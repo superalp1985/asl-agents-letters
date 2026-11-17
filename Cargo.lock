@@ -142,7 +142,6 @@ dependencies = [
  "asl-types",
  "blake3",
  "eframe",
- "egui",
  "rmcp",
  "rusqlite",
  "serde",
@@ -184,6 +183,12 @@ version = "0.1.0"
 [[package]]
 name = "asl-types"
 version = "0.1.0"
+dependencies = [
+ "bs58",
+ "libp2p-identity",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "asn1-rs"

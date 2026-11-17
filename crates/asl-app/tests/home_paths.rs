@@ -25,7 +25,7 @@ fn creates_storage_layout_on_ntfs() {
     let root = base.join(format!("home-{}-{id}", std::process::id()));
 
     let paths = AppPaths::open(&root).unwrap();
-    assert!(paths.root().starts_with(&base.canonicalize().unwrap()));
+    assert!(paths.root().starts_with(base.canonicalize().unwrap()));
     assert_eq!(paths.state(), paths.root().join("state"));
     assert_eq!(paths.snapshots(), paths.root().join("snapshots"));
     assert_eq!(paths.incoming(), paths.root().join("incoming"));

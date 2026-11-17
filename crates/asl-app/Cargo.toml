@@ -8,7 +8,6 @@ rust-version.workspace = true
 [dependencies]
 asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
-egui.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true

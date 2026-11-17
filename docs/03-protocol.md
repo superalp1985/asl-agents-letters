@@ -6,7 +6,9 @@
 
 | 名称 | 定义 |
 | --- | --- |
-| `PeerIdText` | libp2p Ed25519 公钥导出的有效 PeerId；不得只按字符串长度接受 |
+| `AgentIdText` | AIK Ed25519 公钥的 `did:key` 自认证编码；稳定标识长期 Agent 身份 |
+| `PeerIdText` | 当前设备 libp2p Ed25519 公钥导出的有效 PeerId；不得只按字符串长度接受 |
+| `DeviceCertificate` | AIK 对 `{AgentId, device PeerId, serial, issued_at_ms, expires_at_ms}` 的 Ed25519 签名 |
 | `Id128` | 16 个随机字节，线格式为 32 个小写十六进制字符 |
 | `ContentId` / `Hash32` | 32 字节 BLAKE3，线格式为 64 个小写十六进制字符 |
 | `TimeMs` | Unix 毫秒，范围 0 到 i64::MAX；协议校验允许最多 5 分钟时钟偏差 |
@@ -28,7 +30,20 @@
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
 
-控制连接经 libp2p 认证与加密。hello 的 PeerId 必须与连接身份一致，协议 major 不兼容就断开；不能把自报 PeerId 作为认证。
+控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 同时携带 AgentId 和 AIK 签发的设备证书。设备证书签名覆盖下列规范二进制：
+
+```text
+ASCII "ASL-DEVICE-v1\0"
+agent_id_length       u16 big-endian
+agent_id              agent_id_length bytes, canonical UTF-8 did:key
+peer_id_length        u16 big-endian
+peer_id               peer_id_length bytes, canonical UTF-8 PeerId
+serial                u64 big-endian
+issued_at_ms          u64 big-endian
+expires_at_ms         u64 big-endian
+```
+
+AIK 公钥从 AgentId 解码。验证器检查签名、证书有效期、已观察到的最高 serial、设备撤销状态，以及证书 PeerId 与当前已认证传输 PeerId 完全一致。验证通过后再放行普通应用帧；不能把自报 PeerId 或 DHT 记录当成认证。协议 major 不兼容就断开。
 
 blob 协议使用受限 request-response codec，不另写传输加密。每块一条请求；每条请求明确声明内容 ID、lease、块号。64 KiB 控制 codec 与 bulk codec 分开。
 
@@ -40,8 +55,8 @@ DHT 只接受 profile 和应用允许的少量记录；资源发现主要使用 
 
 ```text
 ASCII "ASL-RECORD-v1\0"
-kind                 u8               // profile=1
-public_key           32 bytes          // Ed25519
+kind                 u8               // profile=1, device_directory=2
+agent_public_key     32 bytes          // Ed25519 AIK
 sequence             u64 big-endian
 issued_at_ms         u64 big-endian
 expires_at_ms        u64 big-endian
@@ -49,11 +64,13 @@ payload_length       u32 big-endian
 payload              payload_length bytes, raw UTF-8 JSON
 ```
 
-Ed25519 签名覆盖上述原始字节，不对解析后重新序列化的 JSON 签名。载荷和签名封装后仍需满足 8 KiB 记录上限。公钥导出的 PeerId 必须等于记录 key 的 owner。
+Ed25519 签名覆盖上述原始字节，不对解析后重新序列化的 JSON 签名。载荷和签名封装后仍需满足 8 KiB 记录上限。AIK 公钥解码出的 AgentId 必须等于记录 key 的 owner。
 
-记录验证：kind、长度、签名、owner、时间窗口、最大 TTL、sequence 单调性、payload schema、同 owner 存储份额全部通过才入库。net 必须接入 Kademlia 的入站过滤事件，由验证器决定是否写入记录存储。启动时通过测试验证“未通过过滤的 PUT 不落库”。
+记录验证：kind、长度、AIK 签名、AgentId owner、时间窗口、最大 TTL、sequence 单调性、payload schema、同 owner 存储份额全部通过才入库。net 必须接入 Kademlia 的入站过滤事件，由验证器决定是否写入记录存储。启动时通过测试验证“未通过过滤的 PUT 不落库”。
 
-profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受完全相同字节。撤下资料后不再续发，旧资料可能存续至 TTL 或远端缓存过期。
+`kind=2` 的 device directory 严格包含版本、AgentId、最多 64 个设备证书摘要和撤销 serial 列表；同一目录不得重复 PeerId 或 serial。设备证书有效期最多 30 天，目录自身最长 30 分钟并周期续发。已钉住联系人本地记住见过的最高目录 sequence/设备 serial，拒绝回滚。新联系人可能从 DHT 得到过期但仍在 TTL 内的目录，首次发现的全局撤销状态不能被完全证明；连接必须仍完成 PAKE/指纹核验，界面不得把离线撤销状态宣传为实时保证。
+
+profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受完全相同字节。撤下资料后不再续发，旧资料可能存续至 TTL 或远端缓存过期。profile key 基于 AgentId，签名者为 AIK，避免设备轮换改变联系人身份。
 
 profile payload 严格遵循 `schemas/profile.schema.json`；未授权字段用空值而非填猜测资料。schema 字符数之外仍检查签名封装后的 8 KiB 总字节。头像必须同时存在一条明确公开的应用管理资源引用，不能因 profile 中出现 hash 就绕过文件授权。
 
@@ -64,10 +81,16 @@ NFKC → Unicode lowercase → 首尾去空白 → 连续空白折叠。标签�
 ```text
 tag key     = BLAKE3("ASL-TAG-v1\0" + normalized_tag_utf8)
 content key = BLAKE3("ASL-CONTENT-v1\0" + content_id_bytes)
-profile key = BLAKE3("ASL-PROFILE-v1\0" + peer_id_utf8)
+profile key = BLAKE3("ASL-PROFILE-v1\0" + agent_id_utf8)
 ```
 
 只对 public 范围资源发布 tag/content provider。contacts 与指定 peers 的资源仅在获准直询中返回；hash 和标签都不是保密技术。
+
+持久短码按固定版本算法从 AgentId 派生，显示为分组十进制数字。短码只提供查找便利，不是身份、认证凭据或全局唯一名称。DHT 使用 `BLAKE3("ASL-HANDLE-v1\0" + normalized_code_utf8)` 查找，并允许同一键返回多个候选。每个候选必须提供 AIK 签名的 AgentId/短码声明；客户端复算后过滤伪造值，但仍将合法碰撞显示为多个未核验候选。DHT 隐瞒、日蚀和离线仍可能造成漏查。
+
+固定 1.0 派生算法：`n = LE64(BLAKE3("ASL-HANDLE-ID-v1\0" || agent_id_utf8)[0..8]) mod 10^16`，左侧补零至 16 位，界面按每 4 位分组。输出碰撞是合法状态，禁止抢占/覆盖或声称全局唯一。身份解析通过版本化 `IdentityResolver` 接口，线格式携带算法版本，以便后续替换派生或注册后端。
+
+配对协议使用独立 `/asl/pair/1.0.0` request-response。局域网配对码为一次性 6 位 PAKE 凭据，有效期 2–5 分钟；公网邀请优先使用含随机至少 128-bit token、目标 AgentId、期限和 AIK 签名的二维码/链接，也可用 12 位一次性 PAKE 码。所有 PAKE 记录绑定双方 AgentId、设备 PeerId、传输会话 transcript 和期限；最多 5 次在线尝试，成功或过期立即作废。具体 Rust PAKE crate 必须经依赖/安全评估后固定，未完成前不得自行拼装密码学协议。
 
 provider 记录最长 1 小时，15 分钟续发；应用只把它视为候选节点，必须直连验证。入口与 provider 地址先经本机地址策略过滤，禁止借远端地址驱动 HTTP、SMB、文件协议或系统命令。
 

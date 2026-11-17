@@ -8,7 +8,8 @@
 data/
   config.toml
   state/asl.sqlite3
-  identity/node.dpapi
+  identity/agent-aik.dpapi
+  identity/device-key.dpapi
   credentials/providers.dpapi
   snapshots/ab/<content_id>.blob
   manifests/ab/<content_id>.mnf
@@ -28,9 +29,9 @@ data/
 
 | 表组 | 表 | 责任 |
 | --- | --- | --- |
-| 配置/身份 | settings、identities、policy_state、schema_migrations | 非秘密设置、身份密文引用、授权修订与迁移 |
-| 节点 | peers、authorized_contacts、preferred_peers | 公开观察、授权成员和自主偏好，三者不混用 |
-| 授权 | providers、grants、grant_peers、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收者的确认 |
+| 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、policy_state、schema_migrations | AgentId/公开目录、本机 AIK/设备密文引用、远端设备证书、授权修订与迁移 |
+| 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
+| 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
 | 群组 | asl_groups、group_members、group_events | MLS 群状态、成员授权与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、全文索引和溯源 |
 | 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、拉取描述、重试与去重 |
@@ -50,7 +51,7 @@ pub enum AccessOperation {
     Search, ReadMetadata, ReadChunk, PublishRecord, ModelInput, WriteDerived,
 }
 pub enum Principal {
-    Peer(PeerIdText), LocalTask(TaskId), ModelProvider(String),
+    Agent(AgentIdText), LocalTask(TaskId), ModelProvider(String),
 }
 pub struct AccessRequest {
     pub grant_id: GrantId,
@@ -102,7 +103,7 @@ AND operation allowed
 AND size/type/retention rules satisfied
 ```
 
-public 允许任何已通过 ASL hello 的 peer；contacts 必须位于 authorized_contacts；peers 必须在 grant_peers；group 必须是当前有效群的成员。群 audience 是单独授权，不会转换成 contacts。偏好、信任、贡献、头像、名字均不参与。
+public 允许任何已验证 AIK 设备证书的 Agent；contacts 必须位于按 AgentId 固定的 authorized_contacts；peers audience 必须匹配 grant_agents 中的 AgentId；group 必须是当前有效 MLS 设备成员。群 audience 是单独授权，不会转换成 contacts。偏好、信任、贡献、头像、名字均不参与。
 
 群授权按群 ID 生效，对该群当前及之后经本地授权加入的成员都有效。成员加入、退出或移除会增加 membership epoch；permit、lease 和每次询问确认绑定当时 epoch，发送前重新检查。被移除成员不能取得新的群范围内容，已下载的字节不可召回。
 
@@ -138,21 +139,22 @@ public 允许任何已通过 ASL hello 的 peer；contacts 必须位于 authoriz
 
 清理引用在事务内完成；物理内容仅在没有有效资源/任务引用时回收。source 文件永远不删除。清理使用已固定的应用根句柄，不跟随路径或链接。
 
-备份在 E 盘授权目录生成一致性 SQLite backup 和非秘密配置。DPAPI 身份不能直接跨 Windows 用户使用；跨机导出使用 Argon2id（64 MiB、3 次、1 lane，算法版本 0x13）与 XChaCha20-Poly1305。口令由人提供作为一次迁移授权，不存日志。
+本机 DPAPI/keystore 保护 AIK 与设备密钥。身份迁移是单独的、用户显式触发的加密导出流程，优先复用成熟 `age` passphrase 文件格式，不自创 KDF/AEAD 封装。包内明文归档有固定 magic、主/次版本、AgentId、AIK seed、公钥校验值、用户选择的联系人/信任/短期历史与清单 hash；不含设备私钥、系统凭据、文件目录路径授权、未选中的共享资料或 MLS ratchet 状态。导入检查版本、AgentId 推导、清单 hash 和所有记录边界后，再建立本机事务。
 
-导出格式固定为以下 63 字节头，作为 AEAD 的全部 AAD，后接 80 字节密文：
+目标设备导入后必须生成新设备密钥，由 AIK 签发更高 serial 的设备证书，并发布签名设备目录/旧设备撤销声明。迁移模式下旧实例应先停止；无法联系旧设备或观察全网最新撤销序号时，撤销传播可能延迟，不能承诺即时全网撤销。群组通过 MLS 将新设备作为新叶子加入；不复制旧设备 ratchet 状态。目录路径、OS 凭据、grant 和传输中的短期 lease 必须重新授权/生成。
+
+迁移文件在 E 盘用户授权目录中生成。`age` 口令由人提供，仅用于本次迁移，不入日志；加密工具负责 KDF、AEAD 和文件格式。未知主版本、截断、损坏、错误口令或清单校验失败均拒绝导入，不做部分身份恢复。
+
+迁移明文归档的概念字段如下，具体二进制/归档编码由 T35 与 schema 一并冻结：
 
 ```text
-ASCII "ASLKEY01" (8)
-argon2_version u16 BE = 0x13
-memory_kib u32 BE = 65536
-iterations u32 BE = 3
-parallelism u8 = 1
-salt 16 bytes
-nonce 24 bytes
-ciphertext_length u32 BE = 80
+magic = "ASLMIG01"
+format_version = 1
+agent_id
+agent_identity_key_seed
+agent_public_key_checksum
+selected_data_manifest
+selected_data_payload
 ```
 
-明文是 Ed25519 seed 32 字节 + public key 32 字节；AEAD 标签 16 字节，文件总长 143。导入先检查固定长度、magic 和固定参数，再运行 KDF，防止参数耗尽攻击；解密后由 seed 重新导出公钥并对比。口令按原始 UTF-8 使用，不隐式规范化，最多 1,024 字节。salt/nonce 从操作系统 CSPRNG 取得；加密、KDF 和清零使用固定库，不自行实现密码算法。
-
-恢复只能显式授权；不会在数据库错误时静默重建空授权。恢复后先重验卷、文件身份、grants 与快照，再开放网络。
+AIK seed 仅存在于 age 加密后的包内；公钥校验和用于发现归档损坏，不替代 age 完整性保护。导出不得修改源身份或删除旧设备数据。恢复只能显式授权；不会在数据库错误时静默重建空授权。恢复后先重验卷、文件身份、grants 与快照，再开放网络。

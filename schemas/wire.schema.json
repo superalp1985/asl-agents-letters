@@ -19,9 +19,21 @@
     "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "hello": {
       "type": "object", "additionalProperties": false,
-      "required": ["peer_id", "major", "minor", "features"],
+      "required": ["peer_id", "agent_id", "device_certificate", "major", "minor", "features"],
       "properties": {
         "peer_id": {"type": "string", "minLength": 10, "maxLength": 128},
+        "agent_id": {"type": "string", "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{20,110}$"},
+        "device_certificate": {
+          "type": "object", "additionalProperties": false,
+          "required": ["v", "serial", "issued_at_ms", "expires_at_ms", "signature"],
+          "properties": {
+            "v": {"const": 1},
+            "serial": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+            "issued_at_ms": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+            "expires_at_ms": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+            "signature": {"type": "string", "pattern": "^[0-9a-f]{128}$"}
+          }
+        },
         "major": {"const": 1},
         "minor": {"type": "integer", "minimum": 0, "maximum": 65535},
         "features": {

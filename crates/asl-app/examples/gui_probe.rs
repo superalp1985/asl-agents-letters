@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use egui;
 use rmcp::transport::stdio;
 use rusqlite::Connection;
 
@@ -13,8 +12,8 @@ struct ProbeState {
 struct ProbeApp;
 
 impl eframe::App for ProbeApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
             ui.label("A信 ASL");
         });
         ui.ctx().request_repaint_after(Duration::from_secs(60));

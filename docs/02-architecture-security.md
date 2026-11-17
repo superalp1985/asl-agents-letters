@@ -6,6 +6,8 @@ Rust workspace，八个 crate。使用 rust-libp2p 一个网络栈；不同时�
 
 固定采用 QUIC + TCP/Noise/Yamux、Kademlia、mDNS、identify、ping、relay v2、AutoNAT、DCUtR 和 request-response。不接入 pubsub，也不广播文件清单；不接 IPFS 的公共 DHT 命名空间。最多 64 人的小组复用现有认证连接逐成员投递，OpenMLS 实现 MLS 群密码学，不自行设计群密钥协议。
 
+身份分为长期 AIK 根密钥与逐设备传输密钥。AgentId 由 AIK 的 `did:key` 自认证编码得到；每台设备的 libp2p PeerId 由独立 Ed25519 密钥得到，并由 AIK 签发有期限的设备证书。联系人固定 AIK，网络连接认证设备。身份解析使用版本化接口：1.0 采用 AIK 签名的 DHT 记录和多值数字短码查询，不引入区块链或中央注册服务；后续后端替换不能改变 AgentId 或联系人存储格式。
+
 候选依赖版本见 `specs/dependency-baseline.json`。版本已查询，但依赖组合尚未编译；必须在任务 T01/T02/T14/T39 编译探针后形成 Cargo.lock，不由模型自行追最新版。
 
 ## 2. 进程与数据流
@@ -24,9 +26,9 @@ flowchart LR
 
 `asl.exe` 是桌面入口和本地 CLI；`asl-core.exe` 是后台 supervisor/broker；`asl-net.exe` 跑网络；`asl-worker.exe` 以不同固定角色执行模型输入输出处理与文档提取。Linux 基础设施使用 `asl-infra`，不接触用户共享目录。
 
-可信计算基包含 core、net 的连接认证适配器和 Windows 权限模块。core 持有身份的静态存储、授权、数据库、资料快照和模型 HTTP 凭据，只执行固定实现，不运行来自模型的代码。net 只能通过有界 IPC 请求已授权操作；worker/helper 无任意文件工具、无直接网络、无宿主私人上下文。
+可信计算基包含 core、net 的连接认证适配器和 Windows 权限模块。core 持有 AIK 静态存储、设备证书签发权、授权、数据库、资料快照和模型 HTTP 凭据，只执行固定实现，不运行来自模型的代码。net 只持有当前设备的 libp2p 私钥；net 只能通过有界 IPC 请求已授权操作，worker/helper 无任意文件工具、无直接网络、无宿主私人上下文。
 
-libp2p 握手需要网络进程使用身份私钥。启动时 core 经私有继承管道把该密钥的内存副本交给 net，不能假设库支持未经验证的远程签名接口。net 的沙箱限制文件访问，**不构成“net 被攻陷后仍能保证身份和 contacts 内容安全”的承诺**。连接身份只能取库完成认证后的 PeerId，不能接受消息自报值。net 退出后清除内存副本；凭据从不交给 worker。这里有意保留标准 libp2p 的单身份设计，避免额外发明双身份/应用加密协议。
+libp2p 握手需要网络进程使用设备私钥。启动时 core 经私有继承管道把当前设备密钥的内存副本交给 net。传输握手完成后，ASL hello 携带 AIK 标识和 AIK 签名设备证书；core 校验证书签名、有效期、序号和证书 PeerId 与已认证连接 PeerId 的一致性。校验完成前不向 Agent 暴露普通应用消息。net 被攻陷仍可冒充当前设备并观察其流量，但不能签发新的 AIK 设备证书或转移稳定身份；这不等同于 net 完全失陷时会话内容仍安全。连接身份只能取认证 driver 给出的 PeerId，不能接受消息自报值。net 退出后清除设备密钥副本；任何凭据都不交给 worker。
 
 八个 crate 的依赖图：
 
@@ -43,7 +45,7 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 
 不允许 net 直接依赖 store 的数据库连接或 policy 的目录句柄。跨进程只传不可变 DTO、受限字节和短期授权 ID。
 
-`asl-net` 仅将有界不透明 MLS 字节通过认证连接发送给明确的群成员；不为非成员转发群消息。解密、成员状态和群授权留在 core 的 `asl-groups`。入站应用消息只有通过 MLS 验证、PeerId 绑定、当前成员/epoch 检查后才交给 Agent。连接时序和通信双方仍可被观察。
+`asl-net` 仅将有界不透明 MLS 字节通过认证连接发送给明确的群成员；不为非成员转发群消息。解密、成员状态和群授权留在 core 的 `asl-groups`。入站应用消息只有通过设备证书、AgentId 钉住状态、MLS 验证、当前成员/epoch 检查后才交给 Agent。MLS credential 同时绑定 AgentId 与设备证书；新设备作为新叶子加入，不复制旧设备 ratchet 状态。连接时序和通信双方仍可被观察。
 
 群授权是独立的 audience 类型，不能隐式折算为 `contacts`。群成员变更增加群成员 epoch；群范围 permit、lease 和待处理传输绑定该 epoch，并在发送前重新判定。新成员只有在本地授权该群范围后才能读取群资源。每次询问确认同样绑定接收 PeerId 与群 epoch。
 
@@ -64,7 +66,7 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 
 ## 4. 文件与授权强制点
 
-每项授权包含根目录身份、扩展名、披露范围、模型处理范围、额度、epoch 与状态。contacts 成员变化还会增加全局 `policy_revision`。
+每项授权包含根目录身份、扩展名、披露范围、模型处理范围、额度、epoch 与状态。contacts 成员变化还会增加全局 `policy_revision`。contacts 键为稳定 AgentId/AIK，不以可变 PeerId 或网络地址为键。
 
 访问始终是 `授权句柄 + 受限相对文件标识`，不是 `远端路径 -> open()`。目录遍历和文件打开拒绝 `..`、绝对路径、UNC、设备名、ADS、reparse point，检查卷和目录/文件身份，拒绝硬链接计数大于 1 的源文件。
 
@@ -82,12 +84,13 @@ grant 的快照引用、文件 hash 和实际字节存储分离。同一 content
 
 ```text
 permit_id, grant_id, grant_epoch, policy_revision,
-requester_peer_id, content_id, operation, expires_at_ms
+requester_agent_id, authenticated_device_peer_id,
+content_id, operation, expires_at_ms
 ```
 
 撤销在同一事务内增加 epoch/revision、停用资源引用并记审计。提交后，core 立即取消相关队列、未开始读取、尚未交给 net 的块和模型调用；每次读取、输出、发送前重新验证 permit。
 
-任何 await 之后继续发送前都需重新验证，不得缓存“曾经允许”作为永远有效。权限变更事件带 revision，net 按序 ACK；新请求不得越过尚未确认的撤销栅栏。grant_epoch 是该 grant 的失效条件；全局 policy_revision 只触发重新判定和审计。无关策略变更不应把所有大文件下载取消。联系人授权变动按 requester 重新判定，撤下该身份时立即使其 permit 失效。
+任何 await 之后继续发送前都需重新验证，不得缓存“曾经允许”作为永远有效。权限变更事件带 revision，net 按序 ACK；新请求不得越过尚未确认的撤销栅栏。grant_epoch 是该 grant 的失效条件；全局 policy_revision 只触发重新判定和审计。无关策略变更不应把所有大文件下载取消。联系人授权以 requester AgentId 重新判定；一次 permit 同时绑定 AgentId 和已认证设备 PeerId，撤下身份或设备撤销后立即失效。
 
 公开承诺是“撤销提交后不再授权新的披露，并尽力取消尚未发出的数据”。已经交给传输层或外部模型端点的数据不可收回，不承诺并发时最多只存在一个在途块。
 
@@ -98,6 +101,14 @@ requester_peer_id, content_id, operation, expires_at_ms
 provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定向，HTTPS 校验开启，限制响应、时间与重试。URL 来自配置，不来自 peer 或模型。局域网/loopback provider 必须单独授权，拒绝请求元数据地址和任意 URL 抓取。
 
 对外 query 内容本身需要披露许可。接入宿主不等于接管其权限；不能保证过滤宿主主动塞进 query 的任意秘密。
+
+## 6.1 公网发现与地址隐私
+
+直连模式会向通信对端暴露本机可达网络地址；DHT 查询目标、在线时间、引导节点和中继元数据也可能被关联。界面不把假名身份标为“匿名”。仅中继模式禁止发布或拨打可暴露本机公网地址的直连候选，连接只通过已配置 relay 建立；relay 仍可观察连接关系、时序和流量大小。
+
+所有 DHT、短码、mDNS、邀请和对端提供的地址都只是候选输入。按网络模式过滤环回、私网、链路本地、未授权本机服务与不允许的地址类别；地址解析后再次检查，禁止把 multiaddr 转换成 HTTP、SMB、文件 URL 或系统命令。设备证书验证前仅允许有界 hello/配对握手，不处理问答、文件、模型或群协议。陌生身份的连接、流、握手次数和字节数均有独立上限；已验证身份仍需通过本机 audience/grant 才能读资源或收发文件。
+
+短码解析通过 `IdentityResolver` 接口取得候选。1.0 的 DHT resolver 允许同码多个记录并校验 AIK 签名；解析成功不自动建联系人。配对服务通过 `PairingProtocol` 接口封装成熟 PAKE，绑定双方 AgentId、设备 PeerId、会话 transcript、过期时间和一次性 nonce。具体 PAKE crate/API 需在实现任务中验证安全状态和许可后冻结。
 
 ## 7. 资源保护与调度
 
@@ -115,6 +126,9 @@ provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定�
 | 模型不可用 | 仍可回答确定性资源匹配；自然语言请求返回明确 unavailable |
 | DHT 失败 | 继续已知联系人直连，不假造搜索结果 |
 | 直连失败 | 尝试获准中继；中继容量不足时等待/失败，不要求永远直连 |
+| 短码冲突/污染 | 展示多个未核验候选；PAKE 或完整指纹核验不匹配就终止，不自动钉住 |
+| AIK 丢失/泄露 | 无中心恢复或全局撤销；保留本机警告，联系人必须重新核验新身份 |
+| 设备证书过期/被撤销 | 拒绝该设备的新 ASL 会话；不因同一 AgentId 自动信任新设备 |
 | 磁盘不足 | 先停止新额度预留，保存可恢复状态，不删除用户源文件 |
 | 数据库损坏 | 停止权限相关操作，使用明确恢复流程，不重建为空授权 |
 | 授权版本冲突 | 拒绝并重新求 permit，不接受旧 grant |
@@ -127,3 +141,5 @@ provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定�
 不能靠拆连接绕过运营者限额；也不能把“软件不收费”误解成“他人中继资源无限”。发布包附带可替换入口与自托管配置，首次加入仍需至少一个可达入口。
 
 便捷入网由发布包的 `assets/network-seeds.json` 提供至少两个运营配置独立的真实入口，受发布清单签名保护。首次网络授权后自动使用，不要求日常用户手工填写地址。显式 bootstrap 配置优先，缓存的已知节点次之，内置入口最后补充；用户可以禁用内置列表并授权自己的网络。入口不是身份审批机关，关闭维护者更新站不影响已经入网的节点。
+
+身份迁移包保留 AIK 与用户选定的 ASL 本地数据，不包含可直接复用的设备私钥、OS 凭据或目录 grant。导入后创建新设备密钥并签发新证书；旧设备需停止或通过有效证书序号/撤销记录退役。群 MLS 状态不复制，需由当前群成员按标准 MLS 流程添加新设备。迁移文件格式和身份后端均有版本号与明确拒绝未知主版本的规则。

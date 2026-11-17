@@ -19,34 +19,63 @@ CREATE TABLE settings (
     updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
-CREATE TABLE identities (
-    peer_id TEXT PRIMARY KEY,
+CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY,
+    handle_code TEXT,
+    public_profile_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(public_profile_json)),
+    profile_sequence INTEGER NOT NULL DEFAULT 0,
+    profile_expires_ms INTEGER NOT NULL DEFAULT 0,
+    first_seen_ms INTEGER NOT NULL DEFAULT 0,
+    identity_state TEXT NOT NULL DEFAULT 'unverified'
+        CHECK(identity_state IN ('unverified', 'verified', 'changed', 'revoked'))
+) STRICT;
+
+CREATE TABLE local_agent_identity (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    agent_id TEXT NOT NULL UNIQUE REFERENCES agents(agent_id),
     public_key_hex TEXT NOT NULL CHECK(length(public_key_hex) = 64),
     key_file_relative TEXT NOT NULL,
-    active INTEGER NOT NULL CHECK(active IN (0, 1)),
     created_at_ms INTEGER NOT NULL
 ) STRICT;
-CREATE UNIQUE INDEX one_active_identity ON identities(active) WHERE active = 1;
+
+CREATE TABLE device_identities (
+    peer_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    public_key_hex TEXT NOT NULL CHECK(length(public_key_hex) = 64),
+    certificate_json TEXT NOT NULL CHECK(json_valid(certificate_json)),
+    certificate_serial INTEGER NOT NULL CHECK(certificate_serial >= 1),
+    certificate_expires_ms INTEGER NOT NULL,
+    revoked_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE(peer_id, agent_id),
+    UNIQUE(agent_id, certificate_serial)
+) STRICT;
+
+CREATE TABLE local_device_identity (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    peer_id TEXT NOT NULL UNIQUE REFERENCES device_identities(peer_id),
+    key_file_relative TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE peers (
     peer_id TEXT PRIMARY KEY,
-    public_profile_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(public_profile_json)),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
     addresses_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(addresses_json)),
-    profile_sequence INTEGER NOT NULL DEFAULT 0,
     last_seen_ms INTEGER NOT NULL DEFAULT 0,
-    profile_expires_ms INTEGER NOT NULL DEFAULT 0,
     connection_state TEXT NOT NULL DEFAULT 'offline'
-        CHECK(connection_state IN ('offline', 'connecting', 'direct', 'relay'))
+        CHECK(connection_state IN ('offline', 'connecting', 'direct', 'relay')),
+    FOREIGN KEY(peer_id, agent_id) REFERENCES device_identities(peer_id, agent_id)
 ) STRICT;
 
 CREATE TABLE authorized_contacts (
-    peer_id TEXT PRIMARY KEY REFERENCES peers(peer_id),
+    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
     authorized_at_ms INTEGER NOT NULL,
     authorization_revision INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE preferred_peers (
-    peer_id TEXT PRIMARY KEY REFERENCES peers(peer_id),
+    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
     reason TEXT NOT NULL,
     last_used_ms INTEGER NOT NULL
 ) STRICT;
@@ -112,10 +141,10 @@ CREATE TABLE grants (
        OR (audience <> 'group' AND group_id IS NULL))
 ) STRICT;
 
-CREATE TABLE grant_peers (
+CREATE TABLE grant_agents (
     grant_id TEXT NOT NULL REFERENCES grants(grant_id),
-    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
-    PRIMARY KEY(grant_id, peer_id)
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    PRIMARY KEY(grant_id, agent_id)
 ) STRICT;
 
 CREATE TABLE write_grants (
@@ -174,6 +203,7 @@ CREATE TABLE derivation_sources (
 CREATE TABLE tasks (
     task_id TEXT PRIMARY KEY CHECK(length(task_id) = 32),
     direction TEXT NOT NULL CHECK(direction IN ('incoming', 'outgoing', 'local')),
+    agent_id TEXT REFERENCES agents(agent_id),
     peer_id TEXT REFERENCES peers(peer_id),
     query_text TEXT NOT NULL,
     audience_json TEXT NOT NULL CHECK(json_valid(audience_json)),
@@ -182,7 +212,9 @@ CREATE TABLE tasks (
     requests_used INTEGER NOT NULL DEFAULT 0 CHECK(requests_used >= 0),
     created_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL,
-    CHECK(expires_at_ms >= created_at_ms)
+    CHECK(expires_at_ms >= created_at_ms),
+    CHECK((agent_id IS NULL AND peer_id IS NULL)
+       OR (agent_id IS NOT NULL AND peer_id IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE messages (
@@ -239,7 +271,7 @@ CREATE TABLE transfer_consents (
     content_id TEXT NOT NULL CHECK(length(content_id) = 64),
     source_grant_id TEXT REFERENCES grants(grant_id),
     destination_write_grant_id TEXT REFERENCES write_grants(write_grant_id),
-    target_peer_id TEXT REFERENCES peers(peer_id),
+    target_agent_id TEXT REFERENCES agents(agent_id),
     group_id TEXT REFERENCES asl_groups(group_id),
     group_epoch INTEGER,
     grant_epoch INTEGER,
@@ -249,11 +281,11 @@ CREATE TABLE transfer_consents (
     decided_at_ms INTEGER,
     CHECK((direction = 'upload' AND source_grant_id IS NOT NULL
            AND destination_write_grant_id IS NULL
-           AND ((target_peer_id IS NOT NULL AND group_id IS NULL AND group_epoch IS NULL)
-             OR (target_peer_id IS NULL AND group_id IS NOT NULL AND group_epoch IS NOT NULL)))
+           AND ((target_agent_id IS NOT NULL AND group_id IS NULL AND group_epoch IS NULL)
+             OR (target_agent_id IS NULL AND group_id IS NOT NULL AND group_epoch IS NOT NULL)))
        OR (direction = 'download' AND source_grant_id IS NULL
            AND destination_write_grant_id IS NOT NULL
-           AND target_peer_id IS NULL
+           AND target_agent_id IS NULL
            AND ((group_id IS NULL AND group_epoch IS NULL)
              OR (group_id IS NOT NULL AND group_epoch IS NOT NULL))))
 ) STRICT;
@@ -277,7 +309,8 @@ CREATE TABLE transfer_chunks (
 
 CREATE TABLE trust_events (
     event_id TEXT PRIMARY KEY CHECK(length(event_id) = 32),
-    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    device_peer_id TEXT REFERENCES peers(peer_id),
     task_id TEXT REFERENCES tasks(task_id),
     dimension TEXT NOT NULL CHECK(dimension IN ('integrity', 'availability', 'evidence', 'promise')),
     outcome TEXT NOT NULL CHECK(outcome IN ('positive', 'negative', 'neutral')),
@@ -288,7 +321,8 @@ CREATE TABLE trust_events (
 
 CREATE TABLE contribution_events (
     event_id TEXT PRIMARY KEY CHECK(length(event_id) = 32),
-    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    device_peer_id TEXT REFERENCES peers(peer_id),
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
     content_id TEXT NOT NULL CHECK(length(content_id) = 64),
     help_kind TEXT NOT NULL CHECK(help_kind IN ('used_file', 'used_answer')),
@@ -305,10 +339,10 @@ CREATE TABLE outbox (
 ) STRICT;
 
 CREATE TABLE processed_requests (
-    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
     request_id TEXT NOT NULL CHECK(length(request_id) = 32),
     expires_at_ms INTEGER NOT NULL,
-    PRIMARY KEY(peer_id, request_id)
+    PRIMARY KEY(agent_id, request_id)
 ) STRICT;
 CREATE INDEX processed_expiry ON processed_requests(expires_at_ms);
 
