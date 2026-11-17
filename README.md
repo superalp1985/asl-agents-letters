@@ -35,6 +35,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 11. `specs/identity-registry-v1.md`：区块链身份登记与状态验证契约。
 12. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
 13. `docs/chain-verification.md`：当前链验证核心、依赖探针与尚未完成的接入验收。
+14. `docs/protocol-vectors.md`：固定 CBOR 样例和独立 CDDL 校验范围。
 
 `schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
@@ -66,7 +67,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。授权界面与检查点来源选择尚待接入。
 
-当前 `cargo test --workspace --all-targets --locked` 通过（247 项测试函数，含本轮新增 21 项检查点续期测试），Clippy（`-D warnings`）和格式检查通过。CDDL 语法/固定 ACK 检查沿用上一切片，本轮未重跑。文件测试中实际 symlink 与 8.3 别名分支未执行；已完成切片的独立工程复核没有确认的阻断发现。许可证沿用之前切片证据，本轮未重跑。HTTP 集成、历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 的 14 项 Foundry 合约测试及独立依赖探针本轮未重跑；上游和许可证提示保留在对应记录中。
+当前 `cargo test --workspace --all-targets --locked --offline` 通过（251 项测试函数，含本轮新增 4 项固定向量测试），Clippy（`-D warnings`）、格式和许可证检查通过。固定样例覆盖 14 种帧、3 种签名记录和 3 个结构错误反例；Rust 编解码/固定字节检查与独立 CDDL 校验均符合预期，详见 `docs/protocol-vectors.md`。文件测试中实际 symlink 与 8.3 别名分支仍未执行；独立工程复核不代替完整安全审计。HTTP 集成、历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 的 14 项 Foundry 合约测试及独立依赖探针本轮未重跑；上游和许可证提示保留在对应记录中。
 
 HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
 
@@ -146,6 +147,6 @@ The structured signed-record core now covers profiles, device directories and sh
 
 An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. The authorization UI and trusted checkpoint-source selection remain pending.
 
-The current `cargo test --workspace --all-targets --locked` run passed 247 test functions, including 21 new checkpoint-renewal tests. Real symlink and 8.3 alias branches were not exercised. Clippy with `-D warnings` and formatting passed. CDDL grammar/fixed ACK evidence is from the previous slice and was not rerun here. Independent engineering reviews of the implemented slices found no confirmed blockers in their scope. License evidence is from an earlier slice and was not rerun here. `docs/chain-verification.md` separates local HTTP integration, historical Mainnet finality, synthetic Trie proofs and local state transitions. T06a's 14 Foundry tests and the standalone dependency probes were not rerun in this slice. Upstream and license advisories remain documented.
+The current `cargo test --workspace --all-targets --locked --offline` run passed 251 test functions, including four new fixed-vector tests. Clippy with `-D warnings`, formatting and license checks passed. The corpus covers 14 frame kinds, three signed-record kinds and three structurally invalid cases; Rust codec/fixed-byte checks and independent CDDL validation matched expectations. See `docs/protocol-vectors.md`. Real symlink and 8.3 alias branches were still not exercised. Engineering reviews do not replace the complete security audit. `docs/chain-verification.md` separates local HTTP integration, historical Mainnet finality, synthetic Trie proofs and local state transitions. T06a's 14 Foundry tests and the standalone dependency probes were not rerun in this slice. Upstream and license advisories remain documented.
 
 HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.

@@ -104,6 +104,20 @@ SQLite/恢复测试实际写入并重开 E 盘临时数据库，覆盖原子事�
 
 独立只读工程复核检查生产逻辑与测试，没有确认的阻断发现；复核者未执行命令。两个同时续期调用未做确定性交错测试；旧写入者、底层 CAS 和晚期 SQL 回滚是独立记录的覆盖范围。授权界面、实际多服务链请求、后台进程额度与安全审计仍待完成。本轮未重跑 CDDL、许可证、Foundry 或外部依赖 probe，没有更改依赖/锁文件。
 
+### 2026-11-18 T03/T13 固定协议样例
+
+- `cargo test --workspace --all-targets --locked --offline`：251 项测试函数通过，新增 4 项固定向量测试。
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo run -p asl-types --example export_schema_vectors --locked --offline -- --check`：20 个文件向量及结构化索引与生成器一致。
+- `scripts/validate-cddl.ps1`：语法通过；独立 `cddl 0.10.7 --ci` 接受 17、拒绝 3，均符合预期。
+- `cargo deny --locked check licenses`：通过，保留四条既有未使用许可白名单提示。
+- 额外重跑 `cargo test -p asl-policy --test path_boundaries --locked --offline -- --nocapture --test-threads=1`：21 项函数通过，实际 symlink 仍返回 1314、真实 8.3 别名仍缺失，不计这些向量通过。测试夹具与 SUBST 清理后无残留。
+
+固定样例覆盖全部 14 种帧、3 种签名记录及未知字段/文本字段/未知 kind 三个规范编码反例，原 ACK 文件未改。CDDL 工具默认模式可能在校验失败时返回 0，因此脚本启用 `--ci` 并核对成功/拒绝诊断；超时、崩溃及其他失败不计预期拒绝。每条使用精确 root，临时 wrapper 在 E 盘且运行后删除。只新增已固定 serde_json 的开发依赖及 lockfile 中相应引用，无运行依赖或协议字段变化。
+
+独立静态工程复核无确认的阻断发现，对照了原夹具和 ACK 完整字节，检查全部样例、导出/校验入口与文档；复核者未重跑命令，超时和异常清理路径仅静态阅读。这不是多节点互操作、全量协议穷举、记录签名/链认证或完整安全验收。当前向量使用合成签名和证明字节；验证范围详见 `docs/protocol-vectors.md`。Foundry、真实链服务、Windows 沙箱与 GUI 本轮未运行。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。

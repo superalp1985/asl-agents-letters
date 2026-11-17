@@ -1,6 +1,6 @@
 # ASL/1 结构化协议与应用接口
 
-本文件描述应用协议。libp2p 适配器的具体 API 必须针对固定版本编译，不照搬本文件为不存在的库方法。`schemas/asl-v1.cddl` 是线格式规范，本文补充关系、语义和限制。Rust 确定性 CBOR codec 已实现于 `crates/asl-types/src/protocol/cbor.rs`；旧 JSON parser/schema 已移入 `schemas/prototype/`，不属于 ASL/1。`cddl` 0.10.7 已通过 CDDL 语法检查，且固定 ACK 字节向量通过独立 CDDL 验证；可用 `scripts/validate-cddl.ps1` 重跑。完整多帧互操作套件尚未执行。协议变更需增加版本并重跑互通测试。
+本文件描述应用协议。libp2p 适配器的具体 API 必须针对固定版本编译，不照搬本文件为不存在的库方法。`schemas/asl-v1.cddl` 是线格式规范，本文补充关系、语义和限制。Rust 确定性 CBOR codec 已实现于 `crates/asl-types/src/protocol/cbor.rs`；旧 JSON parser/schema 已移入 `schemas/prototype/`，不属于 ASL/1。`cddl` 0.10.7 已通过语法检查和固定样例独立验证：14 种帧、3 种签名记录通过，3 个结构错误反例拒绝；可用 `scripts/validate-cddl.ps1` 重跑。具体边界见 `docs/protocol-vectors.md`；这些样例不代表完整多节点互操作或密码学认证。协议变更需增加版本并重跑互通测试。
 
 ## 1. 基础类型
 

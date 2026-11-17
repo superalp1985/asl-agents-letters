@@ -73,6 +73,12 @@ contracts/{src/IdentityRegistry.sol,test/IdentityRegistry.t.sol,foundry.toml}
 
 里程碑用于工程验收，不作为缩减版产品对外发布。
 
+### 当前恢复点（2026-11-18）
+
+T07 授权核心、T13 签名记录核心和 T06b 显式检查点续期切片已完成；固定协议样例已覆盖全部帧和记录。后续主线为 T08 缺失真实系统向量 → T09 沙箱 → T10 supervisor → T11/T14 等功能。当前 Windows 令牌无法创建真实符号链接（1314），测试对象也未分配 8.3 短名；不得为追进度把这些分支写成通过或自行改变系统/卷设置。应在具备这些夹具条件的 NTFS 测试环境中补跑 T08，再开始依赖主线的完整验收。
+
+T06b 仍有真实多服务兼容、检查点授权界面、后台/进程额度和独立安全审计未完成；T13 仍需后续 DHT、持久历史和真实投递集成。以上核心切片完成不等于整个 1.0 或这些集成任务完成。
+
 ### T01 — Workspace、工具链与 E 盘路径
 
 依赖：无。创建根 Cargo 文件、八个 crate、`asl-types/src/error.rs`、`asl-policy/src/platform/windows/volume.rs`、`asl-app/src/paths.rs`、`scripts/dev-env.ps1`、`crates/asl-app/tests/home_paths.rs`。
@@ -120,6 +126,8 @@ assert!(decode_control(&duplicate_key_frame).is_err());
 其他验收：合法 hello/query/offer/fetch；错误 major、expires<created、无效长度/PeerId/AgentId/设备证书格式、重复键（含嵌套 body）、未知字段/枚举、tstr 或任意 prose、未知 critical concept、超深/不定长/非确定性编码和尾随字节拒绝。当前时间过期由策略层判断；codec 只校验时间格式与字段关系。ErrorCode 在线格式为数字枚举。
 
 T03 实现状态（2026-11-17）：旧 JSON parser/schema 已隔离到 `schemas/prototype/`；Rust CBOR codec、固定枚举和协议测试已实现。9 项协议测试、workspace 全量测试、Clippy 和格式检查通过；`scripts/validate-cddl.ps1` 通过 CDDL 语法检查及固定 ACK 向量验证。完整多帧互操作套件仍待补。
+
+T03/T13 固定样例补充（2026-11-18）：共享原有协议夹具，新增 14 帧/3 记录的固定十六进制向量、3 个结构反例、结构化索引与默认只读的导出检查器。4 项向量测试及工作区共 251 项测试通过，Clippy、格式和许可证检查通过；独立 `cddl 0.10.7 --ci` 按每种精确 root 验证 17 接受/3 拒绝均符合预期。新增 serde_json 仅为已固定版本的 dev-dependency，线上格式和运行依赖未变。多节点互操作仍待 T14 以后完成，具体证据见 `docs/protocol-vectors.md`。
 
 ### T04 — Manifest 编解码与内容 ID
 

@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "hello-v1",
+      "root": "hello",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "query-v1",
+      "root": "query",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "answer-v1",
+      "root": "answer",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "offer-v1",
+      "root": "offer",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "fetch-request-v1",
+      "root": "fetch-request",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "fetch-grant-v1",
+      "root": "fetch-grant",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "error-v1",
+      "root": "error",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "ack-v1",
+      "root": "ack",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "profile-v1",
+      "root": "profile",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "identity-proof-request-v1",
+      "root": "identity-proof-request",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "identity-proof-v1",
+      "root": "identity-proof",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "pairing-invite-v1",
+      "root": "pairing-invite",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "pairing-exchange-v1",
+      "root": "pairing-exchange",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "group-envelope-v1",
+      "root": "group-envelope",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "signed-profile-record-v1",
+      "root": "signed-profile-record",
+      "codec": "record",
+      "accepted": true
+    },
+    {
+      "name": "signed-device-directory-record-v1",
+      "root": "signed-device-directory-record",
+      "codec": "record",
+      "accepted": true
+    },
+    {
+      "name": "signed-short-code-record-v1",
+      "root": "signed-short-code-record",
+      "codec": "record",
+      "accepted": true
+    },
+    {
+      "name": "ack-unknown-field-v1",
+      "root": "ack",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "ack-text-field-v1",
+      "root": "ack",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "ack-unknown-kind-v1",
+      "root": "ack",
+      "codec": "frame",
+      "accepted": false
+    }
+  ]
+}
