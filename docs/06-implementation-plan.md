@@ -218,6 +218,8 @@ cargo test -p asl-policy --test path_boundaries -- --nocapture
 
 测试夹具在 E:\ASL\work\test-fs，包含 inside/allowed.md、outside/secret.md、junction、symlink、硬链接、ADS 和重命名竞争。真实测试拒绝越界、硬链接>1、设备/UNC/绝对路径/短名绕过；普通允许文件正确读出。测试后只清理自己创建且已验证在该根下的路径。
 
+T08 部分验收（2026-11-18）：句柄相对打开、祖先固定、根身份恢复、保护目录排除、类型/大小/扩展名规则已实现，未暴露路径或原始句柄。21 项测试函数通过，真实 junction、硬链接、ADS、目录/卷根 SUBST、写入/删除/重命名锁及替换对照已执行；持有能力期间新增硬链接后，下一次读取失败关闭。符号链接创建返回 1314、测试对象未分配 8.3 别名，这些实际夹具未执行，不能标为整体验收。不修改机器权限或卷设置绕过测试。独立复核提出的 SUBST、额外扩展名限制和竞态测试问题已修正；详细边界及重跑结果见 `docs/windows-source-handles.md`。后续先继续已满足 T03/T06 依赖的 T13，T09 的完整系统验收仍须先补齐缺失夹具。
+
 ### T09 — AppContainer 与 Job Object
 
 依赖 T08、T02。创建 policy sandbox、windows/appcontainer/job，以及 probe helper。

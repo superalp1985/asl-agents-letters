@@ -69,6 +69,19 @@ SQLite/恢复测试实际写入并重开 E 盘临时数据库，覆盖原子事�
 
 使用合成的本机策略事实测试全部 audience、认证设备绑定、模型 provider 交集、派生来源、版本/撤销/期限及来源图边界；没有把构造事实当成真实链或 MLS 认证。独立只读工程复核无阻断发现，提出的重复来源计数及模型许可跨 scope/撤权重验证两类遗漏已用三项测试补齐；完整测试、Clippy 和格式检查随后通过。复核者未执行测试，这不是独立安全审计。没有执行真实源文件打开、SQLite 撤销事务、沙箱或外网服务验收。详细职责边界见 `docs/policy-authorization.md`。
 
+### 2026-11-18 T08 源文件句柄切片
+
+- `cargo test --workspace --all-targets --locked`：165 项测试函数通过，含 21 项 `path_boundaries`。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- 独立复核者加载 E 盘环境，另行执行 `cargo test -p asl-policy --test path_boundaries --locked -- --nocapture --test-threads=1`：21 项通过。
+
+真实 junction、硬链接、ADS、目录及卷根 SUBST、正常/中文路径、身份恢复、保护目录排除、写入/删除/重命名锁及替换对照已执行。持有能力期间真实新增硬链接成功，后续读取失败且未输出字节。重命名竞争中 256 次被锁拒绝、0 次成功并发替换、0 次回迁重试；锁释放前后替换对照成功。清理后没有本轮夹具或 SUBST 残留。
+
+环境限制：文件/目录 symlink 创建返回 1314，实际 symlink 夹具未执行；测试文件/目录未分配 8.3 别名，实际别名分支未执行。虽然这些测试函数返回通过，不能把缺失分支算作验收。未修改机器权限、开发者模式或卷设置。T08 系统验收保持部分完成；先继续已满足依赖的 T13。
+
+独立只读复核发现卷根 SUBST 规则遗漏、额外扩展名长度限制和竞态夹具共享冲突问题；修正及补测后复查无阻断发现。没有执行 AppContainer、写目录能力、持久撤销或传输栅栏，本轮未重跑许可证/CDDL/Foundry，没有更改依赖版本或锁文件。此复核与本机测试不构成完整安全审计。接口及边界见 `docs/windows-source-handles.md`。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。
