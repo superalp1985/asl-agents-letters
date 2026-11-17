@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:asl:profile:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "name", "description", "tags", "coarse_region", "avatar_content_id"],
+  "properties": {
+    "v": {"const": 1},
+    "name": {"type": "string", "maxLength": 64},
+    "description": {"type": "string", "maxLength": 1024},
+    "tags": {
+      "type": "array", "maxItems": 8, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 48}
+    },
+    "coarse_region": {"type": "string", "maxLength": 64},
+    "avatar_content_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      ]
+    }
+  }
+}

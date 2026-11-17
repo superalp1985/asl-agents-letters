@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:asl:agent-decision:1",
+  "title": "ASL bounded agent decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "action", "text", "refs", "terms", "reason_code"],
+  "properties": {
+    "v": {"const": 1},
+    "action": {"enum": ["answer", "decline", "request_more"]},
+    "text": {"type": "string", "maxLength": 4000},
+    "refs": {
+      "type": "array", "maxItems": 8, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^c_[0-9a-f]{16}$"}
+    },
+    "terms": {
+      "type": "array", "maxItems": 5, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 48}
+    },
+    "reason_code": {
+      "enum": ["supported", "no_match", "insufficient_evidence", "policy_denied", "unavailable"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"action": {"const": "answer"}}},
+      "then": {
+        "properties": {
+          "text": {"minLength": 1},
+          "refs": {"minItems": 1},
+          "terms": {"maxItems": 0},
+          "reason_code": {"const": "supported"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"action": {"const": "request_more"}}},
+      "then": {
+        "properties": {
+          "text": {"maxLength": 0},
+          "refs": {"maxItems": 0},
+          "terms": {"minItems": 1},
+          "reason_code": {"const": "insufficient_evidence"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"action": {"const": "decline"}}},
+      "then": {
+        "properties": {
+          "text": {"maxLength": 0},
+          "refs": {"maxItems": 0},
+          "terms": {"maxItems": 0},
+          "reason_code": {
+            "enum": ["no_match", "insufficient_evidence", "policy_denied", "unavailable"]
+          }
+        }
+      }
+    }
+  ]
+}

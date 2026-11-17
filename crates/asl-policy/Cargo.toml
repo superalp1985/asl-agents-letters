@@ -1,0 +1,12 @@
+[package]
+name = "asl-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+asl-types = { path = "../asl-types" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Storage_FileSystem"] }
