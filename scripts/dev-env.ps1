@@ -10,6 +10,7 @@ $directories = @(
     "$root\dev-cache\cargo",
     "$root\dev-cache\rustup",
     "$root\dev-cache\target",
+    "$root\dev-cache\tools\bin",
     "$root\work\tmp"
 )
 
@@ -21,7 +22,7 @@ $env:ASL_HOME = "$root\data"
 $env:CARGO_HOME = "$root\dev-cache\cargo"
 $env:RUSTUP_HOME = "$root\dev-cache\rustup"
 $env:CARGO_TARGET_DIR = "$root\dev-cache\target"
-$env:PATH = "$env:CARGO_HOME\bin;$env:PATH"
+$env:PATH = "$root\dev-cache\tools\bin;$env:CARGO_HOME\bin;$env:PATH"
 $env:TEMP = "$root\work\tmp"
 $env:TMP = "$root\work\tmp"
 

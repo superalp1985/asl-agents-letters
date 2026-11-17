@@ -6,7 +6,7 @@
 
 **Architecture:** 八个 crate，确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。固定协议、策略服务、SQLite、MLS 群状态和纯传输调度器分别测试；GUI 只观察与授权。
 
-**Tech Stack:** Rust 1.100.0、libp2p 0.57.1、OpenMLS 0.9.2、Tokio、SQLite/FTS5、egui、rmcp、Windows AppContainer/Job Object。
+**Tech Stack:** Rust 1.100.0、libp2p 0.57.1、OpenMLS 0.9.2、Tokio、SQLite/FTS5、egui/eframe 0.35.0、rmcp、Windows AppContainer/Job Object。
 
 **Spec:** `docs/01-product.md` 至 `docs/05-agent-gui.md`、`schemas/`、`specs/`。
 
@@ -85,17 +85,22 @@ assert!(AppPaths::open(std::path::Path::new("relative")).is_err());
 
 ### T02 — 依赖与外部 API 编译探针
 
-依赖 T01。创建 `crates/asl-net/examples/transport_probe.rs`、`crates/asl-app/examples/gui_probe.rs`、`deny.toml`。
+依赖 T01。创建 `crates/asl-net/examples/transport_probe.rs`、`crates/asl-groups/examples/mls_probe.rs`、`crates/asl-app/examples/gui_probe.rs`、`deny.toml`。
 
-只验证固定版本的 libp2p feature/transport、OpenMLS provider/storage API、egui 字体与重绘、rmcp stdio 构建、SQLite FTS5 和 windows API feature。把实际使用的外部 API 导入与签名记录在 `docs/dependency-adapters.md`；不得编造方法。
+只验证固定版本的 libp2p feature/transport、OpenMLS 协议类型、egui 绘制/重绘、rmcp stdio、SQLite FTS5 运行和 windows API feature。将只供 probe 的依赖留在 dev-dependencies，功能实现任务再提升为运行依赖。把实际使用的外部 API 导入与签名记录在 `docs/dependency-adapters.md`；不得编造方法。
 
 ```text
 cargo check --workspace --all-targets --locked
+cargo run -p asl-app --example gui_probe --locked
+cargo run -p asl-net --example transport_probe --locked
+cargo run -p asl-groups --example mls_probe --locked
 cargo tree --locked
 cargo deny check licenses
 ```
 
 验收：构建成功与锁文件；许可证报告无未批准项。版本冲突只能有记录地调整，不由执行模型同时升级整个依赖树。
+
+T02 实测完成（Windows，Rust 1.100.0）：workspace all-targets 检查、GUI/SQLite、libp2p 和 OpenMLS 三个 probe 均通过；依赖树成功解析；`cargo-deny 0.21.0` 的 `licenses` 检查通过。具体已验证 API 与未覆盖范围见 `docs/dependency-adapters.md`。探针不等同于功能验收，Swarm 构造留在 T14，OpenMLS 状态/provider 集成留在 T31，Windows API 调用留在对应策略任务。
 
 ### T03 — ID、错误码与严格控制消息
 

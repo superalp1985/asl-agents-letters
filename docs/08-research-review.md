@@ -45,6 +45,7 @@
 ## 4. 可复用项目
 
 - OpenMLS：复用 RFC 9420 群密钥/成员状态与端到端消息保护；不复制源码，也不自行实现群密码学。群消息用现有认证连接逐成员投递，不用 pubsub，减少组件和群元数据暴露。
+- egui/eframe 版本从 0.37.0 调整为 0.35.0：T02 编译发现与 libp2p 0.57.1 的 wasm 依赖固定冲突，不能通过双版本解决；保持网络栈不变，选择仍兼容 Rust 1.95 的 GUI 版本。
 - rust-libp2p：主网络栈和官方 examples。`https://github.com/libp2p/rust-libp2p`
 - 官方 Kademlia 规范：精确键、provider 与记录验证。`https://github.com/libp2p/specs/tree/master/kad-dht`
 - Reason Network：参考 Agent/MCP/常驻后台的连接方式，不直接复制其账号和团队服务。`https://github.com/reason-machines/reason-network`
