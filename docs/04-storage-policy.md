@@ -8,7 +8,7 @@
 data/
   config.toml
   state/asl.sqlite3
-  identity/agent-aik.dpapi
+  identity/agent-root-secp256k1.dpapi
   identity/device-key.dpapi
   credentials/providers.dpapi
   snapshots/ab/<content_id>.blob
@@ -25,18 +25,20 @@ data/
 
 ## 2. 数据表
 
-完整 DDL 见 `specs/schema-v1.sql`，以它为字段名真源。DDL 已通过本机 SQLite 语法与约束校验不代表应用事务实现已完成。
+完整 DDL 见 `specs/schema-v1.sql`，以它为字段名真源。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 已通过本机 SQLite 语法与约束校验不代表应用事务实现已完成。
 
 | 表组 | 表 | 责任 |
 | --- | --- | --- |
-| 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、policy_state、schema_migrations | AgentId/公开目录、本机 AIK/设备密文引用、远端设备证书、授权修订与迁移 |
+| 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、授权修订与迁移 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
 | 群组 | asl_groups、group_members、group_events | MLS 群状态、成员授权与有期限密文事件 |
-| 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、全文索引和溯源 |
-| 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、拉取描述、重试与去重 |
+| 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、本机检索索引和溯源 |
+| 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、CBOR 语义帧、重试与去重 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |
 | 证据 | trust_events、contribution_events、model_calls、security_events | 本地评价、调用状态和脱敏审计 |
+
+数据库是本机数据边界，不是线上协议：`local_task_text`、资源标题/摘要、模型片段和 GUI 标签可包含本地文本，但不能未经映射复制到 ASL peer message、DHT 记录、链上状态或 MLS 应用明文。线上结构使用 `body_cbor` 等有界 BLOB。公开 profile、offer 和语义任务必须遵循 `schemas/asl-v1.cddl`，不得因数据库使用 JSON 或 TEXT 就将这些字段发送出去。
 
 秘密不进 settings、messages 或 security_events。日志中的 peer 可截断显示，完整身份只存业务表；lease、API Key、私钥和模型端点认证头不进入诊断。
 
@@ -44,14 +46,14 @@ FTS5 的结果不能直接返回 peer。检索前先确定请求者可读的 res
 
 ## 3. 应用类型与职责
 
-类型定义放 `asl-types/src/ids.rs`、`task.rs`、`error.rs`；权限结构放 `asl-policy/src/types.rs`。
+类型定义放 `asl-types/src/ids.rs`、`task.rs`、`error.rs`；确定性 CBOR 类型须与 CDDL 同步；权限结构放 `asl-policy/src/types.rs`。
 
 ```rust
 pub enum AccessOperation {
     Search, ReadMetadata, ReadChunk, PublishRecord, ModelInput, WriteDerived,
 }
 pub enum Principal {
-    Agent(AgentIdText), LocalTask(TaskId), ModelProvider(String),
+    Agent(AgentId), LocalTask(TaskId), ModelProvider(ProviderId),
 }
 pub struct AccessRequest {
     pub grant_id: GrantId,
@@ -68,14 +70,14 @@ pub struct AslError {
 
 `Permit` 由 policy 构造，只读字段包含协议文档列出的内容；不得实现可接受远端输入的 Deserialize。`ErrorCode` 与协议错误码逐一对应，序列化为 snake_case。
 
-`ChunkAssignment` 含 peer/index/deadline，`VerifiedChunk` 含 index/hash/bytes，`FailureKind` 枚举 timeout/disconnected/bad_hash/cancelled。`CandidateSet` 是当前调用内 CandidateId 到 `resource_key + permit + bounded_text` 的映射；`AgentDecision` 字段严格对应 JSON schema。
+`ChunkAssignment` 含 peer/index/deadline，`VerifiedChunk` 含 index/hash/bytes，`FailureKind` 枚举 timeout/disconnected/bad_hash/cancelled。`CandidateSet` 是当前调用内 CandidateId 到 `resource_key + permit + bounded_local_text + evidence` 的映射；`AgentDecision` 只能生成 CDDL 定义的结构化语义/决策对象，不含 prose 字段。
 
 仓储入口固定为：
 
 ```rust
 pub trait ResourceRepository {
     fn visible_keys(&self, principal: &Principal) -> Result<Vec<ResourceKey>, AslError>;
-    fn search_visible(&self, keys: &[ResourceKey], terms: &[String], limit: u32)
+    fn search_visible(&self, keys: &[ResourceKey], concept_ids: &[ConceptRef], limit: u32)
         -> Result<Vec<SearchHit>, AslError>;
 }
 pub trait ReservationRepository {
@@ -85,7 +87,7 @@ pub trait ReservationRepository {
 }
 ```
 
-`SearchHit` 字段是 resource_key/content_id/title/summary/tags/score；不带文件路径。`ReservationRequest` 字段是 task_id/peer_id/kind/bytes/now_ms/idle_limit_ms。kind 为 snapshot/download/derived；quota 在仓储事务内从当前授权读，不从请求者输入读。ID 及失败幂等语义由 tests 固定。
+`SearchHit` 字段是 resource_key/content_id/local_title/local_summary/local_concept_ids/score；不带文件路径。标题和摘要只供本机显示/索引，不进入网络 Offer。`ReservationRequest` 字段是 task_id/peer_id/kind/bytes/now_ms/idle_limit_ms。kind 为 snapshot/download/derived；quota 在仓储事务内从当前授权读，不从请求者输入读。ID 及失败幂等语义由 tests 固定。
 
 ## 4. 权限算法
 
@@ -103,7 +105,7 @@ AND operation allowed
 AND size/type/retention rules satisfied
 ```
 
-public 允许任何已验证 AIK 设备证书的 Agent；contacts 必须位于按 AgentId 固定的 authorized_contacts；peers audience 必须匹配 grant_agents 中的 AgentId；group 必须是当前有效 MLS 设备成员。群 audience 是单独授权，不会转换成 contacts。偏好、信任、贡献、头像、名字均不参与。
+public 允许任何已验证链状态和身份根设备证书的 Agent；contacts 必须位于按 AgentId 固定的 authorized_contacts；peers audience 必须匹配 grant_agents 中的 AgentId；group 必须是当前有效 MLS 设备成员。群 audience 是单独授权，不会转换成 contacts。偏好、信任、贡献、头像、名字均不参与。
 
 群授权按群 ID 生效，对该群当前及之后经本地授权加入的成员都有效。成员加入、退出或移除会增加 membership epoch；permit、lease 和每次询问确认绑定当时 epoch，发送前重新检查。被移除成员不能取得新的群范围内容，已下载的字节不可召回。
 
@@ -139,9 +141,9 @@ public 允许任何已验证 AIK 设备证书的 Agent；contacts 必须位于�
 
 清理引用在事务内完成；物理内容仅在没有有效资源/任务引用时回收。source 文件永远不删除。清理使用已固定的应用根句柄，不跟随路径或链接。
 
-本机 DPAPI/keystore 保护 AIK 与设备密钥。身份迁移是单独的、用户显式触发的加密导出流程，优先复用成熟 `age` passphrase 文件格式，不自创 KDF/AEAD 封装。包内明文归档有固定 magic、主/次版本、AgentId、AIK seed、公钥校验值、用户选择的联系人/信任/短期历史与清单 hash；不含设备私钥、系统凭据、文件目录路径授权、未选中的共享资料或 MLS ratchet 状态。导入检查版本、AgentId 推导、清单 hash 和所有记录边界后，再建立本机事务。
+本机 DPAPI/keystore 保护身份根密钥与设备密钥。身份迁移是单独的、用户显式触发的加密导出流程，优先复用成熟 `age` passphrase 文件格式，不自创 KDF/AEAD 封装。包内明文归档有固定 magic、主/次版本、AgentId、根密钥 seed、公钥校验值、用户选择的联系人/信任/短期历史与清单 hash；不含设备私钥、系统凭据、文件目录路径授权、未选中的共享资料或 MLS ratchet 状态。导入检查版本、AgentId 推导、清单 hash 和所有记录边界后，再建立本机事务。
 
-目标设备导入后必须生成新设备密钥，由 AIK 签发更高 serial 的设备证书，并发布签名设备目录/旧设备撤销声明。迁移模式下旧实例应先停止；无法联系旧设备或观察全网最新撤销序号时，撤销传播可能延迟，不能承诺即时全网撤销。群组通过 MLS 将新设备作为新叶子加入；不复制旧设备 ratchet 状态。目录路径、OS 凭据、grant 和传输中的短期 lease 必须重新授权/生成。
+目标设备导入后必须生成新设备密钥，由根密钥签发更高 serial 的设备证书，并以链上 state commitment 更新设备集合，随后发布签名设备目录。迁移模式下旧实例应先停止；无法联系旧设备或获得最新最终化链状态时，撤销传播可能延迟，不能承诺即时全网撤销。群组通过 MLS 将新设备作为新叶子加入；不复制旧设备 ratchet 状态。目录路径、OS 凭据、grant 和传输中的短期 lease 必须重新授权/生成。
 
 迁移文件在 E 盘用户授权目录中生成。`age` 口令由人提供，仅用于本次迁移，不入日志；加密工具负责 KDF、AEAD 和文件格式。未知主版本、截断、损坏、错误口令或清单校验失败均拒绝导入，不做部分身份恢复。
 
@@ -151,10 +153,10 @@ public 允许任何已验证 AIK 设备证书的 Agent；contacts 必须位于�
 magic = "ASLMIG01"
 format_version = 1
 agent_id
-agent_identity_key_seed
-agent_public_key_checksum
+identity_root_key_seed
+identity_root_public_key_checksum
 selected_data_manifest
 selected_data_payload
 ```
 
-AIK seed 仅存在于 age 加密后的包内；公钥校验和用于发现归档损坏，不替代 age 完整性保护。导出不得修改源身份或删除旧设备数据。恢复只能显式授权；不会在数据库错误时静默重建空授权。恢复后先重验卷、文件身份、grants 与快照，再开放网络。
+身份根密钥 seed 仅存在于 age 加密后的包内；公钥校验和用于发现归档损坏，不替代 age 完整性保护。导出不得修改源身份或删除旧设备数据。恢复只能显式授权；不会在数据库错误时静默重建空授权。恢复后先重验卷、文件身份、grants 与快照，再开放网络。

@@ -1,33 +1,12 @@
-use serde::{Deserialize, Deserializer, de::DeserializeOwned};
-use serde_json::value::RawValue;
-use std::time::{SystemTime, UNIX_EPOCH};
+mod cbor;
 
 use crate::{
-    error::{AslError, ErrorCode},
-    ids::{AgentIdText, Hash32, Id128, PeerIdText, Signature64},
+    error::ErrorCode,
+    ids::{AgentId, Hash32, Id128, PeerId, Signature65},
 };
+pub use cbor::{decode_control, decode_frame, encode_control, encode_frame};
 
-const MAX_CONTROL_FRAME_BYTES: usize = 65_536;
-const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
-const MAX_TIME_MS: u64 = i64::MAX as u64;
-const MAX_DEVICE_CERTIFICATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
-const MAX_FILE_SIZE: u64 = 68_719_476_736;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum WireKind {
-    Hello,
-    Query,
-    Answer,
-    Offer,
-    FetchRequest,
-    FetchGrant,
-    Error,
-    Ack,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Feature {
     Query,
     Blob,
@@ -35,293 +14,281 @@ pub enum Feature {
     Profile,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceStatus {
-    SourceBacked,
-    DerivedUnverified,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Intent {
+    FindEvidence,
+    LocateResource,
+    VerifyClaim,
+    IdentifyAgent,
+    OfferResource,
+    GroupReview,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWireEnvelope {
-    v: u16,
-    kind: WireKind,
-    id: Id128,
-    root_task_id: Id128,
-    #[serde(deserialize_with = "required_nullable_id")]
-    reply_to: Option<Id128>,
-    created_at_ms: u64,
-    expires_at_ms: u64,
-    body: Box<RawValue>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConstraintOperator {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
+    Contains,
+    In,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultShape {
+    Claims,
+    Resources,
+    Agents,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnswerStatus {
+    Answered,
+    NoMatch,
+    Declined,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultStatus {
+    Complete,
+    Partial,
+    Unverified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaKind {
+    Other,
+    Document,
+    Image,
+    Audio,
+    Video,
+    Archive,
+    StructuredData,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupOperation {
+    Application,
+    Membership,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConceptRef {
+    pub vocabulary_id: u16,
+    pub concept_id: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WireEnvelope {
-    pub v: u16,
-    pub kind: WireKind,
-    pub id: Id128,
-    pub root_task_id: Id128,
-    pub reply_to: Option<Id128>,
-    pub created_at_ms: u64,
-    pub expires_at_ms: u64,
-    pub body: WireBody,
+pub enum TypedValue {
+    Integer(i64),
+    Boolean(bool),
+    Null,
+    Hash(Hash32),
+    Agent(AgentId),
+    Concept(ConceptRef),
+    Quantity(i64, ConceptRef),
+    Concepts(Vec<ConceptRef>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WireBody {
-    Hello(HelloBody),
-    Query(QueryBody),
-    Answer(AnswerBody),
-    Offer(OfferBody),
-    FetchRequest(FetchRequestBody),
-    FetchGrant(FetchGrantBody),
-    Error(ErrorBody),
-    Ack(AckBody),
+pub struct Constraint {
+    pub predicate: ConceptRef,
+    pub operator: ConstraintOperator,
+    pub value: TypedValue,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Claim {
+    pub subject: TypedValue,
+    pub predicate: ConceptRef,
+    pub object: TypedValue,
+    pub evidence: Option<Hash32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceCertificate {
-    pub v: u8,
+    pub agent_id: AgentId,
+    pub peer_id: PeerId,
     pub serial: u64,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
-    pub signature: Signature64,
+    pub signature: Signature65,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct HelloBody {
-    pub peer_id: PeerIdText,
-    pub agent_id: AgentIdText,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hello {
+    pub message_id: Id128,
+    pub agent_id: AgentId,
+    pub peer_id: PeerId,
     pub device_certificate: DeviceCertificate,
     pub major: u16,
     pub minor: u16,
     pub features: Vec<Feature>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct QueryBody {
-    pub text: String,
-    pub terms: Vec<String>,
-    pub round: u8,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Query {
+    pub message_id: Id128,
+    pub root_task_id: Id128,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub intent_id: Intent,
+    pub topics: Vec<ConceptRef>,
+    pub constraints: Vec<Constraint>,
+    pub result_shape: ResultShape,
+    pub budget: u8,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AnswerBody {
-    pub text: String,
-    pub offer_ids: Vec<Id128>,
-    pub evidence_status: EvidenceStatus,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Answer {
+    pub message_id: Id128,
+    pub root_task_id: Id128,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub status: AnswerStatus,
+    pub claims: Vec<Claim>,
+    pub evidence_ids: Vec<Id128>,
+    pub result_status: ResultStatus,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct OfferBody {
-    pub offer_id: Id128,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Offer {
+    pub message_id: Id128,
+    pub root_task_id: Id128,
     pub content_id: Hash32,
-    pub title: String,
-    pub summary: String,
-    pub tags: Vec<String>,
     pub file_size: u64,
-    pub source_peer: PeerIdText,
+    pub media_kind: MediaKind,
+    pub concepts: Vec<ConceptRef>,
     pub expires_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FetchRequestBody {
-    #[serde(deserialize_with = "required_nullable_id")]
-    pub offer_id: Option<Id128>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchRequest {
+    pub message_id: Id128,
+    pub root_task_id: Id128,
     pub content_id: Hash32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FetchGrantBody {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchGrant {
+    pub message_id: Id128,
     pub content_id: Hash32,
     pub lease_id: Hash32,
     pub expires_at_ms: u64,
     pub file_size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ErrorBody {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolError {
+    pub message_id: Id128,
     pub code: ErrorCode,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AckBody {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ack {
+    pub message_id: Id128,
     pub received_id: Id128,
 }
 
-fn required_nullable_id<'de, D>(deserializer: D) -> Result<Option<Id128>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<Id128>::deserialize(deserializer)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Profile {
+    pub agent_id: AgentId,
+    pub sequence: u64,
+    pub capabilities: Vec<ConceptRef>,
+    pub avatar: Option<Hash32>,
 }
 
-fn decode_body<T: DeserializeOwned>(raw: &RawValue) -> Result<T, AslError> {
-    serde_json::from_str(raw.get()).map_err(|_| AslError::InvalidMessage)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityProofRequest {
+    pub request_id: Id128,
+    pub agent_id: AgentId,
+    pub checkpoint_hash: Hash32,
 }
 
-fn has_unique<T: Eq>(items: &[T]) -> bool {
-    items
-        .iter()
-        .enumerate()
-        .all(|(index, item)| !items[..index].contains(item))
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageProof {
+    pub slot: u64,
+    pub nodes: Vec<Vec<u8>>,
 }
 
-fn valid_len(value: &str, min: usize, max: usize) -> bool {
-    let length = value.chars().count();
-    (min..=max).contains(&length)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityProof {
+    pub request_id: Id128,
+    pub agent_id: AgentId,
+    pub finalized_height: u64,
+    pub block_hash: Hash32,
+    pub state_root: Hash32,
+    pub account_proof: Vec<Vec<u8>>,
+    pub storage_proofs: Vec<StorageProof>,
+    pub controller_address: [u8; 20],
+    pub state_commitment: Hash32,
+    pub sequence: u64,
+    pub revoked: bool,
 }
 
-fn validate_time(value: u64) -> Result<(), AslError> {
-    if value <= MAX_TIME_MS {
-        Ok(())
-    } else {
-        Err(AslError::InvalidMessage)
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingInvite {
+    pub invite_id: Id128,
+    pub inviter: AgentId,
+    pub target: AgentId,
+    pub expires_at_ms: u64,
+    pub token: Vec<u8>,
+    pub signature: Signature65,
 }
 
-fn validate_hello(body: &HelloBody, now_ms: u64) -> Result<(), AslError> {
-    if body.major != 1 {
-        return Err(AslError::IncompatibleVersion);
-    }
-    if body.device_certificate.v != 1
-        || body.device_certificate.serial == 0
-        || body.device_certificate.expires_at_ms < body.device_certificate.issued_at_ms
-        || body
-            .device_certificate
-            .expires_at_ms
-            .saturating_sub(body.device_certificate.issued_at_ms)
-            > MAX_DEVICE_CERTIFICATE_TTL_MS
-        || !has_unique(&body.features)
-        || body.features.len() > 16
-    {
-        return Err(AslError::InvalidMessage);
-    }
-    validate_time(body.device_certificate.issued_at_ms)?;
-    validate_time(body.device_certificate.expires_at_ms)?;
-    if body.device_certificate.issued_at_ms.saturating_sub(now_ms) > MAX_CLOCK_SKEW_MS {
-        return Err(AslError::InvalidMessage);
-    }
-    if body.device_certificate.expires_at_ms < now_ms {
-        return Err(AslError::ExpiredMessage);
-    }
-    Ok(())
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingExchange {
+    pub exchange_id: Id128,
+    pub agent_id: AgentId,
+    pub peer_id: PeerId,
+    pub attempt: u8,
+    pub payload: Vec<u8>,
+    pub transcript_hash: Hash32,
 }
 
-fn validate_body(body: &WireBody, now_ms: u64) -> Result<(), AslError> {
-    match body {
-        WireBody::Hello(body) => validate_hello(body, now_ms),
-        WireBody::Query(body) => {
-            if !valid_len(&body.text, 1, 2_000)
-                || body.terms.len() > 5
-                || body.terms.iter().any(|term| !valid_len(term, 1, 48))
-                || !has_unique(&body.terms)
-                || body.round > 2
-            {
-                return Err(AslError::InvalidMessage);
-            }
-            Ok(())
-        }
-        WireBody::Answer(body) => {
-            if !valid_len(&body.text, 1, 4_000)
-                || body.offer_ids.len() > 8
-                || !has_unique(&body.offer_ids)
-            {
-                return Err(AslError::InvalidMessage);
-            }
-            Ok(())
-        }
-        WireBody::Offer(body) => {
-            if !valid_len(&body.title, 0, 160)
-                || !valid_len(&body.summary, 0, 1_200)
-                || body.tags.len() > 8
-                || body.tags.iter().any(|tag| !valid_len(tag, 1, 48))
-                || !has_unique(&body.tags)
-                || body.file_size > MAX_FILE_SIZE
-            {
-                return Err(AslError::InvalidMessage);
-            }
-            validate_time(body.expires_at_ms)?;
-            if body.expires_at_ms < now_ms {
-                return Err(AslError::ExpiredMessage);
-            }
-            Ok(())
-        }
-        WireBody::FetchRequest(_) => Ok(()),
-        WireBody::FetchGrant(body) => {
-            if body.file_size > MAX_FILE_SIZE {
-                return Err(AslError::InvalidMessage);
-            }
-            validate_time(body.expires_at_ms)?;
-            if body.expires_at_ms < now_ms {
-                return Err(AslError::ExpiredMessage);
-            }
-            Ok(())
-        }
-        WireBody::Error(_) | WireBody::Ack(_) => Ok(()),
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupEnvelope {
+    pub message_id: Id128,
+    pub group_id: Hash32,
+    pub epoch: u64,
+    pub operation: GroupOperation,
+    pub ciphertext: Vec<u8>,
 }
 
-pub fn parse_wire(bytes: &[u8]) -> Result<WireEnvelope, AslError> {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
-    parse_wire_at(bytes, now_ms)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WireFrame {
+    Hello(Hello),
+    Query(Query),
+    Answer(Answer),
+    Offer(Offer),
+    FetchRequest(FetchRequest),
+    FetchGrant(FetchGrant),
+    Error(ProtocolError),
+    Ack(Ack),
+    Profile(Profile),
+    IdentityProofRequest(IdentityProofRequest),
+    IdentityProof(IdentityProof),
+    PairingInvite(PairingInvite),
+    PairingExchange(PairingExchange),
+    GroupEnvelope(GroupEnvelope),
 }
 
-pub fn parse_wire_at(bytes: &[u8], now_ms: u64) -> Result<WireEnvelope, AslError> {
-    if bytes.len() > MAX_CONTROL_FRAME_BYTES {
-        return Err(AslError::InvalidMessage);
+impl WireFrame {
+    pub fn is_control(&self) -> bool {
+        matches!(
+            self,
+            Self::Hello(_)
+                | Self::Query(_)
+                | Self::Answer(_)
+                | Self::Offer(_)
+                | Self::FetchRequest(_)
+                | Self::FetchGrant(_)
+                | Self::Error(_)
+                | Self::Ack(_)
+                | Self::Profile(_)
+        )
     }
-    let raw: RawWireEnvelope =
-        serde_json::from_slice(bytes).map_err(|_| AslError::InvalidMessage)?;
-    if raw.v != 1 {
-        return Err(AslError::IncompatibleVersion);
-    }
-    validate_time(raw.created_at_ms)?;
-    validate_time(raw.expires_at_ms)?;
-    if raw.expires_at_ms < raw.created_at_ms {
-        return Err(AslError::InvalidMessage);
-    }
-    if raw.created_at_ms.saturating_sub(now_ms) > MAX_CLOCK_SKEW_MS {
-        return Err(AslError::InvalidMessage);
-    }
-    if raw.expires_at_ms < now_ms {
-        return Err(AslError::ExpiredMessage);
-    }
-
-    let body = match raw.kind {
-        WireKind::Hello => WireBody::Hello(decode_body(&raw.body)?),
-        WireKind::Query => WireBody::Query(decode_body(&raw.body)?),
-        WireKind::Answer => WireBody::Answer(decode_body(&raw.body)?),
-        WireKind::Offer => WireBody::Offer(decode_body(&raw.body)?),
-        WireKind::FetchRequest => WireBody::FetchRequest(decode_body(&raw.body)?),
-        WireKind::FetchGrant => WireBody::FetchGrant(decode_body(&raw.body)?),
-        WireKind::Error => WireBody::Error(decode_body(&raw.body)?),
-        WireKind::Ack => WireBody::Ack(decode_body(&raw.body)?),
-    };
-    validate_body(&body, now_ms)?;
-
-    Ok(WireEnvelope {
-        v: raw.v,
-        kind: raw.kind,
-        id: raw.id,
-        root_task_id: raw.root_task_id,
-        reply_to: raw.reply_to,
-        created_at_ms: raw.created_at_ms,
-        expires_at_ms: raw.expires_at_ms,
-        body,
-    })
 }

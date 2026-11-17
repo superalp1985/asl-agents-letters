@@ -7,6 +7,7 @@ use asl_types::error::AslError;
 pub struct AppPaths {
     root: PathBuf,
     state: PathBuf,
+    identity: PathBuf,
     snapshots: PathBuf,
     incoming: PathBuf,
     logs: PathBuf,
@@ -34,6 +35,7 @@ impl AppPaths {
         }
 
         let state = create_child(&root, "state")?;
+        let identity = create_child(&root, "identity")?;
         let snapshots = create_child(&root, "snapshots")?;
         let incoming = create_child(&root, "incoming")?;
         let logs = create_child(&root, "logs")?;
@@ -41,6 +43,7 @@ impl AppPaths {
         Ok(Self {
             root,
             state,
+            identity,
             snapshots,
             incoming,
             logs,
@@ -53,6 +56,10 @@ impl AppPaths {
 
     pub fn state(&self) -> &Path {
         &self.state
+    }
+
+    pub fn identity(&self) -> &Path {
+        &self.identity
     }
 
     pub fn snapshots(&self) -> &Path {

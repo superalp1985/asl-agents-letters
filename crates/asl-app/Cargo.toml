@@ -8,6 +8,11 @@ rust-version.workspace = true
 [dependencies]
 asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
+k256.workspace = true
+libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }
+rand.workspace = true
+sha3.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true

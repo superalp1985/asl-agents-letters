@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:asl:agent-decision:1",
-  "title": "ASL bounded agent decision",
+  "$id": "urn:asl:prototype:agent-decision-json-v0",
+  "title": "Deprecated ASL JSON decision prototype; not a protocol specification",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "action", "text", "refs", "terms", "reason_code"],

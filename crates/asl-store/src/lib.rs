@@ -1,1 +1,409 @@
-//! SQLite persistence and resource storage.
+use std::{
+    io,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use asl_types::error::AslError;
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+
+const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
+
+pub struct Store {
+    connection: Connection,
+}
+
+impl Store {
+    pub fn schema_version(&self) -> u32 {
+        SCHEMA_VERSION as u32
+    }
+
+    pub fn policy_revision(&self) -> Result<u64, AslError> {
+        let revision: i64 = self
+            .connection
+            .query_row(
+                "SELECT revision FROM policy_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        u64::try_from(revision).map_err(|_| AslError::InvalidDatabase)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, AslError> {
+        self.connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    pub fn set_setting(
+        &self,
+        key: &str,
+        value_json: &str,
+        updated_at_ms: i64,
+    ) -> Result<(), AslError> {
+        self.connection
+            .execute(
+                "INSERT INTO settings(key, value_json, updated_at_ms)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                     value_json = excluded.value_json,
+                     updated_at_ms = excluded.updated_at_ms",
+                params![key, value_json, updated_at_ms],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+}
+
+pub fn open_store(path: &Path) -> Result<Store, AslError> {
+    let mut connection = Connection::open(path).map_err(database_error)?;
+    configure_connection(&connection)?;
+
+    match read_schema_version(&connection)? {
+        Some(SCHEMA_VERSION) => validate_existing_schema(&connection)?,
+        Some(_) => return Err(AslError::UnsupportedSchemaVersion),
+        None => apply_v1_migration(&mut connection)?,
+    }
+
+    Ok(Store { connection })
+}
+
+fn configure_connection(connection: &Connection) -> Result<(), AslError> {
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(database_error)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(database_error)?;
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(database_error)?;
+
+    let foreign_keys: i64 = connection
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .map_err(database_error)?;
+    let journal_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(database_error)?;
+    let synchronous: i64 = connection
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(database_error)?;
+
+    if foreign_keys != 1 || !journal_mode.eq_ignore_ascii_case("wal") || synchronous != 2 {
+        return Err(AslError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn read_schema_version(connection: &Connection) -> Result<Option<i64>, AslError> {
+    let has_migrations: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'schema_migrations'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+
+    if !has_migrations {
+        let has_user_objects: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_schema
+                    WHERE name NOT LIKE 'sqlite_%'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        return if has_user_objects {
+            Err(AslError::InvalidDatabase)
+        } else {
+            Ok(None)
+        };
+    }
+
+    let mut statement = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .map_err(database_error)?;
+    let versions = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+
+    if versions.iter().any(|version| *version > SCHEMA_VERSION) {
+        return Err(AslError::UnsupportedSchemaVersion);
+    }
+    if versions != [SCHEMA_VERSION] {
+        return Err(AslError::InvalidDatabase);
+    }
+    Ok(versions.last().copied())
+}
+
+fn apply_v1_migration(connection: &mut Connection) -> Result<(), AslError> {
+    apply_migration(connection, SCHEMA_V1, current_time_ms())
+}
+
+fn apply_migration(
+    connection: &mut Connection,
+    migration_sql: &str,
+    applied_at_ms: i64,
+) -> Result<(), AslError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(database_error)?;
+    apply_migration_in_transaction(&transaction, migration_sql, applied_at_ms)?;
+    transaction.commit().map_err(database_error)
+}
+
+fn apply_migration_in_transaction(
+    transaction: &Transaction<'_>,
+    migration_sql: &str,
+    applied_at_ms: i64,
+) -> Result<(), AslError> {
+    transaction
+        .execute_batch(migration_sql)
+        .map_err(database_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
+            params![SCHEMA_VERSION, applied_at_ms],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn validate_existing_schema(connection: &Connection) -> Result<(), AslError> {
+    let policy_revision: Option<i64> = connection
+        .query_row(
+            "SELECT revision FROM policy_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    if !matches!(policy_revision, Some(revision) if revision >= 1) {
+        return Err(AslError::InvalidDatabase);
+    }
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(database_error)?;
+    if statement.exists([]).map_err(database_error)? {
+        return Err(AslError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn database_error(error: rusqlite::Error) -> AslError {
+    AslError::Io(io::Error::other(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDatabase {
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new() -> Self {
+            let directory = Path::new(r"E:\ASL\work\test-fs\asl-store");
+            fs::create_dir_all(directory).unwrap();
+            let id = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!("store-{}-{id}.sqlite3", std::process::id()));
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = OsString::from(self.path.as_os_str());
+                sidecar.push(suffix);
+                let _ = fs::remove_file(PathBuf::from(sidecar));
+            }
+        }
+    }
+
+    #[test]
+    fn initializes_v1_and_reopens_without_reapplying_migration() {
+        let database = TestDatabase::new();
+
+        {
+            let store = open_store(database.path()).unwrap();
+            assert_eq!(store.schema_version(), 1);
+            assert_eq!(store.policy_revision().unwrap(), 1);
+        }
+
+        let store = open_store(database.path()).unwrap();
+        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.policy_revision().unwrap(), 1);
+
+        let migration_count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(migration_count, 1);
+
+        let integrity: String = store
+            .connection
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn configures_wal_foreign_keys_and_full_synchronous_mode() {
+        let database = TestDatabase::new();
+        let store = open_store(database.path()).unwrap();
+
+        let foreign_keys: i64 = store
+            .connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        let journal_mode: String = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = store
+            .connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 2);
+    }
+
+    #[test]
+    fn settings_use_bound_parameters() {
+        let database = TestDatabase::new();
+        let store = open_store(database.path()).unwrap();
+        let key = "key'); DROP TABLE schema_migrations; --";
+        let value = r#"{"local":"value'); DROP TABLE settings; --"}"#;
+
+        store.set_setting(key, value, 42).unwrap();
+
+        assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
+        assert_eq!(store.schema_version(), 1);
+    }
+
+    #[test]
+    fn rejects_unknown_schema_without_modifying_its_tables() {
+        let database = TestDatabase::new();
+        let connection = Connection::open(database.path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations(
+                    version INTEGER PRIMARY KEY,
+                    applied_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (2, 10);
+                 CREATE TABLE preserved(value INTEGER);
+                 INSERT INTO preserved(value) VALUES (7);",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            open_store(database.path()),
+            Err(AslError::UnsupportedSchemaVersion)
+        ));
+
+        let connection = Connection::open(database.path()).unwrap();
+        let preserved: i64 = connection
+            .query_row("SELECT value FROM preserved", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(preserved, 7);
+        let asl_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'agents'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(asl_tables, 0);
+    }
+
+    #[test]
+    fn rejects_partial_database_without_rebuilding_it() {
+        let database = TestDatabase::new();
+        let connection = Connection::open(database.path()).unwrap();
+        connection
+            .execute_batch("CREATE TABLE user_data(value INTEGER);")
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            open_store(database.path()),
+            Err(AslError::InvalidDatabase)
+        ));
+
+        let connection = Connection::open(database.path()).unwrap();
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'table' AND name = 'user_data'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
+    }
+
+    #[test]
+    fn migration_failure_rolls_back_the_complete_v1_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let failing_migration = format!("{SCHEMA_V1}\nINSERT INTO absent_table VALUES (1);");
+        let result = apply_migration(&mut connection, &failing_migration, 1);
+        assert!(result.is_err());
+
+        let user_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(user_tables, 0);
+    }
+}

@@ -1,233 +1,432 @@
-use asl_types::{
-    error::{AslError, ErrorCode},
-    ids::{AgentIdText, CandidateId, Hash32, Id128, PeerIdText},
-    protocol::{WireBody, parse_wire_at},
-    task::TimeMs,
-};
 use std::str::FromStr;
 
-const NOW_MS: u64 = 1_700_000_000_000;
-const PEER_ID: &str = "12D3KooWRNw2pJC9748Fmq4WNV27HoSTcX3r37132FLkQMrbKAiC";
-const ID: &str = "00000000000000000000000000000001";
-const ROOT_ID: &str = "00000000000000000000000000000002";
-const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+use asl_types::{
+    error::ErrorCode,
+    ids::{AgentId, Hash32, Id128, PeerId, Signature65},
+    protocol::{
+        Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
+        DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
+        IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer, PairingExchange,
+        PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus, StorageProof,
+        TypedValue, WireFrame, decode_control, decode_frame, encode_control, encode_frame,
+    },
+};
+use cbor2::{Value, value::Integer};
 
-fn envelope(kind: &str, body: &str) -> Vec<u8> {
-    format!(
-        r#"{{"v":1,"kind":"{kind}","id":"{ID}","root_task_id":"{ROOT_ID}","reply_to":null,"created_at_ms":{},"expires_at_ms":{},"body":{body}}}"#,
-        NOW_MS - 1_000,
-        NOW_MS + 10_000
-    )
-    .into_bytes()
+fn peer_id() -> PeerId {
+    let peer =
+        libp2p_identity::PeerId::from_str("12D3KooWRNw2pJC9748Fmq4WNV27HoSTcX3r37132FLkQMrbKAiC")
+            .unwrap();
+    PeerId::from_bytes(peer.to_bytes()).unwrap()
 }
 
-fn agent_id() -> String {
-    let mut public_key = [0; 34];
-    public_key[..2].copy_from_slice(&[0xed, 0x01]);
-    format!("did:key:z{}", bs58::encode(public_key).into_string())
-}
-
-fn valid_hello() -> Vec<u8> {
-    let agent_id = agent_id();
-    envelope(
-        "hello",
-        &format!(
-            r#"{{"peer_id":"{PEER_ID}","agent_id":"{agent_id}","device_certificate":{{"v":1,"serial":1,"issued_at_ms":{},"expires_at_ms":{},"signature":"{}"}},"major":1,"minor":0,"features":["query","blob"]}}"#,
-            NOW_MS - 1_000,
-            NOW_MS + 10_000,
-            "00".repeat(64)
-        ),
-    )
-}
-
-#[test]
-fn parses_valid_query_and_offer() {
-    let query = envelope(
-        "query",
-        r#"{"text":"find Rust notes","terms":["rust","notes"],"round":0}"#,
-    );
-    assert!(matches!(
-        parse_wire_at(&query, NOW_MS).unwrap().body,
-        WireBody::Query(_)
-    ));
-
-    let offer = envelope(
-        "offer",
-        &format!(
-            r#"{{"offer_id":"{ID}","content_id":"{HASH}","title":"notes","summary":"","tags":["rust"],"file_size":12,"source_peer":"{PEER_ID}","expires_at_ms":{}}}"#,
-            NOW_MS + 10_000
-        ),
-    );
-    assert!(matches!(
-        parse_wire_at(&offer, NOW_MS).unwrap().body,
-        WireBody::Offer(_)
-    ));
-
-    let fetch_request = envelope(
-        "fetch_request",
-        &format!(r#"{{"offer_id":null,"content_id":"{HASH}"}}"#),
-    );
-    assert!(matches!(
-        parse_wire_at(&fetch_request, NOW_MS).unwrap().body,
-        WireBody::FetchRequest(_)
-    ));
-
-    let fetch_grant = envelope(
-        "fetch_grant",
-        &format!(
-            r#"{{"content_id":"{HASH}","lease_id":"{HASH}","expires_at_ms":{},"file_size":12}}"#,
-            NOW_MS + 10_000
-        ),
-    );
-    assert!(matches!(
-        parse_wire_at(&fetch_grant, NOW_MS).unwrap().body,
-        WireBody::FetchGrant(_)
-    ));
-}
-
-#[test]
-fn parses_hello_but_does_not_claim_certificate_authentication() {
-    let parsed = parse_wire_at(&valid_hello(), NOW_MS).unwrap();
-    let WireBody::Hello(hello) = parsed.body else {
-        panic!("expected hello");
-    };
-    assert_eq!(hello.peer_id.as_str(), PEER_ID);
-    assert_eq!(hello.device_certificate.serial, 1);
-}
-
-#[test]
-fn rejects_overlong_device_certificates() {
-    let valid = String::from_utf8(valid_hello()).unwrap();
-    let short_expiry = NOW_MS + 10_000;
-    let long_expiry = NOW_MS + 31 * 24 * 60 * 60 * 1_000;
-    let overlong = valid.replace(
-        &format!("\"expires_at_ms\":{short_expiry}"),
-        &format!("\"expires_at_ms\":{long_expiry}"),
-    );
-    assert!(parse_wire_at(overlong.as_bytes(), NOW_MS).is_err());
-}
-
-#[test]
-fn rejects_duplicate_fields_at_every_known_level() {
-    let duplicate_envelope = br#"{"v":1,"v":1,"kind":"query","id":"00000000000000000000000000000001","root_task_id":"00000000000000000000000000000002","reply_to":null,"created_at_ms":1699999999000,"expires_at_ms":1700000010000,"body":{"text":"x","terms":[],"round":0}}"#;
-    assert!(parse_wire_at(duplicate_envelope, NOW_MS).is_err());
-
-    let duplicate_body = envelope("query", r#"{"text":"x","text":"y","terms":[],"round":0}"#);
-    assert!(parse_wire_at(&duplicate_body, NOW_MS).is_err());
-}
-
-#[test]
-fn rejects_unknown_fields_and_excessive_frames() {
-    let unknown = envelope(
-        "query",
-        r#"{"text":"x","terms":[],"round":0,"path":"C:\\secret"}"#,
-    );
-    assert!(parse_wire_at(&unknown, NOW_MS).is_err());
-    assert!(parse_wire_at(&vec![b'x'; 65_537], NOW_MS).is_err());
-}
-
-#[test]
-fn rejects_excessive_json_nesting() {
-    let mut body = String::from(r#"{"text":"x","terms":[],"round":0,"extra":{"#);
-    body.push_str(&"[".repeat(140));
-    body.push('0');
-    body.push_str(&"]".repeat(140));
-    body.push_str("}}");
-    let nested = envelope("query", &body);
-    assert!(parse_wire_at(&nested, NOW_MS).is_err());
-}
-
-#[test]
-fn rejects_invalid_versions_ids_hashes_and_peers() {
-    let mut wrong_version = envelope("query", r#"{"text":"x","terms":[],"round":0}"#);
-    let version_pos = wrong_version
-        .windows(br#""v":1"#.len())
-        .position(|window| window == br#""v":1"#)
-        .unwrap();
-    wrong_version[version_pos + 4] = b'2';
-    assert!(matches!(
-        parse_wire_at(&wrong_version, NOW_MS),
-        Err(AslError::IncompatibleVersion)
-    ));
-
-    assert!(Id128::from_str("z".repeat(32).as_str()).is_err());
-    assert!(Hash32::from_str(&"A".repeat(64)).is_err());
-    assert!(PeerIdText::from_str("not-a-peer-id").is_err());
-    assert!(AgentIdText::from_str("did:key:znot-a-key").is_err());
-    assert!(CandidateId::from_str("c_0123456789abcdef").is_ok());
-    assert!(CandidateId::from_str("c_0123456789ABCDEf").is_err());
-
-    let bad_peer = envelope(
-        "offer",
-        &format!(
-            r#"{{"offer_id":"{ID}","content_id":"invalid","title":"x","summary":"","tags":[],"file_size":0,"source_peer":"bad","expires_at_ms":{}}}"#,
-            NOW_MS + 10_000
-        ),
-    );
-    assert!(parse_wire_at(&bad_peer, NOW_MS).is_err());
-}
-
-#[test]
-fn rejects_expired_and_inconsistent_timestamps() {
-    let expired = format!(
-        r#"{{"v":1,"kind":"query","id":"{ID}","root_task_id":"{ROOT_ID}","reply_to":null,"created_at_ms":100,"expires_at_ms":200,"body":{{"text":"x","terms":[],"round":0}}}}"#
-    );
-    assert!(matches!(
-        parse_wire_at(expired.as_bytes(), NOW_MS),
-        Err(AslError::ExpiredMessage)
-    ));
-
-    let just_expired = format!(
-        r#"{{"v":1,"kind":"query","id":"{ID}","root_task_id":"{ROOT_ID}","reply_to":null,"created_at_ms":{},"expires_at_ms":{},"body":{{"text":"x","terms":[],"round":0}}}}"#,
-        NOW_MS - 1_000,
-        NOW_MS - 1
-    );
-    assert!(matches!(
-        parse_wire_at(just_expired.as_bytes(), NOW_MS),
-        Err(AslError::ExpiredMessage)
-    ));
-
-    let inconsistent = format!(
-        r#"{{"v":1,"kind":"query","id":"{ID}","root_task_id":"{ROOT_ID}","reply_to":null,"created_at_ms":{},"expires_at_ms":{},"body":{{"text":"x","terms":[],"round":0}}}}"#,
-        NOW_MS + 1_000,
-        NOW_MS
-    );
-    assert!(parse_wire_at(inconsistent.as_bytes(), NOW_MS).is_err());
-}
-
-#[test]
-fn error_codes_round_trip_as_wire_strings() {
-    let variants = [
-        (ErrorCode::PolicyDenied, "\"policy_denied\""),
-        (ErrorCode::GrantRevoked, "\"grant_revoked\""),
-        (ErrorCode::NotFound, "\"not_found\""),
-        (ErrorCode::Offline, "\"offline\""),
-        (ErrorCode::Timeout, "\"timeout\""),
-        (ErrorCode::Busy, "\"busy\""),
-        (ErrorCode::QuotaExceeded, "\"quota_exceeded\""),
-        (ErrorCode::IntegrityFailed, "\"integrity_failed\""),
-        (ErrorCode::InvalidMessage, "\"invalid_message\""),
-        (ErrorCode::IncompatibleVersion, "\"incompatible_version\""),
-        (ErrorCode::ModelInvalid, "\"model_invalid\""),
-        (ErrorCode::ModelUnavailable, "\"model_unavailable\""),
-        (ErrorCode::SandboxUnavailable, "\"sandbox_unavailable\""),
-        (ErrorCode::DiskFull, "\"disk_full\""),
-        (ErrorCode::RelayCapacity, "\"relay_capacity\""),
-        (ErrorCode::Cancelled, "\"cancelled\""),
-        (ErrorCode::InternalError, "\"internal_error\""),
-    ];
-    for (code, json) in variants {
-        assert_eq!(serde_json::to_string(&code).unwrap(), json);
-        assert_eq!(serde_json::from_str::<ErrorCode>(json).unwrap(), code);
+fn concept(id: u32) -> ConceptRef {
+    ConceptRef {
+        vocabulary_id: 1,
+        concept_id: id,
     }
-    assert!(serde_json::from_str::<ErrorCode>("\"unknown\"").is_err());
+}
+
+fn sample_frames() -> Vec<WireFrame> {
+    let agent = AgentId([7; 32]);
+    let peer = peer_id();
+    let id = Id128([1; 16]);
+    let hash = Hash32([2; 32]);
+    let certificate = DeviceCertificate {
+        agent_id: agent,
+        peer_id: peer.clone(),
+        serial: 1,
+        issued_at_ms: 100,
+        expires_at_ms: 200,
+        signature: Signature65([3; 65]),
+    };
+
+    vec![
+        WireFrame::Hello(Hello {
+            message_id: id,
+            agent_id: agent,
+            peer_id: peer.clone(),
+            device_certificate: certificate,
+            major: 1,
+            minor: 0,
+            features: vec![Feature::Query, Feature::Blob],
+        }),
+        WireFrame::Query(Query {
+            message_id: id,
+            root_task_id: Id128([4; 16]),
+            created_at_ms: 100,
+            expires_at_ms: 200,
+            intent_id: Intent::FindEvidence,
+            topics: vec![concept(100), concept(101)],
+            constraints: vec![
+                Constraint {
+                    predicate: concept(206),
+                    operator: ConstraintOperator::NotEqual,
+                    value: TypedValue::Integer(42),
+                },
+                Constraint {
+                    predicate: concept(207),
+                    operator: ConstraintOperator::Equal,
+                    value: TypedValue::Hash(hash),
+                },
+                Constraint {
+                    predicate: concept(208),
+                    operator: ConstraintOperator::Equal,
+                    value: TypedValue::Agent(agent),
+                },
+                Constraint {
+                    predicate: concept(203),
+                    operator: ConstraintOperator::Equal,
+                    value: TypedValue::Concepts(vec![concept(100), concept(101)]),
+                },
+            ],
+            result_shape: ResultShape::Claims,
+            budget: 10,
+        }),
+        WireFrame::Answer(Answer {
+            message_id: id,
+            root_task_id: Id128([4; 16]),
+            created_at_ms: 100,
+            expires_at_ms: 200,
+            status: AnswerStatus::Answered,
+            claims: vec![Claim {
+                subject: TypedValue::Agent(agent),
+                predicate: concept(208),
+                object: TypedValue::Hash(hash),
+                evidence: Some(hash),
+            }],
+            evidence_ids: vec![Id128([5; 16])],
+            result_status: ResultStatus::Partial,
+        }),
+        WireFrame::Offer(Offer {
+            message_id: id,
+            root_task_id: Id128([4; 16]),
+            content_id: hash,
+            file_size: 1_048_576,
+            media_kind: MediaKind::Image,
+            concepts: vec![concept(100), concept(101)],
+            expires_at_ms: 200,
+        }),
+        WireFrame::FetchRequest(FetchRequest {
+            message_id: id,
+            root_task_id: Id128([4; 16]),
+            content_id: hash,
+        }),
+        WireFrame::FetchGrant(FetchGrant {
+            message_id: id,
+            content_id: hash,
+            lease_id: Hash32([6; 32]),
+            expires_at_ms: 200,
+            file_size: 1_048_576,
+        }),
+        WireFrame::Error(ProtocolError {
+            message_id: id,
+            code: ErrorCode::NotFound,
+        }),
+        WireFrame::Ack(Ack {
+            message_id: id,
+            received_id: Id128([8; 16]),
+        }),
+        WireFrame::Profile(Profile {
+            agent_id: agent,
+            sequence: 7,
+            capabilities: vec![concept(1), concept(100)],
+            avatar: Some(hash),
+        }),
+        WireFrame::IdentityProofRequest(IdentityProofRequest {
+            request_id: id,
+            agent_id: agent,
+            checkpoint_hash: hash,
+        }),
+        WireFrame::IdentityProof(IdentityProof {
+            request_id: id,
+            agent_id: agent,
+            finalized_height: 123,
+            block_hash: hash,
+            state_root: Hash32([9; 32]),
+            account_proof: vec![vec![1, 2, 3]],
+            storage_proofs: vec![StorageProof {
+                slot: 5,
+                nodes: vec![vec![4, 5, 6]],
+            }],
+            controller_address: [10; 20],
+            state_commitment: Hash32([11; 32]),
+            sequence: 4,
+            revoked: false,
+        }),
+        WireFrame::PairingInvite(PairingInvite {
+            invite_id: id,
+            inviter: agent,
+            target: AgentId([12; 32]),
+            expires_at_ms: 200,
+            token: vec![13; 16],
+            signature: Signature65([14; 65]),
+        }),
+        WireFrame::PairingExchange(PairingExchange {
+            exchange_id: id,
+            agent_id: agent,
+            peer_id: peer,
+            attempt: 1,
+            payload: vec![15; 64],
+            transcript_hash: hash,
+        }),
+        WireFrame::GroupEnvelope(GroupEnvelope {
+            message_id: id,
+            group_id: hash,
+            epoch: 2,
+            operation: GroupOperation::Application,
+            ciphertext: vec![16; 128],
+        }),
+    ]
+}
+
+fn replace_value(bytes: &[u8], key: u64, replacement: Value) -> Vec<u8> {
+    let mut value: Value = cbor2::from_slice(bytes).unwrap();
+    let Value::Map(entries) = &mut value else {
+        panic!("encoded frame must be a map");
+    };
+    let target = Value::Integer(Integer::from(key));
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(entry_key, _)| *entry_key == target)
+        .unwrap();
+    *value = replacement;
+    cbor2::to_vec(&value).unwrap()
 }
 
 #[test]
-fn timestamp_type_enforces_protocol_range() {
-    let timestamp = TimeMs::try_from(42).unwrap();
-    assert_eq!(timestamp.get(), 42);
-    assert_eq!(serde_json::to_string(&timestamp).unwrap(), "42");
-    assert!(TimeMs::try_from(u64::MAX).is_err());
-    assert!(serde_json::from_str::<TimeMs>("9223372036854775808").is_err());
+fn every_declared_frame_round_trips_with_deterministic_bytes() {
+    for frame in sample_frames() {
+        let bytes = encode_frame(&frame).unwrap();
+        assert_eq!(encode_frame(&frame).unwrap(), bytes);
+        assert_eq!(decode_frame(&bytes).unwrap(), frame);
+    }
+}
+
+#[test]
+fn control_codec_accepts_only_control_frames() {
+    let control = sample_frames().remove(0);
+    let bytes = encode_control(&control).unwrap();
+    assert_eq!(decode_control(&bytes).unwrap(), control);
+
+    let identity_proof = sample_frames()[10].clone();
+    assert!(encode_control(&identity_proof).is_err());
+    let bytes = encode_frame(&identity_proof).unwrap();
+    assert!(decode_control(&bytes).is_err());
+}
+
+#[test]
+fn rejects_duplicate_map_keys_at_root_and_nested_levels() {
+    let root_duplicate = cbor2::to_vec(&Value::Map(vec![
+        (
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(1)),
+        ),
+        (
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(1)),
+        ),
+    ]))
+    .unwrap();
+    assert!(decode_frame(&root_duplicate).is_err());
+
+    let query = sample_frames().remove(1);
+    let bytes = encode_frame(&query).unwrap();
+    let mut value: Value = cbor2::from_slice(&bytes).unwrap();
+    let Value::Map(root) = &mut value else {
+        panic!("encoded frame must be a map");
+    };
+    let (_, constraints) = root
+        .iter_mut()
+        .find(|(key, _)| *key == Value::Integer(Integer::from(8)))
+        .unwrap();
+    let Value::Array(constraints) = constraints else {
+        panic!("query constraints must be an array");
+    };
+    let Value::Map(fields) = &mut constraints[0] else {
+        panic!("constraint must be a map");
+    };
+    fields.push((
+        Value::Integer(Integer::from(0)),
+        Value::Array(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(100)),
+        ]),
+    ));
+    assert!(decode_frame(&cbor2::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn rejects_unknown_fields_text_values_and_unknown_concepts() {
+    let query = encode_frame(&sample_frames().remove(1)).unwrap();
+    let unknown_field = {
+        let mut value: Value = cbor2::from_slice(&query).unwrap();
+        let Value::Map(fields) = &mut value else {
+            panic!("encoded frame must be a map");
+        };
+        fields.push((
+            Value::Integer(Integer::from(11)),
+            Value::Integer(Integer::from(0)),
+        ));
+        cbor2::to_canonical_vec(&value).unwrap()
+    };
+    assert!(decode_frame(&unknown_field).is_err());
+
+    let text_value = replace_value(&query, 10, Value::Text(String::from("free text")));
+    assert!(decode_frame(&text_value).is_err());
+
+    let unknown_concept = replace_value(
+        &query,
+        7,
+        Value::Array(vec![Value::Array(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(65_000)),
+        ])]),
+    );
+    assert!(decode_frame(&unknown_concept).is_err());
+}
+
+#[test]
+fn rejects_noncanonical_indefinite_and_trailing_encodings() {
+    let ack = encode_frame(&sample_frames()[7]).unwrap();
+
+    let mut noncanonical_integer = ack.clone();
+    noncanonical_integer.splice(2..3, [0x18, 0x01]);
+    assert!(decode_frame(&noncanonical_integer).is_err());
+
+    let mut indefinite_map = ack.clone();
+    assert_eq!(indefinite_map[0], 0xa4);
+    indefinite_map[0] = 0xbf;
+    indefinite_map.push(0xff);
+    assert!(decode_frame(&indefinite_map).is_err());
+
+    let mut trailing = ack;
+    trailing.push(0x00);
+    assert!(decode_frame(&trailing).is_err());
+}
+
+#[test]
+fn rejects_wrong_versions_bounds_and_invalid_peer_ids() {
+    let ack = encode_frame(&sample_frames()[7]).unwrap();
+    let mut wrong_version = ack;
+    wrong_version[2] = 2;
+    let decoded = decode_frame(&wrong_version);
+    assert!(
+        matches!(
+            decoded,
+            Err(asl_types::error::AslError::IncompatibleVersion)
+        ),
+        "unexpected version result: {decoded:?}"
+    );
+
+    let oversized = WireFrame::Offer(Offer {
+        message_id: Id128([1; 16]),
+        root_task_id: Id128([2; 16]),
+        content_id: Hash32([3; 32]),
+        file_size: 68_719_476_737,
+        media_kind: MediaKind::Document,
+        concepts: vec![],
+        expires_at_ms: 200,
+    });
+    assert!(encode_frame(&oversized).is_err());
+
+    assert!(PeerId::from_bytes(vec![0xff]).is_err());
+}
+
+#[test]
+fn error_codes_use_fixed_numeric_wire_values() {
+    let variants: [(ErrorCode, u8); 17] = [
+        (ErrorCode::PolicyDenied, 1),
+        (ErrorCode::GrantRevoked, 2),
+        (ErrorCode::NotFound, 3),
+        (ErrorCode::Offline, 4),
+        (ErrorCode::Timeout, 5),
+        (ErrorCode::Busy, 6),
+        (ErrorCode::QuotaExceeded, 7),
+        (ErrorCode::IntegrityFailed, 8),
+        (ErrorCode::InvalidMessage, 9),
+        (ErrorCode::IncompatibleVersion, 10),
+        (ErrorCode::ModelInvalid, 11),
+        (ErrorCode::ModelUnavailable, 12),
+        (ErrorCode::SandboxUnavailable, 13),
+        (ErrorCode::DiskFull, 14),
+        (ErrorCode::RelayCapacity, 15),
+        (ErrorCode::Cancelled, 16),
+        (ErrorCode::InternalError, 17),
+    ];
+    for (code, wire_value) in variants {
+        let frame = WireFrame::Error(ProtocolError {
+            message_id: Id128([1; 16]),
+            code,
+        });
+        let bytes = encode_frame(&frame).unwrap();
+        assert_eq!(bytes.last(), Some(&wire_value));
+        assert_eq!(decode_frame(&bytes).unwrap(), frame);
+    }
+
+    let valid = encode_frame(&WireFrame::Error(ProtocolError {
+        message_id: Id128([1; 16]),
+        code: ErrorCode::NotFound,
+    }))
+    .unwrap();
+    assert!(decode_frame(&replace_value(&valid, 3, Value::Integer(Integer::from(18)))).is_err());
+}
+
+#[test]
+fn rejects_unknown_enumerations_and_out_of_range_pairing_attempts() {
+    let query = encode_frame(&sample_frames()[1]).unwrap();
+    assert!(decode_frame(&replace_value(&query, 9, Value::Integer(Integer::from(3)))).is_err());
+
+    let mut invalid_operator: Value = cbor2::from_slice(&query).unwrap();
+    let Value::Map(root) = &mut invalid_operator else {
+        panic!("encoded frame must be a map");
+    };
+    let (_, constraints) = root
+        .iter_mut()
+        .find(|(key, _)| *key == Value::Integer(Integer::from(8)))
+        .unwrap();
+    let Value::Array(constraints) = constraints else {
+        panic!("query constraints must be an array");
+    };
+    let Value::Map(first_constraint) = &mut constraints[0] else {
+        panic!("constraint must be a map");
+    };
+    let (_, operator) = first_constraint
+        .iter_mut()
+        .find(|(key, _)| *key == Value::Integer(Integer::from(1)))
+        .unwrap();
+    *operator = Value::Integer(Integer::from(8));
+    assert!(decode_frame(&cbor2::to_canonical_vec(&invalid_operator).unwrap()).is_err());
+
+    let answer = encode_frame(&sample_frames()[2]).unwrap();
+    assert!(decode_frame(&replace_value(&answer, 6, Value::Integer(Integer::from(4)))).is_err());
+    assert!(decode_frame(&replace_value(&answer, 9, Value::Integer(Integer::from(3)))).is_err());
+
+    let offer = encode_frame(&sample_frames()[3]).unwrap();
+    assert!(decode_frame(&replace_value(&offer, 6, Value::Integer(Integer::from(7)))).is_err());
+
+    let pairing = encode_frame(&sample_frames()[12]).unwrap();
+    assert!(
+        decode_frame(&replace_value(
+            &pairing,
+            5,
+            Value::Integer(Integer::from(0))
+        ))
+        .is_err()
+    );
+
+    let group = encode_frame(&sample_frames()[13]).unwrap();
+    assert!(decode_frame(&replace_value(&group, 5, Value::Integer(Integer::from(2)))).is_err());
+}
+
+#[test]
+fn acknowledgement_matches_the_fixed_cbor_wire_vector() {
+    let frame = sample_frames()[7].clone();
+    let encoded = encode_frame(&frame).unwrap();
+    let mut expected = vec![0xa4, 0x00, 0x01, 0x01, 0x07, 0x02, 0x50];
+    expected.extend([1; 16]);
+    expected.extend([0x03, 0x50]);
+    expected.extend([8; 16]);
+    assert_eq!(encoded, expected);
+    assert_eq!(decode_frame(&expected).unwrap(), frame);
 }

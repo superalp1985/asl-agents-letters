@@ -16,7 +16,15 @@ cross-platform certification.
 
 - `libp2p = 0.57.1`: the selected `autonat`, `dcutr`, `ed25519`, `identify`, `kad`, `macros`, `mdns`, `noise`, `ping`, `quic`, `relay`, `request-response`, `tcp`, `tokio`, and `yamux` features compile together. The probe resolves `identity::Keypair::generate_ed25519`, `kad::Behaviour<kad::store::MemoryStore>`, `mdns::tokio::Behaviour`, and the selected behaviour/configuration types. It does not yet construct a `Swarm`; that belongs to T14.
 - `openmls = 0.9.2`: `openmls::prelude::ProtocolVersion::Mls10` compiles. Provider, storage, credential, and group lifecycle integration remain for T31.
-- `windows = 0.62.2`: the `Win32_Storage_FileSystem` feature is enabled for the Windows target and is resolved during the workspace check. No Windows API call is validated by this probe; platform API work remains in the corresponding policy tasks.
+- `k256 = 0.14.0`: `SigningKey::from_slice`, recoverable prehash signing, `VerifyingKey::recover_from_prehash`, low-S normalization and uncompressed SEC1 public-key encoding compile and pass identity certificate tests.
+- `sha3 = 0.12.0`: `Keccak256` is used for Ethereum-style root addresses, AgentId derivation and domain-separated certificate digests.
+- `rand = 0.10.4`: `rngs::SysRng::try_fill_bytes` supplies fallible OS randomness for root and device key generation.
+- `libp2p-identity = 0.3.1`: Ed25519 `SecretKey::try_from_bytes`, protobuf private-key encoding/decoding and PeerId derivation compile and pass device persistence tests.
+- `windows = 0.62.2`: `Win32_Security_Cryptography` and `Win32_Foundation` compile for `CryptProtectData`, `CryptUnprotectData` and `LocalFree`. Windows tests exercised same-user DPAPI persistence, tamper rejection and refusal to overwrite an existing identity. Cross-user, service-account and cross-machine behavior are not validated.
+
+Identity and DPAPI are T06 implementations, not proof of chain state. Public-chain
+finality, registry code hash, storage proofs, device-set commitments, private IPC
+delivery and migration remain unimplemented.
 
 ## Probe Scope and Results
 

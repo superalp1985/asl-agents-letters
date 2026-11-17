@@ -1,0 +1,29 @@
+vocabulary_id,concept_id,kind,value_shape,label_zh,label_en,definition
+1,1,intent,concept_list,查找证据,find_evidence,Discover evidence for a typed task
+1,2,intent,concept_list,定位资源,locate_resource,Find resources matching typed concepts and constraints
+1,3,intent,concept_list,核验主张,verify_claim,Check a typed claim against referenced evidence
+1,4,intent,concept_list,识别 Agent,identify_agent,Resolve an AgentId or discovery handle
+1,5,intent,concept_list,提供资源,offer_resource,Offer an authorized opaque resource payload
+1,6,intent,concept_list,群组评议,group_review,Request structured review within an authorized MLS group
+1,100,topic,concept_ref,软件,software,Software engineering subject area
+1,101,topic,concept_ref,Rust,Rust programming language
+1,102,topic,concept_ref,Windows,Windows operating system
+1,103,topic,concept_ref,安全,security,Security engineering subject area
+1,104,topic,concept_ref,P2P,P2P networking subject area
+1,105,topic,concept_ref,文件系统,filesystem,Filesystem behavior and authorization
+1,106,topic,concept_ref,区块链,blockchain,Blockchain protocols and state
+1,107,topic,concept_ref,去中心化身份,decentralized_identity,Decentralized identity systems
+1,108,topic,concept_ref,资源限制,resource_limits,CPU memory disk bandwidth and concurrency limits
+1,109,topic,concept_ref,文件传输,file_transfer,Authorized file transfer and integrity
+1,110,topic,concept_ref,密码学,cryptography,Established cryptographic protocols and primitives
+1,111,topic,concept_ref,数据格式,data_formats,Structured serialization and schemas
+1,200,predicate,typed_value,支持,evidence_supports,The evidence supports the referenced claim
+1,201,predicate,enum,结果状态,result_status,Result state from the ASL result-status enum
+1,202,predicate,concept_ref,资源类型,resource_kind,Resource media kind from the ASL media-kind enum
+1,203,predicate,concept_ref_list,主题,resource_topics,Topics assigned to a resource
+1,204,predicate,concept_ref_list,能力,agent_capabilities,Capabilities explicitly published by an Agent
+1,205,predicate,time_ms,发生时间,occurred_at,Time an evidence-backed event occurred
+1,206,predicate,uint,文件大小,file_size,Resource size in bytes
+1,207,predicate,hash32,内容标识,content_id,ContentId of an opaque payload
+1,208,predicate,hash32,身份标识,agent_id,Stable AgentId bytes
+1,209,predicate,enum,验证状态,verification_status,Verification state from the ASL verification-status enum

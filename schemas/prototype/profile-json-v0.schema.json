@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:asl:profile:1",
+  "$id": "urn:asl:prototype:profile-json-v0",
+  "title": "Deprecated ASL JSON profile prototype; not a protocol specification",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "name", "description", "tags", "coarse_region", "avatar_content_id"],

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:asl:knowledge:1",
+  "$id": "urn:asl:prototype:knowledge-json-v0",
+  "title": "Deprecated ASL JSON knowledge prototype; not a protocol specification",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "conclusion", "conditions", "source_resource_keys", "verification", "created_at_ms"],

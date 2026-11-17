@@ -10,6 +10,11 @@ pub enum AslError {
     InvalidMessage,
     IncompatibleVersion,
     ExpiredMessage,
+    InvalidIdentity,
+    InvalidDeviceCertificate,
+    KeyProtectionFailed,
+    UnsupportedSchemaVersion,
+    InvalidDatabase,
     Io(io::Error),
 }
 
@@ -23,7 +28,14 @@ impl fmt::Display for AslError {
             Self::InvalidMessage => formatter.write_str("invalid or unsupported message"),
             Self::IncompatibleVersion => formatter.write_str("incompatible protocol version"),
             Self::ExpiredMessage => formatter.write_str("message has expired"),
-            Self::Io(error) => write!(formatter, "storage initialization failed: {error}"),
+            Self::InvalidIdentity => formatter.write_str("invalid identity data"),
+            Self::InvalidDeviceCertificate => formatter.write_str("invalid device certificate"),
+            Self::KeyProtectionFailed => formatter.write_str("identity key protection failed"),
+            Self::UnsupportedSchemaVersion => {
+                formatter.write_str("database schema version is not supported")
+            }
+            Self::InvalidDatabase => formatter.write_str("database schema is invalid"),
+            Self::Io(error) => write!(formatter, "storage operation failed: {error}"),
         }
     }
 }
@@ -36,7 +48,12 @@ impl std::error::Error for AslError {
             | Self::PlatformUnavailable
             | Self::InvalidMessage
             | Self::IncompatibleVersion
-            | Self::ExpiredMessage => None,
+            | Self::ExpiredMessage
+            | Self::InvalidIdentity
+            | Self::InvalidDeviceCertificate
+            | Self::KeyProtectionFailed
+            | Self::UnsupportedSchemaVersion
+            | Self::InvalidDatabase => None,
         }
     }
 }

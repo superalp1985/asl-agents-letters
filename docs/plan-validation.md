@@ -2,7 +2,31 @@
 
 本报告记录首次方案资料包生成时的 128 项检查，早于 R27 群聊/授权需求和 T01 代码实施；后附清单不代表当前工作树已重新校验。
 
-当前代码切片 T01 已另行验证：
+该历史清单中的 JSON schema 路径已迁入 `schemas/prototype/`，不再是 ASL/1 真源。此报告不能用于证明当前方案资料包 128 项仍通过。
+
+## 当前实现验证
+
+### 已实现切片
+
+- SQLite 初始化与迁移功能已有 Rust 实现；`cargo test -p asl-store --locked` 的 6 项测试通过。
+- 测试实际执行 rusqlite migration，覆盖初始化/重复启动、WAL/foreign keys/FULL synchronous、参数绑定、未知 schema 拒绝、部分数据库拒绝和完整迁移失败回滚。
+- ASL/1 确定性 CBOR codec 已实现；`cargo test -p asl-types --test protocol --locked` 的 9 项测试通过，包含全部 14 种帧的往返和固定字节向量。
+- `scripts/validate-cddl.ps1` 通过：`cddl` 0.10.7 的 CDDL 语法检查及固定 ACK 字节向量验证成功；完整多帧互操作套件尚未执行。
+
+### 本轮工作区验证范围
+
+2026-11-17 本轮工作区验证结果：
+
+- `cargo test --workspace --all-targets --locked`：通过。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `scripts/validate-cddl.ps1`：通过（CDDL 语法及固定 ACK 字节向量）。
+
+验证范围仅为当前工作区已有目标及其测试、CDDL 语法和一个固定 ACK 向量。完整多帧互操作、区块链 registry 合约、链轻客户端和状态证明验证未包含在通过范围内；Windows AppContainer、真实网络与完整产品安全也未由这些命令验证。
+
+这些验证结果不构成完整产品、安全、沙箱、互操作或公网验收。
+
+较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。
 - `cargo test -p asl-app --locked` 通过，4 个路径测试通过。

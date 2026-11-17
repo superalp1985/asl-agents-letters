@@ -1,0 +1,217 @@
+; ASL/1 peer-to-peer protocol.
+; All map keys and enum values are unsigned integers. No wire text strings.
+; Decoders MUST reject unknown keys, duplicate keys, indefinite lengths,
+; non-preferred integers, trailing bytes, and non-deterministic encodings.
+
+control-frame = hello / query / answer / offer / fetch-request /
+                fetch-grant / error / ack / profile
+identity-proof-frame = identity-proof-request / identity-proof
+pairing-frame = pairing-invite / pairing-exchange
+group-frame = group-envelope
+
+id128 = bstr .size 16
+hash32 = bstr .size 32
+agent-id = bstr .size 32
+peer-id = bstr .size (1..128)
+signature65 = bstr .size 65
+time-ms = uint .le 9223372036854775807
+
+; Concept refs identify entries in a versioned, localizable ASL vocabulary.
+concept-ref = [uint .le 65535, uint .le 4294967295]
+concept-refs = [0*64 concept-ref]
+topic-refs = [0*16 concept-ref]
+
+; Typed-value discriminants: 0 integer, 1 boolean, 2 null, 3 hash32,
+; 4 agent-id, 5 concept-ref, 6 quantity, 7 concept-ref list.
+typed-value = [0, int] / [1, bool] / [2, null] / [3, hash32] /
+              [4, agent-id] / [5, concept-ref] /
+              [6, int, concept-ref] / [7, [0*64 concept-ref]]
+constraint = {
+  0: concept-ref,
+  1: constraint-operator,
+  2: typed-value
+}
+intent-id = 1..6
+feature-id = 1 / 2 / 3 / 4
+constraint-operator = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7
+result-shape = 0 / 1 / 2
+answer-status = 0 / 1 / 2 / 3
+result-status = 0 / 1 / 2
+media-kind = 0 / 1 / 2 / 3 / 4 / 5 / 6
+group-operation = 0 / 1
+error-code = 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17
+
+device-certificate = {
+  0: 1,
+  1: agent-id,
+  2: peer-id,
+  3: uint,
+  4: time-ms,
+  5: time-ms,
+  6: signature65
+}
+
+hello = {
+  0: 1,
+  1: 0,
+  2: id128,
+  3: agent-id,
+  4: peer-id,
+  5: device-certificate,
+  6: uint .le 65535,
+  7: uint .le 65535,
+  8: [0*16 feature-id]
+}
+
+query = {
+  0: 1,
+  1: 1,
+  2: id128,
+  3: id128,
+  4: time-ms,
+  5: time-ms,
+  6: intent-id,
+  7: concept-refs,
+  8: [0*16 constraint],
+  9: result-shape,
+  10: uint .le 64
+}
+
+claim = {
+  0: typed-value,
+  1: concept-ref,
+  2: typed-value,
+  ? 3: hash32
+}
+
+answer = {
+  0: 1,
+  1: 2,
+  2: id128,
+  3: id128,
+  4: time-ms,
+  5: time-ms,
+  6: answer-status,
+  7: [0*32 claim],
+  8: [0*32 id128],
+  9: result-status
+}
+
+offer = {
+  0: 1,
+  1: 3,
+  2: id128,
+  3: id128,
+  4: hash32,
+  5: uint .le 68719476736,
+  6: media-kind,
+  7: topic-refs,
+  8: time-ms
+}
+
+fetch-request = {
+  0: 1,
+  1: 4,
+  2: id128,
+  3: id128,
+  4: hash32
+}
+
+fetch-grant = {
+  0: 1,
+  1: 5,
+  2: id128,
+  3: hash32,
+  4: hash32,
+  5: time-ms,
+  6: uint .le 68719476736
+}
+
+error = {
+  0: 1,
+  1: 6,
+  2: id128,
+  3: error-code
+}
+
+ack = {
+  0: 1,
+  1: 7,
+  2: id128,
+  3: id128
+}
+
+profile = {
+  0: 1,
+  1: 8,
+  2: agent-id,
+  3: uint,
+  4: [0*128 concept-ref],
+  ? 5: hash32
+}
+
+identity-proof-request = {
+  0: 1,
+  1: 9,
+  2: id128,
+  3: agent-id,
+  4: hash32
+}
+
+; Proof nodes are opaque only to the CBOR codec. The chain-specific verifier
+; checks every node against the finalized execution state root and size caps.
+identity-proof = {
+  0: 1,
+  1: 10,
+  2: id128,
+  3: agent-id,
+  4: uint,
+  5: hash32,
+  6: hash32,
+  7: [0*32 bstr .size (1..2048)],
+  8: [0*8 storage-proof],
+  9: bstr .size 20,
+  10: hash32,
+  11: uint,
+  12: uint .le 1
+}
+
+storage-proof = {
+  0: uint,
+  1: [0*32 bstr .size (1..2048)]
+}
+
+pairing-invite = {
+  0: 1,
+  1: 11,
+  2: id128,
+  3: agent-id,
+  4: agent-id,
+  5: time-ms,
+  6: bstr .size (16..256),
+  7: signature65
+}
+
+pairing-exchange = {
+  0: 1,
+  1: 12,
+  2: id128,
+  3: agent-id,
+  4: peer-id,
+  5: 1..5,
+  6: bstr .size (1..4096),
+  7: hash32
+}
+
+group-envelope = {
+  0: 1,
+  1: 13,
+  2: id128,
+  3: hash32,
+  4: uint,
+  5: group-operation,
+  6: bstr .size (1..65536)
+}
+
+; Numeric limits, enum assignments, cardinality, vocabulary ownership,
+; and cross-field rules are normative in docs/03-protocol.md.

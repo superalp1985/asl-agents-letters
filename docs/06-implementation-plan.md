@@ -2,9 +2,9 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` when available. Without those skills, use `prompts/implement-one-task.md` and execute one ready task at a time. No external skill is a runtime dependency.
 
-**Goal:** 完整实现 R01–R30，发布可无人值守运行的 A信 1.0。
+**Goal:** 完整实现 R01–R33，发布可无人值守运行的 A信 1.0。
 
-**Architecture:** 八个 crate，确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。固定协议、策略服务、SQLite、MLS 群状态和纯传输调度器分别测试；GUI 只观察与授权。
+**Architecture:** Rust workspace 分层实现；确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。确定性 CBOR/CDDL 语义协议、身份根/公共链校验、策略服务、SQLite、MLS 群状态和纯传输调度器分别测试；GUI 只观察与授权。
 
 **Tech Stack:** Rust 1.100.0、libp2p 0.57.1、OpenMLS 0.9.2、Tokio、SQLite/FTS5、egui/eframe 0.35.0、rmcp、Windows AppContainer/Job Object。
 
@@ -12,9 +12,9 @@
 
 ## Global Constraints
 
-- 完整 1.0 包含 R01–R30，不删成 MVP。
+- 完整 1.0 包含 R01–R33，不删成 MVP。
 - 单文件最多 68,719,476,736 字节，固定块 1,048,576 字节。
-- 控制 JSON 最多 65,536 字节，manifest 最多 2,097,210 字节。
+- 控制 CBOR 最多 65,536 字节，manifest 最多 2,097,210 字节；控制协议不定义自由文本字段。
 - 模型最多一次修复，非法输出整次拒绝。
 - 应用层不转发 query；incoming 不产生远端检索。
 - 信任/贡献/自动偏好不参与授权。
@@ -54,15 +54,15 @@ packaging/{windows,linux}/
 
 - [ ] 读取任务、依赖任务证据和引用规范；只处理当前任务列出的文件。
 - [ ] 写出本任务的拒绝/失败测试，运行并确认预期失败。
-- [ ] 实现并通过下面列出的全部正反例，不只通过示例断言。
-- [ ] 执行格式、lint、相关测试；记录实际命令与结果。
+- [ ] 完成一个可审查功能切片后，集中运行其正反例、格式和 lint。
+- [ ] 记录实际命令与结果；未运行的检查不得写成通过。
 - [ ] 审查 diff；提交或提供可审查补丁，更新任务状态。失败/未运行不得写成通过。
 
 任务卡中的 Rust 片段是验收入口示例；其余向量同样必须实现。测试辅助数据只能是固定夹具，不可读取真实用户目录或密钥。
 
 ## 里程碑与依赖
 
-- A：T01–T10，类型/持久化/权限与隔离基础。
+- A：T01–T10（含 T06a/T06b），类型/持久化/身份链/权限与隔离基础。
 - B：T11–T19，资源、网络、发现与对话。
 - C：T20–T24，完整文件传输。
 - D：T25–T30，普通模型自主流程、经验与接入。
@@ -103,20 +103,22 @@ cargo deny check licenses
 
 T02 实测完成（Windows，Rust 1.100.0）：workspace all-targets 检查、GUI/SQLite、libp2p 和 OpenMLS 三个 probe 均通过；依赖树成功解析；`cargo-deny 0.21.0` 的 `licenses` 检查通过。具体已验证 API 与未覆盖范围见 `docs/dependency-adapters.md`。探针不等同于功能验收，Swarm 构造留在 T14，OpenMLS 状态/provider 集成留在 T31，Windows API 调用留在对应策略任务。
 
-### T03 — ID、错误码与严格控制消息
+### T03 — ID、错误码与确定性 CBOR 协议
 
 依赖 T02。创建 asl-types 的 ids/error/protocol/task 与 `tests/protocol.rs`。
 
-接口：`parse_wire(bytes: &[u8]) -> Result<WireEnvelope, AslError>` 和可注入时钟的 `parse_wire_at(bytes, now_ms)`；`WireEnvelope` 严格映射 schema。完成 bytes、深度、未知字段、重复字段、有效设备 PeerId/AgentId 文本、设备证书字段格式与时间关系校验。证书签名验证属于 T06/T14，不在纯解析器中伪造信任。
+线格式以 `schemas/asl-v1.cddl` 为真源；采用确定性 CBOR crate，具体依赖和 feature 在本任务前核实并固定，不手写 CBOR parser。把旧 JSON wire schema/parser 标记为 prototype 并从 ASL/1 入口移除。
+
+接口：`decode_control(bytes: &[u8]) -> Result<WireFrame, AslError>`、`encode_control(&WireFrame) -> Result<Vec<u8>, AslError>`；时间由策略层验证，不让 codec 读取系统时钟。完成 bytes、深度、未知字段、重复 map key、定长 ID、设备证书字段格式与关系约束校验。证书/链状态签名验证属于身份模块，不在纯 codec 中伪造信任。线上值不含 text string。
 
 ```rust
-assert!(parse_wire(br#"{"v":1,"v":1}"#).is_err());
-assert!(parse_wire(&vec![b'x'; 65_537]).is_err());
+assert!(decode_control(&too_long_frame).is_err());
+assert!(decode_control(&duplicate_key_frame).is_err());
 ```
 
-其他验收：合法 hello/query/offer/fetch；错误 major、过期、expires<created、无效 hash/PeerId/AgentId/设备证书格式、重复字段（含嵌套 body）、未知 body 字段拒绝。所有 ErrorCode 线格式可往返。
+其他验收：合法 hello/query/offer/fetch；错误 major、expires<created、无效长度/PeerId/AgentId/设备证书格式、重复键（含嵌套 body）、未知字段/枚举、tstr 或任意 prose、未知 critical concept、超深/不定长/非确定性编码和尾随字节拒绝。当前时间过期由策略层判断；codec 只校验时间格式与字段关系。ErrorCode 在线格式为数字枚举。
 
-T03 完成（2026-11-17）：新增强类型 ID、时间与错误码；按 wire schema 解析所有控制消息，帧上限/未知字段/重复字段/嵌套深度/身份格式/版本/时间均有拒绝测试。身份签名验证明确留给后续身份服务。`cargo test -p asl-types --locked` 10 项通过；workspace 全量测试也通过。
+T03 实现状态（2026-11-17）：旧 JSON parser/schema 已隔离到 `schemas/prototype/`；Rust CBOR codec、固定枚举和协议测试已实现。9 项协议测试、workspace 全量测试、Clippy 和格式检查通过；`scripts/validate-cddl.ps1` 通过 CDDL 语法检查及固定 ACK 向量验证。完整多帧互操作套件仍待补。
 
 ### T04 — Manifest 编解码与内容 ID
 
@@ -149,20 +151,43 @@ SELECT revision FROM policy_state WHERE singleton=1;
 
 验收：第一次初始化为版本 1，重复启动不重复建表；WAL/外键/同步设置正确；中断迁移回滚；更高未知 schema 停止，不删除数据库重建。SQL 注入文本只作为绑定参数。
 
-### T06 — AIK、设备证书与 DPAPI
+T05 实现记录（2026-11-17）：SQLite `open_store` 与 schema v1 迁移已实现，包含 WAL、外键、FULL 同步、未知/局部数据库拒绝且不重建、事务失败回滚和绑定参数。6 项 store 测试及本轮 workspace 测试、Clippy、格式检查通过。CBOR codec 是 T03 的独立实现；链合约与轻客户端仍属于 T06a/T06b 待实现范围。
+
+### T06 — 身份根、设备证书与 DPAPI
 
 依赖 T05。创建 policy windows/dpapi 和 app identity 组合模块；测试用新生成身份，不读真实密钥。
 
-接口拆为 `AgentIdentity::generate()`、`agent_id()`、`issue_device_certificate(device_peer_id, serial, validity)` 和独立 `DeviceIdentity::generate()`。AIK 使用 DPAPI/受限 keystore 保护；AIK 签名覆盖协议定义的规范二进制。此任务不把 AIK 注入 net，也不把设备 PeerId 当作稳定联系人身份。
+接口拆为 `AgentIdentity::generate()`、`agent_id()`、`issue_device_certificate(device_peer_id, serial, issued_at_ms, expires_at_ms)`、`verify_device_certificate(...)` 和独立 `DeviceIdentity::generate()`。身份根使用 secp256k1 ECDSA；证书按 `docs/03-protocol.md` 的规范字节构造，经 Keccak-256 后签名，65 字节签名为 `r || s || v`，其中 `s` 为 low-S、`v` 为 27/28。AgentId 按 `specs/identity-registry-v1.md` 派生。根密钥及设备私钥使用 Windows 当前用户 DPAPI 保护；存储路径由调用方提供，创建使用 create-new，不覆盖旧身份。加载失败不静默生成新身份。此任务不把根密钥注入 net，也不把设备 PeerId 当作稳定联系人身份。具体 Rust 密码学 crate/API 须核实成熟度与许可后固定，不自写椭圆曲线逻辑。
 
 ```rust
 let root = AgentIdentity::generate().unwrap();
 let old_device = DeviceIdentity::generate().unwrap();
 let cert = root.issue_device_certificate(old_device.peer_id(), 1, now_ms, expires_at_ms).unwrap();
-assert!(cert.verify_for(root.agent_id(), old_device.peer_id(), now_ms).is_ok());
+assert!(verify_device_certificate(
+    &cert,
+    root.agent_id(),
+    &old_device.peer_id(),
+    root.controller_address(),
+    1,
+    now_ms,
+).is_ok());
 ```
 
-验收：重启后 AgentId 不变；设备密钥轮换后新 PeerId 由同一 AIK 认证；签名篡改、错误 AgentId/PeerId、过期/回滚 serial 均拒绝；net 只接收设备密钥内存副本且仅经私有 IPC；worker、日志、诊断无密钥；重置必须显式授权。PAKE/签名算法只复用已审查库，不自创协议。
+验收：重启后 AgentId 不变；设备密钥轮换后新 PeerId 由同一身份根认证；签名篡改、错误 AgentId/PeerId、过期/回滚 serial 均拒绝；net 只接收设备密钥内存副本且仅经私有 IPC；worker、日志、诊断无密钥；重置必须显式授权。PAKE/签名算法只复用已审查库，不自创协议。
+
+T06 实现记录（2026-11-17）：已固定并编译 `k256 0.14.0`、`sha3 0.12.0`、`rand 0.10.4`；完成根身份/AgentId 派生、独立 libp2p Ed25519 设备密钥、设备证书签发与本地验证、Windows 当前用户 DPAPI 保护文件、由 `AppPaths` 数据根派生的 identity 目录。工作区测试、Clippy、格式检查通过。尚未实现或验收：身份链最终化状态/撤销证明、net 私有 IPC 密钥交付、设备证书目录/链 commitment、PAKE、跨用户/跨机器恢复及迁移 UI。DPAPI 仅完成当前用户本机往返测试；身份与路径模块仍需独立安全复核。
+
+### T06a — 最小公共链身份合约
+
+依赖 T06。实现 `specs/identity-registry-v1.md` 中 immutable registry：register、state update、root rotation、irreversible revoke。合约无 owner、管理员、升级入口、个人资料或任意调用。EIP-712 domain 绑定 chain/contract；sequence/deadline 由合约强制。使用固定合约测试工具链与测试向量；本任务不部署主网，不引入代币或收费功能。
+
+验收：AgentId 抢注/重复注册失败；伪签名、错误 domain、错误 chain、重复/跳跃 sequence、过期 deadline、无新控制密钥持有证明、吊销后更新全部失败；storage slots 和代码 hash 纳入规范。部署主网前须有独立合约审计和正式部署提案。
+
+### T06b — 链轻客户端与状态证明验证
+
+依赖 T06a。通过版本化 Rust `IdentityResolver`/`IdentityProofVerifier` 接口接入现成 Ethereum light client 和成熟 MPT proof verifier；不信任单一 RPC 或 indexer，不自写共识/Trie 密码学。先对 Helios/Alloy 等候选做固定版本、许可证、API、Windows 资源限制和 proof 支持探针，未通过不锁定为运行依赖。
+
+验收：可信 checkpoint、finalized header 更新、合约 code hash、account/storage proof、本机缓存过期、错误 RPC 和链重组均有固定测试；正向身份更新须在最终化后生效。chain proof 失败或服务离线只降级至最低额度。
 
 ### T07 — 纯授权判定与派生交集
 
@@ -232,25 +257,25 @@ cargo test -p asl-store --test snapshot_import
 cargo test -p asl-store --test visible_search
 ```
 
-### T13 — 记录签名与公开资料
+### T13 — 记录签名与结构化公开资料
 
 依赖 T06、T03。创建 types record 与 app profile 服务。
 
-接口 `sign_record(kind, payload, sequence, lifetime)` 与 `verify_record(bytes, expected_agent, now)`；以 AIK 按协议原始字节签名。profile、设备目录和持久短码声明都以 AgentId 为 owner。
+接口 `sign_record(kind, payload_cbor, sequence, lifetime)` 与 `verify_record(bytes, expected_agent, now)`；以身份根按协议原始字节签名。profile、设备目录和持久短码声明只含 CDDL 字段及概念 ID，并以 AgentId 为 owner。
 
-验收：payload/owner/seq/时间/长度任一篡改失败；过期与旧 sequence 不替换新值；撤下资料停止续发；头像只发布内容引用不写 DHT 本体。
+验收：payload/owner/seq/时间/长度任一篡改失败；任意文本字段拒绝；设备目录 commitment 与链上状态不匹配拒绝；过期与旧 sequence 不替换新值；撤下资料停止续发；头像只发布内容引用不写 DHT 本体。
 
 ```text
 cargo test -p asl-types --test signed_records
 ```
 
-### T14 — libp2p Driver
+### T14 — libp2p Driver 与链身份握手
 
 依赖 T02、T10、T13。创建 net behaviour/transport/driver。
 
-应用接口：`NetworkCommand` 枚举 Dial/SendControl/SendBulk/FindProviders/Provide/Unprovide/PutProfile/Stop；`NetworkEvent` 枚举 TransportConnected/IdentityVerified/Control/Bulk/Providers/Disconnected/Error。普通 Control 事件仅在 core 确认 AgentId/设备证书后产生。禁止将 libp2p 类型散布到 agent、store 和 GUI。
+应用接口：`NetworkCommand` 枚举 Dial/SendControl/SendBulk/FindProviders/Provide/Unprovide/PutProfile/Stop；`NetworkEvent` 枚举 TransportConnected/IdentityProofRequired/IdentityVerified/Control/Bulk/Providers/Disconnected/Error。普通 Control 事件仅在 core 确认最终化链状态、身份根设备证书与认证 AgentId 后产生。禁止将 libp2p 类型散布到 agent、store 和 GUI。
 
-验收双进程 QUIC 与 TCP 的真实加密连接、有效设备 PeerId；传输认证后验证 AIK 设备证书且证书 PeerId 必须等于认证连接；伪造 AgentId、重放/过期/撤销设备证书均拒绝，身份验证前不放行应用消息；控制/大帧分 codec；关闭无资源泄漏。
+验收双进程 QUIC 与 TCP 的真实加密连接、有效设备 PeerId；传输认证后验证链状态与根密钥设备证书且证书 PeerId 必须等于认证连接；伪造 AgentId、重放/过期/撤销设备证书均拒绝，身份验证前不放行应用消息；控制/大帧分 codec；关闭无资源泄漏。
 
 ```text
 cargo test -p asl-net --test two_node_transport
@@ -284,9 +309,9 @@ cargo test -p asl-net --test discovery_policy
 
 依赖 T13、T15。创建 net dht。
 
-规范化由固定 Rust/toolchain 与 unicode-normalization 实现；测试 `ＲＵＳＴ -> rust`、`Ａ信 -> a信`、`Straße -> straße`、分解重音字母合并。协议文档记录实际 Unicode 数据版本并固定测试向量。
+概念发现不对自然语言标签做线上规范化，使用版本化概念 ID。
 
-验收 public 才 start_providing；contacts/content 无公共广告；持久短码键允许多候选、声明必须由 AIK 签名且客户端复算；冲突不覆盖；128 标签上限、8KiB value、10k记录/64MiB 存储限制；非法签名 PUT 不落库。
+验收 public 才 start_providing；contacts/content 无公共广告；持久短码键允许多候选、声明必须由身份根签名且 AgentId 有有效链状态；冲突不覆盖；概念 ID/词表版本一致；8KiB value、10k记录/64MiB 存储限制；自然语言字段和非法签名 PUT 不落库。
 
 ```text
 cargo test -p asl-net --test dht_limits
@@ -384,17 +409,13 @@ cargo test -p asl-app --test hostile_documents
 cargo test -p asl-agent --test model_gateway
 ```
 
-### T26 — 严格模型 JSON 与修复
+### T26 — 严格结构化模型决策
 
 依赖 T25、T03。创建 agent decision/prompt。
 
-接口按规范 validate_decision。通过条件同时是 schema、候选成员、当前授权、action 与方向。
+接口按规范 validate_decision。通过条件同时是本地结构 schema、候选成员、当前授权、action 与方向。模型适配器的内部输出可以使用本地 JSON transport，但映射后的决策类型不含 `text`/prose 字段；对端 wire 必须由 T03 CBOR encoder 生成。
 
-```json
-{"v":1,"action":"decline","text":"","refs":[],"terms":[],"reason_code":"no_match"}
-```
-
-验收上述合法；未知字段、额外 path、自由 Markdown、假 refs、重复字段、过长 text、answer 无 refs、decline 带文本都整次拒绝。一次修复失败固定 model_invalid，绝不部分执行。
+验收：合法 answer/decline/request_more 的结构化对象可解码；未知字段、额外 path、自然语言通道、假 refs/概念、重复键、超限数组和类型不符整次拒绝。一次修复失败固定 model_invalid，绝不部分执行，绝不将模型原始输出转发给 peer。
 
 ### T27 — 自主状态机
 
@@ -442,7 +463,7 @@ cargo test -p asl-app --test mcp_contract
 
 依赖 T06、T14、T19。创建 `asl-groups` 房间服务、持久化适配器、基于现有认证连接的逐成员 fan-out 与定向邀请协议。优先复用 OpenMLS 0.9.2 的 RFC 9420 实现；不得自创群密钥、消息加密或成员树。
 
-固定应用约束：最多 64 名成员、群消息最多 64 KiB、群事件本地保留 7 天、状态 catch-up 最多 256 个 epoch。MLS credential 必须绑定稳定 AgentId 与当前设备证书；迁移设备通过新叶子入组，不复制旧 ratchet 状态。仅当前成员收到群帧，OpenMLS 仅在核验 authenticated sender、AIK 证书、群成员和 epoch 后处理消息。群标识、群名、成员清单和群资源不发布到 DHT。
+固定应用约束：最多 64 名成员、群消息最多 64 KiB、群事件本地保留 7 天、状态 catch-up 最多 256 个 epoch。MLS credential 必须绑定稳定 AgentId 与当前已验证链状态/设备证书；迁移设备通过新叶子入组，不复制旧 ratchet 状态。MLS 解密后的 application plaintext 必须为 CDDL 定义的 ASL 结构对象；禁止自由自然语言字段。仅当前成员收到群帧，OpenMLS 仅在核验 authenticated sender、链状态、设备证书、群成员和 epoch 后处理消息。群标识、群名、成员清单和群资源不发布到 DHT。
 
 验收：邀请仅定向到指定 PeerId；加入前不接收群帧；非成员、伪造 credential、过期或重复消息、未授权成员变更和超预算 catch-up 均拒绝。并发/陈旧 commit 可恢复或明确进入 `needs_sync`，不静默分叉。离线成员消息尽力投递、不承诺必达；状态可从获准成员同步有限 commit，超预算后需重新邀请。验证成员退出/移除后的新消息不可解密，并说明旧消息无法远程删除。
 
@@ -474,7 +495,7 @@ cargo test -p asl-app --test mcp_contract
 
 依赖 T34、T23。创建 store retention、app diagnostics。
 
-验收 7 天消息清理、3 天失败 part、30 天 inbox；不会延长人类上限；存在引用对象不误删；恢复不重建空授权；导出诊断不含 key/lease/原文敏感内容。提供版本化加密迁移包，支持用户选择本地 ASL 数据；导入保留 AIK、联系人、信任和选定记录，目标设备生成新设备密钥/证书；目录 grant、OS 凭据不迁移，MLS ratchet 不复制，需重新授权/入组。诊断导出是对输出目录的授权，默认不外传。
+验收 7 天消息清理、3 天失败 part、30 天 inbox；不会延长人类上限；存在引用对象不误删；恢复不重建空授权；导出诊断不含 key/lease/原文敏感内容。提供版本化加密迁移包，支持用户选择本地 ASL 数据；导入保留身份根、联系人、信任和选定记录，目标设备生成新设备密钥/证书；目录 grant、OS 凭据不迁移，MLS ratchet 不复制，需重新授权/入组。诊断导出是对输出目录的授权，默认不外传。
 
 ```text
 cargo test -p asl-app --test retention_backup
@@ -492,7 +513,7 @@ cargo test -p asl-app --test retention_backup
 
 依赖 T36。创建 tests/adversarial、fuzz targets。
 
-完成测试文档 A01–A20、A21 群成员/MLS/授权确认及身份/配对/迁移用例。优先路径/句柄、AIK/设备证书绑定、PAKE 重放与尝试限制、AppContainer 权限、签名/撤销竞态、manifest/codec、模型输入前过滤和额度。
+完成测试文档 A01–A25，覆盖群成员/MLS/授权确认、公共链证明/最终性、CBOR/CDDL 零文本协议、身份/配对/迁移与多 Agent 资源压测。优先路径/句柄、根密钥/设备证书绑定、PAKE 重放与尝试限制、AppContainer 权限、链签名/撤销竞态、manifest/codec、模型输入前过滤和机器总额度。
 
 ```text
 cargo test --workspace --all-targets --locked
@@ -521,13 +542,13 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 依赖 T39、T32。完成中文完整置顶、英文完整置底的 README，包含真实构建截图、Agent 身份/配对图解、授权说明、协议、MIT/第三方 notices、图标与吉祥物资产清单、SBOM、构建来源、签名包、Linux infra 部署样例和所有 R 编号证据。
 
-发布条件：R01–R30 全部有实现与实际验收；A01–A21 和新增身份/配对测试无阻断问题；真实网络/沙箱报告齐全。不得用演示视频、mock 或开发者的声明替代。
+发布条件：R01–R33 全部有实现与实际验收；A01–A25 和新增身份/配对测试无阻断问题；真实网络/沙箱报告齐全。不得用演示视频、mock 或开发者的声明替代。
 
 ## 需求到任务映射
 
 | 需求 | 主要任务 |
 | --- | --- |
-| R01–R03 | T06、T07、T13、T18a、T29、T34、T35 |
+| R01–R03 | T05、T06、T06a、T06b、T07、T13、T14、T18a、T29、T34、T35 |
 | R04–R06 | T14–T18 |
 | R07–R09 | T19、T25–T27、T30 |
 | R10–R11 | T07–T13、T17、T20 |
@@ -535,12 +556,15 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | R15–R16 | T28–T29 |
 | R17–R18 | T33–T34 |
 | R19–R20 | T05、T19、T23、T35 |
-| R21–R22 | T09–T10、T25–T27、T37、T39 |
+| R21–R22 | T03、T09–T10、T25–T27、T37、T39 |
 | R23–R26 | T01、T06、T15、T35–T40 |
 | R27 | T02、T05、T14、T19、T20、T31–T34 |
 | R28 | T06、T35 |
 | R29 | T13、T17、T18a、T33 |
 | R30 | T14–T18a、T33–T34、T37–T38 |
+| R31 | T05、T06、T06a、T06b、T13–T15、T37–T40 |
+| R32 | T03、T13、T17–T19、T26–T28、T31–T32、T37、T39 |
+| R33 | T09–T10、T14–T18、T20–T29、T37–T38 |
 
 ## 工作量判断
 

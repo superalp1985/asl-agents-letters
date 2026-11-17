@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:asl:wire:1",
+  "$id": "urn:asl:prototype:wire-json-v0",
+  "title": "Deprecated ASL JSON wire prototype; not a protocol specification",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "kind", "id", "root_task_id", "reply_to", "created_at_ms", "expires_at_ms", "body"],

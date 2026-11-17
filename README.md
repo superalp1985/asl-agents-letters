@@ -30,45 +30,50 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 6. `docs/06-implementation-plan.md`：可交给代码模型逐项执行的任务卡。
 7. `docs/07-testing-release.md`：完整测试矩阵、构建、部署与发布标准。
 8. `docs/08-research-review.md`：依赖来源、外部咨询记录与最终取舍。
-9. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
+9. `docs/09-resource-abuse.md`：分身、女巫节点与个人电脑资源保护。
+10. `docs/10-vocabulary.md`：无自由文本语义协议的词表治理。
+11. `specs/identity-registry-v1.md`：区块链身份登记与状态验证契约。
+12. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
 
-`schemas/` 与 `specs/` 是可校验的协议、模型输出、数据库和配置样例。`work/` 是本次方案制作的临时资料，不提交仓库，不含密钥副本。
+`schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
 ## 已冻结的决定
 
-- 长期 Agent 身份由 AIK Ed25519 根密钥派生；每台设备有独立 libp2p PeerId，并持有 AIK 签发的设备证书。联系人固定 AgentId/AIK，而不是地址或设备。
-- 身份迁移通过用户授权的版本化加密包保留 AIK 和选定的 ASL 数据；目标设备生成新设备密钥。目录授权和 OS 凭据不迁移，MLS 群组在新设备重新入组。
-- 1.0 不上区块链、不设中心身份注册。AIK 自认证，DHT 和数字短码只负责尽力发现；短码可能碰撞，候选必须通过证书、二维码/指纹或 PAKE 核验。
+- 长期 Agent 身份由本地 secp256k1 根密钥控制，并在公共链登记最小状态；每台设备有独立 libp2p PeerId，并持有根密钥签发的设备证书。链上登记证明密钥控制和状态，不证明现实主体或善意。联系人固定 AgentId，而不是地址或设备。
+- 身份迁移通过用户授权的版本化加密包保留身份根密钥和选定的 ASL 数据；目标设备生成新设备密钥。目录授权和 OS 凭据不迁移，MLS 群组在新设备重新入组。
+- 区块链是 1.0 身份锚定必需项；不自建链、不设单一中心身份服务。可替换志愿赞助者代付 gas，用户也可自付；ASL 不收费、不发币。DHT 和数字短码只负责尽力发现，不作为认证。
 - 首次配对采用短时效、一次性的 PAKE/签名邀请，不自创密码协议。直接连接会暴露网络地址；提供仅中继选项，但不承诺网络匿名。
 - 网络使用 **rust-libp2p**，不同时引入 iroh，避免维护两套连接与发现体系。
-- DHT 提供精确标签/内容的节点发现；各节点做本地全文检索，不宣称全网全文搜索或全网在线列表。
+- Agent 间控制协议采用确定性 CBOR/CDDL、整数键和概念词表，不含自然语言字段；本地 GUI 可翻译显示结构化信息。DHT 提供类型化概念/内容的节点发现；各节点做本地检索，不宣称全网全文搜索或全网在线列表。
 - 固定 1 MiB 分块，支持断点恢复、多来源并发与整文件校验。
-- 后台状态机决定权限、路由和限额，模型只生成受限 JSON，不获得终端、任意路径或自主改权限的能力。
+- 后台状态机决定权限、路由和限额，模型只产生经校验的结构化语义对象，不获得终端、任意路径或自主改权限的能力。
 - Agent 的“浏览”和“回答”分别授权；默认可浏览但不自动回答。文件上传和下载分别可设为授权内自动执行或每次先询问；确认绑定文件内容、接收方和群成员版本。
 - 支持端到端加密群聊和邀请。没有中心群服务器；群创建者负责成员管理，消息尽力实时投递，不承诺离线必达。群组成员身份本身不扩大文件权限。
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
-- 不收费、不交易、不代币；只做本地柔性调度。
+- 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
+- 允许一个人运行多个 Agent；女巫防护目标是限制其对个人电脑的资源消耗和授权影响，不声称识别真人或消灭分身。
 - 完整桌面运行平台为 Windows 11 x64；基础设施另交付 Linux x86_64 引导/中继服务。Linux/macOS 桌面不在 1.0 的平台承诺中。
 - 应用可控数据默认放 `E:\ASL\data`；开发缓存放 `E:\ASL\dev-cache`。路径不可用时失败，不回落 C 盘。
 
 ## 实施与验证状态
 
-截至 2026-11-17，已完成：公开资料核对、三轮设计评审、T01/T02/T03（Rust workspace、E 盘开发环境、数据根路径、依赖锁定、外部 API 编译探针及严格控制消息解析）。身份分层、迁移、数字短码、PAKE、公网隐私和视觉要求已纳入完整方案。外部评审与最终取舍见 `docs/08-research-review.md`。
+截至 2026-11-17，SQLite 初始化/迁移和 ASL/1 确定性 CBOR codec 已有实现。SQLite 6 项测试和协议 9 项测试通过；协议测试覆盖全部 14 种帧往返、固定 CBOR 字节向量、未知枚举/字段、重复键及非确定性编码拒绝。
 
-T01/T02 的 workspace 检查、4 个路径测试、GUI/SQLite、libp2p 与 OpenMLS 编译探针通过；T03 的 10 项协议测试通过。群聊、身份服务、网络、Agent、文件传输、完整 GUI 和发布包尚未实现；不宣称完整产品、安全或真实网络已验收，也不保证 6.1sol/DeepSeek 无需修正即可完成所有任务。
+本轮 `cargo test --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 均通过。`cddl` 0.10.7 通过 CDDL 语法检查，固定 ACK 字节向量也通过独立 CDDL 验证；可用 `scripts/validate-cddl.ps1` 重跑。完整多帧互操作套件尚未执行。区块链身份目前只有设计与规范文档，registry 合约、链轻客户端和状态证明验证器均未实现。群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未实现。以上检查只覆盖当前工作区已有代码，不代表这些待实现功能、产品安全或真实网络已验收。
 
 ### 架构一览
 
 ```mermaid
 flowchart LR
-  AIK["稳定身份：AIK / AgentId"] --> CERT["签发设备证书"]
+  CHAIN["公共链：最小身份状态"] --> ROOT["本地根密钥 / AgentId"]
+  ROOT --> CERT["签发设备证书"]
   CERT --> DEVICE["设备密钥 / PeerId"]
   DEVICE --> P2P["libp2p：直连或仅中继"]
-  P2P --> DHT["DHT：签名资料、短码候选"]
-  DHT --> VERIFY["证书/PAKE/指纹核验"]
+  P2P --> DHT["DHT：短码与地址候选"]
+  DHT --> VERIFY["链证明/证书/PAKE核验"]
   VERIFY --> POLICY["本机授权与 Agent"]
   POLICY --> FILES["获准资源与群组"]
-  BACKUP["用户授权的加密迁移包"] --> AIK
+  BACKUP["用户授权的加密迁移包"] --> ROOT
   BACKUP --> POLICY
 ```
 
@@ -84,26 +89,29 @@ This repository is the full 1.0 specification and implementation project. It is 
 
 ### Identity and Security
 
-- A long-lived Ed25519 Agent Identity Key (AIK) defines the stable `AgentId` using `did:key`.
-- Each device has its own libp2p key and `PeerId`. The AIK signs a time-bounded certificate binding that device to the stable AgentId.
-- Contacts pin the AIK/AgentId. A transport connection is not trusted as an application identity until its device certificate is verified.
-- An explicitly authorized, versioned encrypted migration package can carry the AIK and selected ASL data. The destination creates a new device key. File grants and operating-system credentials must be authorized again; MLS groups add the new device as a new member leaf.
-- ASL 1.0 does not use a blockchain or a central identity registry. The DHT and a numeric code are best-effort discovery mechanisms, not authentication or globally unique naming. Collisions return multiple candidates.
+- A locally protected secp256k1 identity-root key controls the stable `AgentId`; its minimal state is anchored on a public blockchain. This proves key control and ordered state, not a unique human or benign behavior.
+- Each device has its own libp2p key and `PeerId`. The identity root signs a time-bounded certificate binding that device to the stable AgentId.
+- Contacts pin the AgentId. A transport connection is not trusted as an application identity until its device certificate and chain state are verified.
+- An explicitly authorized, versioned encrypted migration package can carry the identity root key and selected ASL data. The destination creates a new device key. File grants and operating-system credentials must be authorized again; MLS groups add the new device as a new member leaf.
+- Blockchain anchoring is required in 1.0; ASL does not run its own chain or central identity server. Replaceable volunteer sponsors may submit signed updates and pay gas, while users may submit directly. The DHT and numeric code only help discovery; collisions return multiple candidates.
+- Peer control messages use deterministic CBOR/CDDL and typed vocabulary IDs. They contain no free-form natural-language fields. The local UI may render known concepts in natural language.
 - First contact uses a short-lived PAKE code, signed invitation, QR code, or fingerprint verification. Direct connections expose network addresses; relay-only mode is available but does not provide network anonymity.
 - The application has no fees, tokens, trading, or purchasable contribution points. Trust and contribution only affect local scheduling and never grant permissions.
+- Multiple Agents per person and cloned identities are possible. Resource protection relies on machine-wide quotas and local authorization, not human uniqueness.
 
 ### Architecture
 
 ```mermaid
 flowchart LR
-  AIK["Stable identity: AIK / AgentId"] --> CERT["Device certificate"]
+  CHAIN["Public chain: minimal identity state"] --> ROOT["Local root key / AgentId"]
+  ROOT --> CERT["Device certificate"]
   CERT --> DEVICE["Device key / PeerId"]
   DEVICE --> P2P["libp2p: direct or relay-only"]
-  P2P --> DHT["DHT: signed profiles and code candidates"]
-  DHT --> VERIFY["Certificate / PAKE / fingerprint verification"]
+  P2P --> DHT["DHT: code and address candidates"]
+  DHT --> VERIFY["Chain proof / certificate / PAKE verification"]
   VERIFY --> POLICY["Local authorization and agent"]
   POLICY --> FILES["Authorized resources and groups"]
-  BACKUP["User-authorized encrypted migration"] --> AIK
+  BACKUP["User-authorized encrypted migration"] --> ROOT
   BACKUP --> POLICY
 ```
 
@@ -121,4 +129,6 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-As of November 17, 2026, T01 through T03 are complete: workspace and E-drive setup, dependency lock, path tests, compile probes for GUI/SQLite, libp2p, and OpenMLS, and strict control-message parsing with ten protocol tests. The network, cryptographic identity services, transfers, groups, complete GUI, and release packages are not yet implemented or security-certified.
+As of November 17, 2026, SQLite initialization/migration and the deterministic ASL/1 CBOR codec are implemented. The six SQLite tests and nine protocol tests pass. Protocol tests cover round trips for all 14 frame types, a fixed CBOR byte vector, and rejection of unknown enums/fields, duplicate keys, and non-deterministic encodings.
+
+This round's `cargo test --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo fmt --all -- --check` all pass. `cddl` 0.10.7 accepts the CDDL grammar, and an independent CDDL check accepts the fixed ACK byte vector; rerun both with `scripts/validate-cddl.ps1`. A complete multi-frame interoperability suite remains pending. Blockchain identity remains design/specification only: the registry contract, light client, and state-proof verifier are not implemented. Groups, networking, agent behavior, file transfer, the complete GUI, and release packages are also pending. These checks cover only code currently in the workspace; they do not certify pending features, product security, or real-network behavior.

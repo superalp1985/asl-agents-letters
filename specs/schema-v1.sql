@@ -1,12 +1,7 @@
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-
 CREATE TABLE schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at_ms INTEGER NOT NULL CHECK(applied_at_ms >= 0)
 ) STRICT;
-
 CREATE TABLE policy_state (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     revision INTEGER NOT NULL CHECK(revision >= 1)
@@ -22,18 +17,18 @@ CREATE TABLE settings (
 CREATE TABLE agents (
     agent_id TEXT PRIMARY KEY,
     handle_code TEXT,
-    public_profile_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(public_profile_json)),
+    profile_cbor BLOB NOT NULL DEFAULT X'' CHECK(length(profile_cbor) <= 8192),
     profile_sequence INTEGER NOT NULL DEFAULT 0,
     profile_expires_ms INTEGER NOT NULL DEFAULT 0,
     first_seen_ms INTEGER NOT NULL DEFAULT 0,
-    identity_state TEXT NOT NULL DEFAULT 'unverified'
-        CHECK(identity_state IN ('unverified', 'verified', 'changed', 'revoked'))
+    identity_state TEXT NOT NULL DEFAULT 'pending_anchor'
+        CHECK(identity_state IN ('pending_anchor', 'verified', 'stale', 'changed', 'revoked'))
 ) STRICT;
 
 CREATE TABLE local_agent_identity (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     agent_id TEXT NOT NULL UNIQUE REFERENCES agents(agent_id),
-    public_key_hex TEXT NOT NULL CHECK(length(public_key_hex) = 64),
+    public_key_hex TEXT NOT NULL CHECK(length(public_key_hex) = 66),
     key_file_relative TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
 ) STRICT;
@@ -42,7 +37,7 @@ CREATE TABLE device_identities (
     peer_id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL REFERENCES agents(agent_id),
     public_key_hex TEXT NOT NULL CHECK(length(public_key_hex) = 64),
-    certificate_json TEXT NOT NULL CHECK(json_valid(certificate_json)),
+    certificate_cbor BLOB NOT NULL CHECK(length(certificate_cbor) <= 4096),
     certificate_serial INTEGER NOT NULL CHECK(certificate_serial >= 1),
     certificate_expires_ms INTEGER NOT NULL,
     revoked_at_ms INTEGER,
@@ -57,6 +52,40 @@ CREATE TABLE local_device_identity (
     key_file_relative TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
 ) STRICT;
+
+CREATE TABLE chain_state_cache (
+    chain_id INTEGER PRIMARY KEY CHECK(chain_id > 0),
+    registry_address BLOB NOT NULL CHECK(length(registry_address) = 20),
+    registry_code_hash BLOB NOT NULL CHECK(length(registry_code_hash) = 32),
+    finalized_height INTEGER NOT NULL CHECK(finalized_height >= 0),
+    finalized_block_hash BLOB NOT NULL CHECK(length(finalized_block_hash) = 32),
+    execution_state_root BLOB NOT NULL CHECK(length(execution_state_root) = 32),
+    checkpoint_hash BLOB NOT NULL CHECK(length(checkpoint_hash) = 32),
+    verified_header_state BLOB NOT NULL CHECK(length(verified_header_state) <= 1048576),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
+) STRICT;
+
+CREATE TABLE identity_registry_states (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    chain_id INTEGER NOT NULL REFERENCES chain_state_cache(chain_id),
+    controller_address BLOB NOT NULL CHECK(length(controller_address) = 20),
+    state_commitment BLOB NOT NULL CHECK(length(state_commitment) = 32),
+    sequence INTEGER NOT NULL CHECK(sequence >= 1),
+    status TEXT NOT NULL CHECK(status IN ('active', 'revoked')),
+    finalized_height INTEGER NOT NULL CHECK(finalized_height >= 0),
+    storage_proof_hash BLOB NOT NULL CHECK(length(storage_proof_hash) = 32),
+    verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
+) STRICT;
+
+CREATE TABLE identity_proof_cache (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    chain_id INTEGER NOT NULL REFERENCES chain_state_cache(chain_id),
+    finalized_height INTEGER NOT NULL CHECK(finalized_height >= 0),
+    proof_cbor BLOB NOT NULL CHECK(length(proof_cbor) <= 262144),
+    expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),
+    last_used_ms INTEGER NOT NULL CHECK(last_used_ms >= 0)
+) STRICT;
+CREATE INDEX identity_proof_cache_expiry ON identity_proof_cache(expires_at_ms);
 
 CREATE TABLE peers (
     peer_id TEXT PRIMARY KEY,
@@ -205,7 +234,8 @@ CREATE TABLE tasks (
     direction TEXT NOT NULL CHECK(direction IN ('incoming', 'outgoing', 'local')),
     agent_id TEXT REFERENCES agents(agent_id),
     peer_id TEXT REFERENCES peers(peer_id),
-    query_text TEXT NOT NULL,
+    local_task_text TEXT NOT NULL DEFAULT '',
+    semantic_query_cbor BLOB CHECK(semantic_query_cbor IS NULL OR length(semantic_query_cbor) <= 65536),
     audience_json TEXT NOT NULL CHECK(json_valid(audience_json)),
     state TEXT NOT NULL CHECK(state IN ('queued', 'searching', 'model', 'transferring', 'done', 'declined', 'failed', 'cancelled')),
     rounds_used INTEGER NOT NULL DEFAULT 0 CHECK(rounds_used BETWEEN 0 AND 3),
@@ -223,7 +253,7 @@ CREATE TABLE messages (
     peer_id TEXT NOT NULL REFERENCES peers(peer_id),
     direction TEXT NOT NULL CHECK(direction IN ('in', 'out')),
     kind TEXT NOT NULL CHECK(kind IN ('query', 'answer', 'offer', 'error', 'ack')),
-    body_json TEXT NOT NULL CHECK(json_valid(body_json)),
+    body_cbor BLOB NOT NULL CHECK(length(body_cbor) <= 65536),
     created_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL
 ) STRICT;
@@ -234,7 +264,7 @@ CREATE TABLE offers (
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
     peer_id TEXT NOT NULL REFERENCES peers(peer_id),
     content_id TEXT NOT NULL CHECK(length(content_id) = 64),
-    metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
+    metadata_cbor BLOB NOT NULL CHECK(length(metadata_cbor) <= 8192),
     expires_at_ms INTEGER NOT NULL
 ) STRICT;
 
@@ -363,5 +393,3 @@ CREATE TABLE security_events (
     policy_revision INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL
 ) STRICT;
-
-INSERT INTO schema_migrations(version, applied_at_ms) VALUES (1, 0);

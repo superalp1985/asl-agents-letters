@@ -1,3 +1,3 @@
 mod platform;
 
-pub use platform::validate_storage_root;
+pub use platform::{protect_secret, unprotect_secret, validate_storage_root};
