@@ -1,0 +1,33 @@
+[package]
+name = "helios-consensus-core"
+version = "0.12.0"
+edition = "2021"
+license = "MIT"
+publish = false
+repository = "https://github.com/a16z/helios"
+description = "Unmodified Helios Ethereum consensus verifier, vendored at a fixed revision"
+
+[workspace]
+
+[dependencies]
+alloy = { version = "=2.6.1", default-features = false, features = [
+    "consensus", "rpc-types", "ssz", "rlp", "k256", "eips",
+] }
+alloy-rlp = "=0.3.17"
+bls12_381 = { version = "=0.8.0", features = ["experimental"] }
+ssz_types = "=0.11.0"
+ethereum_ssz_derive = "=0.9.1"
+ethereum_ssz = "=0.9.1"
+tree_hash_derive = "=0.10.0"
+tree_hash = "=0.10.0"
+sha2 = "=0.9.9"
+eyre = "=0.6.14"
+serde = { version = "=1.0.229", features = ["derive"] }
+superstruct = "=0.7.0"
+thiserror = "=1.0.69"
+tracing = "=0.1.44"
+typenum = "=1.20.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+wasmtimer = "0.4.3"

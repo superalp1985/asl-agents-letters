@@ -1,0 +1,3 @@
+# Preserve the exact upstream files used for source and fixture provenance.
+vendor/helios-consensus-core/src/** -text
+crates/asl-app/tests/fixtures/helios/** -text

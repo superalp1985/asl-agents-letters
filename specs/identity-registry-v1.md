@@ -2,8 +2,9 @@
 
 Status: the immutable Solidity registry and fixed local Foundry test toolchain
 are implemented. It has not been deployed; the deployment-specific address and
-runtime code hash, independent contract audit, light client, and storage-proof
-verifier are not complete. This specification does not claim blockchain
+runtime code hash and independent contract audit are not complete. The local
+Helios consensus and Alloy storage-proof adapters are implemented; live RPC
+sync and durable checkpoint/cache integration remain incomplete. This specification does not claim blockchain
 identity proves a person, a unique operator, or a benign Agent.
 
 ## Network and Contract
@@ -152,10 +153,13 @@ The client MUST verify:
 An RPC endpoint or indexer may withhold, delay, or corrupt a response. It is
 not trusted to assert identity state; invalid proofs fail. EIP-1186 is marked
 Stagnant, so proof-provider compatibility must be tested against multiple
-implementations. Helios is a candidate reusable Rust light client, not yet an
-approved dependency: it needs an embedded-library probe, version/license
-review, checkpoint lifecycle design, resource measurement, and independent
-security review.
+implementations. The pure Helios 0.12.0 consensus module is now pinned at
+revision `2922a475ef1b48476983333cbae7fc92fdb46cd6` after a Windows library probe.
+Alloy verifies MPT account/storage proofs. Version/license provenance,
+checkpoint/cache lifecycle and measured test-process resources are recorded in
+`docs/chain-verification.md`. The full Helios client was not adopted. Live
+provider compatibility, durable-state integration and independent security
+review are still required.
 
 ## Sponsorship and Failure
 

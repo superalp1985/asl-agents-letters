@@ -31,9 +31,16 @@
     "pdf-extract": "0.12.1",
     "argon2": "0.6.0",
     "chacha20poly1305": "0.11.0",
-    "zeroize": "1.9.1"
+    "zeroize": "1.9.1",
+    "alloy-primitives": "1.7.3",
+    "alloy-rlp": "0.3.17",
+    "alloy-trie": "0.9.9",
+    "alloy-consensus": "2.6.1",
+    "helios-consensus-core": "0.12.0"
   },
   "notes": [
+    "T06b vendors the unmodified pure Helios consensus module at 2922a475ef1b48476983333cbae7fc92fdb46cd6, with normalized standalone Cargo metadata and the original MIT license. Historical Mainnet finality and synthetic Alloy MPT proofs pass local tests; live RPC sync and durable checkpoint/cache integration remain pending.",
+    "Alloy provider 2.6.1 is compiled only in probes/chain-dependencies. It does not enter application runtime dependencies. See docs/chain-verification.md for probe and resource boundaries.",
     "OpenMLS 0.9.2 is the selected RFC 9420 implementation; group provider, persistence and API integration still require T02/T31 compilation probes.",
     "T06 compiled k256 0.14.0, rand 0.10.4 and sha3 0.12.0 for secp256k1 root identity, fallible OS randomness and Keccak signatures. This does not verify public-chain proofs.",
     "Windows DPAPI functions are implemented and exercised by local-user round-trip/corruption tests; other Windows accounts and machine migration are not covered.",

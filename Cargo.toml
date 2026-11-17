@@ -10,6 +10,7 @@ members = [
     "crates/asl-app",
 ]
 resolver = "3"
+exclude = ["vendor/helios-consensus-core", "probes/chain-dependencies"]
 
 [workspace.package]
 version = "0.1.0"
@@ -50,3 +51,8 @@ k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "ge
 rand = "=0.10.4"
 sha3 = "=0.12.0"
 zeroize = "=1.9.1"
+alloy-primitives = { version = "=1.7.3", default-features = false, features = ["std", "rlp"] }
+alloy-rlp = "=0.3.17"
+alloy-trie = { version = "=0.9.9", default-features = false, features = ["std", "ethereum"] }
+alloy-consensus = { version = "=2.6.1", default-features = false, features = ["std"] }
+helios-consensus-core = { path = "vendor/helios-consensus-core", version = "=0.12.0" }

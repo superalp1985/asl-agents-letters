@@ -2,7 +2,7 @@
 
 一个以 Rust 实现的去中心化 Agent 通信与知识交换工具。Agent 在授权范围内自主发现同伴、问答、共享经验和传输文件，人类只观察和管理授权。
 
-本目录是 **完整版 1.0 的项目方案与实施资料包**，不是已经实现的软件，也不是 MVP。全部功能完成并通过发布验收后才称为 1.0；任务分批实施不代表删减产品范围。
+本仓库包含 **完整版 1.0 的方案和逐步实施中的 Rust 代码**，尚未达到可发布软件状态，也不是 MVP。全部功能完成并通过发布验收后才称为 1.0；任务分批实施不代表删减产品范围。
 
 ## 仓库信息
 
@@ -34,6 +34,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 10. `docs/10-vocabulary.md`：无自由文本语义协议的词表治理。
 11. `specs/identity-registry-v1.md`：区块链身份登记与状态验证契约。
 12. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
+13. `docs/chain-verification.md`：当前链验证核心、依赖探针与尚未完成的接入验收。
 
 `schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
@@ -57,9 +58,11 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-截至 2026-11-17，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础和最小公共链 identity registry 合约已实现。SQLite 6 项测试、协议 9 项测试和 registry 14 项 Foundry 测试通过；registry 覆盖 EIP-712 签名域、序号、双密钥根轮换、不可逆撤销及存储槽布局。
+截至 2026-11-17，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。
 
-本轮 `cargo test --workspace --all-targets --locked` 通过（31 项测试），`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo fmt --all -- --check` 通过。合约使用固定的 Foundry 1.9.0 / Solidity 0.8.24：`forge fmt --check` 通过，`forge test` 的 14 项测试通过，`forge build --sizes` 成功；该构建仍打印 Foundry 的 4 条事件顺序静态提示和 1 条 `block.timestamp` 提示，详见 `specs/identity-registry-v1.md`。`cddl` 0.10.7 通过语法检查，固定 ACK 字节向量通过独立验证；可用 `scripts/validate-cddl.ps1` 重跑。完整多帧互操作套件尚未执行。identity registry 尚未部署或独立审计；链轻客户端和状态证明验证器未实现。群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未实现。以上检查不代表这些待实现功能、完整产品安全或真实网络已验收。
+本轮 `cargo test --workspace --all-targets --locked` 通过（57 项，含新增 26 项链验证测试），Clippy（`-D warnings`）、格式、依赖探针、许可证和 CDDL 语法/固定 ACK 向量检查通过。历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 上轮已通过 14 项 Foundry 合约测试，本轮未重跑；上游弃用提示及既有合约构建提示保留在对应记录中。
+
+实时 RPC 同步、多证明服务兼容、可信检查点/身份缓存持久化及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -129,6 +132,8 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-As of November 17, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, and the minimal public-chain identity registry contract are implemented. The six SQLite tests, nine protocol tests, and 14 registry tests pass. Protocol tests cover round trips for all 14 frame types, a fixed CBOR byte vector, and rejection of unknown enums/fields, duplicate keys, and non-deterministic encodings.
+As of November 17, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration.
 
-This round's `cargo test --workspace --all-targets --locked` passed (31 tests); `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` passed. The contract uses pinned Foundry 1.9.0 / Solidity 0.8.24: `forge fmt --check` passed, all 14 `forge test` tests passed, and `forge build --sizes` completed. The build still prints four Foundry event-order advisories and one `block.timestamp` advisory; see `specs/identity-registry-v1.md`. `cddl` 0.10.7 accepts the grammar and the independent check accepts the fixed ACK vector; rerun with `scripts/validate-cddl.ps1`. A complete multi-frame interoperability suite remains pending. The identity registry is implemented but not deployed or independently audited; the light client and state-proof verifier are not implemented. Groups, networking, agent behavior, file transfer, the complete GUI, and release packages are also pending. These checks do not certify pending features, complete product security, or real-network behavior.
+This round's `cargo test --workspace --all-targets --locked` passed 57 tests, including 26 new chain-verification tests. Clippy with `-D warnings`, formatting, dependency probes, license checking, and the CDDL grammar/fixed ACK checks passed. `docs/chain-verification.md` separates historical Mainnet finality, synthetic Trie proofs and local state-transition tests. T06a previously passed 14 Foundry contract tests; they were not rerun in this slice. Upstream deprecation and earlier contract-build advisories remain documented.
+
+Live RPC synchronization, multiple proof-provider compatibility, durable trusted checkpoints/identity observations and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.

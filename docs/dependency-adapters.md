@@ -22,9 +22,34 @@ cross-platform certification.
 - `libp2p-identity = 0.3.1`: Ed25519 `SecretKey::try_from_bytes`, protobuf private-key encoding/decoding and PeerId derivation compile and pass device persistence tests.
 - `windows = 0.62.2`: `Win32_Security_Cryptography` and `Win32_Foundation` compile for `CryptProtectData`, `CryptUnprotectData` and `LocalFree`. Windows tests exercised same-user DPAPI persistence, tamper rejection and refusal to overwrite an existing identity. Cross-user, service-account and cross-machine behavior are not validated.
 
-Identity and DPAPI are T06 implementations, not proof of chain state. Public-chain
-finality, registry code hash, storage proofs, device-set commitments, private IPC
-delivery and migration remain unimplemented.
+Identity and DPAPI are T06 implementations, not proof of chain state. T06b now
+implements local finalized-state and registry account/storage-proof verification
+with Helios/Alloy. Live chain synchronization, durable verified-state caching,
+device-set commitments, private IPC delivery and migration remain pending.
+
+## Chain Verification APIs
+
+- Official Helios 0.12.0 consensus core at revision
+  `2922a475ef1b48476983333cbae7fc92fdb46cd6`: `verify_bootstrap`,
+  `apply_bootstrap`, `verify_update`, `apply_update`, `verify_finality_update`
+  and `apply_finality_update` compile and verify historical Mainnet fixtures on
+  Windows. Only the pure consensus module is vendored, with MIT provenance;
+  the full Helios client has not been compiled or adopted.
+- `alloy-trie = 0.9.9`: `TrieAccount::new`, `proof::verify_proof`,
+  `HashBuilder`, `ProofRetainer` and inclusion/exclusion paths compile and run.
+- `alloy-primitives = 1.7.3`, `alloy-rlp = 0.3.17`,
+  `alloy-consensus = 2.6.1`: fixed-width values, Keccak, RLP and
+  `Header::hash_slow` compile and pass state-proof/header-binding tests.
+- `alloy-provider = 2.6.1`, default features disabled:
+  `ProviderBuilder::connect_mocked_client`, `Provider::get_proof` and
+  `RpcWithBlock::block_id` compile/run in `probes/chain-dependencies`, with no
+  RPC sent. The provider is not an application runtime dependency.
+- crates.io `helios-ethereum 0.1.0` was rejected: the published package contains
+  only a placeholder executable, not the upstream light-client library.
+
+See `docs/chain-verification.md` for exact commands, checkpoint/cache lifecycle,
+the upstream deprecation warning, measured Windows test-process resources and
+unverified live-network boundaries.
 
 ## Probe Scope and Results
 

@@ -29,6 +29,18 @@ Rust workspace 本轮合计 31 项测试通过。Foundry 构建另打印 4 条�
 
 这些验证结果不构成完整产品、安全、沙箱、互操作或公网验收。
 
+### 2026-11-17 T06b 验证核心实现后
+
+- `cargo test --workspace --all-targets --locked`：57 项通过，含 26 项新增链验证测试。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- 独立依赖探针的格式检查及 `cargo run --manifest-path probes/chain-dependencies/Cargo.toml --offline`：通过；未发送 RPC 请求。
+- `cargo deny --locked check licenses`：通过，另有四条既有未使用许可白名单提示。
+- `scripts/validate-cddl.ps1`：通过（语法与固定 ACK 向量）。
+- 内置 Helios 共识模块 10 个源码文件与固定上游归档逐字节相同；独立探针保留一条上游弃用提示。
+
+历史 Mainnet checkpoint/BLS 最终性、合成 MPT 证明和局部缓存/重组测试分开记录。26 项链测试串行测量为 1.15 秒、CPU 1.14 秒、25 毫秒间隔采样最高工作内存 8,986,624 字节；它不是完整后台常驻资源测试。独立代码复核发现的两项问题已修正并通过新增回归测试；该复核不是完整安全审计。实时 RPC、多服务证明兼容、checkpoint/cache 持久化、身份流 codec 和独立安全审计仍待完成。本轮没有重跑 Foundry。完整范围见 `docs/chain-verification.md`。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。
