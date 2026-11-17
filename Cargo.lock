@@ -184,6 +184,7 @@ version = "0.1.0"
 name = "asl-types"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bs58",
  "libp2p-identity",
  "serde",

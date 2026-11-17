@@ -136,6 +136,8 @@ assert_eq!(decode_manifest(&bytes, id).unwrap().file_size, 0);
 
 全部向量：0、1、1MiB、1MiB+1、64GiB、64GiB+1；57 字节；错误 magic/version/chunk_size；count=0xFFFFFFFF；缺/多 1 字节；修改 bytes 而 expected 不变。检查顺序遵循协议；禁止大分配和 panic。
 
+T04 完成（2026-11-17）：实现固定二进制 manifest 编解码和 BLAKE3 ContentId；解析前限制最大字节数，校验版本、文件大小、块长/数量、精确长度、空文件 hash 与期望 ID。7 项 manifest 测试及 workspace 全量测试、Clippy、格式检查通过。
+
 ### T05 — SQLite 初始化与迁移
 
 依赖 T03。创建 asl-store db/migrations，导入提供的 SQL。接口 `open_store(path: &Path) -> Result<Store, AslError>`。
