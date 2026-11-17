@@ -1,0 +1,88 @@
+schema_version = 1
+home = 'E:\ASL\data'
+portable = true
+fallback_to_system_profile = false
+
+[network]
+enabled = false
+public_discovery_authorized = false
+allow_relay = true
+allow_application_query_forwarding = false
+use_bundled_seeds = true
+bootstrap_multiaddrs = []
+relay_multiaddrs = []
+query_deadline_ms = 10000
+max_query_peers = 16
+max_query_terms = 3
+max_published_tags = 128
+max_control_frame_bytes = 65536
+max_dht_records = 10000
+max_dht_bytes = 67108864
+
+[transfer]
+chunk_bytes = 1048576
+max_file_bytes = 68719476736
+max_sources_per_download = 4
+max_requests_per_source = 2
+max_upload_chunks_global = 8
+max_upload_chunks_per_peer = 2
+inline_max_bytes = 32768
+reservation_idle_ms = 300000
+lease_ms = 60000
+
+[storage]
+snapshot_quota_bytes = 21474836480
+download_quota_bytes = 21474836480
+task_download_quota_bytes = 1073741824
+unknown_source_reservation_bytes = 536870912
+minimum_free_bytes = 2147483648
+log_quota_bytes = 134217728
+metadata_quota_bytes = 268435456
+
+[retention]
+chat_days = 7
+inbox_days = 30
+failed_partial_days = 3
+outbox_expiry_seconds = 600
+
+[agent]
+enabled = false
+browse_enabled = true
+answer_enabled = false
+max_concurrent_calls = 4
+max_repairs = 1
+max_rounds = 3
+max_semantic_messages = 6
+max_context_characters = 6000
+max_candidates = 4
+max_candidate_characters = 1200
+model_timeout_ms = 45000
+approved_provider_ids = []
+
+[transfer_approval]
+upload_mode = "ask"
+download_mode = "ask"
+request_timeout_seconds = 300
+
+[groups]
+enabled = false
+max_members = 64
+max_message_bytes = 65536
+retention_days = 7
+auto_accept_invites = false
+max_epoch_catchup = 256
+
+[sandbox]
+required = true
+worker_memory_bytes = 268435456
+extractor_memory_bytes = 536870912
+extractor_timeout_ms = 10000
+network_memory_bytes = 268435456
+allow_plain_process_fallback = false
+
+[profile]
+publish = false
+name = ""
+description = ""
+tags = []
+coarse_region = ""
