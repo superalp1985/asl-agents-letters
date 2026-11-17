@@ -82,6 +82,18 @@ SQLite/恢复测试实际写入并重开 E 盘临时数据库，覆盖原子事�
 
 独立只读复核发现卷根 SUBST 规则遗漏、额外扩展名长度限制和竞态夹具共享冲突问题；修正及补测后复查无阻断发现。没有执行 AppContainer、写目录能力、持久撤销或传输栅栏，本轮未重跑许可证/CDDL/Foundry，没有更改依赖版本或锁文件。此复核与本机测试不构成完整安全审计。接口及边界见 `docs/windows-source-handles.md`。
 
+### 2026-11-18 T13 结构化签名记录
+
+- `cargo test --workspace --all-targets --locked`：226 项测试函数通过，其中新增 24 项 `signed_records`、37 项 `profile::tests`。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `scripts/validate-cddl.ps1`：通过，仍只含语法和固定 ACK 验证。
+- 独立工程复核未发现可确认的实现缺陷；复核者另行重跑 24 项 codec 和 37 项 app 记录测试通过。指出的授权绑定测试弱项已补强为两份均有效的授权，单独检验请求/资源绑定。
+
+新增测试使用真实的一次性根签名和合成 MPT 证明结果，覆盖三个记录种类、签名原文、low-S/v、当前控制者轮换、内外 owner/序号、时效、设备证书/链 commitment/registry sequence、嵌套文本与非规范编码拒绝、8,192/8,193 字节边界、单调观察与额度失败原子性，以及资料续发/撤下、头像公开授权和撤销。合成 Trie 结果不是实际 Mainnet 注册或最终化链部署的证据。
+
+记录封装与目录/短码 CDDL 的规范缺项已显式补全，旧控制帧及合约接口不变。记录历史/发布游标仍为内存状态；DHT 仓储过滤、持久高水位、总额度、网络发送/取消及头像重编码不在本轮范围。无新增依赖或锁文件变化，许可证未重跑；Foundry、真实链服务、DHT/群组/Windows 沙箱和完整 GUI 未运行。T08 的真实 symlink/8.3 夹具缺失仍单独保留。详见 `docs/signed-records.md`。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。

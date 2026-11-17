@@ -7,7 +7,7 @@ mod resolver;
 mod types;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use config::{CheckpointV1, ConsensusConfigV1, ForkV1, ForksV1, RegistryDeploymentV1};
 pub use consensus::EthereumLightClient;

@@ -152,6 +152,15 @@ The client MUST verify:
    the root-key signature on the presented device certificate.
 5. The certificate PeerId equals the PeerId authenticated by libp2p.
 
+The T13 device-set witness encoding is frozen in `docs/03-protocol.md` and
+`schemas/asl-v1.cddl`: `stateCommitment` is
+`BLAKE3("ASL-DEVICE-DIRECTORY-v1\0" || canonical_device_directory_payload)`.
+The payload includes `registry_sequence`, which must equal the proved registry
+sequence. The signed record's publication sequence and refresh timestamps are
+outside this commitment, so renewing an unchanged directory does not require a
+new registry transaction. This completes the previously unspecified witness
+encoding; it does not change contract storage or operation signatures.
+
 An RPC endpoint or indexer may withhold, delay, or corrupt a response. It is
 not trusted to assert identity state; invalid proofs fail. EIP-1186 is marked
 Stagnant, so proof-provider compatibility must be tested against multiple

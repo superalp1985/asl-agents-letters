@@ -31,7 +31,7 @@ fn invalid<T>() -> Result<T, AslError> {
     Err(AslError::InvalidMessage)
 }
 
-fn uint(value: u64) -> Value {
+pub(crate) fn uint(value: u64) -> Value {
     Value::Integer(Integer::from(value))
 }
 
@@ -39,7 +39,7 @@ fn sint(value: i64) -> Value {
     Value::Integer(Integer::from(value))
 }
 
-fn map(entries: impl IntoIterator<Item = (u64, Value)>) -> Value {
+pub(crate) fn map(entries: impl IntoIterator<Item = (u64, Value)>) -> Value {
     Value::Map(
         entries
             .into_iter()
@@ -48,7 +48,7 @@ fn map(entries: impl IntoIterator<Item = (u64, Value)>) -> Value {
     )
 }
 
-fn fields(value: Value) -> Result<Fields, AslError> {
+pub(crate) fn fields(value: Value) -> Result<Fields, AslError> {
     let Value::Map(entries) = value else {
         return invalid();
     };
@@ -62,7 +62,7 @@ fn fields(value: Value) -> Result<Fields, AslError> {
     Ok(result)
 }
 
-fn check_keys(fields: &Fields, allowed: &[u64]) -> Result<(), AslError> {
+pub(crate) fn check_keys(fields: &Fields, allowed: &[u64]) -> Result<(), AslError> {
     if fields.keys().all(|key| allowed.contains(key)) {
         Ok(())
     } else {
@@ -70,7 +70,7 @@ fn check_keys(fields: &Fields, allowed: &[u64]) -> Result<(), AslError> {
     }
 }
 
-fn take(fields: &mut Fields, key: u64) -> Result<Value, AslError> {
+pub(crate) fn take(fields: &mut Fields, key: u64) -> Result<Value, AslError> {
     fields.remove(&key).ok_or(AslError::InvalidMessage)
 }
 
@@ -78,11 +78,11 @@ fn take_optional(fields: &mut Fields, key: u64) -> Option<Value> {
     fields.remove(&key)
 }
 
-fn finish(fields: Fields) -> Result<(), AslError> {
+pub(crate) fn finish(fields: Fields) -> Result<(), AslError> {
     if fields.is_empty() { Ok(()) } else { invalid() }
 }
 
-fn as_u64(value: Value) -> Result<u64, AslError> {
+pub(crate) fn as_u64(value: Value) -> Result<u64, AslError> {
     match value {
         Value::Integer(value) => u64::try_from(value).map_err(|_| AslError::InvalidMessage),
         _ => invalid(),
@@ -114,14 +114,14 @@ where
     T::try_from(value).map_err(|_| AslError::InvalidMessage)
 }
 
-fn fixed_bytes<const N: usize>(value: Value) -> Result<[u8; N], AslError> {
+pub(crate) fn fixed_bytes<const N: usize>(value: Value) -> Result<[u8; N], AslError> {
     match value {
         Value::Bytes(bytes) => bytes.try_into().map_err(|_| AslError::InvalidMessage),
         _ => invalid(),
     }
 }
 
-fn byte_string(value: Value, min: usize, max: usize) -> Result<Vec<u8>, AslError> {
+pub(crate) fn byte_string(value: Value, min: usize, max: usize) -> Result<Vec<u8>, AslError> {
     match value {
         Value::Bytes(bytes) if (min..=max).contains(&bytes.len()) => Ok(bytes),
         _ => invalid(),
@@ -135,7 +135,7 @@ fn peer_id(value: Value) -> Result<PeerId, AslError> {
     }
 }
 
-fn array(value: Value, max: usize) -> Result<Vec<Value>, AslError> {
+pub(crate) fn array(value: Value, max: usize) -> Result<Vec<Value>, AslError> {
     match value {
         Value::Array(values) if values.len() <= max => Ok(values),
         _ => invalid(),
@@ -165,7 +165,7 @@ fn validate_tree(value: &Value, depth: usize) -> Result<(), AslError> {
     }
 }
 
-fn decode_canonical(bytes: &[u8]) -> Result<Value, AslError> {
+pub(crate) fn decode_canonical(bytes: &[u8]) -> Result<Value, AslError> {
     if bytes.is_empty() || bytes.len() > MAX_EXTENDED_FRAME_BYTES {
         return invalid();
     }
@@ -365,7 +365,7 @@ fn claim_value(value: &Claim) -> Value {
     map(entries)
 }
 
-fn device_certificate(value: Value) -> Result<DeviceCertificate, AslError> {
+pub(crate) fn device_certificate(value: Value) -> Result<DeviceCertificate, AslError> {
     let mut fields = fields(value)?;
     check_keys(&fields, &[0, 1, 2, 3, 4, 5, 6])?;
     let version = bounded_uint::<u8>(take(&mut fields, 0)?, 1)?;
@@ -395,7 +395,7 @@ fn device_certificate(value: Value) -> Result<DeviceCertificate, AslError> {
     })
 }
 
-fn device_certificate_value(value: &DeviceCertificate) -> Value {
+pub(crate) fn device_certificate_value(value: &DeviceCertificate) -> Value {
     map([
         (0, uint(1)),
         (1, Value::Bytes(value.agent_id.0.to_vec())),

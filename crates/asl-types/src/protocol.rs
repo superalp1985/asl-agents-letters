@@ -1,4 +1,4 @@
-mod cbor;
+pub(crate) mod cbor;
 
 use crate::{
     error::ErrorCode,

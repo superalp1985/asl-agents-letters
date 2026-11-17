@@ -106,24 +106,26 @@ impl AgentIdentity {
             issued_at_ms,
             expires_at_ms,
         )?;
-        let digest = Keccak256::digest(message);
-        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(&digest);
-        if recovery_id.to_byte() > 1 {
-            return Err(AslError::InvalidIdentity);
-        }
-
-        let mut signature_bytes = [0; Signature65::LENGTH];
-        signature_bytes[..64].copy_from_slice(&signature.to_bytes());
-        signature_bytes[64] = recovery_id.to_byte() + 27;
-
         Ok(DeviceCertificate {
             agent_id: self.agent_id,
             peer_id,
             serial,
             issued_at_ms,
             expires_at_ms,
-            signature: Signature65(signature_bytes),
+            signature: self.sign_domain_message(&message)?,
         })
+    }
+
+    pub(crate) fn sign_domain_message(&self, message: &[u8]) -> Result<Signature65, AslError> {
+        let digest = Keccak256::digest(message);
+        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(&digest);
+        if recovery_id.to_byte() > 1 {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut bytes = [0; Signature65::LENGTH];
+        bytes[..64].copy_from_slice(&signature.to_bytes());
+        bytes[64] = recovery_id.to_byte() + 27;
+        Ok(Signature65(bytes))
     }
 
     fn protected_payload(&self) -> Zeroizing<Vec<u8>> {
@@ -227,22 +229,31 @@ pub fn verify_device_certificate(
         certificate.issued_at_ms,
         certificate.expires_at_ms,
     )?;
+    verify_root_signature(&message, certificate.signature, expected_controller_address)
+        .map_err(|_| AslError::InvalidDeviceCertificate)
+}
+
+pub(crate) fn verify_root_signature(
+    message: &[u8],
+    signature_bytes: Signature65,
+    expected_controller_address: [u8; ROOT_ADDRESS_LENGTH],
+) -> Result<(), AslError> {
     let digest = Keccak256::digest(message);
-    let signature = Signature::from_slice(&certificate.signature.0[..64])
-        .map_err(|_| AslError::InvalidDeviceCertificate)?;
+    let signature =
+        Signature::from_slice(&signature_bytes.0[..64]).map_err(|_| AslError::InvalidIdentity)?;
     if signature.normalize_s() != signature {
-        return Err(AslError::InvalidDeviceCertificate);
+        return Err(AslError::InvalidIdentity);
     }
-    let recovery_id = certificate.signature.0[64]
+    let recovery_id = signature_bytes.0[64]
         .checked_sub(27)
         .and_then(RecoveryId::from_byte)
         .filter(|recovery_id| recovery_id.to_byte() <= 1)
-        .ok_or(AslError::InvalidDeviceCertificate)?;
+        .ok_or(AslError::InvalidIdentity)?;
     let recovered = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
-        .map_err(|_| AslError::InvalidDeviceCertificate)?;
+        .map_err(|_| AslError::InvalidIdentity)?;
 
     if root_address(&recovered) != expected_controller_address {
-        return Err(AslError::InvalidDeviceCertificate);
+        return Err(AslError::InvalidIdentity);
     }
     Ok(())
 }

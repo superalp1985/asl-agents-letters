@@ -278,6 +278,8 @@ cargo test -p asl-store --test visible_search
 cargo test -p asl-types --test signed_records
 ```
 
+T13 实现记录（2026-11-18）：记录核心、严格嵌套 CBOR、固定签名原文、目录承诺与短码派生已实现；app 接入现有根签名和当前链身份 resolver，记录/设备序号与撤销观察单调、有界并原子更新。资料默认不发布，明确配置后每 5 分钟生成候选；撤下停止续发，头像引用每次经过公开资源授权。具体 Rust 入口使用已验证的 RecordPayload 推导 kind，并显式传入本机签发身份/时间及验证 resolver。此前未定义的记录封装/目录/短码 CDDL 已在协议文档中显式补全，没有更改既有控制帧或合约接口。24 项 codec、37 项 app 记录测试和工作区共 226 项测试函数通过，Clippy、格式和 CDDL 语法/ACK 检查通过。历史/发布游标仍为内存状态，DHT 入站过滤、总额度、持久化、实际投递与发送取消在后续任务集成；不声称 T17 或完整节点发现完成。详见 `docs/signed-records.md`。
+
 ### T14 — libp2p Driver 与链身份握手
 
 依赖 T02、T10、T13。创建 net behaviour/transport/driver。

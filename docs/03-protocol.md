@@ -90,7 +90,7 @@ DHT 只接受 profile 和应用允许的少量记录；资源发现主要使用 
 
 ```text
 ASCII "ASL-RECORD-v1\0"
-kind                 u8               // profile=1, device_directory=2
+kind                 u8               // profile=1, device_directory=2, short_code=3
 agent_id             32 bytes
 sequence             u64 big-endian
 issued_at_ms         u64 big-endian
@@ -108,6 +108,12 @@ payload              payload_length bytes, deterministic CBOR per CDDL
 profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受完全相同字节。撤下资料后不再续发，旧资料可能存续至 TTL 或远端缓存过期。profile key 基于 AgentId，签名者为身份根，避免设备轮换改变联系人身份。
 
 profile payload 严格遵循 CDDL 中的 profile 结构，只能包含概念 ID 和明确授权的头像 content ID。昵称、描述、地点及任意标签文本不发布。头像必须同时存在一条明确公开的应用管理资源引用，不能因 profile 中出现 hash 就绕过文件授权。
+
+T13 编码补全（2026-11-18）：之前规范只冻结了签名原文，缺少封装、设备目录和短码声明的 CDDL。新增 `signed-record` 定义，不改变已有控制帧或合约存储。封装采用确定性整数键 map：0=版本 1、1=kind、2=AgentId、3=publication sequence、4=issued、5=expires、6=规范载荷字节、7=65 字节签名；整个封装最多 8 KiB。载荷字节必须再次通过对应已知结构的严格解码，不能承载任意 blob 或文本。所有记录最长 30 分钟。身份根签名复用设备证书的 Keccak-256、secp256k1 low-S 及 v=27/28 格式。
+
+profile 载荷直接复用现有 profile 控制对象，内部 owner/sequence 必须与封装相同。device directory 载荷为整数键 map：0=版本 1、1=AgentId、2=registry sequence、3=设备证书数组、4=撤销 serial 数组；设备至多 64 项，按原始 PeerId 字节严格排序，PeerId 和 serial 都不得重复。撤销 serial 至多 64 项，非零、递增，不能与活跃证书重叠；8 KiB 总上限仍优先于数量上限。`stateCommitment = BLAKE3("ASL-DEVICE-DIRECTORY-v1\0" || canonical_payload_bytes)`，同时验证载荷 registry sequence 等于当前最终化链状态序号。外层 publication sequence 与链序号独立，刷新外层时间不改变目录承诺，也不要求每次续发都上链。
+
+kind=3 的短码声明载荷为 0=版本 1、1=AgentId、2=0 至 9999999999999999 的整数，必须等于下节固定派生算法。前导零与四位分组仅由本地 UI 格式化，线上不增加字符串字段。记录有效、签名正确也只产生发现候选，不产生联系人或文件权限。
 
 ## 4. 发现与标签
 

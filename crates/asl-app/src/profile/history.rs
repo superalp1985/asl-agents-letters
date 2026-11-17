@@ -1,0 +1,114 @@
+use std::collections::{HashMap, HashSet};
+
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, PeerId},
+    protocol::DeviceCertificate,
+    record::{RecordKind, RecordPayload},
+};
+
+use crate::chain::IdentityResolver;
+
+use super::{VerifiedRecord, verify_record};
+
+#[derive(Clone)]
+struct ObservedRecord {
+    sequence: u64,
+    hash: blake3::Hash,
+}
+
+/// One owner's bounded, in-memory observations. The DHT/store adapter must
+/// retain these watermarks durably rather than clearing them on record expiry.
+pub struct RecordHistory {
+    agent_id: AgentId,
+    records: HashMap<RecordKind, ObservedRecord>,
+    device_serials: HashMap<u64, Option<PeerId>>,
+    latest_devices: HashMap<PeerId, DeviceCertificate>,
+    revoked: HashSet<u64>,
+    observation_limit: usize,
+}
+
+impl RecordHistory {
+    pub fn new(agent_id: AgentId, observation_limit: usize) -> Result<Self, AslError> {
+        if !(1..=4_096).contains(&observation_limit) {
+            return Err(AslError::InvalidPolicyState);
+        }
+        Ok(Self {
+            agent_id,
+            records: HashMap::new(),
+            device_serials: HashMap::new(),
+            latest_devices: HashMap::new(),
+            revoked: HashSet::new(),
+            observation_limit,
+        })
+    }
+
+    pub fn accept(
+        &mut self,
+        bytes: &[u8],
+        now_ms: u64,
+        resolver: &mut dyn IdentityResolver,
+    ) -> Result<VerifiedRecord, AslError> {
+        let verified = verify_record(bytes, self.agent_id, now_ms, resolver)?;
+        let record = &verified.signed.record;
+        let kind = record.payload.kind();
+        let hash = blake3::hash(bytes);
+        if let Some(previous) = self.records.get(&kind)
+            && (record.sequence < previous.sequence
+                || (record.sequence == previous.sequence && hash != previous.hash))
+        {
+            return Err(AslError::PolicyVersionConflict);
+        }
+
+        if let RecordPayload::DeviceDirectory(directory) = &record.payload {
+            let mut serials = self.device_serials.clone();
+            let mut latest = self.latest_devices.clone();
+            let mut revoked = self.revoked.clone();
+            for certificate in &directory.devices {
+                if revoked.contains(&certificate.serial)
+                    || serials
+                        .get(&certificate.serial)
+                        .is_some_and(|peer| peer.as_ref() != Some(&certificate.peer_id))
+                    || latest.get(&certificate.peer_id).is_some_and(|previous| {
+                        certificate.serial < previous.serial
+                            || (certificate.serial == previous.serial && certificate != previous)
+                    })
+                {
+                    return Err(AslError::PolicyVersionConflict);
+                }
+                serials.insert(certificate.serial, Some(certificate.peer_id.clone()));
+                latest.insert(certificate.peer_id.clone(), certificate.clone());
+            }
+            for serial in &directory.revoked_serials {
+                revoked.insert(*serial);
+                serials.entry(*serial).or_insert(None);
+            }
+            if serials.len() > self.observation_limit {
+                return Err(AslError::PolicyDenied);
+            }
+            self.device_serials = serials;
+            self.latest_devices = latest;
+            self.revoked = revoked;
+        }
+        self.records.insert(
+            kind,
+            ObservedRecord {
+                sequence: record.sequence,
+                hash,
+            },
+        );
+        Ok(verified)
+    }
+
+    pub fn highest_sequence(&self, kind: RecordKind) -> Option<u64> {
+        self.records.get(&kind).map(|record| record.sequence)
+    }
+
+    pub fn highest_device_serial(&self, peer: &PeerId) -> Option<u64> {
+        self.latest_devices.get(peer).map(|device| device.serial)
+    }
+
+    pub fn observed_revocation(&self, serial: u64) -> bool {
+        self.revoked.contains(&serial)
+    }
+}
