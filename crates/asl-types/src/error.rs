@@ -15,6 +15,11 @@ pub enum AslError {
     KeyProtectionFailed,
     UnsupportedSchemaVersion,
     InvalidDatabase,
+    PolicyDenied,
+    GrantRevoked,
+    NotFound,
+    InvalidPolicyState,
+    PolicyVersionConflict,
     Io(io::Error),
 }
 
@@ -35,6 +40,11 @@ impl fmt::Display for AslError {
                 formatter.write_str("database schema version is not supported")
             }
             Self::InvalidDatabase => formatter.write_str("database schema is invalid"),
+            Self::PolicyDenied => formatter.write_str("access is denied by policy"),
+            Self::GrantRevoked => formatter.write_str("grant has been revoked"),
+            Self::NotFound => formatter.write_str("resource not found"),
+            Self::InvalidPolicyState => formatter.write_str("policy state is invalid"),
+            Self::PolicyVersionConflict => formatter.write_str("policy version conflict"),
             Self::Io(error) => write!(formatter, "storage operation failed: {error}"),
         }
     }
@@ -53,7 +63,12 @@ impl std::error::Error for AslError {
             | Self::InvalidDeviceCertificate
             | Self::KeyProtectionFailed
             | Self::UnsupportedSchemaVersion
-            | Self::InvalidDatabase => None,
+            | Self::InvalidDatabase
+            | Self::PolicyDenied
+            | Self::GrantRevoked
+            | Self::NotFound
+            | Self::InvalidPolicyState
+            | Self::PolicyVersionConflict => None,
         }
     }
 }

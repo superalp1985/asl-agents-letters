@@ -57,3 +57,11 @@ pub struct TaskId(pub Id128);
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct TransferId(pub Id128);
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ProviderId(pub String);
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct GroupId(pub Id128);

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 asl-types = { path = "../asl-types" }
+rand.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]

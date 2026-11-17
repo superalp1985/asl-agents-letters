@@ -59,6 +59,16 @@ SQLite/恢复测试实际写入并重开 E 盘临时数据库，覆盖原子事�
 
 本轮没有访问真实 Beacon/RPC 服务、没有部署合约、没有执行多运营商 EIP-1186 互测或完整链同步资源测量；Foundry 与独立 probe 未重跑。授权 checkpoint 续期、后台/Windows 进程额度集成和独立安全审计未完成，T06b 继续保持部分完成。DPAPI 不声称阻止同用户恶意程序或整库旧副本回滚。所有开发下载、构建缓存与测试数据位于 E 盘。
 
+### 2026-11-18 T07 纯授权判定
+
+- `cargo test --workspace --all-targets --locked`：144 项通过，含 36 项新增 `grant_policy` 测试。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo deny --locked check licenses`：通过，四条既有未使用白名单提示保留。
+- `scripts/validate-cddl.ps1`：通过，范围仍为语法和固定 ACK 向量。
+
+使用合成的本机策略事实测试全部 audience、认证设备绑定、模型 provider 交集、派生来源、版本/撤销/期限及来源图边界；没有把构造事实当成真实链或 MLS 认证。独立只读工程复核无阻断发现，提出的重复来源计数及模型许可跨 scope/撤权重验证两类遗漏已用三项测试补齐；完整测试、Clippy 和格式检查随后通过。复核者未执行测试，这不是独立安全审计。没有执行真实源文件打开、SQLite 撤销事务、沙箱或外网服务验收。详细职责边界见 `docs/policy-authorization.md`。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。

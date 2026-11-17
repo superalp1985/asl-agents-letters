@@ -945,6 +945,7 @@ name = "asl-policy"
 version = "0.1.0"
 dependencies = [
  "asl-types",
+ "rand 0.10.4",
  "windows",
  "zeroize",
 ]

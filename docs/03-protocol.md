@@ -275,6 +275,11 @@ pub fn validate_decision(
 ) -> Result<AgentDecision, DecisionError>;
 ```
 
+`AccessRequest` 的设备认证和群上下文由本机 scoped policy service 提供，
+不新增可由对端自报的权限字段。`Permit` 绑定具体服务实例及已认证设备；
+群范围许可还绑定 membership epoch。纯授权判定与后续持久撤销、文件句柄和
+传输 lease 的职责边界见 `docs/policy-authorization.md`。
+
 `encode_manifest` 固定写入 chunk_size/count 并验证 size 与 hashes 数量；不接受自定义块长。`CandidateSet` 带 permit 关联，返回前 core 仍需重新验证授权。
 
 ## 11. 错误码

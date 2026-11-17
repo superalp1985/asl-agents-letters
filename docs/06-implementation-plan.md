@@ -192,7 +192,7 @@ T06a 实现记录（2026-11-17）：新增 `contracts/src/IdentityRegistry.sol`�
 
 验收：可信 checkpoint、finalized header 更新、合约 code hash、account/storage proof、本机缓存过期、错误 RPC 和链重组均有固定测试；正向身份更新须在最终化后生效。chain proof 失败或服务离线只降级至最低额度。
 
-T06b 部分实现（截至 2026-11-18）：Windows 探针通过后，接入固定 Helios 0.12.0 官方共识模块和 Alloy MPT 库，实现版本化验证/解析接口、可信 checkpoint/finalized-only 状态、registry account/code hash/三个 storage slots 验证及最多 128 项的 TTL/LRU 内存缓存。首轮新增 26 项链测试，工作区共 57 项测试通过。后续已实现 Reqwest 有界 HTTP 获取、可配置入口切换、区块哈希绑定的 EIP-1186 解析、SQLite 原子快照/CAS 和 DPAPI 保护恢复；高水位与撤销观察不随证明缓存过期删除，未注册身份负缓存只留在有界内存。当前工作区 108 项测试通过（49 链、34 store），Clippy、格式、许可证和 CDDL 检查通过。测试分别使用本地 HTTP 服务、历史 Mainnet 数据、合成 Trie 和局部状态转换，不能混称真实链部署验收。真实多运营商证明服务兼容、授权 checkpoint 续期、后台调度/进程额度接入和独立安全审计仍待完成；本任务不标为整体完成。候选版本、Windows 测量、工程复核和具体边界见 `docs/chain-verification.md`。
+T06b 部分实现（截至 2026-11-18）：Windows 探针通过后，接入固定 Helios 0.12.0 官方共识模块和 Alloy MPT 库，实现版本化验证/解析接口、可信 checkpoint/finalized-only 状态、registry account/code hash/三个 storage slots 验证及最多 128 项的 TTL/LRU 内存缓存。首轮新增 26 项链测试，工作区共 57 项测试通过。后续已实现 Reqwest 有界 HTTP 获取、可配置入口切换、区块哈希绑定的 EIP-1186 解析、SQLite 原子快照/CAS 和 DPAPI 保护恢复；高水位与撤销观察不随证明缓存过期删除，未注册身份负缓存只留在有界内存。该切片验收时工作区 108 项测试通过（49 链、34 store），Clippy、格式、许可证和 CDDL 检查通过。测试分别使用本地 HTTP 服务、历史 Mainnet 数据、合成 Trie 和局部状态转换，不能混称真实链部署验收。真实多运营商证明服务兼容、授权 checkpoint 续期、后台调度/进程额度接入和独立安全审计仍待完成；本任务不标为整体完成。候选版本、Windows 测量、工程复核和具体边界见 `docs/chain-verification.md`。
 
 ### T07 — 纯授权判定与派生交集
 
@@ -205,6 +205,8 @@ cargo test -p asl-policy --test grant_policy
 ```
 
 额外向量：epoch 变化、provider 不匹配、never、local_only、溯源环/深度 5/来源 33；全局 revision 的无关变更不取消仍然合法的 permit。
+
+T07 实现记录（2026-11-18）：已拆分 types、audience、labels 和 service，保留冻结 AccessRequest/PolicyService 接口；使用本机 scoped service 绑定已认证设备与群上下文。public/contacts/peers/group、模型 provider 交集、来源图上限、内容/来源版本绑定、短期 Permit、撤销及快照版本检查已实现；信任/贡献不进入判定输入。36 项授权测试和工作区共 144 项测试通过，Clippy、格式、许可证与 CDDL 检查通过；独立只读工程复核无阻断发现，提出的两类测试遗漏已补齐。这里只完成内存授权判定；数据库撤销事务、文件句柄、lease、队列取消与浏览/回答状态机仍在各自后续任务实现。详见 `docs/policy-authorization.md`。
 
 ### T08 — Windows 文件句柄安全
 
