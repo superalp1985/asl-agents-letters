@@ -13,16 +13,19 @@
 - ASL/1 确定性 CBOR codec 已实现；`cargo test -p asl-types --test protocol --locked` 的 9 项测试通过，包含全部 14 种帧的往返和固定字节向量。
 - `scripts/validate-cddl.ps1` 通过：`cddl` 0.10.7 的 CDDL 语法检查及固定 ACK 字节向量验证成功；完整多帧互操作套件尚未执行。
 
-### 本轮工作区验证范围
-
-2026-11-17 本轮工作区验证结果：
+### 2026-11-17 T06a 实现后验证范围
 
 - `cargo test --workspace --all-targets --locked`：通过。
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `cargo fmt --all -- --check`：通过。
 - `scripts/validate-cddl.ps1`：通过（CDDL 语法及固定 ACK 字节向量）。
+- `forge fmt --check`：通过（Foundry 1.9.0）。
+- `forge test -vv`：14 项通过，0 失败（Solidity 0.8.24）。
+- `forge build --sizes`：成功；IdentityRegistry runtime 4,548 字节，initcode 5,517 字节。
+- `forge inspect IdentityRegistry storage-layout`：与身份规范中的存储布局一致。
+- `forge inspect IdentityRegistry deployedBytecode | cast keccak`：template hash 与身份规范记录一致。
 
-验证范围仅为当前工作区已有目标及其测试、CDDL 语法和一个固定 ACK 向量。完整多帧互操作、区块链 registry 合约、链轻客户端和状态证明验证未包含在通过范围内；Windows AppContainer、真实网络与完整产品安全也未由这些命令验证。
+Rust workspace 本轮合计 31 项测试通过。Foundry 构建另打印 4 条事件顺序提示和 1 条区块时间戳提示，具体边界与 template hash 说明见 `specs/identity-registry-v1.md`。验证只覆盖当前工作区目标及其测试、identity registry 本地合约测试、CDDL 语法和一个固定 ACK 向量。合约未部署或独立审计；链轻客户端/状态证明、完整多帧互操作、Windows AppContainer、真实网络与完整产品安全均未由这些命令验证。
 
 这些验证结果不构成完整产品、安全、沙箱、互操作或公网验收。
 

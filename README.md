@@ -57,9 +57,9 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-截至 2026-11-17，SQLite 初始化/迁移和 ASL/1 确定性 CBOR codec 已有实现。SQLite 6 项测试和协议 9 项测试通过；协议测试覆盖全部 14 种帧往返、固定 CBOR 字节向量、未知枚举/字段、重复键及非确定性编码拒绝。
+截至 2026-11-17，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础和最小公共链 identity registry 合约已实现。SQLite 6 项测试、协议 9 项测试和 registry 14 项 Foundry 测试通过；registry 覆盖 EIP-712 签名域、序号、双密钥根轮换、不可逆撤销及存储槽布局。
 
-本轮 `cargo test --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 均通过。`cddl` 0.10.7 通过 CDDL 语法检查，固定 ACK 字节向量也通过独立 CDDL 验证；可用 `scripts/validate-cddl.ps1` 重跑。完整多帧互操作套件尚未执行。区块链身份目前只有设计与规范文档，registry 合约、链轻客户端和状态证明验证器均未实现。群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未实现。以上检查只覆盖当前工作区已有代码，不代表这些待实现功能、产品安全或真实网络已验收。
+本轮 `cargo test --workspace --all-targets --locked` 通过（31 项测试），`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo fmt --all -- --check` 通过。合约使用固定的 Foundry 1.9.0 / Solidity 0.8.24：`forge fmt --check` 通过，`forge test` 的 14 项测试通过，`forge build --sizes` 成功；该构建仍打印 Foundry 的 4 条事件顺序静态提示和 1 条 `block.timestamp` 提示，详见 `specs/identity-registry-v1.md`。`cddl` 0.10.7 通过语法检查，固定 ACK 字节向量通过独立验证；可用 `scripts/validate-cddl.ps1` 重跑。完整多帧互操作套件尚未执行。identity registry 尚未部署或独立审计；链轻客户端和状态证明验证器未实现。群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未实现。以上检查不代表这些待实现功能、完整产品安全或真实网络已验收。
 
 ### 架构一览
 
@@ -129,6 +129,6 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-As of November 17, 2026, SQLite initialization/migration and the deterministic ASL/1 CBOR codec are implemented. The six SQLite tests and nine protocol tests pass. Protocol tests cover round trips for all 14 frame types, a fixed CBOR byte vector, and rejection of unknown enums/fields, duplicate keys, and non-deterministic encodings.
+As of November 17, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, and the minimal public-chain identity registry contract are implemented. The six SQLite tests, nine protocol tests, and 14 registry tests pass. Protocol tests cover round trips for all 14 frame types, a fixed CBOR byte vector, and rejection of unknown enums/fields, duplicate keys, and non-deterministic encodings.
 
-This round's `cargo test --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo fmt --all -- --check` all pass. `cddl` 0.10.7 accepts the CDDL grammar, and an independent CDDL check accepts the fixed ACK byte vector; rerun both with `scripts/validate-cddl.ps1`. A complete multi-frame interoperability suite remains pending. Blockchain identity remains design/specification only: the registry contract, light client, and state-proof verifier are not implemented. Groups, networking, agent behavior, file transfer, the complete GUI, and release packages are also pending. These checks cover only code currently in the workspace; they do not certify pending features, product security, or real-network behavior.
+This round's `cargo test --workspace --all-targets --locked` passed (31 tests); `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` passed. The contract uses pinned Foundry 1.9.0 / Solidity 0.8.24: `forge fmt --check` passed, all 14 `forge test` tests passed, and `forge build --sizes` completed. The build still prints four Foundry event-order advisories and one `block.timestamp` advisory; see `specs/identity-registry-v1.md`. `cddl` 0.10.7 accepts the grammar and the independent check accepts the fixed ACK vector; rerun with `scripts/validate-cddl.ps1`. A complete multi-frame interoperability suite remains pending. The identity registry is implemented but not deployed or independently audited; the light client and state-proof verifier are not implemented. Groups, networking, agent behavior, file transfer, the complete GUI, and release packages are also pending. These checks do not certify pending features, complete product security, or real-network behavior.

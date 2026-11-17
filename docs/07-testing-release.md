@@ -8,8 +8,18 @@
 | --- | --- | --- |
 | SQLite 初始化与迁移 | 已实现；6 项对应测试通过 | 不代表完整业务表访问、保留策略和全产品存储流程均已完成 |
 | CBOR wire codec | 已实现；9 项协议测试通过 | 覆盖 14 种帧往返、固定字节向量和主要拒绝条件；`cddl` 0.10.7 语法检查及固定 ACK 向量验证通过，完整多帧互操作套件待执行 |
-| 区块链身份 | 待实现方案 | 已有身份登记规范；尚无 registry 合约、轻客户端或状态证明验证器 |
+| 区块链 identity registry 合约 | 已实现；14 项 Foundry 测试通过 | 未部署、未独立审计；轻客户端与状态证明验证仍待实现 |
+| 区块链轻客户端/状态证明 | 待实现方案 | 需验证最终化状态、合约代码 hash 和 storage proofs |
 | Windows 沙箱、真实 P2P 网络、群组与完整 GUI | 尚未实现或验收 | 需按后续任务执行真实系统测试 |
+
+2026-11-17 T06a 合约验收：
+
+- `forge fmt --check`：通过。
+- `forge test -vv`：14 项通过，0 失败。
+- `forge build --sizes`：成功；IdentityRegistry 运行时代码 4,548 字节、initcode 5,517 字节。
+- `forge inspect IdentityRegistry storage-layout`：与 `specs/identity-registry-v1.md` 记录的 slot 0–2 布局一致。
+- `forge inspect IdentityRegistry deployedBytecode | cast keccak`：runtime template hash 为 `0x447a1a286b4e8947950a81fa38751eaecfe1871fdfd360f09c5505e523635961`。
+- 构建输出包含 4 条 `reentrancy-events` 提示和 1 条 `block-timestamp` 提示；本记录保留原始告警，不将构建成功描述为静态检查或安全审计通过。
 
 2026-11-17 工作区验证结果：
 
@@ -17,8 +27,9 @@
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `cargo fmt --all -- --check`：通过。
 - `scripts/validate-cddl.ps1`：通过（固定使用 `cddl` 0.10.7，检查 CDDL 语法并验证固定 ACK 向量）。
+- Rust workspace 测试本轮合计 31 项通过；T06a 合约 14 项 Foundry 测试单独统计。
 
-以上结果只覆盖当前工作区已有代码、CDDL 语法及一个固定帧向量。完整多帧互操作、链身份、Windows AppContainer、真实公网网络或完整产品安全验证尚未完成；这些结果不能作为完整 1.0 发布验收。
+以上结果只覆盖当前工作区已有 Rust 代码与测试、identity registry 合约固定测试、CDDL 语法及一个固定帧向量。registry 尚未部署或独立审计，完整多帧互操作、轻客户端/状态证明、Windows AppContainer、真实公网网络或完整产品安全验证尚未完成；这些结果不能作为完整 1.0 发布验收。
 
 ## 2. 阻断发布的反例
 

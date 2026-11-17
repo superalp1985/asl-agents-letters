@@ -1,0 +1,18 @@
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+out = "../dev-cache/contract-out"
+cache_path = "../dev-cache/contract-cache"
+solc_version = "0.8.24"
+auto_detect_solc = false
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+bytecode_hash = "none"
+cbor_metadata = false
+extra_output = ["storageLayout"]
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+]

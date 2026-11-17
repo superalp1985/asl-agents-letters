@@ -46,6 +46,7 @@ crates/asl-app/tests/home_paths.rs
 tests/{integration,adversarial,network}/
 assets/{avatars,icons,licenses}/
 packaging/{windows,linux}/
+contracts/{src/IdentityRegistry.sol,test/IdentityRegistry.t.sol,foundry.toml}
 ```
 
 文件只有在对应任务实施时创建；本资料包没有假装生成这些应用文件。可拆分大文件，但不能改变冻结接口或增加循环 crate 依赖。
@@ -151,7 +152,7 @@ SELECT revision FROM policy_state WHERE singleton=1;
 
 验收：第一次初始化为版本 1，重复启动不重复建表；WAL/外键/同步设置正确；中断迁移回滚；更高未知 schema 停止，不删除数据库重建。SQL 注入文本只作为绑定参数。
 
-T05 实现记录（2026-11-17）：SQLite `open_store` 与 schema v1 迁移已实现，包含 WAL、外键、FULL 同步、未知/局部数据库拒绝且不重建、事务失败回滚和绑定参数。6 项 store 测试及本轮 workspace 测试、Clippy、格式检查通过。CBOR codec 是 T03 的独立实现；链合约与轻客户端仍属于 T06a/T06b 待实现范围。
+T05 实现记录（2026-11-17）：SQLite `open_store` 与 schema v1 迁移已实现，包含 WAL、外键、FULL 同步、未知/局部数据库拒绝且不重建、事务失败回滚和绑定参数。6 项 store 测试及工作区测试、Clippy、格式检查通过。CBOR codec 是 T03 的独立实现；registry 合约已在 T06a 实现，轻客户端与状态证明仍属于 T06b 待实现范围。
 
 ### T06 — 身份根、设备证书与 DPAPI
 
@@ -177,11 +178,13 @@ assert!(verify_device_certificate(
 
 T06 实现记录（2026-11-17）：已固定并编译 `k256 0.14.0`、`sha3 0.12.0`、`rand 0.10.4`；完成根身份/AgentId 派生、独立 libp2p Ed25519 设备密钥、设备证书签发与本地验证、Windows 当前用户 DPAPI 保护文件、由 `AppPaths` 数据根派生的 identity 目录。工作区测试、Clippy、格式检查通过。尚未实现或验收：身份链最终化状态/撤销证明、net 私有 IPC 密钥交付、设备证书目录/链 commitment、PAKE、跨用户/跨机器恢复及迁移 UI。DPAPI 仅完成当前用户本机往返测试；身份与路径模块仍需独立安全复核。
 
-### T06a — 最小公共链身份合约
+### T06a — 最小公共链身份合约（已实现，2026-11-17）
 
 依赖 T06。实现 `specs/identity-registry-v1.md` 中 immutable registry：register、state update、root rotation、irreversible revoke。合约无 owner、管理员、升级入口、个人资料或任意调用。EIP-712 domain 绑定 chain/contract；sequence/deadline 由合约强制。使用固定合约测试工具链与测试向量；本任务不部署主网，不引入代币或收费功能。
 
 验收：AgentId 抢注/重复注册失败；伪签名、错误 domain、错误 chain、重复/跳跃 sequence、过期 deadline、无新控制密钥持有证明、吊销后更新全部失败；storage slots 和代码 hash 纳入规范。部署主网前须有独立合约审计和正式部署提案。
+
+T06a 实现记录（2026-11-17）：新增 `contracts/src/IdentityRegistry.sol`，采用 OpenZeppelin Contracts 5.5.0（固定上游 commit）ECDSA/EIP-712。Foundry 1.9.0、Solidity 0.8.24 与 Cancun/optimizer 200/no-IR/无 metadata 构建参数固定。14 项合约测试通过，覆盖注册、AgentId 派生、伪签名与错误 domain/chain、部署后 chain ID 变化、序号重放/跳号、过期 deadline、根轮换双方签名与旧根拒绝、不可逆撤销和 storage slot 布局。运行时代码大小 4,548 字节；未打补丁的 runtime bytecode template hash、存储槽及完整操作签名均记录在 `specs/identity-registry-v1.md`。未部署，未做 gas 主网测量、独立审计、轻客户端或 storage proof；这些不是本任务的已验收范围。
 
 ### T06b — 链轻客户端与状态证明验证
 
