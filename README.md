@@ -64,9 +64,11 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。设备目录同时绑定当前链承诺与序号，所有记录严格拒绝文本载荷；资料默认不发布，授权后续发，头像引用需独立公开授权。记录历史和发布游标尚未持久化，DHT 与实际投递仍待接入，详见 `docs/signed-records.md`。
 
-当前 `cargo test --workspace --all-targets --locked` 通过（226 项测试函数，含新增 24 项记录 codec 和 37 项签名/资料服务测试），Clippy（`-D warnings`）、格式及 CDDL 语法/固定 ACK 检查通过。文件测试中实际 symlink 与 8.3 别名分支未执行；已完成切片的独立工程复核没有确认的阻断发现。许可证沿用之前切片证据，本轮未重跑。HTTP 集成、历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 的 14 项 Foundry 合约测试及独立依赖探针本轮未重跑；上游和许可证提示保留在对应记录中。
+可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。授权界面与检查点来源选择尚待接入。
 
-HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、可信检查点授权续期、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
+当前 `cargo test --workspace --all-targets --locked` 通过（247 项测试函数，含本轮新增 21 项检查点续期测试），Clippy（`-D warnings`）和格式检查通过。CDDL 语法/固定 ACK 检查沿用上一切片，本轮未重跑。文件测试中实际 symlink 与 8.3 别名分支未执行；已完成切片的独立工程复核没有确认的阻断发现。许可证沿用之前切片证据，本轮未重跑。HTTP 集成、历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 的 14 项 Foundry 合约测试及独立依赖探针本轮未重跑；上游和许可证提示保留在对应记录中。
+
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -142,6 +144,8 @@ The pure authorization core implements public/contacts/peers/group audiences, mo
 
 The structured signed-record core now covers profiles, device directories and short-code claims. Directories bind both the current chain commitment and sequence, and every record strictly rejects text payloads. Profiles are disabled until explicitly configured; renewal with an avatar requires separate public-resource authorization. Record history and publication cursors are not yet durable, and DHT delivery remains pending; see `docs/signed-records.md`.
 
-The current `cargo test --workspace --all-targets --locked` run passed 226 test functions, including 24 new record-codec and 37 signing/profile-service tests. Real symlink and 8.3 alias branches were not exercised. Clippy with `-D warnings`, formatting and CDDL grammar/fixed ACK checks passed. Independent engineering reviews of the implemented slices found no confirmed blockers in their scope. License evidence is from an earlier slice and was not rerun here. `docs/chain-verification.md` separates local HTTP integration, historical Mainnet finality, synthetic Trie proofs and local state transitions. T06a's 14 Foundry tests and the standalone dependency probes were not rerun in this slice. Upstream and license advisories remain documented.
+An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. The authorization UI and trusted checkpoint-source selection remain pending.
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, authorized checkpoint renewal, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.
+The current `cargo test --workspace --all-targets --locked` run passed 247 test functions, including 21 new checkpoint-renewal tests. Real symlink and 8.3 alias branches were not exercised. Clippy with `-D warnings` and formatting passed. CDDL grammar/fixed ACK evidence is from the previous slice and was not rerun here. Independent engineering reviews of the implemented slices found no confirmed blockers in their scope. License evidence is from an earlier slice and was not rerun here. `docs/chain-verification.md` separates local HTTP integration, historical Mainnet finality, synthetic Trie proofs and local state transitions. T06a's 14 Foundry tests and the standalone dependency probes were not rerun in this slice. Upstream and license advisories remain documented.
+
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.

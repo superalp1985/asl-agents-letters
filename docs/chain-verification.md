@@ -1,9 +1,10 @@
 # T06b Chain Verification Core
 
 Status on 2026-11-18: local consensus/MPT verification, bounded HTTP acquisition,
-and durable SQLite recovery are implemented. HTTP and restart integration tests
+durable SQLite recovery and an explicit local checkpoint-renewal API are
+implemented. HTTP and restart integration tests
 use local servers with historical or synthetic fixtures. T06b remains open for
-real multi-provider compatibility, authorized checkpoint renewal, background
+real multi-provider compatibility, checkpoint-authorization UI, background
 scheduling/process limits and independent security audit. No public deployment
 or live Mainnet synchronization is claimed.
 
@@ -188,8 +189,60 @@ malicious process running as the same Windows user or replacement of the entire
 database with an older valid copy. Cross-device migration and rollback-aware
 backup policy remain T35 work. A mismatched deployment/checkpoint configuration,
 corrupt snapshot or expired weak-subjectivity view stops recovery; it never
-silently rebuilds an empty database. Authorized checkpoint renewal must preserve
-observations and remains an explicit pending integration task.
+silently rebuilds an empty database.
+
+## Explicit Checkpoint Renewal
+
+`DurableIdentityResolver::renew_checkpoint` is a separate local operation. The
+caller supplies the exact previous configuration and a replacement light client
+created through the normal bootstrap/consensus verifier after an explicit local
+trusted-checkpoint change. An endpoint response or peer record cannot approve
+that change. There is no automatic checkpoint fallback.
+
+The old DPAPI snapshot, complete configuration and row digest are authenticated
+even when its weak-subjectivity lifetime has expired. Expired consensus state
+exposes only immutable rollback floors to this operation; ordinary restore still
+rejects it. A saved finality-conflict lock cannot be cleared by renewal. Missing
+or corrupt state cannot be replaced with an empty database.
+
+Only the checkpoint may differ. Chain, genesis, fork schedule, deployment,
+freshness limits and cache budgets remain fixed. The new anchor slot must exceed
+both the old anchor and saved finalized beacon slot. The replacement finalized
+execution state must be fresh, cannot decrease execution height or timestamp,
+and cannot change the block hash/state root at an equal height. An incomplete
+Gloas execution projection is rejected.
+
+All identity observations retain their exact sequence, controller, commitment,
+revocation and observation times. Proof caches are cleared rather than given a
+new lifetime: active identities are unknown until a fresh proof is verified,
+while observed revocations remain limited. No contact, directory, group or model
+permission is granted by renewal.
+
+The new configuration, consensus state, checkpoint hash and retained observations
+are sealed and committed in the existing single SQLite transaction with opaque
+snapshot compare-and-swap. A stale writer or failed write preserves the previous
+database. After success, ordinary restore requires the new configuration; the
+old one fails closed. The caller must retain that new local configuration.
+
+This callable API does not implement a GUI confirmation flow, checkpoint-source
+selection, unattended trust decisions, background scheduling or cross-device
+migration.
+
+On 2026-11-18, the workspace passed 247 test functions, including 21 new renewal
+tests (70 chain tests total). Clippy with `-D warnings`, formatting and diff
+checking passed. Real E-drive SQLite and current-user DPAPI tests use synthetic
+post-consensus heads/checkpoints and MPT proofs; they are not live BLS or
+weak-subjectivity interoperability evidence. They cover expired recovery,
+unchanged observations, live/expired proof clearing, fresh-proof requirements,
+configuration/anchor/execution floors, old/new Gloas projections, conflict locks,
+late SQL rollback and stale ordinary-writer CAS rejection.
+
+An independent read-only engineering review found no confirmed production
+blockers. The reviewer did not execute tests. Two concurrent renewal operations
+were not deterministically interleaved; the reverse stale-writer test, existing
+store CAS tests and late SQL rollback are separate coverage. No public provider,
+deployment, CDDL, license, Foundry or external dependency probe was run in this
+slice. Dependencies, lockfile and database schema are unchanged.
 
 ## Previous Core Verification
 

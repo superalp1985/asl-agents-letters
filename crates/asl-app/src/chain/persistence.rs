@@ -142,39 +142,13 @@ impl DurableIdentityResolver {
         config: DurableResolverConfigV1,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
-        let mut bundle = store
-            .load_chain_bundle(config.consensus.chain_id)
-            .map_err(|_| ChainError::StorageUnavailable)?
-            .ok_or(ChainError::InvalidLocalState)?;
-        normalize(&mut bundle);
-        let plaintext = unprotect_secret(&bundle.state.verified_header_state)
-            .map_err(|_| ChainError::InvalidLocalState)?;
-        if plaintext.len() > MAX_CHAIN_SNAPSHOT_BYTES {
-            return Err(ChainError::InvalidLocalState);
-        }
-        let saved: LocalSnapshot = decode(&plaintext)?;
-        if saved.domain != SNAPSHOT_DOMAIN
-            || saved.config != config
-            || saved.rows_hash != rows_hash(&bundle)?
-            || bundle.state.updated_at_ms > millis(now_secs)?
-            || bundle.state.registry_address != config.deployment.address
-            || bundle.state.registry_code_hash != config.deployment.runtime_code_hash
-            || bundle.state.checkpoint_hash != config.consensus.checkpoint.beacon_root
-        {
-            return Err(ChainError::InvalidLocalState);
-        }
+        let (bundle, saved) = authenticated_snapshot(&store, &config, now_secs)?;
         let client = EthereumLightClient::from_local_state(
             config.consensus.clone(),
             &saved.consensus_json,
             now_secs,
         )?;
-        if let Some(finalized) = client.observed_execution()
-            && (finalized.block_number() != bundle.state.finalized_height
-                || finalized.block_hash() != bundle.state.finalized_block_hash
-                || finalized.state_root() != bundle.state.execution_state_root)
-        {
-            return Err(ChainError::InvalidLocalState);
-        }
+        check_saved_execution(&bundle, client.observed_execution())?;
         let mut resolver = make_resolver(&config, client)?;
         let verifier = EthereumProofVerifier::new(config.deployment)?;
         for row in &bundle.proofs {
@@ -207,6 +181,60 @@ impl DurableIdentityResolver {
             bundle,
             storage_healthy: true,
         })
+    }
+
+    /// Called only after an explicit local change of trusted checkpoint. The
+    /// replacement must have passed the normal bootstrap/consensus verifier.
+    /// This operation preserves identity observations, not cached permissions.
+    pub fn renew_checkpoint(
+        store: Store,
+        previous_config: DurableResolverConfigV1,
+        replacement: EthereumLightClient,
+        now_secs: u64,
+    ) -> Result<Self, ChainError> {
+        let (previous, saved) = authenticated_snapshot(&store, &previous_config, now_secs)?;
+        let (previous_slot, previous_execution) = EthereumLightClient::checkpoint_renewal_floor(
+            previous_config.consensus.clone(),
+            &saved.consensus_json,
+        )?;
+        check_saved_execution(&previous, previous_execution.as_ref())?;
+        if previous_config.consensus.slot_time(previous_slot)? > now_secs {
+            return Err(ChainError::ClockBeforeState);
+        }
+        let mut config = previous_config.clone();
+        config.consensus.checkpoint = replacement.config().checkpoint;
+        if replacement.config() != &config.consensus {
+            return Err(ChainError::InvalidConfiguration);
+        }
+        if config.consensus.checkpoint.slot <= previous_config.consensus.checkpoint.slot
+            || config.consensus.checkpoint.slot <= previous_slot
+        {
+            return Err(ChainError::Rollback);
+        }
+        let finalized = replacement.finalized(now_secs)?;
+        if finalized.block_number() < previous.state.finalized_height
+            || (finalized.block_number() == previous.state.finalized_height
+                && (finalized.block_hash() != previous.state.finalized_block_hash
+                    || finalized.state_root() != previous.state.execution_state_root))
+            || previous_execution
+                .as_ref()
+                .is_some_and(|old| finalized.timestamp_secs() < old.timestamp_secs())
+        {
+            return Err(ChainError::Rollback);
+        }
+        let candidate = make_resolver(&config, replacement)?;
+        let mut bundle = previous.clone();
+        bundle.state.checkpoint_hash = config.consensus.checkpoint.beacon_root;
+        bundle.proofs.clear();
+        let mut durable = Self {
+            store,
+            config,
+            resolver: candidate.clone(),
+            bundle: previous,
+            storage_healthy: true,
+        };
+        durable.commit(candidate, bundle, now_secs)?;
+        Ok(durable)
     }
 
     pub fn light_client(&self) -> &EthereumLightClient {
@@ -437,6 +465,49 @@ fn make_resolver(
     )
 }
 
+fn authenticated_snapshot(
+    store: &Store,
+    config: &DurableResolverConfigV1,
+    now_secs: u64,
+) -> Result<(ChainBundle, LocalSnapshot), ChainError> {
+    let mut bundle = store
+        .load_chain_bundle(config.consensus.chain_id)
+        .map_err(|_| ChainError::StorageUnavailable)?
+        .ok_or(ChainError::InvalidLocalState)?;
+    normalize(&mut bundle);
+    let plaintext = unprotect_secret(&bundle.state.verified_header_state)
+        .map_err(|_| ChainError::InvalidLocalState)?;
+    if plaintext.len() > MAX_CHAIN_SNAPSHOT_BYTES {
+        return Err(ChainError::InvalidLocalState);
+    }
+    let saved: LocalSnapshot = decode(&plaintext)?;
+    if saved.domain != SNAPSHOT_DOMAIN
+        || &saved.config != config
+        || saved.rows_hash != rows_hash(&bundle)?
+        || bundle.state.updated_at_ms > millis(now_secs)?
+        || bundle.state.registry_address != config.deployment.address
+        || bundle.state.registry_code_hash != config.deployment.runtime_code_hash
+        || bundle.state.checkpoint_hash != config.consensus.checkpoint.beacon_root
+    {
+        return Err(ChainError::InvalidLocalState);
+    }
+    Ok((bundle, saved))
+}
+
+fn check_saved_execution(
+    bundle: &ChainBundle,
+    execution: Option<&FinalizedExecution>,
+) -> Result<(), ChainError> {
+    if let Some(finalized) = execution
+        && (finalized.block_number() != bundle.state.finalized_height
+            || finalized.block_hash() != bundle.state.finalized_block_hash
+            || finalized.state_root() != bundle.state.execution_state_root)
+    {
+        return Err(ChainError::InvalidLocalState);
+    }
+    Ok(())
+}
+
 fn check_observation(bundle: &ChainBundle, identity: &VerifiedIdentity) -> Result<(), ChainError> {
     let Some(row) = bundle
         .observations
@@ -503,3 +574,7 @@ fn millis(seconds: u64) -> Result<u64, ChainError> {
 #[cfg(all(test, windows))]
 #[path = "persistence_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "checkpoint_renewal_tests.rs"]
+mod checkpoint_renewal_tests;

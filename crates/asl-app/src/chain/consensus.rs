@@ -123,6 +123,12 @@ impl EthereumLightClient {
     }
 
     #[cfg(test)]
+    pub(super) fn with_test_checkpoint(mut self, checkpoint: super::CheckpointV1) -> Self {
+        self.config.checkpoint = checkpoint;
+        self
+    }
+
+    #[cfg(test)]
     pub(super) fn with_test_beacon_conflict(mut self) -> Self {
         let LightClientHeader::Capella(header) = &mut self.store.finalized_header else {
             panic!("test fixture requires capella");
@@ -162,12 +168,37 @@ impl EthereumLightClient {
         bytes: &[u8],
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        let client = Self::decode_authenticated_local_state(config, bytes)?;
+        client.check_checkpoint_lifetime(now_secs)?;
+        Ok(client)
+    }
+
+    // Only immutable rollback floors are exposed from an expired, authenticated
+    // snapshot. This path cannot restore a client for ordinary identity use.
+    pub(super) fn checkpoint_renewal_floor(
+        config: ConsensusConfigV1,
+        bytes: &[u8],
+    ) -> Result<(u64, Option<FinalizedExecution>), ChainError> {
+        let client = Self::decode_authenticated_local_state(config, bytes)?;
+        Ok((
+            client.store.finalized_header.beacon().slot,
+            client.execution,
+        ))
+    }
+
+    fn decode_authenticated_local_state(
+        config: ConsensusConfigV1,
+        bytes: &[u8],
+    ) -> Result<Self, ChainError> {
         config.validate()?;
         if bytes.len() > 1024 * 1024 {
             return Err(ChainError::InvalidLocalState);
         }
         let saved: LocalConsensusState =
             serde_json::from_slice(bytes).map_err(|_| ChainError::InvalidLocalState)?;
+        if saved.conflicting_finality {
+            return Err(ChainError::ConflictingFinality);
+        }
         if saved.store.finalized_header.beacon().slot < config.checkpoint.slot {
             return Err(ChainError::InvalidLocalState);
         }
@@ -180,9 +211,8 @@ impl EthereumLightClient {
             conflicting_finality: saved.conflicting_finality,
             execution_header_rlp: None,
         };
-        client.check_checkpoint_lifetime(now_secs)?;
         if let Some(rlp) = saved.execution_header_rlp {
-            client.supply_execution_header(&rlp, now_secs)?;
+            client.bind_execution_header(&rlp)?;
         }
         Ok(client)
     }
@@ -261,6 +291,10 @@ impl EthereumLightClient {
     // Alloy checks the full header against that verified hash before use.
     pub fn supply_execution_header(&mut self, rlp: &[u8], now_secs: u64) -> Result<(), ChainError> {
         self.check_checkpoint_lifetime(now_secs)?;
+        self.bind_execution_header(rlp)
+    }
+
+    fn bind_execution_header(&mut self, rlp: &[u8]) -> Result<(), ChainError> {
         if rlp.len() > MAX_EXECUTION_HEADER_BYTES {
             return Err(ChainError::InvalidExecutionHeader);
         }
