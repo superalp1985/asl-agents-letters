@@ -7,6 +7,8 @@ use std::{
 use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub mod chain;
+
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 

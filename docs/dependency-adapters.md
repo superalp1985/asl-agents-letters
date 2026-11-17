@@ -24,8 +24,9 @@ cross-platform certification.
 
 Identity and DPAPI are T06 implementations, not proof of chain state. T06b now
 implements local finalized-state and registry account/storage-proof verification
-with Helios/Alloy. Live chain synchronization, durable verified-state caching,
-device-set commitments, private IPC delivery and migration remain pending.
+with Helios/Alloy, bounded HTTP acquisition and DPAPI-bound SQLite recovery.
+Live provider interoperability, authorized checkpoint renewal, device-set
+commitments, private IPC delivery and migration remain pending.
 
 ## Chain Verification APIs
 
@@ -46,6 +47,17 @@ device-set commitments, private IPC delivery and migration remain pending.
   RPC sent. The provider is not an application runtime dependency.
 - crates.io `helios-ethereum 0.1.0` was rejected: the published package contains
   only a placeholder executable, not the upstream light-client library.
+- `reqwest = 0.13.5`, default features disabled, `native-tls` and `json`:
+  `Client::builder`, explicit `Policy::none`, `retry::never`, `no_proxy`,
+  connect/read/total request timeouts and incremental `Response::chunk`
+  compile and run against local HTTP fixtures. Windows uses the OS TLS
+  backend through native-tls/Schannel with normal certificate validation.
+  This is not a live HTTPS interoperability result.
+- `alloy-rpc-types-eth = 2.6.1`: `EIP1186AccountProofResponse`,
+  full-width/quantity `JsonStorageKey::as_b256`, RPC `Header::into_consensus`
+  and `Header::new` compile and run with local JSON-RPC fixtures. The HTTP
+  adapter uses these mature parsers with its own bounded download before
+  parsing; it does not add the complete Alloy provider as a runtime dependency.
 
 See `docs/chain-verification.md` for exact commands, checkpoint/cache lifecycle,
 the upstream deprecation warning, measured Windows test-process resources and

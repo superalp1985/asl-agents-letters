@@ -27,6 +27,10 @@ data/
 
 完整 DDL 见 `specs/schema-v1.sql`，以它为字段名真源。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 已通过本机 SQLite 语法与约束校验不代表应用事务实现已完成。
 
+T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL 字段不变。永久身份观察单独设 10,000 项硬上限；满额拒绝新的观察，不静默删除高水位或撤销记录。DPAPI 保护的本地快照绑定完整链配置与上述行的摘要，恢复先验证完整性与配置，再重验未过期证明。写失败或并发旧快照覆盖失败后停止返回正向链身份。DPAPI 不提供整库历史回滚防护；同一 Windows 用户恶意程序或已被恢复的整份旧数据库不在此完整性机制的保证内。
+
+运行时仅把已注册或已撤销身份的证明与观察写入数据库。未注册身份的有效不存在证明只进入有界 TTL/LRU 内存缓存，不创建永久 agents 行，重启后回到 Unknown；已有高水位不能被不存在证明降级。存储层只检查行的一致性，不判定证明语义，不能绕过 DurableIdentityResolver 直接写入网络返回的证明。恢复时用当前时间检查过期，再独立恢复历史 LRU 时间，不能用某条记录的旧访问时间清理其他证明。
+
 | 表组 | 表 | 责任 |
 | --- | --- | --- |
 | 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、授权修订与迁移 |

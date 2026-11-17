@@ -3,8 +3,10 @@
 Status: the immutable Solidity registry and fixed local Foundry test toolchain
 are implemented. It has not been deployed; the deployment-specific address and
 runtime code hash and independent contract audit are not complete. The local
-Helios consensus and Alloy storage-proof adapters are implemented; live RPC
-sync and durable checkpoint/cache integration remain incomplete. This specification does not claim blockchain
+Helios consensus and Alloy storage-proof adapters, bounded HTTP acquisition,
+and durable checkpoint/cache recovery are implemented. Live provider
+compatibility, authorized checkpoint renewal and runtime integration remain
+incomplete. This specification does not claim blockchain
 identity proves a person, a unique operator, or a benign Agent.
 
 ## Network and Contract
@@ -158,7 +160,7 @@ revision `2922a475ef1b48476983333cbae7fc92fdb46cd6` after a Windows library prob
 Alloy verifies MPT account/storage proofs. Version/license provenance,
 checkpoint/cache lifecycle and measured test-process resources are recorded in
 `docs/chain-verification.md`. The full Helios client was not adopted. Live
-provider compatibility, durable-state integration and independent security
+provider compatibility, authorized checkpoint renewal and independent security
 review are still required.
 
 ## Sponsorship and Failure

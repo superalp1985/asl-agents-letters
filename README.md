@@ -58,11 +58,11 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-截至 2026-11-17，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。
+截至 2026-11-18，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。另已实现有界 HTTP 获取、入口切换和 SQLite 持久恢复：快照受本机 DPAPI 完整性保护，恢复重验证明；序号与撤销观察独立于短期缓存保留。未注册身份的负缓存仅留在有界内存，重启后回到未知状态。
 
-本轮 `cargo test --workspace --all-targets --locked` 通过（57 项，含新增 26 项链验证测试），Clippy（`-D warnings`）、格式、依赖探针、许可证和 CDDL 语法/固定 ACK 向量检查通过。历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 上轮已通过 14 项 Foundry 合约测试，本轮未重跑；上游弃用提示及既有合约构建提示保留在对应记录中。
+本轮 `cargo test --workspace --all-targets --locked` 通过（108 项，含 49 项链验证/HTTP/恢复测试及 34 项存储测试），Clippy（`-D warnings`）、格式、许可证和 CDDL 语法/固定 ACK 向量检查通过。HTTP 集成、历史 Mainnet 最终性、合成 Trie 证明和本地状态转换测试的区别见 `docs/chain-verification.md`。T06a 的 14 项 Foundry 合约测试及独立依赖探针本轮未重跑；上游和许可证提示保留在对应记录中。
 
-实时 RPC 同步、多证明服务兼容、可信检查点/身份缓存持久化及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、可信检查点授权续期、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -132,8 +132,8 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-As of November 17, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration.
+As of November 18, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration. Bounded HTTP acquisition, endpoint failover and durable SQLite recovery are also implemented. Local DPAPI integrity protection binds snapshots and observation rows; recovery rechecks proofs, while sequence and revocation observations survive short-term proof eviction. Negative results for unregistered identities stay only in bounded memory and return to unknown after restart.
 
-This round's `cargo test --workspace --all-targets --locked` passed 57 tests, including 26 new chain-verification tests. Clippy with `-D warnings`, formatting, dependency probes, license checking, and the CDDL grammar/fixed ACK checks passed. `docs/chain-verification.md` separates historical Mainnet finality, synthetic Trie proofs and local state-transition tests. T06a previously passed 14 Foundry contract tests; they were not rerun in this slice. Upstream deprecation and earlier contract-build advisories remain documented.
+This round's `cargo test --workspace --all-targets --locked` passed 108 tests, including 49 chain-verification/HTTP/recovery tests and 34 storage tests. Clippy with `-D warnings`, formatting, license checking, and the CDDL grammar/fixed ACK checks passed. `docs/chain-verification.md` separates local HTTP integration, historical Mainnet finality, synthetic Trie proofs and local state transitions. T06a's 14 Foundry tests and the standalone dependency probes were not rerun in this slice. Upstream and license advisories remain documented.
 
-Live RPC synchronization, multiple proof-provider compatibility, durable trusted checkpoints/identity observations and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, authorized checkpoint renewal, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.

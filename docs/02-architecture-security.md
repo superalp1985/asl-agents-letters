@@ -8,7 +8,7 @@ Rust workspace，八个 crate。使用 rust-libp2p 一个网络栈；不同时�
 
 身份分为本机保护的 secp256k1 身份根密钥与逐设备传输密钥。AgentId 由初始根公钥派生；公共链登记当前控制者、设备状态承诺、序号和撤销状态。每台设备的 libp2p PeerId 由独立 Ed25519 密钥得到，并由身份根密钥签发有期限的设备证书。联系人固定 AgentId，网络连接认证设备。DHT/短码只负责发现。链验证依赖已验证最终化区块头及状态证明；链不能证明真人身份、唯一控制者、善意或设备安全。
 
-链上默认生产配置建议 Ethereum Mainnet + 极小、不可升级、无管理员 EVM registry。T06a 已实现 immutable 合约和本地 Foundry 测试；尚未部署、测量主网 gas、独立审计或完成 light-client/state-proof Rust 适配器。链 ID、地址和实际部署 runtime code hash 通过版本化网络配置提供，代码不硬编码端点或部署地址。ASL 不维护私有链，不收费、不发币。多个独立志愿提交者可替用户提交其签名操作并承担 gas；用户可选自付。若都不可用，新身份保持 pending_anchor，链校验失败只能降级，不能扩大权限。详见 `specs/identity-registry-v1.md`。
+链上默认生产配置建议 Ethereum Mainnet + 极小、不可升级、无管理员 EVM registry。T06a 已实现 immutable 合约和本地 Foundry 测试；T06b 已实现本地 Helios/Alloy 验证、有界 HTTP 获取和 SQLite 持久恢复。尚未部署、测量主网 gas、真实多运营商证明服务互测或独立审计。链 ID、地址和实际部署 runtime code hash 通过版本化网络配置提供，代码不硬编码端点或部署地址。ASL 不维护私有链，不收费、不发币。多个独立志愿提交者可替用户提交其签名操作并承担 gas；用户可选自付。若都不可用，新身份保持 pending_anchor，链校验失败只能降级，不能扩大权限。详见 `specs/identity-registry-v1.md`。
 
 P2P 语义控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。控制帧中不得出现自由文本字段；模型输入/输出的应用决策也必须转换为受限类型对象。libp2p 自身握手、地址和基础协议不属于 ASL 语义载荷，但 ASL 不把其字符串字段转交给 Agent 作为指令。
 

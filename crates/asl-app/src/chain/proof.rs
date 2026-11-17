@@ -23,6 +23,7 @@ pub trait IdentityProofVerifier {
     ) -> Result<VerifiedIdentity, ChainError>;
 }
 
+#[derive(Clone)]
 pub struct EthereumProofVerifier {
     deployment: RegistryDeploymentV1,
 }

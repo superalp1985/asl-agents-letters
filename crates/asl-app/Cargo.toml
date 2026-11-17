@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
+asl-store = { path = "../asl-store" }
 k256.workspace = true
 libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }
 rand.workspace = true
@@ -20,10 +21,13 @@ alloy-consensus.workspace = true
 helios-consensus-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+cbor2.workspace = true
+blake3.workspace = true
+alloy-rpc-types-eth.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-blake3.workspace = true
 eframe.workspace = true
 rmcp.workspace = true
 rusqlite.workspace = true
-tokio.workspace = true

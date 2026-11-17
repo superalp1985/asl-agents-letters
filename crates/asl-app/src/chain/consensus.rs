@@ -8,7 +8,7 @@ use helios_consensus_core::{
     types::{Bootstrap, FinalityUpdate, Fork, Forks, LightClientHeader, LightClientStore, Update},
     verify_bootstrap, verify_finality_update, verify_update,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{ChainError, ConsensusConfigV1, FinalizedExecution, ForkV1};
 
@@ -20,12 +20,22 @@ struct BeaconResponse<T> {
     data: T,
 }
 
+#[derive(Clone)]
 pub struct EthereumLightClient {
     config: ConsensusConfigV1,
     forks: Forks,
     store: LightClientStore<MainnetConsensusSpec>,
     execution: Option<FinalizedExecution>,
     conflicting_finality: bool,
+    execution_header_rlp: Option<Vec<u8>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalConsensusState {
+    store: LightClientStore<MainnetConsensusSpec>,
+    conflicting_finality: bool,
+    execution_header_rlp: Option<Vec<u8>>,
 }
 
 impl EthereumLightClient {
@@ -61,6 +71,7 @@ impl EthereumLightClient {
             store,
             execution,
             conflicting_finality: false,
+            execution_header_rlp: None,
         })
     }
 
@@ -70,6 +81,110 @@ impl EthereumLightClient {
 
     pub fn max_finality_age_secs(&self) -> u64 {
         self.config.max_finality_age_secs
+    }
+
+    pub(super) fn config(&self) -> &ConsensusConfigV1 {
+        &self.config
+    }
+
+    pub(super) fn update_period(&self) -> u64 {
+        self.store.finalized_header.beacon().slot
+            / MainnetConsensusSpec::slots_per_sync_committee_period()
+            + u64::from(self.store.next_sync_committee.is_some())
+    }
+
+    pub(super) fn execution_block_hash(&self) -> Result<[u8; 32], ChainError> {
+        execution_hash(&self.store.finalized_header).map(|hash| hash.0)
+    }
+
+    pub(super) fn observed_execution(&self) -> Option<&FinalizedExecution> {
+        self.execution.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_execution(mut self, finalized: FinalizedExecution) -> Self {
+        // Synthetic Trie tests start after consensus verification. This fixture
+        // shortcut is not compiled into the application.
+        let LightClientHeader::Capella(header) = &mut self.store.finalized_header else {
+            panic!("test fixture requires capella");
+        };
+        header.beacon.slot = finalized.beacon_slot;
+        let helios_consensus_core::types::ExecutionPayloadHeader::Capella(execution) =
+            &mut header.execution
+        else {
+            panic!("test fixture requires capella execution");
+        };
+        execution.block_number = finalized.block_number;
+        execution.block_hash = B256::from(finalized.block_hash);
+        execution.state_root = B256::from(finalized.state_root);
+        execution.timestamp = finalized.timestamp_secs;
+        self.execution = Some(finalized);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_beacon_conflict(mut self) -> Self {
+        let LightClientHeader::Capella(header) = &mut self.store.finalized_header else {
+            panic!("test fixture requires capella");
+        };
+        header.beacon.body_root = B256::ZERO;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_gloas_execution(mut self, execution: &Header) -> Self {
+        use helios_consensus_core::types::LightClientHeaderGloas;
+        let mut candidate = self.store.clone();
+        let mut beacon = candidate.finalized_header.beacon().clone();
+        beacon.slot += 1;
+        candidate.finalized_header = LightClientHeader::Gloas(LightClientHeaderGloas {
+            beacon,
+            execution_block_hash: execution.hash_slow(),
+            ..Default::default()
+        });
+        self.commit_verified_store(candidate).unwrap();
+        self
+    }
+
+    pub(super) fn local_state(&self) -> Result<Vec<u8>, ChainError> {
+        serde_json::to_vec(&LocalConsensusState {
+            store: self.store.clone(),
+            conflicting_finality: self.conflicting_finality,
+            execution_header_rlp: self.execution_header_rlp.clone(),
+        })
+        .map_err(|_| ChainError::InvalidLocalState)
+    }
+
+    // The persistence adapter authenticates the enclosing local snapshot before
+    // calling this. No peer/RPC response is accepted through this entry point.
+    pub(super) fn from_local_state(
+        config: ConsensusConfigV1,
+        bytes: &[u8],
+        now_secs: u64,
+    ) -> Result<Self, ChainError> {
+        config.validate()?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(ChainError::InvalidLocalState);
+        }
+        let saved: LocalConsensusState =
+            serde_json::from_slice(bytes).map_err(|_| ChainError::InvalidLocalState)?;
+        if saved.store.finalized_header.beacon().slot < config.checkpoint.slot {
+            return Err(ChainError::InvalidLocalState);
+        }
+        let execution = execution_from_payload(config.chain_id, &saved.store.finalized_header)?;
+        let mut client = Self {
+            forks: configured_forks(&config),
+            config,
+            store: saved.store,
+            execution,
+            conflicting_finality: saved.conflicting_finality,
+            execution_header_rlp: None,
+        };
+        client.check_checkpoint_lifetime(now_secs)?;
+        if let Some(rlp) = saved.execution_header_rlp {
+            client.supply_execution_header(&rlp, now_secs)?;
+        }
+        Ok(client)
     }
 
     pub fn finalized(&self, now_secs: u64) -> Result<FinalizedExecution, ChainError> {
@@ -171,6 +286,7 @@ impl EthereumLightClient {
             return Err(ChainError::InvalidExecutionHeader);
         }
         self.execution = Some(candidate);
+        self.execution_header_rlp = Some(rlp.to_vec());
         Ok(())
     }
 
@@ -237,6 +353,12 @@ impl EthereumLightClient {
         {
             self.conflicting_finality = true;
             return Err(ChainError::ConflictingFinality);
+        }
+        if !matches!(next_header, LightClientHeader::Gloas(_))
+            || execution.as_ref().map(|state| state.block_hash)
+                != self.execution.as_ref().map(|state| state.block_hash)
+        {
+            self.execution_header_rlp = None;
         }
         self.store = candidate;
         self.execution = execution;

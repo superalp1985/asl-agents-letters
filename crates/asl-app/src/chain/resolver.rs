@@ -13,11 +13,13 @@ pub trait IdentityResolver {
     fn resolve(&mut self, agent: AgentId, now_secs: u64) -> IdentityResolution;
 }
 
+#[derive(Clone)]
 struct CachedIdentity {
     identity: VerifiedIdentity,
     last_used_secs: u64,
 }
 
+#[derive(Clone)]
 pub struct EthereumIdentityResolver {
     light_client: EthereumLightClient,
     verifier: EthereumProofVerifier,
@@ -63,6 +65,16 @@ impl EthereumIdentityResolver {
         proof: &IdentityProofV1,
         now_secs: u64,
     ) -> Result<(), ChainError> {
+        let identity = self.verify_fresh_proof(expected_agent, proof, now_secs)?;
+        self.cache_verified(identity, now_secs)
+    }
+
+    pub(super) fn verify_fresh_proof(
+        &self,
+        expected_agent: AgentId,
+        proof: &IdentityProofV1,
+        now_secs: u64,
+    ) -> Result<VerifiedIdentity, ChainError> {
         let finalized = self.light_client.finalized(now_secs)?;
         let identity = self.verifier.verify(&finalized, expected_agent, proof)?;
         if now_secs
@@ -72,10 +84,10 @@ impl EthereumIdentityResolver {
         {
             return Err(ChainError::StaleFinality);
         }
-        self.cache_verified(identity, now_secs)
+        Ok(identity)
     }
 
-    fn cache_verified(
+    pub(super) fn cache_verified(
         &mut self,
         identity: VerifiedIdentity,
         now_secs: u64,
@@ -116,6 +128,20 @@ impl EthereumIdentityResolver {
                 last_used_secs: now_secs,
             },
         );
+        Ok(())
+    }
+
+    pub(super) fn restore_verified(
+        &mut self,
+        identity: VerifiedIdentity,
+        last_used_secs: u64,
+        now_secs: u64,
+    ) -> Result<(), ChainError> {
+        let agent = identity.agent_id();
+        self.cache_verified(identity, now_secs)?;
+        if let Some(cached) = self.cache.get_mut(&agent) {
+            cached.last_used_secs = last_used_secs;
+        }
         Ok(())
     }
 }

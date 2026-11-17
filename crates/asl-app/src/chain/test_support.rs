@@ -13,6 +13,40 @@ pub const FINALITY: &[u8] = include_bytes!("../../tests/fixtures/helios/finality
 pub const BOOTSTRAP_TIME: u64 = 1_691_656_535;
 pub const FINALITY_NOW: u64 = 1_692_137_207;
 
+pub struct TestChainDatabase {
+    pub path: std::path::PathBuf,
+}
+
+impl TestChainDatabase {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../work/test-chain");
+        std::fs::create_dir_all(&base).unwrap();
+        Self {
+            path: base.join(format!(
+                "chain-{}-{}.sqlite3",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+        }
+    }
+
+    pub fn open(&self) -> asl_store::Store {
+        asl_store::open_store(&self.path).unwrap()
+    }
+}
+
+impl Drop for TestChainDatabase {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.path.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+        }
+    }
+}
+
 pub fn consensus_config() -> ConsensusConfigV1 {
     let fork = |epoch, version| ForkV1 {
         epoch,
@@ -77,7 +111,14 @@ pub fn proof_fixture(
     values: [[u8; 32]; 3],
     deployment_variant: u8,
 ) -> (RegistryDeploymentV1, FinalizedExecution, IdentityProofV1) {
-    let agent = AgentId([7; 32]);
+    proof_fixture_for_agent(values, deployment_variant, AgentId([7; 32]))
+}
+
+pub fn proof_fixture_for_agent(
+    values: [[u8; 32]; 3],
+    deployment_variant: u8,
+    agent: AgentId,
+) -> (RegistryDeploymentV1, FinalizedExecution, IdentityProofV1) {
     let deployment = RegistryDeploymentV1 {
         version: 1,
         chain_id: 1,

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "beacon_endpoints": [],
+  "execution_endpoints": [],
+  "request_timeout_ms": 10000,
+  "max_committee_updates": 8,
+  "max_sync_requests": 24
+}

@@ -1,6 +1,7 @@
 use std::fmt;
 
 use asl_types::ids::AgentId;
+use serde::{Deserialize, Serialize};
 
 use super::RegistryDeploymentV1;
 
@@ -22,6 +23,12 @@ pub enum ChainError {
     InvalidRegistryState,
     Rollback,
     CacheFull,
+    TransportUnavailable,
+    InvalidRpcResponse,
+    ResponseTooLarge,
+    InvalidLocalState,
+    StorageUnavailable,
+    ObservationLimit,
 }
 
 impl fmt::Display for ChainError {
@@ -43,6 +50,12 @@ impl fmt::Display for ChainError {
             Self::InvalidRegistryState => "invalid registry storage state",
             Self::Rollback => "identity state would roll back",
             Self::CacheFull => "verified identity cache is full",
+            Self::TransportUnavailable => "configured chain services are unavailable",
+            Self::InvalidRpcResponse => "invalid chain service response",
+            Self::ResponseTooLarge => "chain service response exceeds limits",
+            Self::InvalidLocalState => "local chain state failed integrity or configuration checks",
+            Self::StorageUnavailable => "verified chain state could not be saved",
+            Self::ObservationLimit => "durable identity observation limit reached",
         };
         formatter.write_str(message)
     }
@@ -87,7 +100,7 @@ impl FinalizedExecution {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccountProofV1 {
     pub nonce: u64,
     pub balance: [u8; 32],
@@ -96,14 +109,14 @@ pub struct AccountProofV1 {
     pub nodes: Vec<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StorageProofV1 {
     pub slot: [u8; 32],
     pub value: [u8; 32],
     pub nodes: Vec<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct IdentityProofV1 {
     pub version: u16,
     pub agent_id: AgentId,
