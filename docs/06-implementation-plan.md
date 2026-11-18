@@ -75,7 +75,7 @@ contracts/{src/IdentityRegistry.sol,test/IdentityRegistry.t.sol,foundry.toml}
 
 ### 当前恢复点（2026-11-18）
 
-T07 授权核心、T08 文件句柄能力、T13 签名记录核心和 T06b 显式检查点续期切片已完成；固定协议样例已覆盖全部帧和记录。后续主线为 T09 沙箱 → T10 supervisor → T11/T14 等功能。本机仍不能创建真实符号链接或取得实际 8.3 别名，缺失向量由用户操作的 NTFS 云机补齐，不修改本机权限或卷设置。
+T07 授权核心、T08 文件句柄能力、T13 签名记录核心和 T06b 显式检查点续期切片已完成；固定协议样例已覆盖全部帧和记录。T09 沙箱首轮实现和本机否定探针已完成，独立复核后更新了继承句柄窗口与 UDP 确认测试。仍缺真实 UDP 回包、QUIC 和 mDNS 请求/响应验收，T09 不标整体验收完成。后续依赖 T09 的 T10 supervisor 及之后任务可在隔离接口上继续实施，但真实网络验收继续作为单独发布阻断。T08 本机不能创建真实符号链接或取得实际 8.3 别名，缺失向量由用户操作的 NTFS 云机补齐，不修改本机权限或卷设置。
 
 云机补跑更新：首次完整日志证明实际符号链接和 8.3 别名已执行，暴露卷根 SUBST 的测试盘符硬编码。修正后用户反馈完整重跑 22 项通过、0 失败、1.27 秒；本次只提供结果摘要，没有新完整日志或提交 SHA。结合之前真实夹具日志与本机 SUBST 实测，T08 本任务验收完成，可以实施 T09。云机环境自 2026-11-18 起保留 7 天，后续系统测试按需使用；不是整个产品验收。
 
@@ -226,13 +226,13 @@ T07 实现记录（2026-11-18）：已拆分 types、audience、labels 和 servi
 cargo test -p asl-policy --test path_boundaries -- --nocapture
 ```
 
-测试夹具在 E:\ASL\work\test-fs，包含 inside/allowed.md、outside/secret.md、junction、symlink、硬链接、ADS 和重命名竞争。真实测试拒绝越界、硬链接>1、设备/UNC/绝对路径/短名绕过；普通允许文件正确读出。测试后只清理自己创建且已验证在该根下的路径。
+测试夹具默认使用系统临时目录下的 `asl-test-fs`，或通过 `ASL_T08_FIXTURE_BASE` 指向指定 NTFS 目录；开发脚本将临时目录置于 E 盘。夹具包含 inside/allowed.md、outside/secret.md、junction、symlink、硬链接、ADS 和重命名竞争。真实测试拒绝越界、硬链接>1、设备/UNC/绝对路径/短名绕过；普通允许文件正确读出。测试后只清理自己创建且已验证在该根下的路径。
 
 T08 验收完成（2026-11-18）：句柄相对打开、祖先固定、根身份恢复、保护目录排除、类型/大小/扩展名规则已实现，未暴露路径或原始句柄。真实 junction、硬链接、ADS、目录/卷根 SUBST、写入/删除/重命名锁及替换对照已执行；持有能力期间新增硬链接后，下一次读取失败关闭。本机 symlink/8.3 条件缺失，用户云机完整日志已补齐真实夹具；盘符修正后用户报告云机 22 项全部通过（1.27 秒），本次只有结果摘要，证据来源分开记录。独立工程复核提出的问题已修正；不修改机器权限或卷设置绕过测试。详细范围见 `docs/windows-source-handles.md`；后续持久撤销、AppContainer 和传输栅栏分别验收。
 
 ### T09 — AppContainer 与 Job Object
 
-依赖 T08、T02。创建 policy sandbox、windows/appcontainer/job，以及 probe helper。
+依赖 T08、T02。创建 policy sandbox、windows/appcontainer/job，以及 probe helper。受控子进程编译为 Windows GUI subsystem，保留三个匿名标准管道；不得使用 `CREATE_NO_WINDOW`（该组合在本机真实 AppContainer 探针下以 `STATUS_DLL_INIT_FAILED` 退出）。环境只由可信系统路径和 `SHGetKnownFolderPath` 重建 `LOCALAPPDATA`，不继承父进程环境。
 
 接口 `spawn_sandbox(role, inherited_handles, limits) -> Result<SandboxChild, AslError>`；role 为 Net/Worker/Extractor；句柄使用显式 allowlist。
 
@@ -242,17 +242,21 @@ cargo test -p asl-policy --test sandbox_probe -- --nocapture
 
 验收在真实 Windows 测得：worker 读 outside、连 HTTP、启动子进程均失败；net 可进行获准 TCP/QUIC、mDNS，但读用户目录失败。AppContainer/Job 失效、ACL 不支持、句柄遗留均失败关闭。此任务必须独立复核，不能伪造 probe 返回值。
 
+T09 当前实现记录（2026-11-18）：完成 Windows AppContainer 按 Net/Worker/Extractor 拆分、网络 capability 最小分配、真实子 token SID/capability 检查、唯一只读执行文件 ACL、Job 内存/CPU/单进程/kill-on-close 约束、helper CPU 与墙钟时限、三个匿名 IPC 管道、父环境清空、悬挂启动后入 Job 再放行及失败关闭。broker 端点永久不可继承；创建时只复制三只 allowlist handle，立即清除继承标志并通过本地进程创建锁串行化。执行文件 ACL 读改写现由进程内锁与按 pinned file identity 命名的跨进程 mutex 串行化，两个独立测试进程实测通过。新增真实 Windows helper 探针，覆盖文件越权、worker 联网/子进程拒绝、坏句柄不泄漏数据、ACL 只改可执行文件并恢复、超时/CPU/内存限制、句柄与子进程清理、Net 角色公网 TCP 能力及 multicast membership。外部 TCP 测试仅建立连接握手，实际 UDP echo、libp2p QUIC 和 mDNS 查询/响应仍未验收。独立初审发现的管道句柄暴露与 UDP 探针假阳性已按意见修正；Worker UDP 拒绝现在返回结构化失败并有 TEST-NET 回归测试。此前一次独立复核因工作区不可见未能检查本仓库；后续正确工作区复核发现 DACL 跨进程竞争，现已添加 mutex 与双进程测试，修正后的独立复核仍待确认。T09 保持部分完成，T10 实现不代表网络验收或独立安全审计关闭。
+
 ### T10 — Supervisor 与有界 IPC
 
 依赖 T09、T06。创建 app supervisor/ipc 和四个 Windows bin 入口。
 
 接口 `Supervisor::start(AppPaths)`；IPC 消息枚举固定，不接 shell command/path。连接身份使用私有继承管道，net peer 事件只来自已认证 driver。
 
-验收：超 4MiB、未知角色、重复序列、非法操作拒绝；core 退出杀死子进程；worker 崩溃只失败当前任务；stderr 不污染 MCP stdout。
+验收：超 4MiB、未知角色、重复序列、非法操作拒绝；core 退出由 Job Object 终止子进程；worker 崩溃只失败当前任务。MCP server 尚未实现，stdio 隔离要求在 MCP 接入任务中端到端验收；IPC 子进程 stdout 只能包含固定二进制帧、诊断只能写 stderr。T10 IPC v1 暂不定义 peer identity event；T14 的网络消息必须来自已认证 driver 并经 core 身份校验。
 
 ```text
-cargo test -p asl-app --test supervisor_ipc
+cargo test -p asl-app --test supervisor_ipc --locked --offline
 ```
+
+T10 当前实现记录（2026-11-18）：完成固定 binary IPC v1（20 字节头、固定角色/消息/操作、每方向从 1 开始的严格序号、4 MiB 整帧上限），拒绝未知角色/消息/操作、错方向、重复/跳号、长度矛盾和超限帧；任务载荷在复制前限长。Net 事件通过容量为 8 的有界队列传递；EOF 或解码错误会终止读取线程，避免反复累积错误。新增 `Supervisor::start(AppPaths)`，通过相邻固定 Windows 二进制创建受限 Net 常驻子进程，Worker 每任务单独启动；Core 仅从 `ASL_HOME` 取数据根，无默认盘符回退。四个入口为 `asl`、`asl-core`、`asl-net`、`asl-worker`；IPC 子进程 stdout 仅承载 IPC 帧，诊断走 stderr。真实 Windows 测试覆盖 Net 心跳、Worker 结构化拒绝、收到任务启动确认后但 Core 放行执行前强制终止 Worker，验证当前调用失败，以及新 Worker 接续任务；该用例验证握手阶段中止，不代表计算中的崩溃注入。Worker 启动失败也不会影响 Net。T10 未实现 ASL 网络 driver/PeerId 事件、MCP 服务端或 GUI；IPC v1 不暴露 peer identity，T14 必须由认证 driver 与 core 身份校验共同接入。core 正常退出通过 supervisor 清理，异常退出依靠 T09 Job 的 `KILL_ON_JOB_CLOSE`；Supervisor 进程级故障注入及真实 MCP stdout 集成仍待后续验证，不能据此声称全部 T10 系统验收已关闭。
 
 ### T11 — 不可变快照与源目录对账
 

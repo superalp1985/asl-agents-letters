@@ -2,6 +2,7 @@ mod audience;
 mod labels;
 pub mod paths;
 mod platform;
+pub mod sandbox;
 pub mod service;
 pub mod types;
 

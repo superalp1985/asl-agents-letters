@@ -60,11 +60,15 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 - net 使用独立 AppContainer 身份，只授予确需的网络能力和 IPC，不授予用户资料目录。
 - worker/helper 不授予网络能力或用户目录；仅得到本次操作的输入和输出管道。
 - 子进程加入 Job Object，限制内存、CPU 时间、活动进程数和退出联动；活动进程上限为 1，禁止自行启动子进程。
-- IPC 使用继承句柄及明确白名单，拒绝继承文件、密钥和数据库句柄；启动环境清除 API Key。
-- 可执行文件读/执行 ACL 只授予对应 sandbox SID，不把 E:\ASL 根目录整体开放给它。
+- IPC 使用匿名管道与进程创建时的明确句柄白名单；broker 管道端点默认不可继承，仅在受锁保护的创建调用中为白名单制作短暂可继承副本并立即清除标志。文件、密钥和数据库句柄不在列表中；启动环境由系统路径及已核验的已知文件夹重建，不复制父进程环境或 API Key。
+- 可执行文件通过已固定的 NTFS 文件句柄单独授予对应随机 sandbox SID 读取/执行 ACL，进程结束后撤销；同一文件的 DACL 读改写由进程内锁和按文件身份命名的跨进程 mutex 串行化。不把 E:\ASL 根目录或父目录整体开放给它。OS 自身 AppContainer profile 目录由 Windows 管理。
 - Windows API 与 `unsafe` 集中在 `asl-policy/src/platform/windows/`。不能把低完整性令牌当成 AppContainer 等价替代。
 
+T10 IPC v1 使用私有继承匿名管道、固定消息枚举、方向/角色校验、单向严格递增序号和 4 MiB 整帧上限；不包含 shell、路径或自由文本字段。Core 的 Net 事件队列有界为 8 帧，EOF/解码错误会结束读取线程，避免反复处理终止错误。当前 Net IPC 仅支持启动、停止和心跳，尚无对端身份事件。T14 增加网络事件时，身份只能由已认证 driver 产生并进入 core 的身份/链证明校验；不得接受 net 子进程自报 PeerId 作为已认证身份。Worker 任务只携带待校验的 ASL 控制帧字节，结果为固定状态枚举；原始 payload 不直接转发给 Agent。
+
 网络能力包括不同地址类型的适配必须真实验证；AppContainer 的网络权限不等于按域名限制出站。外部模型 HTTP 由 core 的固定网关发起。
+
+T09 实现已有按角色启动、独立 profile、子进程限制、Job 资源限制、显式管道继承、执行文件 ACL、期限 watchdog 和真实否定探针。剩余 TCP/UDP 外部端点、QUIC 及 mDNS 请求/响应必须单独实测；单独创建 multicast membership 不等于 mDNS 已验收。所有其他 ASL 子进程启动必须继续经过统一 broker/sandbox 启动路径，不能并行使用未采用句柄白名单的裸 `CreateProcess`。
 
 隔离不能抵抗管理员、内核入侵、同账号调试器或已被攻陷的 core。安全文档必须陈述威胁范围，不能宣传“绝对不泄露”。
 

@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -14,8 +14,11 @@ struct TestDatabase(PathBuf);
 
 impl TestDatabase {
     fn new() -> Self {
-        let directory = Path::new(r"E:\ASL\work\test-fs\asl-store");
-        fs::create_dir_all(directory).unwrap();
+        let directory = std::env::var_os("ASL_TEST_FIXTURE_BASE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("asl-test-fs"))
+            .join("asl-store");
+        fs::create_dir_all(&directory).unwrap();
         let id = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
         Self(directory.join(format!("chain-{}-{id}.sqlite3", std::process::id())))
     }

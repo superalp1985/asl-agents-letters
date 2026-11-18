@@ -14,13 +14,14 @@ use windows::Wdk::Storage::FileSystem::{
 use windows::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, UNICODE_STRING};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-    FILE_SHARE_READ, FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_TYPE_DISK, FileAttributeTagInfo,
-    FileIdInfo, FileStandardInfo, GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
-    GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW, SYNCHRONIZE, VOLUME_NAME_GUID,
+    CreateFileW, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_STANDARD_INFO, FILE_TRAVERSE,
+    FILE_TYPE_DISK, FileAttributeTagInfo, FileIdInfo, FileStandardInfo,
+    GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW,
+    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -32,6 +33,43 @@ struct PinnedDirectory {
     pins: Vec<Arc<File>>,
     identity: FileIdentity,
     name: Vec<u16>,
+}
+
+pub(super) struct ExecutablePin {
+    pub(super) file: File,
+    pub(super) identity: FileIdentity,
+    _directory: PinnedDirectory,
+}
+
+pub(super) fn pin_executable(path: &Path) -> Result<ExecutablePin, AslError> {
+    let directory = pin_directory(path.parent().ok_or(AslError::SandboxUnavailable)?)?;
+    let component = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(AslError::SandboxUnavailable)?;
+    let names = validated_relative(Path::new(component))?;
+    if names.len() != 1 {
+        return Err(AslError::SandboxUnavailable);
+    }
+    let parent = directory.pins.last().ok_or(AslError::SandboxUnavailable)?;
+    let file = relative_open_with_access(
+        parent,
+        component,
+        false,
+        FILE_READ_ATTRIBUTES
+            | FILE_READ_DATA
+            | FILE_EXECUTE
+            | SYNCHRONIZE
+            | READ_CONTROL
+            | WRITE_DAC,
+    )?;
+    let identity = inspect(&file, false)?.identity;
+    check_long_name(&file, &directory.name, component)?;
+    Ok(ExecutablePin {
+        file,
+        identity,
+        _directory: directory,
+    })
 }
 
 pub(crate) struct SourceRoot {
@@ -194,6 +232,22 @@ fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
 }
 
 fn relative_open(parent: &File, component: &str, directory: bool) -> Result<File, AslError> {
+    let desired = FILE_READ_ATTRIBUTES
+        | SYNCHRONIZE
+        | if directory {
+            FILE_TRAVERSE
+        } else {
+            FILE_READ_DATA
+        };
+    relative_open_with_access(parent, component, directory, desired)
+}
+
+fn relative_open_with_access(
+    parent: &File,
+    component: &str,
+    directory: bool,
+    desired: FILE_ACCESS_RIGHTS,
+) -> Result<File, AslError> {
     // The caller passes one previously validated component. NT's counted
     // string cannot interpret it as an absolute path or another stream.
     let mut encoded: Vec<u16> = component.encode_utf16().collect();
@@ -212,13 +266,6 @@ fn relative_open(parent: &File, component: &str, directory: bool) -> Result<File
     };
     let mut handle = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
-    let desired = FILE_READ_ATTRIBUTES
-        | SYNCHRONIZE
-        | if directory {
-            FILE_TRAVERSE
-        } else {
-            FILE_READ_DATA
-        };
     let options = FILE_OPEN_REPARSE_POINT
         | FILE_SYNCHRONOUS_IO_NONALERT
         | if directory {

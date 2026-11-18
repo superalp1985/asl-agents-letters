@@ -16,7 +16,9 @@ fn rejects_unc_storage_root() {
 
 #[test]
 fn creates_storage_layout_on_ntfs() {
-    let base = PathBuf::from(r"E:\ASL\work\test-fs");
+    let base = std::env::var_os("ASL_TEST_FIXTURE_BASE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("asl-test-fs"));
     fs::create_dir_all(&base).unwrap();
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)

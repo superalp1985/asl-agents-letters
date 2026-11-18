@@ -291,3 +291,63 @@ Foundry 或独立复核。用户确认云机环境自 2026-11-18 起保留 7 天
 - PASS relay credential not copied into any package file
 - PASS consultation completed: round-1-native
 - PASS consultation completed: round-2
+
+### 2026-11-18 T09 AppContainer/Job 首轮与 T10 Supervisor/IPC
+
+- `cargo test --workspace --all-targets --locked --offline`：281 项通过，2 项需外部网络端点的测试忽略。
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `git diff --check`：通过。
+- `cargo test -p asl-app --test supervisor_ipc --locked --offline`：2 项通过。
+- `cargo test -p asl-policy --lib named_acl_mutex_serializes_other_processes --locked --offline`：1 项通过。
+- `cargo test -p asl-app supervisor::tests::sandboxed_worker_failure_does_not_stop_net_or_core --lib --locked --offline -- --exact --nocapture`：1 项通过。
+- Windows sandbox probe：14 项通过、2 项需外部 endpoint 的用例默认忽略。
+- Windows Supervisor/IPC 集成：Net 心跳、Worker 结构化拒绝结果、Worker 启动失败后 Net 仍可响应均通过。
+- 单独启用公网 TCP probe：Net 连接到公共 IPv4 TCP 443 端点，Worker 对同一端点被拒；只验证 TCP 建连，不发送应用数据。
+- 多播 socket membership 成功不等于实际 mDNS；尚无受控 UDP echo receiver，也没有在本轮接入 libp2p QUIC/mDNS query/response。
+
+覆盖 Worker/Extractor 外部文件读取、联网和子进程拒绝，Net 文件拒绝/网络连接，
+AppContainer SID/capability 核验，父环境变量清除，可执行文件 ACL 授权和精确
+恢复，三个 broker 管道默认不可继承、进程句柄显式 allowlist、Job CPU/内存/
+活动进程/终止限制、helper 超时、异常失败回收和无沙箱 fallback。Windows
+版本为本机 NTFS/Rust1.100/MSVC。第一次独立只读复核发现临时可继承 pipe handle
+暴露窗口及 UDP 探针未确认远端收包；已改为只在串行 CreateProcess 调用期间
+使用临时复制句柄、立即清除继承标记，并要求 UDP 收到原 endpoint 的相同
+payload。第二轮复核发现 Worker 预期 UDP 拒绝导致探针非零退出，现已改成结构化
+false 并新增 TEST-NET 回归。此前一次独立复核运行在错误工作区，未检查本仓库；
+随后在正确工作区的只读复核发现执行文件 DACL 读改写存在跨进程竞争，并指出
+Worker 运行中崩溃测试不足。现以按固定文件身份命名的跨进程 mutex 串行化
+DACL 读改写，双进程测试通过；Supervisor 测试现强制终止正在执行任务的 Worker，
+确认当前任务失败、Net 仍响应且新 Worker 可完成下一任务。复核者正在只读复查
+这两项修正，尚未收到其复查结论。不能宣称完整 T09 网络验收、通用沙箱安全证明
+或独立安全审计。无协议/schema/Cargo.lock 变化；未重跑 CDDL、许可证、Foundry
+或依赖探针。
+
+T10 新增固定二进制 IPC、`asl`/`asl-core`/`asl-net`/`asl-worker` 入口及
+真实受限子进程 Supervisor 测试。IPC 限长 4 MiB，拒绝未知角色/消息/操作、
+错误方向、非预期序号和长度不匹配；Worker 每任务单独启动。Worker 在任务中
+被强制终止后，当前任务失败，Net 继续响应，新的 Worker 可接续下一任务。
+T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚未做 Supervisor
+进程级故障注入；MCP server/stdout 端到端也未实现或测试。
+本轮因此记录 T10 代码切片通过工作区及真实子进程测试，不宣称完整系统验收。
+本轮没有新增协议/schema、依赖锁或 CDDL 变化。
+
+### 2026-11-18 T09/T10 复验与测试路径整理
+
+- 使用 E 盘 Rust 1.100.0 工具链和 E 盘缓存执行
+  `cargo test --workspace --all-targets --locked --offline`：284 项通过，
+  2 项需要外部网络端点的测试忽略。
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `git diff --check`：通过。
+- Windows 测试包含 Supervisor Net 心跳、Worker 任务握手阶段终止后的失败关闭与
+  新 Worker 接续、ACL 跨进程 mutex，以及文件/网络/子进程隔离探针。
+- Worker 中止用例在 Worker 报告 `TaskStarted` 后、Core 发送 `TaskContinue` 前
+  终止进程；它验证握手中止时单次调用失败，不代表计算执行期间的进程级崩溃注入。
+- Net 事件转发使用容量为 8 的有界队列；EOF 回归验证读取线程只发送一次终止错误后退出。
+- UDP echo、libp2p QUIC、实际 mDNS 查询/响应、Supervisor 进程级故障注入和
+  MCP stdout 集成仍未验收。未重跑许可证/CDDL、Foundry 或独立依赖探针。
+- 测试夹具默认使用系统临时目录；T08/T09/T10 及通用夹具可分别通过测试专用
+  环境变量指定位置。开发脚本仍将缓存和临时目录放在 E 盘；产品数据根配置不变。
+- 这次工作区测试是在 E 盘 NTFS 环境执行。云机保留供后续真实系统测试使用，
+  本次没有启动云机，也没有修改系统设置。

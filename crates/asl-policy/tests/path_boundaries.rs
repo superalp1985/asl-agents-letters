@@ -16,7 +16,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use asl_policy::{AuthorizedFile, SourceGrant, SourceRules, open_authorized_source};
 use asl_types::error::AslError;
 
-const FIXTURE_BASE: &str = r"E:\ASL\work\test-fs";
 const FIXTURE_BASE_ENV: &str = "ASL_T08_FIXTURE_BASE";
 const FIXTURE_PREFIX: &str = "t08-path-";
 const REPARSE_POINT: u32 = 0x400;
@@ -27,9 +26,11 @@ const SECRET: &[u8] = b"outside fixture secret: never authorized\n";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 fn fixture_base() -> PathBuf {
-    std::env::var_os(FIXTURE_BASE_ENV)
+    let base = std::env::var_os(FIXTURE_BASE_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(FIXTURE_BASE))
+        .unwrap_or_else(|| std::env::temp_dir().join("asl-test-fs"));
+    fs::create_dir_all(&base).expect("create test fixture base");
+    base
 }
 
 fn fixture_volume_root(path: &Path) -> &Path {

@@ -237,8 +237,11 @@ mod tests {
 
     impl TestDatabase {
         fn new() -> Self {
-            let directory = Path::new(r"E:\ASL\work\test-fs\asl-store");
-            fs::create_dir_all(directory).unwrap();
+            let directory = std::env::var_os("ASL_TEST_FIXTURE_BASE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("asl-test-fs"))
+                .join("asl-store");
+            fs::create_dir_all(&directory).unwrap();
             let id = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("store-{}-{id}.sqlite3", std::process::id()));
             Self { path }

@@ -20,6 +20,8 @@ pub enum AslError {
     NotFound,
     InvalidPolicyState,
     PolicyVersionConflict,
+    SandboxUnavailable,
+    SandboxSetupFailed { stage: &'static str, code: i32 },
     Io(io::Error),
 }
 
@@ -45,6 +47,12 @@ impl fmt::Display for AslError {
             Self::NotFound => formatter.write_str("resource not found"),
             Self::InvalidPolicyState => formatter.write_str("policy state is invalid"),
             Self::PolicyVersionConflict => formatter.write_str("policy version conflict"),
+            Self::SandboxUnavailable => {
+                formatter.write_str("required process sandbox is unavailable")
+            }
+            Self::SandboxSetupFailed { stage, code } => {
+                write!(formatter, "sandbox setup failed at {stage}: 0x{code:08x}")
+            }
             Self::Io(error) => write!(formatter, "storage operation failed: {error}"),
         }
     }
@@ -68,7 +76,9 @@ impl std::error::Error for AslError {
             | Self::GrantRevoked
             | Self::NotFound
             | Self::InvalidPolicyState
-            | Self::PolicyVersionConflict => None,
+            | Self::PolicyVersionConflict
+            | Self::SandboxUnavailable => None,
+            Self::SandboxSetupFailed { .. } => None,
         }
     }
 }
