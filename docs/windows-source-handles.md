@@ -57,7 +57,11 @@ AppContainer、Job Object、SQLite 撤销、lease 或网络发送。
 
 ## 验证
 
-测试仅使用 E 盘一次性夹具。真实 junction、硬链接、ADS、SUBST 及
+测试默认使用 `E:\ASL\work\test-fs`。在专用测试机上可通过
+`ASL_T08_FIXTURE_BASE` 指定另一个本地 NTFS 目录，例如
+`C:\ASL\work\test-fs`；这只改变一次性测试夹具位置，不改变生产授权边界。
+
+测试默认使用 E 盘一次性夹具；指定环境变量时使用对应盘符的一次性夹具。真实 junction、硬链接、ADS、SUBST 及
 重命名锁定和替换对照已执行；并发重命名在能力存活期间被锁拒绝。
 测试期间成功新增一个硬链接，之后能力读取立即失败且未输出字节。
 SUBST 对目录和整个 `E:\` 的映射均真实建立并被拒绝，测试结束后移除。

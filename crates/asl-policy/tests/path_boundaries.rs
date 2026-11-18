@@ -17,6 +17,7 @@ use asl_policy::{AuthorizedFile, SourceGrant, SourceRules, open_authorized_sourc
 use asl_types::error::AslError;
 
 const FIXTURE_BASE: &str = r"E:\ASL\work\test-fs";
+const FIXTURE_BASE_ENV: &str = "ASL_T08_FIXTURE_BASE";
 const FIXTURE_PREFIX: &str = "t08-path-";
 const REPARSE_POINT: u32 = 0x400;
 const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
@@ -25,7 +26,14 @@ const ALLOWED: &[u8] = b"authorized fixture bytes\n";
 const SECRET: &[u8] = b"outside fixture secret: never authorized\n";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+fn fixture_base() -> PathBuf {
+    std::env::var_os(FIXTURE_BASE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(FIXTURE_BASE))
+}
+
 struct Fixture {
+    base: PathBuf,
     root: PathBuf,
     inside: PathBuf,
     protected: PathBuf,
@@ -35,13 +43,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let base = Path::new(FIXTURE_BASE);
+        let base = fixture_base();
         assert!(
             base.is_dir(),
-            "required E: fixture directory is unavailable: {FIXTURE_BASE}"
+            "required fixture directory is unavailable: {} (set {FIXTURE_BASE_ENV} to override)",
+            base.display()
         );
         assert_eq!(
-            fs::symlink_metadata(base).unwrap().file_attributes() & REPARSE_POINT,
+            fs::symlink_metadata(&base).unwrap().file_attributes() & REPARSE_POINT,
             0,
             "fixture base must be an actual directory"
         );
@@ -54,9 +63,10 @@ impl Fixture {
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
-        validate_fixture_root(&root);
-        fs::create_dir(&root).expect("create unique fixture on E:");
+        validate_fixture_root(&root, &base);
+        fs::create_dir(&root).expect("create unique fixture directory");
         let fixture = Self {
+            base,
             inside: root.join("inside"),
             protected: root.join("protected"),
             outside: root.join("outside"),
@@ -133,14 +143,14 @@ impl Fixture {
     }
 
     fn cleanup(&self) -> io::Result<()> {
-        validate_fixture_root(&self.root);
+        validate_fixture_root(&self.root, &self.base);
         let metadata = fs::symlink_metadata(&self.root)?;
         assert_eq!(
             metadata.file_attributes() & REPARSE_POINT,
             0,
             "refuse recursive cleanup of a replaced fixture root"
         );
-        let resolved_base = fs::canonicalize(FIXTURE_BASE)?;
+        let resolved_base = fs::canonicalize(&self.base)?;
         let resolved_root = fs::canonicalize(&self.root)?;
         assert!(
             resolved_base.is_absolute()
@@ -189,9 +199,9 @@ impl Drop for Fixture {
     }
 }
 
-fn validate_fixture_root(root: &Path) {
+fn validate_fixture_root(root: &Path, base: &Path) {
     assert!(root.is_absolute());
-    assert_eq!(root.parent(), Some(Path::new(FIXTURE_BASE)));
+    assert_eq!(root.parent(), Some(base));
     assert!(
         root.file_name()
             .and_then(|name| name.to_str())
