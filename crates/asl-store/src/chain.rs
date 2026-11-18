@@ -111,6 +111,25 @@ impl Store {
             _ => return Err(AslError::InvalidDatabase),
         }
 
+        // A changed registry sequence can retire a device even when the Agent
+        // stays active. Cache touches do not change authorization facts.
+        let changed_authority = previous.as_ref().is_some_and(|old| {
+            old.state.checkpoint_hash != bundle.state.checkpoint_hash
+                || old.observations.iter().any(|prior| {
+                    observations
+                        .get(&prior.agent_id.0)
+                        .is_none_or(|new| new.sequence != prior.sequence)
+                })
+        });
+        if changed_authority {
+            transaction
+                .execute(
+                    "UPDATE policy_state SET revision=revision+1 WHERE singleton=1",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
+
         let state = &bundle.state;
         transaction
             .execute(

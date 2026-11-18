@@ -1,0 +1,72 @@
+use std::{path::Path, str};
+
+use asl_policy::{AuthorizedFile, snapshot_files::StagedSnapshot};
+use asl_types::{error::AslError, protocol::ConceptRef};
+
+use crate::search::{LocalIndexText, PreparedIndex};
+
+const MAX_TITLE_CHARS: usize = 160;
+const MAX_BODY_BYTES: usize = 32768;
+const TEXT_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "txt", "rs", "toml", "json", "csv", "yaml", "yml", "log",
+];
+
+pub(super) fn copy_and_prepare(
+    home: &Path,
+    source: &mut AuthorizedFile,
+    relative: &Path,
+    progress: impl FnMut() -> Result<(), AslError>,
+) -> Result<(StagedSnapshot, PreparedIndex), AslError> {
+    let basename = relative
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or(AslError::NotFound)?;
+    let title: String = basename.chars().take(MAX_TITLE_CHARS).collect();
+    let extension = relative.extension().and_then(|s| s.to_str());
+    let text = extension.is_some_and(|ext| {
+        TEXT_EXTENSIONS
+            .iter()
+            .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+    });
+    let mut body = String::new();
+    let staged =
+        StagedSnapshot::copy_from_observing_first_chunk(home, source, progress, |chunk| {
+            if text {
+                body.push_str(text_prefix(chunk));
+            }
+        })?;
+    let index = PreparedIndex::new(LocalIndexText {
+        title: &title,
+        summary: "",
+        body: &body,
+        concepts: if extension.is_some_and(|ext| ext.eq_ignore_ascii_case("rs")) {
+            &[ConceptRef::RUST]
+        } else {
+            &[]
+        },
+    })?;
+    Ok((staged, index))
+}
+
+fn text_prefix(chunk: &[u8]) -> &str {
+    let prefix = &chunk[..chunk.len().min(MAX_BODY_BYTES)];
+    if prefix.starts_with(b"%PDF-") {
+        return "";
+    }
+    let text = match str::from_utf8(prefix) {
+        Ok(text) => text,
+        // Ignore an unfinished character only at our cap, never at EOF.
+        Err(e) if chunk.len() > prefix.len() && e.error_len().is_none() => {
+            str::from_utf8(&prefix[..e.valid_up_to()]).expect("validated UTF-8 prefix")
+        }
+        Err(_) => return "",
+    };
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        ""
+    } else {
+        text
+    }
+}

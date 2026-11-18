@@ -1,5 +1,6 @@
 //! Trusted local broker only. Importing a file does not grant disclosure.
 mod grants;
+mod index_input;
 mod recovery;
 mod reservations;
 mod sources;
@@ -10,10 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
-use asl_policy::{
-    AuthorizedFile, open_authorized_source,
-    snapshot_files::{PinnedHome, StagedSnapshot},
-};
+use asl_policy::{AuthorizedFile, open_authorized_source, snapshot_files::PinnedHome};
 use asl_types::{
     error::AslError,
     ids::Id128,
@@ -99,7 +97,10 @@ impl SnapshotBroker {
             Ok(())
         };
         let db = &mut self.store.connection;
-        let mut staged = StagedSnapshot::copy_from(&self.home, source, || progress(db))?;
+        let (mut staged, index) =
+            index_input::copy_and_prepare(&self.home, source, Path::new(relative), || {
+                progress(db)
+            })?;
         let content_id = staged.content_id();
         recovery::claim_install(db, hold, content_id)?;
         // New objects stay exclusively pinned. Do not hold a SQLite writer
@@ -128,12 +129,19 @@ impl SnapshotBroker {
         if written != 1 {
             return Err(AslError::InvalidDatabase);
         }
-        let existing: Option<String> = tx.query_row(
-            "SELECT resource_key FROM resources WHERE grant_id=?1 AND source_relative=?2 AND active=1
+        let existing: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT resource_key, EXISTS(SELECT 1 FROM resource_fts f
+                 WHERE f.rowid=resources.row_id AND f.resource_key=resources.resource_key)
+             FROM resources WHERE grant_id=?1 AND source_relative=?2 AND active=1
              AND origin='local' AND source_file_id=?3 AND content_id=?4 AND source_grant_epoch=?5",
-            params![auth.id,relative,source_id,content,auth.epoch], |r|r.get(0)).optional().map_err(database_error)?;
-        let key = match existing {
-            Some(key) => ResourceKey(parse_id(&key)?),
+                params![auth.id, relative, source_id, content, auth.epoch],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let (key, indexed) = match existing {
+            Some((key, indexed)) => (ResourceKey(parse_id(&key)?), indexed),
             None => {
                 tx.execute("UPDATE resources SET active=0,updated_at_ms=?3 WHERE grant_id=?1 AND source_relative=?2 AND active=1 AND origin='local'",
                            params![auth.id,relative,now]).map_err(database_error)?;
@@ -142,9 +150,12 @@ impl SnapshotBroker {
                     VALUES (?1,?2,?3,?4,?5,'local','','','source_backed',?6,?6,?7)",
                     params![hex::encode(key.0.0),content,auth.id,relative,source_id,now,auth.epoch]).map_err(database_error)?;
                 bump_revision(&tx)?;
-                key
+                (key, false)
             }
         };
+        if !indexed {
+            index.write(&tx, &key, content_id.into())?;
+        }
         reservations::finish(&tx, hold, "consumed", "done")?;
         if let Err(error) = tx.execute_batch("COMMIT") {
             if !tx.is_autocommit() && tx.rollback().is_ok() {

@@ -106,6 +106,29 @@ fn assert_unchanged(store: &Store, expected: &ChainBundle) {
 }
 
 #[test]
+fn identity_fence_changes_on_revocation_but_not_a_cache_touch() {
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let first = bundle(1);
+    store.save_chain_bundle(&first, None).unwrap();
+    let rev = store.policy_revision().unwrap();
+    let mut refreshed = advance(&first);
+    refreshed.proofs[0].last_used_ms += 1;
+    store
+        .save_chain_bundle(&refreshed, Some(&first.state.verified_header_state))
+        .unwrap();
+    assert_eq!(store.policy_revision().unwrap(), rev);
+    let mut revoked = advance(&refreshed);
+    revoked.observations[0].status = ObservationStatus::Revoked;
+    revoked.observations[0].sequence += 1;
+    revoked.proofs.clear();
+    store
+        .save_chain_bundle(&revoked, Some(&refreshed.state.verified_header_state))
+        .unwrap();
+    assert_eq!(store.policy_revision().unwrap(), rev + 1);
+}
+
+#[test]
 fn records_have_the_required_value_and_serialization_traits() {
     fn assert_traits<T>()
     where

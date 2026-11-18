@@ -71,7 +71,9 @@ Windows T09 已实现按 Net/Worker/Extractor 分权的 AppContainer 启动、Jo
 
 **本地文件共享基础（T11）：** 同一份内容只存一套快照，但每个目录保留独立授权。文件改写、删除或目录撤权时，旧引用失效。Core 使用 Windows 目录变更通知和每 30 秒启动的补查；导入成功不等于向任何节点公开。详见 [导入与对账](docs/snapshot-import.md)。
 
-Windows 全工作区回归：327 项通过、0 失败；真实 30 秒补查另行通过。已测试导入进程中断后保留其他授权仍引用的快照。未测试突然断电或公网文件传输。
+**本地授权检索（T12）：** 陌生节点的检索范围不含联系人专属资料；私有文件不会改变公开命中数、摘要或排名。导入文本会建立本地索引，`.rs` 文件可按 Rust 概念编号检索。PDF 默认仅索引文件名。检索不发送文件，也不给模型读权限。[机制与验证范围](docs/visible-search.md)。
+
+T11 在 Windows 的全工作区回归为 327 项通过、0 失败，真实 30 秒补查另行通过。各轮结果见[验证记录](docs/plan-validation.md)。未测试突然断电或公网文件传输。
 
 ```mermaid
 flowchart LR
@@ -168,7 +170,9 @@ The first Windows T09 slice implements per-role AppContainer launch, Job Object 
 
 **Local file sharing foundation (T11):** identical content shares one physical snapshot, while each directory retains separate authorization. Editing or deleting a source invalidates the old reference; revoking a grant invalidates its own references. Core uses Windows change notifications and schedules a fallback sweep every 30 seconds. Import does not publish to peers. See [snapshot import and reconciliation](docs/snapshot-import.md).
 
-Windows workspace regression: 327 tests passed, none failed. The real 30-second fallback passed separately. Process-termination recovery preserved snapshots still referenced by other grants. Sudden power loss and public-network file transfers were not tested.
+**Local permission-filtered search (T12):** strangers cannot search contacts-only files. Private files do not change public result counts, summaries or ranking. Imported text is indexed locally; `.rs` files are searchable by the Rust topic ID. Only the filename of a PDF is indexed by default. A search neither sends a file nor grants model access. See [search and its verification scope](docs/visible-search.md).
+
+The T11 Windows workspace regression passed 327 tests with zero failures; the real 30-second fallback passed separately. See the [validation log](docs/plan-validation.md) for subsequent runs. Sudden power loss and public-network file transfers were not tested.
 
 ```mermaid
 flowchart LR

@@ -81,6 +81,17 @@ pub struct ConceptRef {
     pub concept_id: u32,
 }
 
+impl ConceptRef {
+    pub const RUST: Self = Self {
+        vocabulary_id: 1,
+        concept_id: 101,
+    };
+
+    pub fn is_topic(self) -> bool {
+        self.vocabulary_id == 1 && (100..=111).contains(&self.concept_id)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypedValue {
     Integer(i64),

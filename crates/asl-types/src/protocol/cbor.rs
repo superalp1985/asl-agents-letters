@@ -217,7 +217,7 @@ fn known_concept(concept: ConceptRef) -> bool {
 }
 
 fn is_topic(concept: ConceptRef) -> bool {
-    concept.vocabulary_id == 1 && (100..=111).contains(&concept.concept_id)
+    concept.is_topic()
 }
 
 fn is_predicate(concept: ConceptRef) -> bool {

@@ -260,6 +260,13 @@ pub struct ScopedPolicy<'a> {
     scope: Scope,
 }
 
+impl ScopedPolicy<'_> {
+    /// Routing context only. A peer ID alone is not authorization.
+    pub fn device_peer_id(&self) -> Option<&PeerId> {
+        self.scope.peer()
+    }
+}
+
 impl PolicyService for ScopedPolicy<'_> {
     fn authorize(&self, request: &AccessRequest, now_ms: u64) -> Result<Permit, AslError> {
         self.engine.authorize_in(&self.scope, request, now_ms)

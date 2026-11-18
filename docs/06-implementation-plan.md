@@ -282,6 +282,8 @@ T11 本地导入与对账：Core 已接入 `SnapshotBroker`、目录变更通知
 cargo test -p asl-store --test visible_search
 ```
 
+T12 本地实现：导入时索引、已有引用的受限文本补录、Jieba/FTS5、检索和元数据双授权、结构化概念查询均已落地。仅在已授权的本地引用内计算命中与排名，不使用全库 BM25。PDF 夹具使用已提取文本，不代表 PDF 解析或公网 Agent 联调。见 `docs/visible-search.md`、`docs/plan-validation.md`。
+
 ### T13 — 记录签名与结构化公开资料
 
 依赖 T06、T03。创建 types record 与 app profile 服务。

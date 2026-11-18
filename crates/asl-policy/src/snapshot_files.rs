@@ -109,6 +109,17 @@ impl StagedSnapshot {
         source: &mut AuthorizedFile,
         progress: impl FnMut() -> Result<(), AslError>,
     ) -> Result<Self, AslError> {
+        Self::copy_from_observing_first_chunk(home, source, progress, |_| {})
+    }
+
+    /// `observe` borrows the first nonempty chunk copied and hashed from the
+    /// pinned source. It is never called for an empty file.
+    pub fn copy_from_observing_first_chunk(
+        home: &Path,
+        source: &mut AuthorizedFile,
+        progress: impl FnMut() -> Result<(), AslError>,
+        observe: impl FnOnce(&[u8]),
+    ) -> Result<Self, AslError> {
         #[cfg(windows)]
         {
             use asl_types::manifest::{CHUNK_SIZE, content_id, encode_manifest};
@@ -122,6 +133,7 @@ impl StagedSnapshot {
             let mut whole = blake3::Hasher::new();
             let mut chunk_hashes = Vec::new();
             let mut buffer = vec![0; remaining.min(u64::from(CHUNK_SIZE)) as usize];
+            let mut first_chunk = Some(observe);
             while remaining != 0 {
                 let len = remaining.min(u64::from(CHUNK_SIZE)) as usize;
                 let chunk = &mut buffer[..len];
@@ -129,6 +141,9 @@ impl StagedSnapshot {
                 blob.write_all(chunk)?;
                 whole.update(chunk);
                 chunk_hashes.push(*blake3::hash(chunk).as_bytes());
+                if let Some(observe) = first_chunk.take() {
+                    observe(chunk);
+                }
                 remaining -= len as u64;
                 progress()?;
             }
@@ -154,7 +169,7 @@ impl StagedSnapshot {
         }
         #[cfg(not(windows))]
         {
-            let _ = (home, source, progress);
+            let _ = (home, source, progress, observe);
             Err(AslError::PlatformUnavailable)
         }
     }

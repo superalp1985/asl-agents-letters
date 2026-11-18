@@ -10,6 +10,7 @@ asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
 blake3.workspace = true
 hex.workspace = true
+jieba-rs = { version = "=0.11.0", default-features = false, features = ["default-dict"] }
 rand.workspace = true
 serde_json.workspace = true
 bs58.workspace = true
