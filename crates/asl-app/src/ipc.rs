@@ -1,13 +1,21 @@
 use std::env;
 use std::io::{Read, Write};
 
-use asl_types::{error::AslError, protocol::decode_control};
+use asl_types::{
+    error::AslError,
+    ids::PeerId,
+    protocol::{
+        IdentityProof, IdentityProofRequest, MAX_EXTENDED_FRAME_BYTES, WireFrame, decode_control,
+        decode_frame as decode_asl_frame, encode_frame as encode_asl_frame,
+    },
+};
 
 pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 const TASK_BODY_HEADER_BYTES: usize = 21;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
+pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
 
@@ -21,43 +29,23 @@ pub enum IpcRole {
 }
 
 impl IpcRole {
-    fn from_wire(value: u8) -> Result<Self, AslError> {
-        match value {
-            1 => Ok(Self::Core),
-            2 => Ok(Self::Net),
-            3 => Ok(Self::Worker),
-            4 => Ok(Self::Extractor),
-            _ => Err(AslError::InvalidMessage),
-        }
-    }
-
-    fn permits(self, receiver: Self, message: &IpcMessage) -> bool {
+    fn permits(self, receiver: Self, kind: u8) -> bool {
         matches!(
-            (self, receiver, message),
+            (self, receiver, kind),
             (
                 Self::Core,
-                Self::Net,
-                IpcMessage::Shutdown | IpcMessage::Ping { .. }
-            ) | (
-                Self::Core,
-                Self::Worker,
-                IpcMessage::Shutdown
-                    | IpcMessage::Ping { .. }
-                    | IpcMessage::RunTask { .. }
-                    | IpcMessage::TaskContinue { .. },
-            ) | (
-                Self::Core,
-                Self::Extractor,
-                IpcMessage::Shutdown | IpcMessage::Ping { .. }
-            ) | (
                 Self::Net | Self::Worker | Self::Extractor,
-                Self::Core,
-                IpcMessage::Ready | IpcMessage::Stopped | IpcMessage::Pong { .. },
-            ) | (
-                Self::Worker | Self::Extractor,
-                Self::Core,
-                IpcMessage::TaskResult { .. }
-            ) | (Self::Worker, Self::Core, IpcMessage::TaskStarted { .. })
+                2 | 4
+            ) | (Self::Core, Self::Net, 14 | 15)
+                | (Self::Core, Self::Worker, 6 | 9)
+                | (
+                    Self::Net | Self::Worker | Self::Extractor,
+                    Self::Core,
+                    1 | 3 | 5
+                )
+                | (Self::Net, Self::Core, 10..=13)
+                | (Self::Worker | Self::Extractor, Self::Core, 7)
+                | (Self::Worker, Self::Core, 8)
         )
     }
 
@@ -129,6 +117,31 @@ pub enum IpcMessage {
     TaskContinue {
         task_id: [u8; 16],
     },
+    PeerAuthenticated {
+        connection_id: [u8; 16],
+        peer_id: PeerId,
+    },
+    PeerDisconnected {
+        connection_id: [u8; 16],
+    },
+    IdentityProofRequested {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        request: IdentityProofRequest,
+    },
+    IdentityProofReceived {
+        connection_id: [u8; 16],
+        proof: IdentityProof,
+    },
+    RequestIdentityProof {
+        connection_id: [u8; 16],
+        request: IdentityProofRequest,
+    },
+    ReplyIdentityProof {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        proof: IdentityProof,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,11 +157,14 @@ pub fn encode_frame(
     sequence: u64,
     message: &IpcMessage,
 ) -> Result<Vec<u8>, AslError> {
-    if sequence == 0 || !sender.permits(receiver, message) {
+    if sequence == 0 {
         return Err(AslError::InvalidMessage);
     }
 
     let (kind, body) = encode_message(message)?;
+    if !sender.permits(receiver, kind) {
+        return Err(AslError::InvalidMessage);
+    }
     let total = HEADER_BYTES
         .checked_add(body.len())
         .filter(|length| *length <= MAX_IPC_FRAME_BYTES)
@@ -174,33 +190,42 @@ pub fn decode_frame(
     if bytes.len() < HEADER_BYTES || bytes.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
     }
-    if bytes[..4] != MAGIC || u16::from_be_bytes([bytes[4], bytes[5]]) != VERSION {
-        return Err(AslError::InvalidMessage);
-    }
-
-    let role = IpcRole::from_wire(bytes[6])?;
-    let sequence = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
-    let payload_len = u32::from_be_bytes(bytes[16..20].try_into().unwrap()) as usize;
-    let exact_len = HEADER_BYTES
-        .checked_add(payload_len)
-        .ok_or(AslError::InvalidMessage)?;
-    if role != expected_sender
-        || sequence != expected_sequence
-        || sequence == 0
-        || exact_len != bytes.len()
-    {
-        return Err(AslError::InvalidMessage);
-    }
-
-    let message = decode_message(bytes[7], &bytes[HEADER_BYTES..])?;
-    if !role.permits(receiver, &message) {
+    let (kind, body_len) = decode_header(
+        bytes[..HEADER_BYTES].try_into().unwrap(),
+        expected_sender,
+        receiver,
+        expected_sequence,
+    )?;
+    if bytes.len() - HEADER_BYTES != body_len {
         return Err(AslError::InvalidMessage);
     }
     Ok(IpcFrame {
-        role,
-        sequence,
-        message,
+        role: expected_sender,
+        sequence: expected_sequence,
+        message: decode_message(kind, &bytes[HEADER_BYTES..])?,
     })
+}
+
+fn decode_header(
+    header: &[u8; HEADER_BYTES],
+    expected_sender: IpcRole,
+    receiver: IpcRole,
+    expected_sequence: u64,
+) -> Result<(u8, usize), AslError> {
+    let kind = header[7];
+    let sequence = u64::from_be_bytes(header[8..16].try_into().unwrap());
+    let body_len = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+    if header[..4] != MAGIC
+        || header[4..6] != VERSION.to_be_bytes()
+        || header[6] != expected_sender as u8
+        || !expected_sender.permits(receiver, kind)
+        || sequence != expected_sequence
+        || sequence == 0
+        || max_body_bytes(kind).is_none_or(|limit| body_len > limit)
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok((kind, body_len))
 }
 
 fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
@@ -248,6 +273,60 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(task_id);
             9
         }
+        IpcMessage::PeerAuthenticated {
+            connection_id,
+            peer_id,
+        } => {
+            let peer_bytes = peer_id.as_bytes();
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            10
+        }
+        IpcMessage::PeerDisconnected { connection_id } => {
+            body.extend_from_slice(connection_id);
+            11
+        }
+        IpcMessage::IdentityProofRequested {
+            connection_id,
+            response_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_identity_frame(&mut body, &WireFrame::IdentityProofRequest(request.clone()))?;
+            12
+        }
+        IpcMessage::IdentityProofReceived {
+            connection_id,
+            proof,
+        } => {
+            body.extend_from_slice(connection_id);
+            append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
+            13
+        }
+        IpcMessage::RequestIdentityProof {
+            connection_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            append_identity_frame(&mut body, &WireFrame::IdentityProofRequest(request.clone()))?;
+            14
+        }
+        IpcMessage::ReplyIdentityProof {
+            connection_id,
+            response_id,
+            proof,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
+            15
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -292,8 +371,98 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
         9 if body.len() == 16 => Ok(IpcMessage::TaskContinue {
             task_id: body.try_into().unwrap(),
         }),
+        10 if body.len() >= 18 => {
+            let peer_length = u16::from_be_bytes(body[16..18].try_into().unwrap()) as usize;
+            if body.len() != 18 + peer_length {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_id =
+                PeerId::from_bytes(body[18..].to_vec()).map_err(|_| AslError::InvalidMessage)?;
+            Ok(IpcMessage::PeerAuthenticated {
+                connection_id: body[..16].try_into().unwrap(),
+                peer_id,
+            })
+        }
+        11 if body.len() == 16 => Ok(IpcMessage::PeerDisconnected {
+            connection_id: body.try_into().unwrap(),
+        }),
+        12 if body.len() >= 36 => Ok(IpcMessage::IdentityProofRequested {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            request: decode_identity_request(&body[32..])?,
+        }),
+        13 if body.len() >= 20 => Ok(IpcMessage::IdentityProofReceived {
+            connection_id: body[..16].try_into().unwrap(),
+            proof: decode_identity_proof(&body[16..])?,
+        }),
+        14 if body.len() >= 20 => Ok(IpcMessage::RequestIdentityProof {
+            connection_id: body[..16].try_into().unwrap(),
+            request: decode_identity_request(&body[16..])?,
+        }),
+        15 if body.len() >= 36 => Ok(IpcMessage::ReplyIdentityProof {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            proof: decode_identity_proof(&body[32..])?,
+        }),
         _ => Err(AslError::InvalidMessage),
     }
+}
+
+fn append_identity_frame(body: &mut Vec<u8>, frame: &WireFrame) -> Result<(), AslError> {
+    let bytes = encode_asl_frame(frame)?;
+    if bytes.len() > MAX_IPC_IDENTITY_PROOF_FRAME_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    body.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(&bytes);
+    Ok(())
+}
+
+fn decode_identity_request(bytes: &[u8]) -> Result<IdentityProofRequest, AslError> {
+    match decode_identity_frame(bytes)? {
+        WireFrame::IdentityProofRequest(request) => Ok(request),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn decode_identity_proof(bytes: &[u8]) -> Result<IdentityProof, AslError> {
+    match decode_identity_frame(bytes)? {
+        WireFrame::IdentityProof(proof) => Ok(proof),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn decode_identity_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
+    if bytes.len() < 4 {
+        return Err(AslError::InvalidMessage);
+    }
+    let frame_length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    if frame_length == 0
+        || frame_length > MAX_IPC_IDENTITY_PROOF_FRAME_BYTES
+        || bytes.len() != 4 + frame_length
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    decode_asl_frame(&bytes[4..])
+}
+
+fn max_body_bytes(kind: u8) -> Option<usize> {
+    Some(match kind {
+        1..=3 => 0,
+        4..=5 => 8,
+        6 => MAX_IPC_TASK_PAYLOAD_BYTES + TASK_BODY_HEADER_BYTES,
+        7 => 17,
+        8..=9 => 16,
+        10 => 18 + 128,
+        11 => 16,
+        12 | 15 => 32 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
+        13 | 14 => 16 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
+        _ => return None,
+    })
 }
 
 pub struct FrameReader<R> {
@@ -317,18 +486,17 @@ impl<R: Read> FrameReader<R> {
         let sequence = self.next_sequence.ok_or(AslError::InvalidMessage)?;
         let mut header = [0u8; HEADER_BYTES];
         self.reader.read_exact(&mut header)?;
-        let payload_len = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
-        let total_len = HEADER_BYTES
-            .checked_add(payload_len)
-            .filter(|length| *length <= MAX_IPC_FRAME_BYTES)
-            .ok_or(AslError::InvalidMessage)?;
-        let mut bytes = Vec::with_capacity(total_len);
-        bytes.extend_from_slice(&header);
-        bytes.resize(total_len, 0);
-        self.reader.read_exact(&mut bytes[HEADER_BYTES..])?;
-        let frame = decode_frame(&bytes, self.expected_sender, self.receiver, sequence)?;
+        let (kind, body_len) =
+            decode_header(&header, self.expected_sender, self.receiver, sequence)?;
+        let mut body = vec![0; body_len];
+        self.reader.read_exact(&mut body)?;
+        let message = decode_message(kind, &body)?;
         self.next_sequence = sequence.checked_add(1);
-        Ok(frame)
+        Ok(IpcFrame {
+            role: self.expected_sender,
+            sequence,
+            message,
+        })
     }
 }
 
@@ -477,6 +645,13 @@ mod tests {
                     (IpcRole::Worker, IpcRole::Core)
                 }
                 IpcMessage::TaskContinue { .. } => (IpcRole::Core, IpcRole::Worker),
+                IpcMessage::PeerAuthenticated { .. }
+                | IpcMessage::PeerDisconnected { .. }
+                | IpcMessage::IdentityProofRequested { .. }
+                | IpcMessage::IdentityProofReceived { .. } => (IpcRole::Net, IpcRole::Core),
+                IpcMessage::RequestIdentityProof { .. } | IpcMessage::ReplyIdentityProof { .. } => {
+                    (IpcRole::Core, IpcRole::Net)
+                }
             };
             let bytes = encode_frame(sender, receiver, 7, &message).unwrap();
             let decoded = decode_frame(&bytes, sender, receiver, 7).unwrap();
@@ -560,6 +735,69 @@ mod tests {
             payload: vec![0; max_payload + 1],
         };
         assert!(encode_frame(IpcRole::Core, IpcRole::Worker, 1, &oversized).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_identity_frame_before_reading_its_body() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct HeaderReader {
+            bytes: Cursor<Vec<u8>>,
+            body_reads: Arc<AtomicUsize>,
+        }
+
+        impl Read for HeaderReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.position() >= HEADER_BYTES as u64 {
+                    self.body_reads.fetch_add(1, Ordering::Relaxed);
+                }
+                self.bytes.read(buffer)
+            }
+        }
+
+        let mut header = vec![0; HEADER_BYTES];
+        header[..4].copy_from_slice(&MAGIC);
+        header[4..6].copy_from_slice(&VERSION.to_be_bytes());
+        header[6] = IpcRole::Net as u8;
+        header[7] = 13;
+        header[8..16].copy_from_slice(&1_u64.to_be_bytes());
+        header[16..20]
+            .copy_from_slice(&((MAX_IPC_FRAME_BYTES - HEADER_BYTES) as u32).to_be_bytes());
+        let body_reads = Arc::new(AtomicUsize::new(0));
+        let reader = HeaderReader {
+            bytes: Cursor::new(header),
+            body_reads: body_reads.clone(),
+        };
+        let mut frame_reader = FrameReader::new(reader, IpcRole::Net, IpcRole::Core);
+
+        assert!(matches!(
+            frame_reader.receive(),
+            Err(AslError::InvalidMessage)
+        ));
+        assert_eq!(body_reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejects_invalid_network_headers_before_reading_the_body() {
+        let mut header = vec![0; HEADER_BYTES];
+        header[..4].copy_from_slice(&MAGIC);
+        header[4..6].copy_from_slice(&VERSION.to_be_bytes());
+        header[7] = 10;
+        header[16..20].copy_from_slice(&18_u32.to_be_bytes());
+
+        for (actual, expected, sequence) in [
+            (IpcRole::Worker, IpcRole::Net, 1_u64),
+            (IpcRole::Worker, IpcRole::Worker, 1),
+            (IpcRole::Net, IpcRole::Net, 2),
+        ] {
+            header[6] = actual as u8;
+            header[8..16].copy_from_slice(&sequence.to_be_bytes());
+            let mut reader = FrameReader::new(Cursor::new(&header), expected, IpcRole::Core);
+            assert!(matches!(reader.receive(), Err(AslError::InvalidMessage)));
+        }
     }
 
     #[test]

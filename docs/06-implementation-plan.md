@@ -324,6 +324,8 @@ T14 组合网络行为切片（2026-11-19）：在现有 loopback-only Noise/Yam
 
 T14 Core 身份证明准入切片（2026-11-19）：`DeviceSession::begin_network_hello` 由本机选择最终化检查点和随机请求 ID，并只经本会话已认证连接发送证明请求。`serve_local_identity_proof` 仅为本机配置的 AgentId 返回持久缓存中检查点完全匹配且未过期的证明；入站请求不能触发链 RPC 或指定其他身份。`finish_network_hello` 将响应令牌绑定到同一连接和 pending request，使用现有 MPT verifier 校验证明，再核验签名设备目录，只准入绑定到该传输 PeerId 的证书。任一步失败都会关闭该会话。Windows TCP 回环集成测试覆盖成功准入、checkpoint/AgentId 错配、缓存过期、证明状态值篡改及目录篡改拒绝。`asl-net` 回复句柄改为借用，错误尝试不会消耗仍有效的句柄。本切片尚未接入 Net/Core Supervisor IPC，未配置生产/公网监听与地址策略，不代表公网或完整 T14 验收。
 
+T14 Net/Core IPC wire 切片（2026-11-19）：为传输 PeerId、断开事件、身份证明请求/响应增加固定 IPC 类型；身份证明载荷复用 identity-proof 1.1 规范 CBOR 编解码，并由 IPC 消息单独绑定 connection handle 和入站 response handle。Net 专属事件拒绝 Worker/Extractor 发送；connection、response handle 均为不透明 16 字节值。FrameReader 按消息类型在分配 body 前限长，身份证明消息不超过其协议帧 256 KiB 加固定封装。完成正反向往返、角色拒绝、畸形 PeerId、串线帧、超限证明及超限 body 预读测试。当前仅完成 IPC wire contract；Supervisor/Net 运行时仍未生成或映射 handles、交付设备密钥、处理网络命令、转发事件或调用 Core `DeviceSession`，不代表跨进程身份握手已运行，T14 未关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

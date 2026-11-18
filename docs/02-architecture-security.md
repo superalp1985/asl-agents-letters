@@ -64,7 +64,7 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 - 可执行文件通过已固定的 NTFS 文件句柄单独授予对应随机 sandbox SID 读取/执行 ACL，进程结束后撤销；同一文件的 DACL 读改写由进程内锁和按文件身份命名的跨进程 mutex 串行化。不把 `ASL_HOME` 根目录或父目录整体开放给它。OS 自身 AppContainer profile 目录由 Windows 管理。
 - Windows API 与 `unsafe` 集中在 `asl-policy/src/platform/windows/`。不能把低完整性令牌当成 AppContainer 等价替代。
 
-T10 IPC v1 使用私有继承匿名管道、固定消息枚举、方向/角色校验、单向严格递增序号和 4 MiB 整帧上限；不包含 shell、路径或自由文本字段。Core 的 Net 事件队列有界为 8 帧，EOF/解码错误会结束读取线程，避免反复处理终止错误。当前 Net IPC 仅支持启动、停止和心跳，尚无对端身份事件。T14 增加网络事件时，身份只能由已认证 driver 产生并进入 core 的身份/链证明校验；不得接受 net 子进程自报 PeerId 作为已认证身份。Worker 任务只携带待校验的 ASL 控制帧字节，结果为固定状态枚举；原始 payload 不直接转发给 Agent。
+T10 IPC v1 使用私有继承匿名管道、固定消息枚举、方向/角色校验、单向严格递增序号和 4 MiB 整帧上限；不包含 shell、路径或自由文本字段。Core 的 Net 事件队列有界为 8 帧，EOF/解码错误会结束读取线程，避免反复累积错误。T14 已定义并测试 Net/Core 的传输 PeerId、连接关闭和身份证明请求/应答消息；帧头先校验角色、方向、序号和各类型长度上限，再读取正文。`PeerAuthenticated` 仅表示 Net 的 libp2p 传输认证结果，不表示 Agent 身份已验证；Core 仍须使用本机最终化检查点验证 MPT 证明、签名设备目录和证书 PeerId。connection/response handle 必须由 Net 对具体活动连接建立映射，并在关闭后作废。当前 Supervisor 与 Net 子进程尚未消费这些 T14 消息，故跨进程连接认证和身份闸门仍未接通。Worker 任务只携带待校验的 ASL 控制帧字节，结果为固定状态枚举；原始 payload 不直接转发给 Agent。
 
 网络能力包括不同地址类型的适配必须真实验证；AppContainer 的网络权限不等于按域名限制出站。外部模型 HTTP 由 core 的固定网关发起。
 

@@ -413,4 +413,15 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, and `scripts/validate-cddl.ps1` passed; CDDL validation reported 17 accepted and 3 rejected vectors as expected.
 - The implementation remains loopback-only and this run did not exercise public addresses, AppContainer networking, Supervisor IPC delivery of authenticated peer events, DHT, relay or multi-operator chain proof services. A source scan found no fixed public IP in product runtime code; loopback literals are confined to local tests. These results do not close T14 or certify public-network security.
 
+### 2026-11-19 T14 Net/Core identity-proof IPC wire
+
+- Added fixed IPC messages for authenticated transport PeerId, disconnection, identity-proof request/response, and the matching Core send/reply commands. PeerId bytes are canonically parsed; identity frames reuse the existing deterministic CBOR codec and must be the correct request/response variant.
+- Net identity events are role-restricted to Net -> Core; Worker/Extractor cannot encode a peer-authentication event. The FrameReader enforces the per-message maximum from the fixed header before allocating the body; identity-proof bodies are capped at 256 KiB plus the fixed IPC envelope.
+- `cargo test -p asl-app --test network_ipc --locked --offline`: 5 passed. Cases cover both message directions, role rejection, malformed PeerId, wrong nested frame kind, and proof size rejection.
+- `cargo test -p asl-app --lib ipc::tests --locked --offline`: 7 passed, including reader probes proving oversized identity events and wrong-role/direction/sequence headers are rejected before their bodies are read.
+- A role-boundary regression first exposed that Worker could encode a peer event; permissions were restricted to Net. A follow-up header test initially failed because the reader consumed the body before validating its role; header validation now rejects role, direction, sequence, and size before body allocation/read.
+- Final `cargo test --workspace --all-targets --locked --offline` passed on Windows with Rust 1.100.0, with `ASL_T10_FIXTURE_BASE` under the configured E: development root. Strict workspace Clippy, `cargo fmt --all -- --check`, `git diff --check`, and `scripts/validate-cddl.ps1` passed; CDDL reported 17 accepted and 3 rejected vectors.
+- A product-runtime source scan for fixed public IPv4 endpoints found no matches. The networking driver remains loopback-only and is not yet wired into the child process.
+- This is only the IPC wire contract. No Supervisor/Net runtime mapping, device-key handoff, socket command handling, Core `DeviceSession` call, AppContainer networking, or public-network test was performed.
+
 已有链 HTTP 历史同步测试曾在一次全量运行中于本地恢复时返回 `InvalidLocalState`；随后单项与全量重跑均通过。未确认该偶发失败的原因，本批未修改链 HTTP 或恢复代码。

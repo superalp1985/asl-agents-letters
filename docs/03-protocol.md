@@ -57,6 +57,8 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
 
+IPC/1 的 T14 类型消息使用 16 字节不透明 connection handle 和已认证设备 PeerId；连接事件只能由 Net 角色发送，PeerId 仅代表 Noise/libp2p 设备传输认证，不代表 AgentId 已验证。身份证明请求/应答复用 `/asl/identity-proof/1.1.0` 的规范 CBOR 帧，额外绑定 connection handle；入站请求另带不透明 response handle，Core 回答时必须原样带回。每种 IPC 消息在读取 body 前执行自身长度上限。运行时必须让 handle 对应一条活动连接、响应句柄对应原请求，并在断开后使旧句柄失效。当前已实现并测试 IPC 消息类型、编码和解码；Net 子进程的连接表、密钥交付、Supervisor 收发和 Core 身份闸门接线仍待完成，因此这些约束尚未由端到端进程测试验证。
+
 控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查必须由后续 driver/Core 完成。未接入 Core 身份闸门前不得把 codec 单独注册为可处理业务的网络行为。
 
 控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 携带 AgentId 和设备证书。双方按需在独立 identity-proof stream 交换证明：request 的 checkpoint 字段绑定请求方本机已接受的 finalized block hash，不能由对端指定信任根；响应必须精确匹配 request ID、AgentId 和 checkpoint。响应包含 finalized height/block hash/state root、完整 EIP-1186 account verifier inputs（nonce、balance、storage root、code hash、nodes）、恰好三个 `{slot: bytes32, value: bytes32, nodes}` 路径，以及最多 8 KiB 的身份根签名 device-directory record。链 ID、registry address 和可信状态根只取本机已验证配置/轻客户端；controller、commitment、sequence、revocation 等状态由 Core 运行现有 Ethereum MPT 验证器从槽值解码，不采信对端派生字段。随后 Core 验证签名目录、链上 commitment/sequence、当前证书和传输 PeerId。每条路径最多 32 个节点、每节点最多 2 KiB、总帧 256 KiB。证明必须来自请求中指定的 checkpoint；对端无法提供时握手失败，不接受它建议的新 root。昂贵验签/证明验证必须经过每连接及全局预算闸门；验证成功前只放行有界 hello/proof/pair 消息。
