@@ -180,7 +180,7 @@ async fn control_identity_and_bulk_requests_use_the_authenticated_connection() {
             listener
                 .send_identity_proof_response(
                     &alternate_connection,
-                    identity_response_token,
+                    &identity_response_token,
                     identity_response.clone(),
                 )
                 .unwrap_err()
@@ -193,7 +193,7 @@ async fn control_identity_and_bulk_requests_use_the_authenticated_connection() {
             listener
                 .send_identity_proof_response(
                     &listener_connection,
-                    identity_response_token,
+                    &identity_response_token,
                     wrong_identity_response,
                 )
                 .is_err()
@@ -201,7 +201,7 @@ async fn control_identity_and_bulk_requests_use_the_authenticated_connection() {
         listener
             .send_identity_proof_response(
                 &listener_connection,
-                identity_response_token,
+                &identity_response_token,
                 identity_response,
             )
             .unwrap();
@@ -259,7 +259,7 @@ async fn control_identity_and_bulk_requests_use_the_authenticated_connection() {
         listener
             .send_control_response(
                 &listener_connection,
-                control_response_token,
+                &control_response_token,
                 control_response.clone(),
             )
             .unwrap();
@@ -315,7 +315,7 @@ async fn control_identity_and_bulk_requests_use_the_authenticated_connection() {
         listener
             .send_bulk_response(
                 &listener_connection,
-                bulk_response_token,
+                &bulk_response_token,
                 BulkResponse {
                     request_id: bulk_request.request_id,
                     status: BulkStatus::NotFound,

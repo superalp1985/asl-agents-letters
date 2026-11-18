@@ -89,7 +89,7 @@ Idle
 
 ## 7. stdio MCP 接入
 
-使用 rmcp，宿主启动 `asl.exe mcp --home E:\ASL\data`，通过同用户私有 IPC 找到 core。标准输出只写 MCP 协议，诊断到 stderr 且脱敏。
+使用 rmcp，宿主启动 `asl.exe mcp --home $env:ASL_HOME`，通过同用户私有 IPC 找到 core。标准输出只写 MCP 协议，诊断到 stderr 且脱敏。
 
 固定四个工具：
 

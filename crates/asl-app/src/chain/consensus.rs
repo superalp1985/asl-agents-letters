@@ -102,7 +102,7 @@ impl EthereumLightClient {
     }
 
     #[cfg(test)]
-    pub(super) fn with_test_execution(mut self, finalized: FinalizedExecution) -> Self {
+    pub(crate) fn with_test_execution(mut self, finalized: FinalizedExecution) -> Self {
         // Synthetic Trie tests start after consensus verification. This fixture
         // shortcut is not compiled into the application.
         let LightClientHeader::Capella(header) = &mut self.store.finalized_header else {

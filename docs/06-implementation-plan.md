@@ -18,7 +18,7 @@
 - 模型最多一次修复，非法输出整次拒绝。
 - 应用层不转发 query；incoming 不产生远端检索。
 - 信任/贡献/自动偏好不参与授权。
-- E 盘数据和缓存，不静默回落 C 盘。
+- 数据和开发缓存放在用户显式选择的本地磁盘，不静默切换到其他磁盘。
 - Windows 沙箱建立失败时不得普通进程回退。
 - 项目自身 MIT，第三方许可独立保留。
 - browsing 与 answering 分别授权；默认不自动回答。
@@ -81,17 +81,17 @@ T07 授权核心、T08 文件句柄能力、T13 签名记录核心和 T06b 显�
 
 T06b 仍有真实多服务兼容、检查点授权界面、后台/进程额度和独立安全审计未完成；T13 仍需后续 DHT、持久历史和真实投递集成。以上核心切片完成不等于整个 1.0 或这些集成任务完成。
 
-### T01 — Workspace、工具链与 E 盘路径
+### T01 — Workspace、工具链与用户可配置路径
 
 依赖：无。创建根 Cargo 文件、八个 crate、`asl-types/src/error.rs`、`asl-policy/src/platform/windows/volume.rs`、`asl-app/src/paths.rs`、`scripts/dev-env.ps1`、`crates/asl-app/tests/home_paths.rs`。
 
-接口：`AppPaths::open(root: &Path) -> Result<AppPaths, AslError>`；提供 root/state/snapshots/incoming/logs 的只读路径。`dev-env.ps1` 仅修改当前进程的 PATH、CARGO_HOME、RUSTUP_HOME、CARGO_TARGET_DIR、TEMP、TMP，目标均在 E:\ASL。
+接口：`AppPaths::open(root: &Path) -> Result<AppPaths, AslError>`；提供 root/state/snapshots/incoming/logs 的只读路径。`dev-env.ps1` 要求显式本地磁盘根目录，只修改当前 PowerShell 进程的 PATH、ASL_HOME、CARGO_HOME、RUSTUP_HOME、CARGO_TARGET_DIR、TEMP、TMP；不写机器级环境变量，不回退到其他磁盘。
 
 ```rust
 assert!(AppPaths::open(std::path::Path::new("relative")).is_err());
 ```
 
-验收：绝对 E 盘目录可用；相对路径、不可用卷、UNC、reparse、非 NTFS 拒绝；禁止调用系统用户目录 fallback。运行 `cargo check --workspace --locked`，首次生成 lock 后再带 locked 重跑。
+验收：绝对且可用的本地磁盘目录可用；相对路径、不可用卷、UNC、reparse、非 NTFS 拒绝；禁止调用系统用户目录 fallback 或静默改选磁盘。运行 `cargo check --workspace --locked`，首次生成 lock 后再带 locked 重跑。
 
 ### T02 — 依赖与外部 API 编译探针
 
@@ -226,7 +226,7 @@ T07 实现记录（2026-11-18）：已拆分 types、audience、labels 和 servi
 cargo test -p asl-policy --test path_boundaries -- --nocapture
 ```
 
-测试夹具默认使用系统临时目录下的 `asl-test-fs`，或通过 `ASL_T08_FIXTURE_BASE` 指向指定 NTFS 目录；开发脚本将临时目录置于 E 盘。夹具包含 inside/allowed.md、outside/secret.md、junction、symlink、硬链接、ADS 和重命名竞争。真实测试拒绝越界、硬链接>1、设备/UNC/绝对路径/短名绕过；普通允许文件正确读出。测试后只清理自己创建且已验证在该根下的路径。
+测试夹具默认使用系统临时目录下的 `asl-test-fs`，或通过 `ASL_T08_FIXTURE_BASE` 指向指定 NTFS 目录；开发脚本将临时目录置于用户选择的开发盘。夹具包含 inside/allowed.md、outside/secret.md、junction、symlink、硬链接、ADS 和重命名竞争。真实测试拒绝越界、硬链接>1、设备/UNC/绝对路径/短名绕过；普通允许文件正确读出。测试后只清理自己创建且已验证在该根下的路径。
 
 T08 验收完成（2026-11-18）：句柄相对打开、祖先固定、根身份恢复、保护目录排除、类型/大小/扩展名规则已实现，未暴露路径或原始句柄。真实 junction、硬链接、ADS、目录/卷根 SUBST、写入/删除/重命名锁及替换对照已执行；持有能力期间新增硬链接后，下一次读取失败关闭。本机 symlink/8.3 条件缺失，用户云机完整日志已补齐真实夹具；盘符修正后用户报告云机 22 项全部通过（1.27 秒），本次只有结果摘要，证据来源分开记录。独立工程复核提出的问题已修正；不修改机器权限或卷设置绕过测试。详细范围见 `docs/windows-source-handles.md`；后续持久撤销、AppContainer 和传输栅栏分别验收。
 
@@ -321,6 +321,8 @@ T14 bulk codec 切片（2026-11-18）：新增 `/asl/blob/1.0.0` request-respons
 T14 身份证明 wire 修订（2026-11-19）：明确废弃未发布的 `/asl/identity-proof/1.0.0` 线格式并冻结 `/asl/identity-proof/1.1.0`。响应现在携带可供既有 MPT 验证器使用的完整账户字段、三个 256 位 slot/value 路径及最多 8 KiB 签名设备目录；不再接收对端声称的 controller、sequence 或 revoked 结果。`asl-app::chain::identity_proof_from_wire` 只从本机 deployment 配置补链 ID/registry 地址，并在映射前绑定 pending request ID、AgentId 和请求 checkpoint；映射结果由原 `EthereumProofVerifier` 执行真实 trie 验证。固定 CDDL/CBOR 样例与 TCP/QUIC 子流测试同步更新。仍未完成生产 Swarm behaviour、同一认证连接的请求响应绑定、proof serving、Core IPC 闸门和公网测试，故 T14 未关闭。
 
 T14 组合网络行为切片（2026-11-19）：在现有 loopback-only Noise/Yamux 与 QUIC Swarm 注册 control、identity-proof 1.1 和 blob 三个 request-response behaviour。公共事件不暴露 libp2p request/channel 类型；出站请求与入站回复句柄绑定本地认证连接，IdentityProof 的 request ID/AgentId/checkpoint 与 Bulk 的 request ID 在交付/回复时核对。每协议每 peer 最多 2 条并行子流，超时 10 秒，等待中的请求和回复句柄各有 96 项总上限。新增 TCP/QUIC 组合驱动往返测试。本切片仍只绑定 loopback 地址；Net/Core Supervisor IPC、链证明接收与目录验签、Core 的未验证控制帧身份闸门、生产 proof serving 和公网地址策略未完成。`ControlRequest` 明确仍是待身份验证事件，T14 不关闭。
+
+T14 Core 身份证明准入切片（2026-11-19）：`DeviceSession::begin_network_hello` 由本机选择最终化检查点和随机请求 ID，并只经本会话已认证连接发送证明请求。`serve_local_identity_proof` 仅为本机配置的 AgentId 返回持久缓存中检查点完全匹配且未过期的证明；入站请求不能触发链 RPC 或指定其他身份。`finish_network_hello` 将响应令牌绑定到同一连接和 pending request，使用现有 MPT verifier 校验证明，再核验签名设备目录，只准入绑定到该传输 PeerId 的证书。任一步失败都会关闭该会话。Windows TCP 回环集成测试覆盖成功准入、checkpoint/AgentId 错配、缓存过期、证明状态值篡改及目录篡改拒绝。`asl-net` 回复句柄改为借用，错误尝试不会消耗仍有效的句柄。本切片尚未接入 Net/Core Supervisor IPC，未配置生产/公网监听与地址策略，不代表公网或完整 T14 验收。
 
 ### T15 — 引导、中继、NAT 与基础设施
 
@@ -530,7 +532,7 @@ cargo test -p asl-app --test mcp_contract
 
 所有写操作调用 PolicyService，不直接更新分数。公开字段修改、数据范围、联系人/群成员、模型、网络、浏览/回答、传输询问模式、保留/额度均显示将披露什么。
 
-验收撤销立即触发栅栏；新联系人不是自动偏好；身份重置不隐式继承信任；无授权不能自动启动生图/云模型；目录选择默认 E。
+验收撤销立即触发栅栏；新联系人不是自动偏好；身份重置不隐式继承信任；无授权不能自动启动生图/云模型；目录选择使用用户配置的 `ASL_HOME` 或显式本地路径，不假设盘符存在。
 
 ### T35 — 保留、备份、诊断与崩溃恢复
 
@@ -546,7 +548,7 @@ cargo test -p asl-app --test retention_backup
 
 依赖 T35。创建 packaging/windows、app update。
 
-后台定义为当前 Windows 用户登录后的常驻进程，不冒充 SYSTEM 服务使用用户 DPAPI。便携包所有可控路径留 E；系统创建的小量 AppContainer/图形元数据如实说明。
+后台定义为当前 Windows 用户登录后的常驻进程，不冒充 SYSTEM 服务使用用户 DPAPI。便携包所有可控路径位于用户选择的应用根目录；系统创建的小量 AppContainer/图形元数据如实说明。
 
 更新使用已固定公钥验证清单签名、包 hash、版本/回滚策略；支持替换更新源和手动导入已签名包，不把更新站变成身份/运行必需服务。安装失败回滚二进制，不回滚授权数据库到更宽松状态。
 

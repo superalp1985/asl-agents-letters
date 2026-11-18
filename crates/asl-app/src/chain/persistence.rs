@@ -6,14 +6,17 @@ use asl_store::{
         MAX_CHAIN_OBSERVATIONS, MAX_CHAIN_PROOF_BYTES, MAX_CHAIN_SNAPSHOT_BYTES, ObservationStatus,
     },
 };
-use asl_types::ids::AgentId;
+use asl_types::{
+    ids::AgentId,
+    protocol::{IdentityProof as WireIdentityProof, IdentityProofRequest},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     ChainError, ConsensusConfigV1, EthereumIdentityResolver, EthereumLightClient,
     EthereumProofVerifier, FinalizedExecution, IdentityProofV1, IdentityProofVerifier,
     IdentityResolution, IdentityResolver, LimitedReason, RegistryDeploymentV1, RegistryStatus,
-    VerifiedIdentity,
+    VerifiedIdentity, identity_proof_from_wire,
 };
 
 const SNAPSHOT_DOMAIN: &str = "ASL-LOCAL-CHAIN-1";
@@ -344,6 +347,45 @@ impl DurableIdentityResolver {
             }
         }
         self.commit(candidate, bundle, now_secs)
+    }
+
+    pub(crate) fn accept_wire_identity_proof(
+        &mut self,
+        request: &IdentityProofRequest,
+        proof: &WireIdentityProof,
+        now_secs: u64,
+    ) -> Result<(), ChainError> {
+        let finalized = self.resolver.light_client().finalized(now_secs)?;
+        if request.checkpoint_hash.0 != finalized.block_hash() {
+            return Err(ChainError::WrongContext);
+        }
+        let proof = identity_proof_from_wire(request, proof, self.config.deployment)?;
+        self.accept_proof(request.agent_id, &proof, now_secs)
+    }
+
+    pub(crate) fn cached_identity_proof(
+        &self,
+        request: &IdentityProofRequest,
+        now_secs: u64,
+    ) -> Result<Option<IdentityProofV1>, ChainError> {
+        self.ensure_storage()?;
+        let finalized = self.light_client().finalized(now_secs)?;
+        if request.checkpoint_hash.0 != finalized.block_hash() {
+            return Ok(None);
+        }
+        let now_ms = millis(now_secs)?;
+        let Some(row) = self.bundle.proofs.iter().find(|row| {
+            row.agent_id == request.agent_id
+                && row.finalized_height == finalized.block_number()
+                && row.expires_at_ms >= now_ms
+        }) else {
+            return Ok(None);
+        };
+        let saved: SavedProof = decode(&row.proof_cbor)?;
+        if saved.proof.block_hash != finalized.block_hash() {
+            return Ok(None);
+        }
+        Ok(Some(saved.proof))
     }
 
     fn update_consensus(

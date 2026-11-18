@@ -18,6 +18,7 @@ pub use config::{CheckpointV1, ConsensusConfigV1, ForkV1, ForksV1, RegistryDeplo
 pub use consensus::EthereumLightClient;
 pub use http::{ChainEndpointV1, ChainHttpClient, ChainHttpConfigV1, ChainSyncReport};
 pub use network::identity_proof_from_wire;
+pub(crate) use network::identity_proof_to_wire;
 pub use persistence::{DurableIdentityResolver, DurableResolverConfigV1};
 pub use proof::{EthereumProofVerifier, IdentityProofVerifier, registry_slots};
 pub use resolver::{EthereumIdentityResolver, IdentityResolver};

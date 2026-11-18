@@ -1,5 +1,12 @@
 use super::*;
+#[cfg(windows)]
+use crate::chain::{
+    DurableIdentityResolver, DurableResolverConfigV1,
+    test_support::{TestChainDatabase, bootstrapped, consensus_config},
+};
 use crate::profile::DeviceSession;
+#[cfg(windows)]
+use crate::profile::{DeviceAdmissionError, serve_local_identity_proof};
 use asl_net::transport::{LocalTransport, TransportEvent, TransportKind};
 use asl_types::protocol::{Feature, Hello};
 use libp2p_identity::Keypair;
@@ -43,7 +50,7 @@ async fn connect(
     listener: &mut LocalTransport,
     endpoint: std::net::SocketAddr,
     peer: &PeerId,
-) -> DeviceSession {
+) -> (DeviceSession, asl_net::transport::AuthenticatedPeer) {
     dialer.dial(TransportKind::Tcp, endpoint, peer).unwrap();
     let (dialer_event, listener_event) = timeout(Duration::from_secs(5), async {
         tokio::join!(dialer.next_event(), listener.next_event())
@@ -54,12 +61,17 @@ async fn connect(
         panic!("dialer did not produce an authenticated connection");
     };
     assert_eq!(connection.peer_id(), peer);
-    assert!(matches!(
-        listener_event.unwrap(),
-        TransportEvent::Connected { .. }
-    ));
+    let TransportEvent::Connected {
+        connection: listener_connection,
+    } = listener_event.unwrap()
+    else {
+        panic!("listener did not produce an authenticated connection");
+    };
 
-    DeviceSession::from_transport(connection)
+    (
+        DeviceSession::from_transport(connection),
+        listener_connection,
+    )
 }
 
 #[tokio::test]
@@ -75,7 +87,7 @@ async fn authenticated_connection_admits_its_bound_device_certificate() {
     let (mut listener, endpoint) = listen(device_key.clone()).await;
     let mut dialer = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
 
-    let mut session = connect(&mut dialer, &mut listener, endpoint, &peer).await;
+    let (mut session, _) = connect(&mut dialer, &mut listener, endpoint, &peer).await;
     let old_connection = session.connection_id().unwrap();
     session
         .accept_hello(&hello(&cert), &signed, &mut history, &mut resolver, NOW)
@@ -96,7 +108,7 @@ async fn authenticated_connection_admits_its_bound_device_certificate() {
     assert!(session.current_agent(&history, &mut resolver, NOW).is_err());
 
     let (mut listener, endpoint) = listen(device_key).await;
-    let mut next = connect(&mut dialer, &mut listener, endpoint, &peer).await;
+    let (mut next, _) = connect(&mut dialer, &mut listener, endpoint, &peer).await;
     assert_ne!(next.connection_id(), Some(old_connection));
     assert!(next.current_agent(&history, &mut resolver, NOW).is_err());
     drop(dialer);
@@ -104,6 +116,186 @@ async fn authenticated_connection_admits_its_bound_device_certificate() {
         next.accept_hello(&hello(&cert), &signed, &mut history, &mut resolver, NOW)
             .is_err()
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn network_hello_verifies_the_proof_and_directory_before_admission() {
+    let root = AgentIdentity::generate().unwrap();
+    let device = Keypair::generate_ed25519();
+    let peer = PeerId::from_bytes(device.public().to_peer_id().to_bytes()).unwrap();
+    let cert = certificate(&root, &peer, 1);
+    let directory = directory(&root, 7, vec![cert.clone()], vec![]);
+    let signed = signed_directory(&root, &directory, 1);
+    let mut values = [[0; 32]; 3];
+    values[0][12..].copy_from_slice(&root.controller_address());
+    values[1] = device_directory_commitment(&directory).unwrap().0;
+    values[2][23] = 1;
+    values[2][24..].copy_from_slice(&7_u64.to_be_bytes());
+    let (deployment, finalized, proof) = proof_fixture_for_agent(values, 8, root.agent_id());
+    let config = DurableResolverConfigV1 {
+        consensus: consensus_config(),
+        deployment,
+        max_cache_age_secs: 120,
+        cache_capacity: 2,
+    };
+    let create_resolver = |db: &TestChainDatabase| {
+        DurableIdentityResolver::create(
+            db.open(),
+            config.clone(),
+            bootstrapped().with_test_execution(finalized.clone()),
+            BOOTSTRAP_TIME,
+        )
+        .unwrap()
+    };
+    let serving_db = TestChainDatabase::new();
+    let mut serving = create_resolver(&serving_db);
+    serving
+        .accept_proof(root.agent_id(), &proof, BOOTSTRAP_TIME)
+        .unwrap();
+    let remote_hello = hello(&cert);
+
+    for case in 0..3 {
+        let receiving_db = TestChainDatabase::new();
+        let mut resolver = create_resolver(&receiving_db);
+        let mut history = RecordHistory::new(root.agent_id(), 32).unwrap();
+        let (mut listener, address) = listen(device.clone()).await;
+        let dialer_key = Keypair::generate_ed25519();
+        let dialer_peer = PeerId::from_bytes(dialer_key.public().to_peer_id().to_bytes()).unwrap();
+        let dialer_identity = AgentIdentity::generate().unwrap();
+        let dialer_certificate = certificate(&dialer_identity, &dialer_peer, 1);
+        let dialer_hello = hello(&dialer_certificate);
+        let mut dialer = LocalTransport::new(dialer_key).unwrap();
+        let (mut session, listener_connection) =
+            connect(&mut dialer, &mut listener, address, &peer).await;
+        let hello_token = listener
+            .send_control_request(
+                &listener_connection,
+                asl_types::protocol::WireFrame::Hello(remote_hello.clone()),
+            )
+            .unwrap();
+        let event = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                event = dialer.next_event() => event.unwrap(),
+                event = listener.next_event() => panic!("unexpected listener event: {event:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let TransportEvent::ControlRequest {
+            connection: dialer_connection,
+            request: asl_types::protocol::WireFrame::Hello(received_hello),
+            response: hello_response_token,
+        } = event
+        else {
+            panic!("unexpected request event: {event:?}");
+        };
+        let sent = session
+            .begin_network_hello(received_hello, &mut dialer, &resolver, NOW)
+            .unwrap();
+        assert!(session.current_agent(&history, &mut resolver, NOW).is_err());
+        let (connection, request, response_token) = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                event = listener.next_event() => match event.unwrap() {
+                    TransportEvent::IdentityProofRequest { connection, request, response } => (connection, request, response),
+                    event => panic!("unexpected request event: {event:?}"),
+                },
+                event = dialer.next_event() => panic!("unexpected outbound event: {event:?}"),
+            }
+        }).await.unwrap();
+        assert_eq!(request.checkpoint_hash.0, finalized.block_hash());
+        assert_eq!(request.agent_id, root.agent_id());
+        let mut wrong = request.clone();
+        wrong.checkpoint_hash.0[0] ^= 1;
+        assert!(
+            serve_local_identity_proof(&remote_hello, &signed, &wrong, &mut serving, NOW)
+                .unwrap()
+                .is_none()
+        );
+        wrong = request.clone();
+        wrong.agent_id.0[0] ^= 1;
+        assert!(
+            serve_local_identity_proof(&remote_hello, &signed, &wrong, &mut serving, NOW)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            serve_local_identity_proof(
+                &remote_hello,
+                &signed,
+                &request,
+                &mut serving,
+                NOW + 121_000
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut response =
+            serve_local_identity_proof(&remote_hello, &signed, &request, &mut serving, NOW)
+                .unwrap()
+                .unwrap();
+        match case {
+            1 => response.state_root.0[0] ^= 1,
+            2 => *response.signed_directory.last_mut().unwrap() ^= 1,
+            _ => {}
+        }
+        listener
+            .send_identity_proof_response(&connection, &response_token, response)
+            .unwrap();
+        let (connection, received, proof) = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                event = dialer.next_event() => match event.unwrap() {
+                    TransportEvent::IdentityProofResponse { connection, request, response } => (connection, request, response),
+                    event => panic!("unexpected response event: {event:?}"),
+                },
+                event = listener.next_event() => panic!("unexpected listener event: {event:?}"),
+            }
+        }).await.unwrap();
+        assert_eq!(received, sent);
+        let result = session.finish_network_hello(
+            &connection,
+            received,
+            &proof,
+            &mut history,
+            &mut resolver,
+            NOW,
+        );
+        match case {
+            0 => {
+                result.unwrap();
+                assert_eq!(
+                    session.current_agent(&history, &mut resolver, NOW).unwrap(),
+                    root.agent_id()
+                );
+                dialer
+                    .send_control_response(
+                        &dialer_connection,
+                        &hello_response_token,
+                        asl_types::protocol::WireFrame::Hello(dialer_hello),
+                    )
+                    .unwrap();
+                let event = timeout(Duration::from_secs(5), async {
+                    tokio::select! {
+                        event = listener.next_event() => event.unwrap(),
+                        event = dialer.next_event() => panic!("unexpected dialer event: {event:?}"),
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(
+                    matches!(event, TransportEvent::ControlResponse { request, .. } if request == hello_token)
+                );
+                assert!(
+                    session
+                        .current_agent(&history, &mut resolver, NOW + 121_000)
+                        .is_err()
+                );
+            }
+            1 => assert!(matches!(result, Err(DeviceAdmissionError::Chain(_)))),
+            _ => assert!(matches!(result, Err(DeviceAdmissionError::Session(_)))),
+        }
+        assert!(session.current_agent(&history, &mut resolver, NOW).is_err());
+    }
 }
 
 #[test]

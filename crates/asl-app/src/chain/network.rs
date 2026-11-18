@@ -1,4 +1,9 @@
-use asl_types::protocol::{IdentityProof as WireIdentityProof, IdentityProofRequest};
+use asl_types::{
+    ids::Hash32,
+    protocol::{
+        AccountProof, IdentityProof as WireIdentityProof, IdentityProofRequest, StorageProof,
+    },
+};
 
 use super::{
     AccountProofV1, ChainError, IdentityProofV1, RegistryDeploymentV1, StorageProofV1,
@@ -44,4 +49,35 @@ pub fn identity_proof_from_wire(
             })
             .collect(),
     })
+}
+
+pub(crate) fn identity_proof_to_wire(
+    request: &IdentityProofRequest,
+    proof: IdentityProofV1,
+    signed_directory: Vec<u8>,
+) -> WireIdentityProof {
+    WireIdentityProof {
+        request_id: request.request_id,
+        agent_id: proof.agent_id,
+        finalized_height: proof.block_number,
+        block_hash: Hash32(proof.block_hash),
+        state_root: Hash32(proof.state_root),
+        account: AccountProof {
+            nonce: proof.account.nonce,
+            balance: proof.account.balance,
+            storage_root: proof.account.storage_root,
+            code_hash: proof.account.code_hash,
+            nodes: proof.account.nodes,
+        },
+        storage_proofs: proof
+            .storage
+            .into_iter()
+            .map(|path| StorageProof {
+                slot: path.slot,
+                value: path.value,
+                nodes: path.nodes,
+            })
+            .collect(),
+        signed_directory,
+    }
 }

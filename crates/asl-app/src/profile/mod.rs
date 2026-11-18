@@ -1,4 +1,5 @@
 mod history;
+mod proof_response;
 mod publisher;
 mod session;
 
@@ -17,8 +18,9 @@ use crate::{
 };
 
 pub use history::RecordHistory;
+pub use proof_response::serve_local_identity_proof;
 pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};
-pub use session::DeviceSession;
+pub use session::{DeviceAdmissionError, DeviceSession};
 
 /// Verified for this call's local resolver state. A cached value does not
 /// replace resolving fresh state again when a network connection is admitted.

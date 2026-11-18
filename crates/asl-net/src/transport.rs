@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
+    hash::{Hash, Hasher},
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Weak},
@@ -73,7 +74,9 @@ pub struct AuthenticatedPeer {
 
 impl PartialEq for AuthenticatedPeer {
     fn eq(&self, other: &Self) -> bool {
-        self.connection_id == other.connection_id && self.peer == other.peer
+        self.connection_id == other.connection_id
+            && self.peer == other.peer
+            && Weak::ptr_eq(&self.lifetime, &other.lifetime)
     }
 }
 
@@ -94,11 +97,55 @@ impl AuthenticatedPeer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RequestToken(u64);
+#[derive(Clone, Debug)]
+pub struct RequestToken(LocalConnectionId, u64, Weak<()>);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ResponseToken(LocalConnectionId, u64);
+impl PartialEq for RequestToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1 == other.1 && Weak::ptr_eq(&self.2, &other.2)
+    }
+}
+
+impl Eq for RequestToken {}
+
+impl RequestToken {
+    pub(super) fn new(connection: &AuthenticatedPeer, id: u64) -> Self {
+        Self(connection.connection_id, id, connection.lifetime.clone())
+    }
+
+    pub fn belongs_to(&self, connection: &AuthenticatedPeer) -> bool {
+        self.0 == connection.connection_id && Weak::ptr_eq(&self.2, &connection.lifetime)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResponseToken(LocalConnectionId, u64, Weak<()>);
+
+impl PartialEq for ResponseToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1 == other.1 && Weak::ptr_eq(&self.2, &other.2)
+    }
+}
+
+impl Eq for ResponseToken {}
+
+impl Hash for ResponseToken {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+        self.1.hash(state);
+        self.2.as_ptr().hash(state);
+    }
+}
+
+impl ResponseToken {
+    pub(super) fn new(connection: &AuthenticatedPeer, id: u64) -> Self {
+        Self(connection.connection_id, id, connection.lifetime.clone())
+    }
+
+    pub(super) fn belongs_to(&self, connection: &AuthenticatedPeer) -> bool {
+        self.0 == connection.connection_id && Weak::ptr_eq(&self.2, &connection.lifetime)
+    }
+}
 
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -499,6 +546,39 @@ mod tests {
             SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 1).into(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn connection_handles_include_their_transport_lifetime_identity() {
+        let peer = device_peer(peer()).unwrap();
+        let first_owner = Arc::new(());
+        let second_owner = Arc::new(());
+        let first = AuthenticatedPeer {
+            peer: peer.clone(),
+            connection_id: LocalConnectionId(ConnectionId::new_unchecked(1)),
+            lifetime: Arc::downgrade(&first_owner),
+        };
+        let same_connection = AuthenticatedPeer {
+            peer: peer.clone(),
+            connection_id: LocalConnectionId(ConnectionId::new_unchecked(1)),
+            lifetime: Arc::downgrade(&first_owner),
+        };
+        let other_swarm = AuthenticatedPeer {
+            peer,
+            connection_id: LocalConnectionId(ConnectionId::new_unchecked(1)),
+            lifetime: Arc::downgrade(&second_owner),
+        };
+
+        assert_eq!(first, same_connection);
+        assert_ne!(first, other_swarm);
+        assert_ne!(
+            RequestToken::new(&first, 1),
+            RequestToken::new(&other_swarm, 1)
+        );
+        assert_ne!(
+            ResponseToken::new(&first, 1),
+            ResponseToken::new(&other_swarm, 1)
+        );
     }
 
     fn record_established(

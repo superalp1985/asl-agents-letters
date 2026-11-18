@@ -55,11 +55,11 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
 - 允许一个人运行多个 Agent；女巫防护目标是限制其对个人电脑的资源消耗和授权影响，不声称识别真人或消灭分身。
 - 完整桌面运行平台为 Windows 11 x64；基础设施另交付 Linux x86_64 引导/中继服务。Linux/macOS 桌面不在 1.0 的平台承诺中。
-- 应用可控数据默认放 `E:\ASL\data`；开发缓存放 `E:\ASL\dev-cache`。路径不可用时失败，不回落 C 盘。
+- 应用数据目录由 `ASL_HOME` 指定。开发缓存目录由 `scripts/dev-env.ps1 -Root` 或 `ASL_DEV_ROOT` 指定。路径不可用时停止启动。
 
 ## 实施与验证状态
 
-截至 2026-11-18，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。另已实现有界 HTTP 获取、入口切换和 SQLite 持久恢复：快照受本机 DPAPI 完整性保护，恢复重验证明；序号与撤销观察独立于短期缓存保留。未注册身份的负缓存仅留在有界内存，重启后回到未知状态。
+截至 2026-11-19，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。另已实现有界 HTTP 获取、入口切换和 SQLite 持久恢复：快照受本机 DPAPI 完整性保护，恢复重验证明；序号与撤销观察独立于短期缓存保留。未注册身份的负缓存仅留在有界内存，重启后回到未知状态。
 
 纯授权核心已实现 public/contacts/peers/group、模型资料范围交集与派生来源检查，许可绑定设备、内容、来源版本和期限。信任/贡献不进入授权输入；本机授权事实由 core 提供，不接受对端自报。Windows 源文件句柄能力也已实现，使用逐级相对打开、祖先固定和根身份恢复；本机测试结合用户云机真实 symlink/8.3 夹具及修正后 22 项完整通过反馈，T08 本任务系统验收完成。数据库撤销与传输栅栏仍须后续集成，详见 `docs/policy-authorization.md` 和 `docs/windows-source-handles.md`。
 
@@ -68,6 +68,8 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。授权界面与检查点来源选择尚待接入。
 
 Windows T09 已实现按 Net/Worker/Extractor 分权的 AppContainer 启动、Job Object 资源约束、白名单匿名管道和可执行文件独立 ACL。真实系统探针验证 Worker 不能读授权目录外文件、联网或启动子进程；Net 的 TCP 网络能力、Worker 的拒绝、内存/CPU/期限限制及清理路径均有实测。外部 TCP 仅测连接握手；真实 UDP 回包、libp2p QUIC 及 mDNS 查询/响应尚未验证，因此 T09 仍为部分验收，不能称整个沙箱/网络已完成。
+
+**T14 身份握手（部分实现）：** TCP/QUIC loopback request-response 已组合控制、身份证明和 bulk codec。Core 从本地最终化检查点发起证明请求，只用本机持久缓存应答；收到端通过 MPT 证明及签名设备目录校验后才准入当前连接的设备。定向 Windows TCP 测试覆盖成功、错配和篡改拒绝。尚未接入 Supervisor IPC、生产监听/地址策略、DHT、中继或公网，不能称公网网络已验收；详见 [实施计划](docs/06-implementation-plan.md) 与 [验证记录](docs/plan-validation.md)。
 
 **本地文件共享基础（T11）：** 同一份内容只存一套快照，但每个目录保留独立授权。文件改写、删除或目录撤权时，旧引用失效。Core 使用 Windows 目录变更通知和每 30 秒启动的补查；导入成功不等于向任何节点公开。详见 [导入与对账](docs/snapshot-import.md)。
 
@@ -88,7 +90,7 @@ flowchart LR
 
 沙箱与 IPC 阶段的全工作区回归为 284 项通过、2 项外部端点测试忽略。已验证 Net 心跳、Worker 握手中止及新 Worker 接续，尚不代表运行中计算崩溃或 Supervisor 崩溃。受控 UDP 回包、QUIC、真实 mDNS 与 MCP 标准输出集成仍待验收。完整分轮结果、云机夹具与本次验证范围见 [验证记录](docs/plan-validation.md)。
 
-HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；完整多帧互操作、群聊、网络、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；Net/Core IPC、公网发现与连接、群聊、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -154,11 +156,11 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 - Display name: `A信 — Agents' Letters`
 - License: MIT for project code; third-party software, fonts, and artwork retain their own licenses.
 - Desktop target: Windows 11 x64. Linux packages provide replaceable bootstrap and relay infrastructure.
-- User-controlled data and development caches prefer `E:\ASL`; the application must not silently fall back to the C drive.
+- Set `ASL_HOME` for application data. Choose the development root with `scripts/dev-env.ps1 -Root` or `ASL_DEV_ROOT`. Startup fails when the configured path is unavailable.
 
 ### Implementation Status
 
-As of November 18, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration. Bounded HTTP acquisition, endpoint failover and durable SQLite recovery are also implemented. Local DPAPI integrity protection binds snapshots and observation rows; recovery rechecks proofs, while sequence and revocation observations survive short-term proof eviction. Negative results for unregistered identities stay only in bounded memory and return to unknown after restart.
+As of November 19, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration. Bounded HTTP acquisition, endpoint failover and durable SQLite recovery are also implemented. Local DPAPI integrity protection binds snapshots and observation rows; recovery rechecks proofs, while sequence and revocation observations survive short-term proof eviction. Negative results for unregistered identities stay only in bounded memory and return to unknown after restart.
 
 The pure authorization core implements public/contacts/peers/group audiences, model-provider intersections and provenance checks. Permits bind devices, content, source revisions and expiry. Trust/contribution are not authorization inputs. Facts come from the trusted local broker, never peer claims. Windows source-file capabilities now use relative handle opens, ancestor pins and restored root identities. Local tests, the user's earlier cloud log exercising real symlink/8.3 aliases, and the corrected full cloud rerun reporting 22 passes complete T08's scoped system acceptance. Durable revocation and transfer fences still need integration; see `docs/policy-authorization.md` and `docs/windows-source-handles.md`.
 
@@ -167,6 +169,8 @@ The structured signed-record core now covers profiles, device directories and sh
 An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. The authorization UI and trusted checkpoint-source selection remain pending.
 
 The first Windows T09 slice implements per-role AppContainer launch, Job Object limits, an explicit anonymous-pipe allowlist and executable-only ACL access. Real probes verify that Worker cannot read outside files, connect to a test HTTP listener or spawn a child; Net TCP capability, resource deadlines and cleanup are also exercised. The external TCP test proves only connection establishment. UDP echo, libp2p QUIC and an actual mDNS exchange remain unverified, so T09 is only partially accepted.
+
+**T14 identity handshake (partial):** TCP/QUIC loopback request-response composes the control, identity-proof and bulk codecs. Core selects its own finalized checkpoint for proof requests and serves proofs only from its durable local cache; the receiving side admits a device only after MPT proof and signed device-directory validation bound to the authenticated connection. Targeted Windows TCP tests cover success, mismatches and tampering. Supervisor IPC, production listener/address policy, DHT, relay and public-network validation remain open; see the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
 
 **Local file sharing foundation (T11):** identical content shares one physical snapshot, while each directory retains separate authorization. Editing or deleting a source invalidates the old reference; revoking a grant invalidates its own references. Core uses Windows change notifications and schedules a fallback sweep every 30 seconds. Import does not publish to peers. See [snapshot import and reconciliation](docs/snapshot-import.md).
 
@@ -187,4 +191,4 @@ flowchart LR
 
 The sandbox/IPC workspace run passed 284 tests with two external endpoint tests ignored. Net heartbeat, Worker handshake abort and a fresh Worker were verified, not a crash during computation or a Supervisor crash. Controlled UDP echo, QUIC, actual mDNS exchange and MCP stdout integration remain open. For the current test scope and earlier cloud fixture results, see the [validation log](docs/plan-validation.md).
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Full interoperability, groups, networking, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Net/Core IPC, public-network discovery/connectivity, groups, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.

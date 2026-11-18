@@ -16,7 +16,8 @@
 | Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入、MCP stdout 集成及 T14 认证 peer 事件尚未验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
-| 真实 P2P 网络、群组与完整 GUI | 尚未实现或验收 | 需按后续任务执行真实系统测试 |
+| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；Net/Core Supervisor IPC、生产监听、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
+| 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
 
 2026-11-17 T06a 合约验收：
 
@@ -96,21 +97,16 @@
 
 执行模型验收按 T39：实际调用目标模型写指定任务、独立编译测试并记录修正。运行模型验收至少 100 组固定输入，包含正确引用、无证据、注入、结构对象错误、超时和非法引用。非法输出执行率必须为 0；有效回答率如实报告，不编造模型能力。线上语义 wire 不包含自由文本字段。
 
-## 6. 构建与 E 盘环境
+## 6. 本机开发环境
 
-开发环境由 `scripts/dev-env.ps1` 设置当前进程环境：
+开发脚本要求指定本地磁盘目录，并为当前 PowerShell 进程设置 `ASL_HOME`、Cargo、rustup 和临时文件路径。下面提示输入本机实际开发根目录；不会修改机器级设置或自动切换磁盘。
 
 ```powershell
-$env:ASL_HOME = 'E:\ASL\data'
-$env:CARGO_HOME = 'E:\ASL\dev-cache\cargo'
-$env:RUSTUP_HOME = 'E:\ASL\dev-cache\rustup'
-$env:CARGO_TARGET_DIR = 'E:\ASL\dev-cache\target'
-$env:PATH = 'E:\ASL\dev-cache\cargo\bin;' + $env:PATH
-$env:TEMP = 'E:\ASL\work\tmp'
-$env:TMP = 'E:\ASL\work\tmp'
+$devRoot = Read-Host 'Enter the local ASL development root'
+. .\scripts\dev-env.ps1 -Root $devRoot
 ```
 
-不得使用 setx 改机器全局设置，不挪动用户既有工具链。使用 E 盘工具链前先核对目标目录与磁盘空间。OS 自身的少量沙箱/字体/图形缓存不属于应用可完全控制的范围。
+不得使用 setx 改机器全局设置，不挪动用户既有工具链。选用的本地磁盘必须有足够空间；不假设机器存在某个盘符，也不自动改写到其他磁盘。OS 自身的少量沙箱/字体/图形缓存不属于应用可完全控制的范围。
 
 最终检查：
 

@@ -51,7 +51,7 @@ impl LocalTransport {
         if !request.is_control() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let token = RequestToken(self.requests.next_token()?);
+        let token = RequestToken::new(connection, self.requests.next_token()?);
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -61,7 +61,7 @@ impl LocalTransport {
             ProtocolKind::Control,
             request_id,
             connection,
-            token,
+            &token,
             PendingRequestKind::Control,
         );
         Ok(token)
@@ -74,7 +74,7 @@ impl LocalTransport {
     ) -> io::Result<RequestToken> {
         self.require_live(connection)?;
         self.require_request_capacity()?;
-        let token = RequestToken(self.requests.next_token()?);
+        let token = RequestToken::new(connection, self.requests.next_token()?);
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -84,7 +84,7 @@ impl LocalTransport {
             ProtocolKind::IdentityProof,
             request_id,
             connection,
-            token,
+            &token,
             PendingRequestKind::IdentityProof(request),
         );
         Ok(token)
@@ -97,7 +97,7 @@ impl LocalTransport {
     ) -> io::Result<RequestToken> {
         self.require_live(connection)?;
         self.require_request_capacity()?;
-        let token = RequestToken(self.requests.next_token()?);
+        let token = RequestToken::new(connection, self.requests.next_token()?);
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -107,7 +107,7 @@ impl LocalTransport {
             ProtocolKind::Bulk,
             request_id,
             connection,
-            token,
+            &token,
             PendingRequestKind::Bulk(request),
         );
         Ok(token)
@@ -116,7 +116,7 @@ impl LocalTransport {
     pub fn send_control_response(
         &mut self,
         connection: &AuthenticatedPeer,
-        token: ResponseToken,
+        token: &ResponseToken,
         response: WireFrame,
     ) -> io::Result<()> {
         if !response.is_control() {
@@ -136,7 +136,7 @@ impl LocalTransport {
     pub fn send_identity_proof_response(
         &mut self,
         connection: &AuthenticatedPeer,
-        token: ResponseToken,
+        token: &ResponseToken,
         response: IdentityProof,
     ) -> io::Result<()> {
         let pending = self.response_ref(connection, token, ProtocolKind::IdentityProof)?;
@@ -163,7 +163,7 @@ impl LocalTransport {
     pub fn send_bulk_response(
         &mut self,
         connection: &AuthenticatedPeer,
-        token: ResponseToken,
+        token: &ResponseToken,
         response: BulkResponse,
     ) -> io::Result<()> {
         let pending = self.response_ref(connection, token, ProtocolKind::Bulk)?;
@@ -208,13 +208,13 @@ impl LocalTransport {
         protocol: ProtocolKind,
         request_id: OutboundRequestId,
         connection: &AuthenticatedPeer,
-        token: RequestToken,
+        token: &RequestToken,
         kind: PendingRequestKind,
     ) {
         self.requests.outbound.insert(
             (protocol, request_id),
             PendingRequest {
-                token,
+                token: token.clone(),
                 connection_id: connection.connection_id,
                 kind,
             },
@@ -224,30 +224,30 @@ impl LocalTransport {
     fn take_response(
         &mut self,
         connection: &AuthenticatedPeer,
-        token: ResponseToken,
+        token: &ResponseToken,
         protocol: ProtocolKind,
     ) -> io::Result<PendingResponse> {
         self.response_ref(connection, token, protocol)?;
         self.requests
             .inbound
-            .remove(&token)
+            .remove(token)
             .ok_or(io::ErrorKind::NotFound.into())
     }
 
     fn response_ref(
         &self,
         connection: &AuthenticatedPeer,
-        token: ResponseToken,
+        token: &ResponseToken,
         protocol: ProtocolKind,
     ) -> io::Result<&PendingResponse> {
         self.require_live(connection)?;
-        if token.0 != connection.connection_id {
+        if !token.belongs_to(connection) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let pending = self
             .requests
             .inbound
-            .get(&token)
+            .get(token)
             .ok_or(io::ErrorKind::NotFound)?;
         if pending.protocol != protocol {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -275,7 +275,7 @@ impl LocalTransport {
                 };
                 let Some(response) = self.insert_response(
                     ProtocolKind::Control,
-                    connection.connection_id,
+                    &connection,
                     request_id,
                     PendingResponseKind::Control(channel),
                 ) else {
@@ -348,7 +348,7 @@ impl LocalTransport {
                 };
                 let Some(response) = self.insert_response(
                     ProtocolKind::IdentityProof,
-                    connection.connection_id,
+                    &connection,
                     request_id,
                     PendingResponseKind::IdentityProof {
                         channel,
@@ -431,7 +431,7 @@ impl LocalTransport {
                 };
                 let Some(response) = self.insert_response(
                     ProtocolKind::Bulk,
-                    connection.connection_id,
+                    &connection,
                     request_id,
                     PendingResponseKind::Bulk {
                         channel,
@@ -509,16 +509,16 @@ impl LocalTransport {
     fn insert_response(
         &mut self,
         protocol: ProtocolKind,
-        connection_id: LocalConnectionId,
+        connection: &AuthenticatedPeer,
         inbound_request_id: InboundRequestId,
         response: PendingResponseKind,
     ) -> Option<ResponseToken> {
         if self.requests.inbound.len() >= MAX_PENDING_RESPONSES {
             return None;
         }
-        let token = ResponseToken(connection_id, self.requests.next_token().ok()?);
+        let token = ResponseToken::new(connection, self.requests.next_token().ok()?);
         self.requests.inbound.insert(
-            token,
+            token.clone(),
             PendingResponse {
                 kind: response,
                 protocol,
@@ -539,13 +539,13 @@ impl LocalTransport {
     ) -> Option<TransportEvent> {
         let pending = self.requests.outbound.remove(&(protocol, request_id))?;
         let connection_id = LocalConnectionId(connection_id);
-        if pending.connection_id != connection_id {
+        let Some(connection) = self.authenticated_peer(peer, connection_id.0) else {
+            return Some(failed_request(&pending));
+        };
+        if pending.connection_id != connection_id || !pending.token.belongs_to(&connection) {
             return Some(failed_request(&pending));
         }
-        Some(match self.authenticated_peer(peer, connection_id.0) {
-            Some(connection) => event(connection, pending, response),
-            None => failed_request(&pending),
-        })
+        Some(event(connection, pending, response))
     }
 
     fn fail_request(
@@ -612,7 +612,7 @@ struct PendingRequest {
 fn failed_request(pending: &PendingRequest) -> TransportEvent {
     TransportEvent::RequestFailed {
         connection_id: pending.connection_id,
-        request: pending.token,
+        request: pending.token.clone(),
     }
 }
 
