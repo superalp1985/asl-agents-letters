@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use asl_net::codec::{CONTROL_PROTOCOL, ControlCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec};
+use asl_net::codec::{
+    BULK_PROTOCOL, BulkCodec, BulkOperation, BulkRequest, BulkResponse, BulkStatus,
+    CONTROL_PROTOCOL, ControlCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
+};
 use asl_net::transport::TransportKind;
 use asl_types::protocol::{Ack, IdentityProof, IdentityProofRequest, WireFrame};
 use libp2p::{
@@ -214,6 +217,78 @@ async fn identity_proof_codec_runs_over_tcp_and_quic_request_response_substreams
                                 received_response = true;
                             }
                             SwarmEvent::Behaviour(Event::OutboundFailure { error, .. }) => panic!("identity proof request failed: {error}"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(received_request);
+    }
+}
+
+#[tokio::test]
+async fn bulk_codec_runs_over_tcp_and_quic_request_response_substreams() {
+    for kind in [TransportKind::Tcp, TransportKind::Quic] {
+        let mut listener = swarm(Keypair::generate_ed25519(), BulkCodec, BULK_PROTOCOL);
+        listener.listen_on(endpoint(kind, 0)).unwrap();
+        let address = tokio::time::timeout(DEADLINE, listening(&mut listener))
+            .await
+            .unwrap();
+        let listener_peer = *listener.local_peer_id();
+        let mut dialer = swarm(Keypair::generate_ed25519(), BulkCodec, BULK_PROTOCOL);
+        let dialer_peer = *dialer.local_peer_id();
+        dialer.dial(address).unwrap();
+
+        let request = BulkRequest {
+            operation: BulkOperation::Manifest,
+            request_id: [1; 16].into(),
+            content_id: [2; 32].into(),
+            lease_id: [3; 32].into(),
+            chunk_index: 0,
+        };
+        let response = BulkResponse {
+            request_id: request.request_id,
+            status: BulkStatus::Success,
+            payload: vec![0x5a; 58],
+        };
+        let mut request_id = None;
+        let mut received_request = false;
+        let mut received_response = false;
+
+        tokio::time::timeout(DEADLINE, async {
+            while !received_response {
+                tokio::select! {
+                    event = listener.select_next_some() => {
+                        if let SwarmEvent::Behaviour(Event::Message {
+                            peer,
+                            message: Message::Request { request: incoming, channel, .. },
+                            ..
+                        }) = event {
+                            assert_eq!(peer, dialer_peer);
+                            assert_eq!(incoming, request);
+                            listener.behaviour_mut().send_response(channel, response.clone()).unwrap();
+                            received_request = true;
+                        }
+                    }
+                    event = dialer.select_next_some() => {
+                        match event {
+                            SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == listener_peer => {
+                                request_id = Some(dialer.behaviour_mut().send_request(&listener_peer, request.clone()));
+                            }
+                            SwarmEvent::Behaviour(Event::Message {
+                                peer,
+                                message: Message::Response { request_id: response_id, response: incoming },
+                                ..
+                            }) => {
+                                assert_eq!(peer, listener_peer);
+                                assert_eq!(Some(response_id), request_id);
+                                assert_eq!(incoming, response);
+                                received_response = true;
+                            }
+                            SwarmEvent::Behaviour(Event::OutboundFailure { error, .. }) => panic!("bulk request failed: {error}"),
                             _ => {}
                         }
                     }

@@ -51,7 +51,7 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | `/asl/kad/1.0.0` | ASL 网络的 Kademlia | 记录值最多 8 KiB；本机最多 10,000 条/64 MiB，含额外索引的上限另计 |
 | `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
 | `/asl/identity-proof/1.0.0` | 按需交换链上身份状态证明 | 请求仅为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀 |
-| `/asl/blob/1.0.0` | manifest、块、inline 拉取 | 一请求一响应；manifest 最多 2,097,210 字节，数据块最多 1 MiB |
+| `/asl/blob/1.0.0` | manifest、块、inline 拉取 | request-response 一请求一响应；请求固定 91 字节，响应最多 2,097,237 字节（不含外层 u32 BE 前缀），manifest 最多 2,097,210 字节，数据块最多 1 MiB |
 | `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
 
@@ -214,6 +214,8 @@ payload_length u32 BE | payload
 ```
 
 响应头 27 字节，最大帧长为 27+2,097,210=2,097,237，不含外层 4 字节。status=0 成功、1 not_found、2 busy、3 expired、4 integrity_failed、5 cancelled；非成功时 payload_length 必须为 0。请求 ID 必须匹配当前连接上的待完成请求；未知、重复和超期响应不写盘。状态 1 同时用于无权限和不存在，避免裸 hash 探测。
+
+`/asl/blob/1.0.0` codec 严格要求请求恰为 91 字节、响应长度恰为 27+payload_length；两端在读取 payload 后都要求发送半流结束，不接受尾随请求/响应。请求和响应的 magic、操作码、状态码、固定索引、payload 上限和错误状态空 payload 规则在 codec 层先校验。codec 不校验 lease、内容授权、请求是否属于当前连接或块 hash；这些由 Core/transfer 层绑定当前认证会话后处理。
 
 每块请求含 lease、content_id、index；长度由 manifest 推导，远端不能指定任意 offset/length。最后一块为剩余字节，空文件不请求块。
 

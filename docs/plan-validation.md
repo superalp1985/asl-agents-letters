@@ -380,6 +380,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 
 - `cargo test -p asl-net --test substream_codec --locked --offline`：5 项通过。验证固定协议向量的 request/response 往返、u32 BE framing、64 KiB 控制限制、93 字节身份请求上限、256 KiB 身份响应限制、截断/尾随数据拒绝、协议串线和身份消息方向。
 - `cargo test -p asl-net --test libp2p_substreams --locked --offline`：2 项通过；每项分别在 TCP 和 QUIC 上建立真实 Swarm request-response 子流并验证控制或身份请求/响应到达预期 peer 和匹配的 request ID。该测试是同一进程内的两个 Swarm，既有独立进程测试仍只覆盖底层传输连接。
+- `cargo test -p asl-net --test bulk_codec --locked --offline`：5 项通过。验证 91 字节请求、27 字节响应头、u32 BE 响应长度、操作码/固定索引、状态码、错误 payload、截断/尾随和 2,097,210 字节 payload 上限。
+- `cargo test -p asl-net --test libp2p_substreams --locked --offline`：更新为 3 项通过；新增 bulk codec 在 TCP 和 QUIC 上真实 request-response 往返，另两项覆盖控制和身份 codec。
+- bulk 切片后的最终工作区重跑：`cargo test --workspace --all-targets --locked --offline` 通过；`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 通过；`cargo fmt --all -- --check` 与 `git diff --check` 通过。此前同一全量命令曾单次触发既有链 HTTP 恢复测试的 `InvalidLocalState`，单项重跑和随后全量重跑均通过；本批未修改链 HTTP/恢复代码。
 - 上述测试只证明 codec 线格式和真实子流互操作；生产 codec 未注册到 Swarm，不能把结果解释为 Core 身份闸门、请求与 AgentId 绑定、Supervisor IPC 或完整 T14 验收。测试和后续集成均应设置有界 stream 数与请求超时；当前 pinned libp2p request-response 默认值是每连接最多 100 streams、10 秒超时，本集成测试显式采用每连接最多 2 streams、10 秒超时。
 - 本轮最新工作树验证：`cargo test --workspace --all-targets --locked --offline` 通过；`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 通过；`cargo fmt --all -- --check` 与 `git diff --check` 通过。未在 AppContainer 或公网验证。
 
