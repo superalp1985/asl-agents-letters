@@ -1,7 +1,7 @@
 //! Explicit loopback endpoints only, pending the T16 address policy.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     io,
     net::{IpAddr, SocketAddr},
@@ -10,7 +10,13 @@ use std::{
     time::Duration,
 };
 
+mod behaviour;
+mod requests;
+use behaviour::{AslBehaviour, BehaviourEvent};
+use requests::Requests;
+
 use asl_types::ids::PeerId;
+use asl_types::protocol::{IdentityProof, IdentityProofRequest, WireFrame};
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     core::{
@@ -21,6 +27,7 @@ use libp2p::{
     identity::Keypair,
     multiaddr::Protocol,
     noise,
+    request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
     swarm::{
         ConnectionDenied, ConnectionId, DialError, FromSwarm, NetworkBehaviour, SwarmEvent,
         ToSwarm,
@@ -30,12 +37,21 @@ use libp2p::{
     tcp, yamux,
 };
 
+use crate::codec::{
+    BULK_PROTOCOL, BulkCodec, BulkRequest, BulkResponse, CONTROL_PROTOCOL, ControlCodec,
+    IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
+};
+
 const MAX_LISTENERS: usize = 4;
 const MAX_PENDING_INBOUND: usize = 8;
 const MAX_PENDING_OUTBOUND: usize = 8;
 const MAX_CONNECTIONS: usize = 16;
+const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
+const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
+const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportKind {
@@ -78,13 +94,54 @@ impl AuthenticatedPeer {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RequestToken(u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ResponseToken(LocalConnectionId, u64);
+
+#[derive(Debug)]
 pub enum TransportEvent {
     Listening(TransportKind, SocketAddr),
     InboundRejected,
     /// Authenticated device key only; no agent identity, certificate or grant is implied.
     Connected {
         connection: AuthenticatedPeer,
+    },
+    /// Core must verify the ASL identity/session before forwarding this frame.
+    ControlRequest {
+        connection: AuthenticatedPeer,
+        request: WireFrame,
+        response: ResponseToken,
+    },
+    ControlResponse {
+        connection: AuthenticatedPeer,
+        request: RequestToken,
+        response: WireFrame,
+    },
+    IdentityProofRequest {
+        connection: AuthenticatedPeer,
+        request: IdentityProofRequest,
+        response: ResponseToken,
+    },
+    IdentityProofResponse {
+        connection: AuthenticatedPeer,
+        request: RequestToken,
+        response: IdentityProof,
+    },
+    BulkRequest {
+        connection: AuthenticatedPeer,
+        request: BulkRequest,
+        response: ResponseToken,
+    },
+    BulkResponse {
+        connection: AuthenticatedPeer,
+        request: RequestToken,
+        response: BulkResponse,
+    },
+    RequestFailed {
+        connection_id: LocalConnectionId,
+        request: RequestToken,
     },
     Disconnected {
         connection_id: LocalConnectionId,
@@ -96,12 +153,14 @@ pub enum TransportEvent {
 /// Construction opens no sockets. Dropping the adapter shuts down its transports.
 pub struct LocalTransport {
     live: HashMap<LocalConnectionId, Arc<()>>,
-    swarm: Swarm<Admission>,
+    swarm: Swarm<AslBehaviour>,
     listeners: HashSet<ListenerId>,
+    requests: Requests,
 }
 
 impl LocalTransport {
     pub fn new(identity: Keypair) -> io::Result<Self> {
+        let behaviour = AslBehaviour::new();
         let swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_tcp(tcp::Config::default(), noise::Config::new, || {
@@ -115,7 +174,7 @@ impl LocalTransport {
                 config.max_connection_data = 16 * 1024;
                 config
             })
-            .with_behaviour(|_| Admission::default())
+            .with_behaviour(|_| behaviour)
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
@@ -128,6 +187,7 @@ impl LocalTransport {
             live: HashMap::new(),
             swarm,
             listeners: HashSet::new(),
+            requests: Requests::new(),
         })
     }
 
@@ -173,6 +233,9 @@ impl LocalTransport {
     /// Failed inbound handshakes are reported without stopping the listener.
     pub async fn next_event(&mut self) -> io::Result<TransportEvent> {
         require_runtime()?;
+        if let Some(event) = self.requests.pop_event() {
+            return Ok(event);
+        }
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -205,11 +268,28 @@ impl LocalTransport {
                 } => {
                     let connection_id = LocalConnectionId(connection_id);
                     self.live.remove(&connection_id);
+                    self.requests.close_connection(connection_id);
                     return Ok(TransportEvent::Disconnected {
                         connection_id,
                         peer: device_peer(peer_id)?,
                     });
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Control(event)) => {
+                    if let Some(event) = self.handle_control(event)? {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::IdentityProof(event)) => {
+                    if let Some(event) = self.handle_identity_proof(event)? {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Bulk(event)) => {
+                    if let Some(event) = self.handle_bulk(event)? {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Admission(never)) => match never {},
                 SwarmEvent::ListenerClosed { listener_id, .. } => {
                     self.listeners.remove(&listener_id);
                     return Err(io::Error::other("loopback listener closed"));

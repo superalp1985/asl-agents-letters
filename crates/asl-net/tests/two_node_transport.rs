@@ -228,6 +228,7 @@ async fn run_listener_child(
                     "listener reported an unexpected extra endpoint",
                 ));
             }
+            Ok(_) => continue,
             Err(error) => return Err(error),
         }
     }

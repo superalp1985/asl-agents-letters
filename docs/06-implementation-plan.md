@@ -320,6 +320,8 @@ T14 bulk codec 切片（2026-11-18）：新增 `/asl/blob/1.0.0` request-respons
 
 T14 身份证明 wire 修订（2026-11-19）：明确废弃未发布的 `/asl/identity-proof/1.0.0` 线格式并冻结 `/asl/identity-proof/1.1.0`。响应现在携带可供既有 MPT 验证器使用的完整账户字段、三个 256 位 slot/value 路径及最多 8 KiB 签名设备目录；不再接收对端声称的 controller、sequence 或 revoked 结果。`asl-app::chain::identity_proof_from_wire` 只从本机 deployment 配置补链 ID/registry 地址，并在映射前绑定 pending request ID、AgentId 和请求 checkpoint；映射结果由原 `EthereumProofVerifier` 执行真实 trie 验证。固定 CDDL/CBOR 样例与 TCP/QUIC 子流测试同步更新。仍未完成生产 Swarm behaviour、同一认证连接的请求响应绑定、proof serving、Core IPC 闸门和公网测试，故 T14 未关闭。
 
+T14 组合网络行为切片（2026-11-19）：在现有 loopback-only Noise/Yamux 与 QUIC Swarm 注册 control、identity-proof 1.1 和 blob 三个 request-response behaviour。公共事件不暴露 libp2p request/channel 类型；出站请求与入站回复句柄绑定本地认证连接，IdentityProof 的 request ID/AgentId/checkpoint 与 Bulk 的 request ID 在交付/回复时核对。每协议每 peer 最多 2 条并行子流，超时 10 秒，等待中的请求和回复句柄各有 96 项总上限。新增 TCP/QUIC 组合驱动往返测试。本切片仍只绑定 loopback 地址；Net/Core Supervisor IPC、链证明接收与目录验签、Core 的未验证控制帧身份闸门、生产 proof serving 和公网地址策略未完成。`ControlRequest` 明确仍是待身份验证事件，T14 不关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

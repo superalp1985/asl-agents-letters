@@ -395,4 +395,13 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - 随后重新运行 `cargo test --workspace --all-targets --locked --offline`、`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`，均退出码为 0。全量测试包括 Windows AppContainer 用例；两项因云机环境限制的探针仍按既有规则标记 ignored。
 - 本记录不代表 Swarm 生产接线、Core 身份准入、proof serving、Supervisor IPC、每连接请求绑定或公网安全验收；这些仍属于 T14 后续工作。
 
+### 2026-11-19 T14 composed request-response behaviour
+
+- Existing loopback Swarm now composes the frozen control, identity-proof 1.1 and bulk codecs. Request and response events retain opaque local tokens bound to the exact authenticated transport connection; identity proof context and bulk request IDs are checked before delivery. Per-protocol stream concurrency, request timeout and aggregate pending-token limits are configured.
+- `cargo test -p asl-net --all-targets --locked --offline`: 23 passed, 1 ignored. The new integration test exercises all three request-response types over TCP and QUIC, including refusal of an identity response with a wrong AgentId or a different authenticated connection while retaining the pending response handle.
+- `cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`: passed. Full-workspace verification for the combined changes is recorded below after completion.
+- This remains a loopback-only transport slice. It does not connect network behaviour to Supervisor IPC, run the production Core identity gate, serve verified chain proofs/directories, or validate public address policy.
+- Combined changes then passed `cargo test --workspace --all-targets --locked --offline`, strict workspace Clippy, `cargo fmt --all -- --check`, `git diff --check`, and `scripts/validate-cddl.ps1` (17 accepted, 3 rejected). Ignored Windows-only probes remain separately marked; no public-network or whole-product claim is made.
+- Revalidation after extracting request ownership into `transport/requests.rs` and embedding the inbound connection ID in each opaque response token: the TCP/QUIC integration now also rejects using a valid response token on a second authenticated connection without consuming it. Fresh `cargo test --workspace --all-targets --locked --offline`, strict workspace Clippy, `cargo fmt --all -- --check`, `git diff --check`, and CDDL validation all passed (17 accepted, 3 rejected). The workspace run was on the local Windows host; ignored external-endpoint, production-timer, and subprocess-entry probes remain unrun.
+
 已有链 HTTP 历史同步测试曾在一次全量运行中于本地恢复时返回 `InvalidLocalState`；随后单项与全量重跑均通过。未确认该偶发失败的原因，本批未修改链 HTTP 或恢复代码。
