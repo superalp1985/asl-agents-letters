@@ -32,6 +32,11 @@ fn fixture_base() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(FIXTURE_BASE))
 }
 
+fn fixture_volume_root(path: &Path) -> &Path {
+    assert!(path.is_absolute(), "fixture must have an absolute path");
+    path.ancestors().last().expect("fixture volume root")
+}
+
 struct Fixture {
     base: PathBuf,
     root: PathBuf,
@@ -302,6 +307,20 @@ fn short_component(path: &Path) -> Option<OsString> {
 }
 
 #[test]
+fn fixture_volume_root_follows_the_selected_drive() {
+    for (path, expected) in [
+        (r"C:\ASL\work\test-fs", r"C:\"),
+        (r"E:\ASL\work\test-fs", r"E:\"),
+        (r"Z:\Temporary Fixtures\test-fs", r"Z:\"),
+    ] {
+        let path = Path::new(path);
+        let root = fixture_volume_root(path);
+        assert_eq!(root, Path::new(expected));
+        assert_eq!(root.join(path.strip_prefix(root).unwrap()), path);
+    }
+}
+
+#[test]
 fn exact_nested_reads_have_stable_identity_and_non_ascii_names() {
     let fixture = Fixture::new();
     let nested = fixture.inside.join("Nested");
@@ -520,7 +539,9 @@ fn case_variants_fail_but_drive_letter_case_is_irrelevant() {
     assert!(
         SourceGrant::open(&fixture.inside, &fixture.root.join("Protected"), rules(128)).is_err()
     );
-    let lower_drive = PathBuf::from(fixture.inside.to_str().unwrap().replacen("E:", "e:", 1));
+    let volume_root = fixture_volume_root(&fixture.inside);
+    let lower_drive = PathBuf::from(volume_root.to_str().unwrap().to_ascii_lowercase())
+        .join(fixture.inside.strip_prefix(volume_root).unwrap());
     let lower = SourceGrant::open(&lower_drive, &fixture.protected, rules(128)).unwrap();
     assert_eq!(lower.identity(), grant.identity());
     let exact_ancestor = SourceGrant::open(&nested_source, &nested_protected, rules(128)).unwrap();
@@ -1075,7 +1096,8 @@ fn real_subst_root_is_rejected_without_modifying_drive_settings() {
         );
         return;
     };
-    for target in [fixture.inside.as_path(), Path::new(r"E:\")] {
+    let volume_root = fixture_volume_root(&fixture.inside);
+    for target in [fixture.inside.as_path(), volume_root] {
         let name = format!("{letter}:");
         let output = Command::new("subst.exe")
             .arg(&name)

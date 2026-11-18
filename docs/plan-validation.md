@@ -118,6 +118,23 @@ SQLite/恢复测试实际写入并重开 E 盘临时数据库，覆盖原子事�
 
 独立静态工程复核无确认的阻断发现，对照了原夹具和 ACK 完整字节，检查全部样例、导出/校验入口与文档；复核者未重跑命令，超时和异常清理路径仅静态阅读。这不是多节点互操作、全量协议穷举、记录签名/链认证或完整安全验收。当前向量使用合成签名和证明字节；验证范围详见 `docs/protocol-vectors.md`。Foundry、真实链服务、Windows 沙箱与 GUI 本轮未运行。
 
+### 2026-11-18 T08 云机夹具与盘符修正
+
+用户提交的云机 C 盘 NTFS 输出实际覆盖文件/目录 symlink，以及文件/目录/授权根
+8.3 别名。21 项函数中 20 通过、1 失败；失败来自卷根 SUBST 夹具残留的 `E:\`
+硬编码，目录 SUBST 已执行。不是生产能力接受了越界路径，也不能记录整体验收通过。
+
+测试现跟随所选夹具路径派生卷根，盘符大小写用例同步修正，新增 C/E/Z 路径
+派生回归测试。修正后本机运行：
+
+- `cargo test --workspace --all-targets --locked --offline`：252 项函数通过。
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo fmt --all -- --check` 和 `git diff --check`：通过。
+- `cargo test -p asl-policy --test path_boundaries --locked --offline -- --nocapture --test-threads=1`：22 项函数通过；本机 symlink/8.3 仍未实际执行，卷根 SUBST 正确跟随 E 盘。
+
+云机修正版完整重跑仍待用户提供，T08 保持部分验收。未改生产代码、依赖、
+锁文件、协议或机器设置；本次未重跑 CDDL、许可证、Foundry 或独立复核。
+
 较早 T01 路径切片另行验证：
 
 - `cargo check --workspace --locked` 通过。
