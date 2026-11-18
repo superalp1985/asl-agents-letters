@@ -385,4 +385,14 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - 最终 bulk 切片通过全工作区 `cargo test --workspace --all-targets --locked --offline`、严格 Clippy、格式与 diff 检查。下方已有链恢复用例也在本轮全量中通过。
 - 上述测试只证明 codec 线格式和真实子流互操作；生产 codec 未注册到 Swarm，不能把结果解释为 Core 身份闸门、请求与 AgentId 绑定、Supervisor IPC 或完整 T14 验收。后续集成需使用有界 stream 数与请求超时；本集成测试显式采用每连接最多 2 streams、10 秒超时。未在 AppContainer 或公网验证。
 
+### 2026-11-19 T14 identity-proof 1.1.0 schema repair
+
+- `/asl/identity-proof/1.0.0` 的原响应缺少 account nonce/balance/storage root/code hash，且 storage slot 只有 u64，无法输入现有 `EthereumProofVerifier`。未发布协议显式升级到 `/asl/identity-proof/1.1.0`，不保留旧响应的静默兼容。
+- 新响应包含完整账户 MPT 输入、恰好 3 个 bytes32 slot/value 路径，以及 8 KiB 内签名设备目录记录；移除 wire 上未经证明的 controller、commitment、sequence、revoked 派生字段。Core adapter 从本机部署配置添加 chain ID 和 registry address，request ID、AgentId、checkpoint 任一不匹配时拒绝映射。
+- `cargo test -p asl-app --lib chain::network_tests --locked --offline`：2 项通过；正例通过现有 Ethereum MPT verifier，负例覆盖 request ID、AgentId、checkpoint 错配。
+- `cargo test -p asl-types --test protocol --test schema_vectors --locked --offline`：15 项通过；包括 8 KiB directory 上限、三条固定宽度 slot/value 与固定样例语料。
+- `cargo test -p asl-net --test substream_codec --test libp2p_substreams --locked --offline`：8 项通过；TCP/QUIC 真实子流运行于同进程 Swarm。`scripts/validate-cddl.ps1`：17 个接受向量、3 个拒绝向量与 CDDL 语法均通过。
+- 随后重新运行 `cargo test --workspace --all-targets --locked --offline`、`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`，均退出码为 0。全量测试包括 Windows AppContainer 用例；两项因云机环境限制的探针仍按既有规则标记 ignored。
+- 本记录不代表 Swarm 生产接线、Core 身份准入、proof serving、Supervisor IPC、每连接请求绑定或公网安全验收；这些仍属于 T14 后续工作。
+
 已有链 HTTP 历史同步测试曾在一次全量运行中于本地恢复时返回 `InvalidLocalState`；随后单项与全量重跑均通过。未确认该偶发失败的原因，本批未修改链 HTTP 或恢复代码。

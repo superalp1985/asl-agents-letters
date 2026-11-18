@@ -17,7 +17,7 @@ use libp2p::{
 
 pub const CONTROL_PROTOCOL: StreamProtocol = StreamProtocol::new("/asl/control/1.0.0");
 pub const IDENTITY_PROOF_PROTOCOL: StreamProtocol =
-    StreamProtocol::new("/asl/identity-proof/1.0.0");
+    StreamProtocol::new("/asl/identity-proof/1.1.0");
 
 // Canonical CBOR map with five one-byte keys, two one-byte values, and three fixed byte strings.
 const PROOF_REQUEST_BYTES: usize = 1 + 5 + 2 + (1 + 16) + (2 + 32) + (2 + 32);

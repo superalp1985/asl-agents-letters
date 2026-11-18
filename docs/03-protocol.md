@@ -50,7 +50,7 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | --- | --- | --- |
 | `/asl/kad/1.0.0` | ASL 网络的 Kademlia | 记录值最多 8 KiB；本机最多 10,000 条/64 MiB，含额外索引的上限另计 |
 | `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
-| `/asl/identity-proof/1.0.0` | 按需交换链上身份状态证明 | 请求仅为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀 |
+| `/asl/identity-proof/1.1.0` | 按需交换链上身份状态与设备目录证明 | 请求为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀；不兼容的 1.0.0 不协商 |
 | `/asl/blob/1.0.0` | manifest、块、inline 拉取 | request-response 一请求一响应；请求固定 91 字节，响应最多 2,097,237 字节（不含外层 u32 BE 前缀），manifest 最多 2,097,210 字节，数据块最多 1 MiB |
 | `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
@@ -59,7 +59,9 @@ manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 ha
 
 控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查必须由后续 driver/Core 完成。未接入 Core 身份闸门前不得把 codec 单独注册为可处理业务的网络行为。
 
-控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 携带 AgentId、设备证书和链身份状态摘要。若本机没有新鲜缓存，双方按需在独立 identity-proof stream 请求并提交已最终化的 registry storage proof。proof request 的 checkpoint 字段绑定本机已接受的 finalized block hash，不能由对端指定新信任根。proof response 字段依次为 AgentId、finalized height/block hash/state root、contract account proof、storage-slot proofs、controller address、state commitment、sequence 和 status。一个证明最多含 32 个节点/路径、每节点最多 2 KiB、最多 8 个 slot path、总帧 256 KiB。core 使用本地轻客户端最终化状态根验证，不信任对端、RPC 或索引器对证明的解释。昂贵验签/证明验证要经过未知来源预算闸门。验证成功前只放行有界 hello/proof/pair 消息。
+控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 携带 AgentId 和设备证书。双方按需在独立 identity-proof stream 交换证明：request 的 checkpoint 字段绑定请求方本机已接受的 finalized block hash，不能由对端指定信任根；响应必须精确匹配 request ID、AgentId 和 checkpoint。响应包含 finalized height/block hash/state root、完整 EIP-1186 account verifier inputs（nonce、balance、storage root、code hash、nodes）、恰好三个 `{slot: bytes32, value: bytes32, nodes}` 路径，以及最多 8 KiB 的身份根签名 device-directory record。链 ID、registry address 和可信状态根只取本机已验证配置/轻客户端；controller、commitment、sequence、revocation 等状态由 Core 运行现有 Ethereum MPT 验证器从槽值解码，不采信对端派生字段。随后 Core 验证签名目录、链上 commitment/sequence、当前证书和传输 PeerId。每条路径最多 32 个节点、每节点最多 2 KiB、总帧 256 KiB。证明必须来自请求中指定的 checkpoint；对端无法提供时握手失败，不接受它建议的新 root。昂贵验签/证明验证必须经过每连接及全局预算闸门；验证成功前只放行有界 hello/proof/pair 消息。
+
+`/asl/identity-proof/1.1.0` 修正此前 1.0.0 线格式与现有验证器不兼容的问题：旧结构省略账户 trie 验证所需字段、用 64 位 storage slot 且携带未经验证器推导的注册状态。本项目尚未发布，故直接冻结新的 1.1.0，禁止静默兼容旧结构。身份目录作为签名记录随身份证明返回，避免为目录另造信任根或额外发现步骤；记录本身仍须按第 3 节完整验签和核对当前链状态。
 
 PAIR invite/exchange 帧只含 AgentId、PeerId、期限、一次性 token、有限尝试序号、transcript hash 和所选成熟 PAKE 的有界密码学 payload。MLS group envelope 外层只含 group ID、epoch、操作码和有界 ciphertext；OpenMLS 解密后的 plaintext 必须再次通过 ASL 语义 CDDL 校验。
 

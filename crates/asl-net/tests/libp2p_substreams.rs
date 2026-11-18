@@ -178,12 +178,21 @@ async fn identity_proof_codec_runs_over_tcp_and_quic_request_response_substreams
             finalized_height: 123,
             block_hash: [4; 32].into(),
             state_root: [5; 32].into(),
-            account_proof: vec![vec![6; 8]],
-            storage_proofs: vec![],
-            controller_address: [7; 20],
-            state_commitment: [8; 32].into(),
-            sequence: 9,
-            revoked: false,
+            account: asl_types::protocol::AccountProof {
+                nonce: 1,
+                balance: [6; 32],
+                storage_root: [7; 32],
+                code_hash: [8; 32],
+                nodes: vec![vec![9; 8]],
+            },
+            storage_proofs: (0_u8..3)
+                .map(|slot| asl_types::protocol::StorageProof {
+                    slot: [slot + 10; 32],
+                    value: [slot + 20; 32],
+                    nodes: vec![vec![11; 8]],
+                })
+                .collect(),
+            signed_directory: vec![12; 256],
         };
         let mut request_id = None;
         let mut received_request = false;

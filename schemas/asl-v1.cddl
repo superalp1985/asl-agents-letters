@@ -168,18 +168,26 @@ identity-proof = {
   4: uint,
   5: hash32,
   6: hash32,
-  7: [0*32 bstr .size (1..2048)],
-  8: [0*8 storage-proof],
-  9: bstr .size 20,
-  10: hash32,
-  11: uint,
-  12: uint .le 1
+  7: account-proof,
+  8: [storage-proof, storage-proof, storage-proof],
+  9: bstr .size (1..8192)
+}
+
+account-proof = {
+  0: uint,
+  1: hash32,
+  2: hash32,
+  3: hash32,
+  4: proof-nodes
 }
 
 storage-proof = {
-  0: uint,
-  1: [0*32 bstr .size (1..2048)]
+  0: hash32,
+  1: hash32,
+  2: proof-nodes
 }
+
+proof-nodes = [0*32 bstr .size (1..2048)]
 
 pairing-invite = {
   0: 1,

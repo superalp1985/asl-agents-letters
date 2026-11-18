@@ -7,7 +7,7 @@ use crate::{
     error::{AslError, ErrorCode},
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
-        Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
+        AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
         DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
         IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer, PairingExchange,
         PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus, StorageProof,
@@ -18,6 +18,7 @@ use crate::{
 pub const MAX_CONTROL_FRAME_BYTES: usize = 65_536;
 pub const MAX_EXTENDED_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PAIRING_FRAME_BYTES: usize = 8 * 1024;
+const MAX_SIGNED_DIRECTORY_BYTES: usize = 8 * 1024;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 const MAX_TIME_MS: u64 = i64::MAX as u64;
 const MAX_CERTIFICATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
@@ -838,35 +839,50 @@ fn proof_nodes(value: Value) -> Result<Vec<Vec<u8>>, AslError> {
         .collect()
 }
 
+fn decode_account_proof(value: Value) -> Result<AccountProof, AslError> {
+    let mut fields = fields(value)?;
+    check_keys(&fields, &[0, 1, 2, 3, 4])?;
+    let nonce = as_u64(take(&mut fields, 0)?)?;
+    let balance = fixed_bytes::<32>(take(&mut fields, 1)?)?;
+    let storage_root = fixed_bytes::<32>(take(&mut fields, 2)?)?;
+    let code_hash = fixed_bytes::<32>(take(&mut fields, 3)?)?;
+    let nodes = proof_nodes(take(&mut fields, 4)?)?;
+    finish(fields)?;
+    Ok(AccountProof {
+        nonce,
+        balance,
+        storage_root,
+        code_hash,
+        nodes,
+    })
+}
+
 fn decode_storage_proof(value: Value) -> Result<StorageProof, AslError> {
     let mut fields = fields(value)?;
-    check_keys(&fields, &[0, 1])?;
-    let slot = as_u64(take(&mut fields, 0)?)?;
-    let nodes = proof_nodes(take(&mut fields, 1)?)?;
+    check_keys(&fields, &[0, 1, 2])?;
+    let slot = fixed_bytes::<32>(take(&mut fields, 0)?)?;
+    let value = fixed_bytes::<32>(take(&mut fields, 1)?)?;
+    let nodes = proof_nodes(take(&mut fields, 2)?)?;
     finish(fields)?;
-    Ok(StorageProof { slot, nodes })
+    Ok(StorageProof { slot, value, nodes })
 }
 
 fn decode_identity_proof(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9])?;
     let request_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let agent_id = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
     let finalized_height = as_u64(take(&mut fields, 4)?)?;
     let block_hash = Hash32(fixed_bytes::<32>(take(&mut fields, 5)?)?);
     let state_root = Hash32(fixed_bytes::<32>(take(&mut fields, 6)?)?);
-    let account_proof = proof_nodes(take(&mut fields, 7)?)?;
-    let storage_proofs = array(take(&mut fields, 8)?, 8)?
+    let account = decode_account_proof(take(&mut fields, 7)?)?;
+    let storage_proofs = array(take(&mut fields, 8)?, 3)?
         .into_iter()
         .map(decode_storage_proof)
         .collect::<Result<Vec<_>, _>>()?;
-    let controller_address = fixed_bytes::<20>(take(&mut fields, 9)?)?;
-    let state_commitment = Hash32(fixed_bytes::<32>(take(&mut fields, 10)?)?);
-    let sequence = as_u64(take(&mut fields, 11)?)?;
-    let revoked = match bounded_uint::<u8>(take(&mut fields, 12)?, 1)? {
-        0 => false,
-        1 => true,
-        _ => return invalid(),
-    };
+    if storage_proofs.len() != 3 {
+        return invalid();
+    }
+    let signed_directory = byte_string(take(&mut fields, 9)?, 1, MAX_SIGNED_DIRECTORY_BYTES)?;
     finish(fields)?;
     Ok(WireFrame::IdentityProof(IdentityProof {
         request_id,
@@ -874,12 +890,9 @@ fn decode_identity_proof(mut fields: Fields) -> Result<WireFrame, AslError> {
         finalized_height,
         block_hash,
         state_root,
-        account_proof,
+        account,
         storage_proofs,
-        controller_address,
-        state_commitment,
-        sequence,
-        revoked,
+        signed_directory,
     }))
 }
 
@@ -1119,14 +1132,24 @@ fn encode_value(frame: &WireFrame) -> Value {
             (6, Value::Bytes(value.state_root.0.to_vec())),
             (
                 7,
-                Value::Array(
-                    value
-                        .account_proof
-                        .iter()
-                        .cloned()
-                        .map(Value::Bytes)
-                        .collect(),
-                ),
+                map([
+                    (0, uint(value.account.nonce)),
+                    (1, Value::Bytes(value.account.balance.to_vec())),
+                    (2, Value::Bytes(value.account.storage_root.to_vec())),
+                    (3, Value::Bytes(value.account.code_hash.to_vec())),
+                    (
+                        4,
+                        Value::Array(
+                            value
+                                .account
+                                .nodes
+                                .iter()
+                                .cloned()
+                                .map(Value::Bytes)
+                                .collect(),
+                        ),
+                    ),
+                ]),
             ),
             (
                 8,
@@ -1136,9 +1159,10 @@ fn encode_value(frame: &WireFrame) -> Value {
                         .iter()
                         .map(|proof| {
                             map([
-                                (0, uint(proof.slot)),
+                                (0, Value::Bytes(proof.slot.to_vec())),
+                                (1, Value::Bytes(proof.value.to_vec())),
                                 (
-                                    1,
+                                    2,
                                     Value::Array(
                                         proof.nodes.iter().cloned().map(Value::Bytes).collect(),
                                     ),
@@ -1148,10 +1172,7 @@ fn encode_value(frame: &WireFrame) -> Value {
                         .collect(),
                 ),
             ),
-            (9, Value::Bytes(value.controller_address.to_vec())),
-            (10, Value::Bytes(value.state_commitment.0.to_vec())),
-            (11, uint(value.sequence)),
-            (12, uint(if value.revoked { 1 } else { 0 })),
+            (9, Value::Bytes(value.signed_directory.clone())),
         ]),
         WireFrame::PairingInvite(value) => entries.extend([
             (2, Value::Bytes(value.invite_id.0.to_vec())),

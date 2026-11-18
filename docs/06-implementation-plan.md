@@ -318,6 +318,8 @@ T14 子流 codec 切片（2026-11-18）：新增独立 `/asl/control/1.0.0` 和 
 
 T14 bulk codec 切片（2026-11-18）：新增 `/asl/blob/1.0.0` request-response codec。请求严格使用 91 字节固定格式，响应使用 u32 BE 长度前缀和 27 字节固定头，成功 payload 上限由 manifest 规范导出，为 2,097,210 字节；未知 magic/操作码/状态码、manifest/inline 非零 index、错误状态携带 payload、截断、尾随和超限长度均拒绝。真实 TCP 与 QUIC 子流测试传输并重新校验最大合法 2,097,210 字节 manifest。该切片不校验 lease/授权/块 hash，不注册生产网络 behaviour，不代表 transfer 调度、请求与认证连接绑定或完整 T14 已关闭。
 
+T14 身份证明 wire 修订（2026-11-19）：明确废弃未发布的 `/asl/identity-proof/1.0.0` 线格式并冻结 `/asl/identity-proof/1.1.0`。响应现在携带可供既有 MPT 验证器使用的完整账户字段、三个 256 位 slot/value 路径及最多 8 KiB 签名设备目录；不再接收对端声称的 controller、sequence 或 revoked 结果。`asl-app::chain::identity_proof_from_wire` 只从本机 deployment 配置补链 ID/registry 地址，并在映射前绑定 pending request ID、AgentId 和请求 checkpoint；映射结果由原 `EthereumProofVerifier` 执行真实 trie 验证。固定 CDDL/CBOR 样例与 TCP/QUIC 子流测试同步更新。仍未完成生产 Swarm behaviour、同一认证连接的请求响应绑定、proof serving、Core IPC 闸门和公网测试，故 T14 未关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

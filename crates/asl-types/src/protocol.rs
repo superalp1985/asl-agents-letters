@@ -223,8 +223,18 @@ pub struct IdentityProofRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountProof {
+    pub nonce: u64,
+    pub balance: [u8; 32],
+    pub storage_root: [u8; 32],
+    pub code_hash: [u8; 32],
+    pub nodes: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageProof {
-    pub slot: u64,
+    pub slot: [u8; 32],
+    pub value: [u8; 32],
     pub nodes: Vec<Vec<u8>>,
 }
 
@@ -235,12 +245,9 @@ pub struct IdentityProof {
     pub finalized_height: u64,
     pub block_hash: Hash32,
     pub state_root: Hash32,
-    pub account_proof: Vec<Vec<u8>>,
+    pub account: AccountProof,
     pub storage_proofs: Vec<StorageProof>,
-    pub controller_address: [u8; 20],
-    pub state_commitment: Hash32,
-    pub sequence: u64,
-    pub revoked: bool,
+    pub signed_directory: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

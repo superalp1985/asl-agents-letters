@@ -49,6 +49,72 @@ fn control_codec_accepts_only_control_frames() {
 }
 
 #[test]
+fn identity_proof_v11_carries_verifier_inputs_and_the_signed_device_directory() {
+    let byte_string = |byte| Value::Bytes(vec![byte; 32]);
+    let nodes = || Value::Array(vec![Value::Bytes(vec![1, 2, 3])]);
+    let account = Value::Map(vec![
+        (Value::Integer(0.into()), Value::Integer(1.into())),
+        (Value::Integer(1.into()), byte_string(2)),
+        (Value::Integer(2.into()), byte_string(3)),
+        (Value::Integer(3.into()), byte_string(4)),
+        (Value::Integer(4.into()), nodes()),
+    ]);
+    let storage = Value::Array(
+        (1..=3)
+            .map(|slot| {
+                Value::Map(vec![
+                    (Value::Integer(0.into()), byte_string(slot)),
+                    (Value::Integer(1.into()), byte_string(slot + 3)),
+                    (Value::Integer(2.into()), nodes()),
+                ])
+            })
+            .collect(),
+    );
+    let proof = Value::Map(vec![
+        (Value::Integer(0.into()), Value::Integer(1.into())),
+        (Value::Integer(1.into()), Value::Integer(10.into())),
+        (Value::Integer(2.into()), Value::Bytes(vec![5; 16])),
+        (Value::Integer(3.into()), Value::Bytes(vec![6; 32])),
+        (Value::Integer(4.into()), Value::Integer(123.into())),
+        (Value::Integer(5.into()), byte_string(7)),
+        (Value::Integer(6.into()), byte_string(8)),
+        (Value::Integer(7.into()), account),
+        (Value::Integer(8.into()), storage),
+        (Value::Integer(9.into()), Value::Bytes(vec![9; 8_192])),
+    ]);
+    let encoded = cbor2::to_canonical_vec(&proof).unwrap();
+    assert!(matches!(
+        decode_frame(&encoded),
+        Ok(WireFrame::IdentityProof(_))
+    ));
+}
+
+#[test]
+fn identity_proof_requires_the_revised_envelope_and_three_fixed_width_storage_paths() {
+    let proof = encode_frame(&sample_frames()[10]).unwrap();
+    let request = encode_frame(&sample_frames()[9]).unwrap();
+    for frame in [&proof, &request] {
+        assert!(decode_frame(&replace_value(frame, 0, Value::Integer(1.into()))).is_err());
+    }
+    assert!(decode_frame(&replace_value(&proof, 6, Value::Array(vec![]))).is_err());
+    assert!(decode_frame(&replace_value(&proof, 7, Value::Bytes(vec![0; 8_193]))).is_err());
+    assert!(decode_frame(&replace_value(&request, 4, Value::Bytes(vec![0; 31]))).is_err());
+    let Value::Map(fields) = cbor2::from_slice(&proof).unwrap() else {
+        panic!("expected proof map");
+    };
+    let Value::Array(mut paths) = fields[8].1.clone() else {
+        panic!("expected storage paths");
+    };
+    let Value::Map(first) = &mut paths[0] else {
+        panic!("expected a storage proof map");
+    };
+    first[0].1 = Value::Integer(0.into());
+    assert!(decode_frame(&replace_value(&proof, 8, Value::Array(paths))).is_err());
+    assert!(decode_frame(&replace_value(&proof, 8, Value::Array(vec![]))).is_err());
+    assert!(decode_frame(&replace_value(&proof, 9, Value::Bytes(vec![9; 8_193]))).is_err());
+}
+
+#[test]
 fn rejects_duplicate_map_keys_at_root_and_nested_levels() {
     let root_duplicate = cbor2::to_vec(&Value::Map(vec![
         (
