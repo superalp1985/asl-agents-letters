@@ -4,7 +4,10 @@ use crate::{
     error::ErrorCode,
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
 };
-pub use cbor::{decode_control, decode_frame, encode_control, encode_frame};
+pub use cbor::{
+    MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, decode_control, decode_frame,
+    encode_control, encode_frame,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Feature {

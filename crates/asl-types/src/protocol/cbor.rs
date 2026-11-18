@@ -15,8 +15,8 @@ use crate::{
     },
 };
 
-const MAX_CONTROL_FRAME_BYTES: usize = 65_536;
-const MAX_EXTENDED_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_CONTROL_FRAME_BYTES: usize = 65_536;
+pub const MAX_EXTENDED_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PAIRING_FRAME_BYTES: usize = 8 * 1024;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 const MAX_TIME_MS: u64 = i64::MAX as u64;

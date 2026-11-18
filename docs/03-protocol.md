@@ -49,13 +49,15 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | 协议 | 用途 | 限制 |
 | --- | --- | --- |
 | `/asl/kad/1.0.0` | ASL 网络的 Kademlia | 记录值最多 8 KiB；本机最多 10,000 条/64 MiB，含额外索引的上限另计 |
-| `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | 每帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
-| `/asl/identity-proof/1.0.0` | 按需交换链上身份状态证明 | 每帧确定性 CBOR 最多 256 KiB；未校验身份不能提交大 proof 或重复触发验证 |
+| `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
+| `/asl/identity-proof/1.0.0` | 按需交换链上身份状态证明 | 请求仅为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀 |
 | `/asl/blob/1.0.0` | manifest、块、inline 拉取 | 一请求一响应；manifest 最多 2,097,210 字节，数据块最多 1 MiB |
 | `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
+
+控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查必须由后续 driver/Core 完成。未接入 Core 身份闸门前不得把 codec 单独注册为可处理业务的网络行为。
 
 控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 携带 AgentId、设备证书和链身份状态摘要。若本机没有新鲜缓存，双方按需在独立 identity-proof stream 请求并提交已最终化的 registry storage proof。proof request 的 checkpoint 字段绑定本机已接受的 finalized block hash，不能由对端指定新信任根。proof response 字段依次为 AgentId、finalized height/block hash/state root、contract account proof、storage-slot proofs、controller address、state commitment、sequence 和 status。一个证明最多含 32 个节点/路径、每节点最多 2 KiB、最多 8 个 slot path、总帧 256 KiB。core 使用本地轻客户端最终化状态根验证，不信任对端、RPC 或索引器对证明的解释。昂贵验签/证明验证要经过未知来源预算闸门。验证成功前只放行有界 hello/proof/pair 消息。
 

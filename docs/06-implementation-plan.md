@@ -314,6 +314,8 @@ T14 首轮实现记录（2026-11-18）：`asl-net` 已提供只绑定回环地�
 
 本轮验收覆盖：独立进程 TCP/QUIC 回环加密连接、正确设备 PeerId、错误期望 PeerId 拒绝、连接准入状态的入站/出站并发与总量上限、Core 证书/目录/链状态绑定及旧会话不可恢复。连接上限目前有状态机单测，尚未进行公网压力或 AppContainer 负载验收。控制请求响应 driver、独立 identity-proof stream、控制/大帧实际子流 codec、Supervisor IPC 接线、mDNS/公网地址策略、中继和公网端点仍属于后续切片；本记录不宣称完整 T14 已关闭。
 
+T14 子流 codec 切片（2026-11-18）：新增独立 `/asl/control/1.0.0` 和 `/asl/identity-proof/1.0.0` request-response codec。两者共用协议已冻结的确定性 CBOR 编解码器，使用 u32 BE 长度前缀并在读取 payload 前校验限额；控制帧上限 65,536 字节，身份请求以固定字段限制为 93 字节，身份响应上限 262,144 字节。接收端读满后要求对端关闭写半流，拒绝尾随数据；协议串线、身份方向错误及超限长度均拒绝。固定向量测试覆盖错误边界；真实 TCP 与 QUIC libp2p Swarm request-response 测试分别完成控制和身份请求/响应往返。该切片只完成 codec 和子流线格式互操作，不注册生产网络 behaviour，不代表已有身份验证、请求 ID/AgentId 绑定、Supervisor IPC、bulk codec 或连接驱动；T14 仍未关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

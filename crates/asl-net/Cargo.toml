@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 asl-types = { path = "../asl-types" }
-libp2p = { version = "=0.57.1", default-features = false, features = ["ed25519", "noise", "quic", "tcp", "tokio", "yamux"] }
+libp2p = { version = "=0.57.1", default-features = false, features = ["ed25519", "noise", "quic", "request-response", "tcp", "tokio", "yamux"] }
 tokio.workspace = true
 
 [dev-dependencies]
