@@ -1,1 +1,3 @@
-//! libp2p transport and peer discovery adapters.
+//! Authenticated device transports. Transport identity does not authorize ASL traffic.
+
+pub mod transport;

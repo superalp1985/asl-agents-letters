@@ -366,3 +366,14 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - 测试使用真实 SQLite/FTS5、本地授权快照和 Windows 文件导入。覆盖本地中文/结构化概念检索、私有内容不改变公开命中/分数、伪造候选键、无权 inbox、允许 Search 但禁止 ReadMetadata、两个授权共用内容时的隔离、数据库/内存版本漂移、已撤销链身份、群/指定节点授权交集、大目录分页及游标失效。
 - 独立代码复核报告的五个问题已分别处理：持久撤销优先于旧许可、按候选而非命中限制工作量、返回时权限失效需重试、SQLite v3 事务清理失效引用的 FTS 行、读取存储标签时先检查借用数据的长度。v1/v2 升级、回滚、反复授权/撤销以及真实的固定句柄前缀索引有用例。不代表磁盘安全擦除或经过独立安全审计。
 - 未运行公网、云机、PDF 解析、Foundry 或模型测试；未开放节点文本消息、群聊或文件传输。线上 schema 未改，数据库版本与线上协议版本独立。
+
+### 2026-11-18 T14 首轮：回环加密传输与 Core 身份闸门
+
+- `cargo test -p asl-net --test two_node_transport --locked --offline`：5 项通过、0 失败、1 个子进程入口默认忽略。覆盖独立进程 TCP Noise/Yamux、QUIC、同进程 TCP 回环、错误期望 PeerId 拒绝，以及错误入站握手后监听器继续服务。
+- `cargo test -p asl-app --lib profile::tests::connection_tests --locked --offline`：4 项通过、0 失败。覆盖未完成 hello 不放行、重复 hello 关闭、连接 PeerId 与 hello/证书不符、伪造 AgentId、旧证书、链撤销、目录变化、过期、历史推进、时钟回退和关闭后不可恢复。真实 TCP 回环回归验证了收到断开事件后旧会话失效、同设备重连必须重新握手、传输销毁后旧句柄不能完成 hello。
+- 准入状态单测共 2 项。覆盖入站/出站握手与已建立连接共享总量上限，以及同一 PeerId 入站不会释放其独立的出站握手名额。此处是状态逻辑验证，不代表公网压力测试。
+- 本轮实现仍限定为本机回环地址。传输层只证明设备 PeerId；普通业务帧必须另经 Core 的链身份、根签名设备证书和当前目录核验。尚未接入 identity-proof stream、请求响应 driver、控制/大帧实际子流 codec、AppContainer 真机网络、mDNS、公网地址、中继或 DHT，因此不能据此宣称完整 T14 或公网安全验收。
+
+补充验证（2026-11-18）：`cargo test --workspace --all-targets --locked --offline` 全工作区通过，包含 TCP/QUIC 双进程、Core 身份闸门、路径边界、既有 Windows 沙箱和存储/协议测试；`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 通过。新增的 T14 传输未在 AppContainer 内或公网运行。
+
+已有链 HTTP 历史同步测试曾在一次全量运行中于本地恢复时返回 `InvalidLocalState`；随后单项与全量重跑均通过。未确认该偶发失败的原因，本批未修改链 HTTP 或恢复代码。

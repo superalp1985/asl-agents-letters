@@ -1,5 +1,6 @@
 mod history;
 mod publisher;
+mod session;
 
 use asl_types::{
     error::AslError,
@@ -11,12 +12,13 @@ use asl_types::{
 };
 
 use crate::{
-    chain::{IdentityResolution, IdentityResolver, RegistryStatus},
+    chain::{IdentityResolution, IdentityResolver, RegistryStateV1, RegistryStatus},
     identity::{AgentIdentity, verify_device_certificate, verify_root_signature},
 };
 
 pub use history::RecordHistory;
 pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};
+pub use session::DeviceSession;
 
 /// Verified for this call's local resolver state. A cached value does not
 /// replace resolving fresh state again when a network connection is admitted.
@@ -24,7 +26,7 @@ pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};
 pub struct VerifiedRecord {
     signed: SignedRecord,
     bytes: Vec<u8>,
-    registry_sequence: u64,
+    registry_state: RegistryStateV1,
 }
 
 impl VerifiedRecord {
@@ -37,7 +39,7 @@ impl VerifiedRecord {
     }
 
     pub fn registry_sequence(&self) -> u64 {
-        self.registry_sequence
+        self.registry_state.sequence
     }
 }
 
@@ -72,20 +74,13 @@ pub fn verify_record(
 ) -> Result<VerifiedRecord, AslError> {
     let signed = decode_record(bytes)?;
     let record = &signed.record;
-    if record.payload.agent_id() != expected_agent || resolver.interface_version() != 1 {
+    if record.payload.agent_id() != expected_agent {
         return Err(AslError::InvalidIdentity);
     }
     if now_ms < record.issued_at_ms || now_ms >= record.expires_at_ms {
         return Err(AslError::ExpiredMessage);
     }
-    let IdentityResolution::Verified(identity) = resolver.resolve(expected_agent, now_ms / 1_000)
-    else {
-        return Err(AslError::InvalidIdentity);
-    };
-    let state = identity.state();
-    if identity.agent_id() != expected_agent || state.status != RegistryStatus::Active {
-        return Err(AslError::InvalidIdentity);
-    }
+    let state = resolve_active(expected_agent, now_ms, resolver)?;
     verify_root_signature(
         &record_signing_bytes(record)?,
         signed.signature,
@@ -111,8 +106,27 @@ pub fn verify_record(
     Ok(VerifiedRecord {
         signed,
         bytes: bytes.to_vec(),
-        registry_sequence: state.sequence,
+        registry_state: state,
     })
+}
+
+fn resolve_active(
+    agent: AgentId,
+    now_ms: u64,
+    resolver: &mut dyn IdentityResolver,
+) -> Result<RegistryStateV1, AslError> {
+    if resolver.interface_version() != 1 {
+        return Err(AslError::InvalidIdentity);
+    }
+    match resolver.resolve(agent, now_ms / 1_000) {
+        IdentityResolution::Verified(identity)
+            if identity.agent_id() == agent
+                && identity.state().status == RegistryStatus::Active =>
+        {
+            Ok(identity.state())
+        }
+        _ => Err(AslError::InvalidIdentity),
+    }
 }
 
 #[cfg(test)]

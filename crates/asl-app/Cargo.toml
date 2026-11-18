@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 asl-policy = { path = "../asl-policy" }
+asl-net = { path = "../asl-net" }
 asl-types = { path = "../asl-types" }
 asl-store = { path = "../asl-store" }
 k256.workspace = true

@@ -177,6 +177,8 @@ lease 绑定连接身份、内容、grant epoch 与 policy revision。revision �
 
 ## 7. 固定 manifest
 
+manifest 相当于内嵌在文件传输协议里的种子元数据，不生成或交换独立 `.torrent` 文件。`Offer` 和公开发现只提供引用；接收方持有效 lease，在 `/asl/blob/1.0.0` 请求 `manifest` 操作，其成功响应的 payload 就是下列二进制清单。完整清单不进入 `Offer`、DHT 或控制帧；块数由文件大小与协议固定块长推导，无需在 `Offer` 增加字段。
+
 ```text
 magic                8 bytes          ASCII "ASLMNF01"
 version              u16 BE           1
@@ -223,6 +225,8 @@ Any non-durable -> Cancelled         on revoke/cancel
 ```
 
 先 hash 验证再写入，批次 sync 成功后才能提交 DurableVerified。一次最多 8 个待持久化块，崩溃最多重拉这些未提交块。重复块不重复写账。
+
+同一 `ContentId` 的一份已校验 manifest 可用于核对所有来源的块，无需从每个节点重复请求清单。每个来源仍须独立签发当前连接的 lease；知道 `ContentId` 不代表可以下载，也不触发自动做种。
 
 每下载最多 4 个来源，每来源 2 个并发请求；调度优先缺失块、再处理超时块。3 次坏 hash 后禁用该来源于当前传输，记录完整性证据，不用贡献抵扣。
 

@@ -266,6 +266,8 @@ fn accept_directory(
     history.accept(&bytes, NOW, &mut resolver)
 }
 
+mod connection_tests;
+
 fn high_s(mut signature: Signature65) -> Signature65 {
     let order = U256::from_be_slice(&[
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,

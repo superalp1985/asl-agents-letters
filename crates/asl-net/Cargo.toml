@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+asl-types = { path = "../asl-types" }
+libp2p = { version = "=0.57.1", default-features = false, features = ["ed25519", "noise", "quic", "tcp", "tokio", "yamux"] }
+tokio.workspace = true
+
 [dev-dependencies]
 libp2p.workspace = true
-tokio.workspace = true

@@ -50,9 +50,17 @@ impl RecordHistory {
         resolver: &mut dyn IdentityResolver,
     ) -> Result<VerifiedRecord, AslError> {
         let verified = verify_record(bytes, self.agent_id, now_ms, resolver)?;
+        self.observe(&verified)?;
+        Ok(verified)
+    }
+
+    pub(super) fn observe(&mut self, verified: &VerifiedRecord) -> Result<(), AslError> {
         let record = &verified.signed.record;
+        if record.payload.agent_id() != self.agent_id {
+            return Err(AslError::InvalidIdentity);
+        }
         let kind = record.payload.kind();
-        let hash = blake3::hash(bytes);
+        let hash = blake3::hash(verified.bytes());
         if let Some(previous) = self.records.get(&kind)
             && (record.sequence < previous.sequence
                 || (record.sequence == previous.sequence && hash != previous.hash))
@@ -97,7 +105,15 @@ impl RecordHistory {
                 hash,
             },
         );
-        Ok(verified)
+        Ok(())
+    }
+
+    pub(super) fn matches_directory(&self, agent: AgentId, hash: blake3::Hash) -> bool {
+        self.agent_id == agent
+            && self
+                .records
+                .get(&RecordKind::DeviceDirectory)
+                .is_some_and(|record| record.hash == hash)
     }
 
     pub fn highest_sequence(&self, kind: RecordKind) -> Option<u64> {

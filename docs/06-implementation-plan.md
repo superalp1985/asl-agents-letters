@@ -310,6 +310,10 @@ T13 实现记录（2026-11-18）：记录核心、严格嵌套 CBOR、固定签�
 cargo test -p asl-net --test two_node_transport
 ```
 
+T14 首轮实现记录（2026-11-18）：`asl-net` 已提供只绑定回环地址的 TCP Noise/Yamux 与 QUIC 传输适配器，拨号必须给出期望设备 PeerId；认证成功后产生与单条连接绑定的 `AuthenticatedPeer` 句柄，不把 libp2p 连接类型暴露给 Core。Core 的 `DeviceSession` 要求 hello、认证 PeerId、设备证书、已签名设备目录和当前活动链身份全部一致，并在证书过期、链身份受限、目录更新、历史推进、时钟回退或会话关闭后停止放行。传输处理到断开事件或被销毁时，旧句柄失效；重连必须重新握手。失败的入站传输握手只产生有界拒绝事件，监听器可继续服务。
+
+本轮验收覆盖：独立进程 TCP/QUIC 回环加密连接、正确设备 PeerId、错误期望 PeerId 拒绝、连接准入状态的入站/出站并发与总量上限、Core 证书/目录/链状态绑定及旧会话不可恢复。连接上限目前有状态机单测，尚未进行公网压力或 AppContainer 负载验收。控制请求响应 driver、独立 identity-proof stream、控制/大帧实际子流 codec、Supervisor IPC 接线、mDNS/公网地址策略、中继和公网端点仍属于后续切片；本记录不宣称完整 T14 已关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

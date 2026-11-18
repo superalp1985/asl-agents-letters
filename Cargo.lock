@@ -917,6 +917,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-eth",
  "alloy-trie",
+ "asl-net",
  "asl-policy",
  "asl-store",
  "asl-types",
@@ -948,6 +949,7 @@ dependencies = [
 name = "asl-net"
 version = "0.1.0"
 dependencies = [
+ "asl-types",
  "libp2p",
  "tokio",
 ]
