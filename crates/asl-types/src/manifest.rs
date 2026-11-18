@@ -1,7 +1,7 @@
 const MAGIC: &[u8; 8] = b"ASLMNF01";
 const VERSION: u16 = 1;
 const HEADER_LEN: usize = 58;
-const CHUNK_SIZE: u32 = 1_048_576;
+pub const CHUNK_SIZE: u32 = 1_048_576;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 const MAX_CHUNK_COUNT: u32 = 65_536;
 const HASH_LEN: usize = 32;
@@ -65,6 +65,10 @@ fn chunk_count(file_size: u64) -> Result<u32, ManifestError> {
 
 pub fn content_id(manifest_bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(manifest_bytes).as_bytes()
+}
+
+pub fn encoded_len_for_size(file_size: u64) -> Result<usize, ManifestError> {
+    Ok(HEADER_LEN + chunk_count(file_size)? as usize * HASH_LEN)
 }
 
 pub fn decode_manifest(

@@ -15,6 +15,7 @@ use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
     TaskStatus, WorkerOperation,
 };
+use crate::libraries::LocalLibraries;
 use crate::paths::AppPaths;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,7 +23,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Supervisor {
-    _paths: AppPaths,
+    libraries: LocalLibraries,
     launcher: SandboxLauncher,
     net: NetRuntime,
 }
@@ -39,12 +40,18 @@ impl Supervisor {
     }
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
+        let libraries = LocalLibraries::open(&paths)?;
         let net = NetRuntime::start(&launcher)?;
         Ok(Self {
-            _paths: paths,
+            libraries,
             launcher,
             net,
         })
+    }
+
+    /// Trusted in-process entry point only; not dispatched from Net or Worker IPC.
+    pub fn local_libraries(&mut self) -> &mut LocalLibraries {
+        &mut self.libraries
     }
 
     pub fn ping_net(&mut self) -> Result<(), AslError> {
@@ -76,6 +83,7 @@ impl Supervisor {
 
     pub fn run(mut self) -> Result<(), AslError> {
         loop {
+            self.libraries.check_health()?;
             self.ping_net()?;
             thread::sleep(Duration::from_secs(5));
         }

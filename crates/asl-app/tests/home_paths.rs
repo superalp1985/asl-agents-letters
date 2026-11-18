@@ -15,6 +15,13 @@ fn rejects_unc_storage_root() {
 }
 
 #[test]
+fn refuses_device_namespaces_even_for_an_existing_directory() {
+    let verbatim = std::env::temp_dir().canonicalize().unwrap();
+    assert!(AppPaths::open(&verbatim).is_err());
+    assert!(AppPaths::open(Path::new(r"\\.\E:\")).is_err());
+}
+
+#[test]
 fn creates_storage_layout_on_ntfs() {
     let base = std::env::var_os("ASL_TEST_FIXTURE_BASE")
         .map(PathBuf::from)

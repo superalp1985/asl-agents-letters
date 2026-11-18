@@ -32,6 +32,7 @@ lease_ms = 60000
 
 [storage]
 snapshot_quota_bytes = 21474836480
+snapshot_task_quota_bytes = 1073741824
 download_quota_bytes = 21474836480
 task_download_quota_bytes = 1073741824
 unknown_source_reservation_bytes = 536870912

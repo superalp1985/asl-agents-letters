@@ -155,7 +155,7 @@ Foundry 或独立复核。用户确认云机环境自 2026-11-18 起保留 7 天
 - 两轮完整咨询返回 end_turn；第一次截断请求未当成完整评审。
 - 已校验 JSON Schema、正反例、SQLite DDL/约束/FTS5、TOML、任务依赖和资料引用。
 
-## 未执行的验证
+## 首次资料包未执行的验证（历史）
 
 未实现或编译 ASL 应用，未测试 Windows 沙箱、真实网络、文件传输、运行性能、
 应用层引用/授权检查、记录签名，或 6.1sol/DeepSeek 的实际编码和运行能力。
@@ -351,3 +351,11 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
   环境变量指定位置。开发脚本仍将缓存和临时目录放在 E 盘；产品数据根配置不变。
 - 这次工作区测试是在 E 盘 NTFS 环境执行。云机保留供后续真实系统测试使用，
   本次没有启动云机，也没有修改系统设置。
+
+### 2026-11-18 T11：真实 Windows 本地导入、对账与中断恢复
+
+- E 盘 NTFS，Rust 1.100.0：`cargo test --workspace --all-targets --locked --offline`，327 通过、0 失败、4 个测试入口默认忽略。4 项分别是外部 TCP、外部 UDP、真实 30 秒补查，以及供恢复测试启动的子进程入口；后者已由父测试执行，不是未经测试的恢复功能。
+- 单跑 `cargo test -p asl-app --test local_libraries --locked --offline -- --ignored --exact periodic_sweep_finds_a_change_outside_watched_roots_without_an_app_hint`，1 项通过（30.08 秒）。`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 通过。
+- 从 SQLite v1 升级、稳定句柄读取、复制前预算、并发预留、提交前降额或撤权、同内容跨授权去重、同长度改写和删除、真实目录通知与丢通知后的补查均有覆盖。拒绝前已存在的不匹配对象，不覆盖或清理其原始字节。
+- 中断测试让独立导入进程在安装阶段退出；到期前预留不释放，到期后重启能清理无引用的半成品，仍被引用的快照不受影响。清理受阻时保持预留，之后可重试。没有模拟拔电、磁盘控制器故障或整个操作系统崩溃。
+- 本轮没有启用公网公告、文件传输或 lease，没有使用云机或重跑 Foundry/CDDL。用户可通过 Core 本地接口授予目录；GUI、自动收录目录中新文件和发送前的接收方授权仍不能从这组测试推断。

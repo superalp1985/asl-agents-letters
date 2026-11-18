@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 asl-types = { path = "../asl-types" }
+blake3.workspace = true
+hex.workspace = true
 rand.workspace = true
 zeroize.workspace = true
 

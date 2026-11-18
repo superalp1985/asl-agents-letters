@@ -554,7 +554,7 @@ fn read_blob(row: &Row<'_>, index: usize, limit: usize) -> Result<Vec<u8>, AslEr
     Ok(blob.to_vec())
 }
 
-fn agent_text(agent: AgentId) -> String {
+pub(crate) fn agent_text(agent: AgentId) -> String {
     bs58::encode(agent.as_bytes()).into_string()
 }
 

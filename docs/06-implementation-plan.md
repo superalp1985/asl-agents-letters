@@ -270,6 +270,8 @@ T10 当前实现记录（2026-11-18）：完成固定 binary IPC v1（20 字节�
 cargo test -p asl-store --test snapshot_import
 ```
 
+T11 本地导入与对账：Core 已接入 `SnapshotBroker`、目录变更通知和定时补查。导入以真实目录授权开稳定句柄，先预留再读文件；文件复制完成后重验授权版本和额度。资源引用按 grant 隔离，监听只检查已有引用，不自动收录新文件。SQLite 数据库升级为 v2；线上 ASL/1 协议没有变化。见 `docs/snapshot-import.md` 和 `docs/plan-validation.md`。此处没有向公网发公告或签发下载 lease；源引用失效和将来发送前的 lease 检查是不同验收项。
+
 ### T12 — 授权前置的全文检索
 
 依赖 T11。创建 store search adapter，使用 jieba+FTS5。实现 visible_keys/search_visible。

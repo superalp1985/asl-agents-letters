@@ -85,6 +85,13 @@ impl SourceGrant {
         Ok(grant)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn directory_watch(
+        &self,
+    ) -> io::Result<crate::platform::windows::reconcile_watch::DirectoryWatch> {
+        self.root.directory_watch()
+    }
+
     pub fn identity(&self) -> &FileIdentity {
         #[cfg(windows)]
         {

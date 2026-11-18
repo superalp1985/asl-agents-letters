@@ -6,6 +6,7 @@ use asl_types::error::AslError;
 
 pub struct AppPaths {
     root: PathBuf,
+    dos_root: PathBuf,
     state: PathBuf,
     identity: PathBuf,
     snapshots: PathBuf,
@@ -28,6 +29,9 @@ impl AppPaths {
         validate_existing_components(root)?;
         fs::create_dir_all(root)?;
 
+        // Preserve the checked drive-absolute input for handle-based traversal.
+        // canonicalize() returns a verbatim path, a different Windows namespace.
+        let dos_root = root.to_path_buf();
         let root = root.canonicalize()?;
         validate_existing_components(&root)?;
         if !fs::metadata(&root)?.is_dir() {
@@ -42,6 +46,7 @@ impl AppPaths {
 
         Ok(Self {
             root,
+            dos_root,
             state,
             identity,
             snapshots,
@@ -52,6 +57,10 @@ impl AppPaths {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn dos_root(&self) -> &Path {
+        &self.dos_root
     }
 
     pub fn state(&self) -> &Path {

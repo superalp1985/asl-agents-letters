@@ -945,6 +945,8 @@ name = "asl-policy"
 version = "0.1.0"
 dependencies = [
  "asl-types",
+ "blake3",
+ "hex",
  "rand 0.10.4",
  "windows",
  "zeroize",
@@ -954,10 +956,16 @@ dependencies = [
 name = "asl-store"
 version = "0.1.0"
 dependencies = [
+ "asl-policy",
  "asl-types",
+ "blake3",
  "bs58",
+ "hex",
+ "rand 0.10.4",
  "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

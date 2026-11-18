@@ -6,7 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
+blake3.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde_json.workspace = true
 bs58.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"

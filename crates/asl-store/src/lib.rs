@@ -8,9 +8,11 @@ use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub mod chain;
+pub mod resources;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
+const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 
 pub struct Store {
     connection: Connection,
@@ -68,10 +70,20 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
     let mut connection = Connection::open(path).map_err(database_error)?;
     configure_connection(&connection)?;
 
-    match read_schema_version(&connection)? {
-        Some(SCHEMA_VERSION) => validate_existing_schema(&connection)?,
-        Some(_) => return Err(AslError::UnsupportedSchemaVersion),
-        None => apply_v1_migration(&mut connection)?,
+    {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let version = read_schema_version(&transaction)?.unwrap_or(0);
+        let now = current_time_ms();
+        if version == 0 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V1, 1, now)?;
+        }
+        if version < 2 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V2, 2, now)?;
+        }
+        validate_existing_schema(&transaction)?;
+        transaction.commit().map_err(database_error)?;
     }
 
     Ok(Store { connection })
@@ -146,31 +158,16 @@ fn read_schema_version(connection: &Connection) -> Result<Option<i64>, AslError>
     if versions.iter().any(|version| *version > SCHEMA_VERSION) {
         return Err(AslError::UnsupportedSchemaVersion);
     }
-    if versions != [SCHEMA_VERSION] {
+    if versions != [1] && versions != [1, 2] {
         return Err(AslError::InvalidDatabase);
     }
     Ok(versions.last().copied())
 }
 
-fn apply_v1_migration(connection: &mut Connection) -> Result<(), AslError> {
-    apply_migration(connection, SCHEMA_V1, current_time_ms())
-}
-
-fn apply_migration(
-    connection: &mut Connection,
-    migration_sql: &str,
-    applied_at_ms: i64,
-) -> Result<(), AslError> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
-    apply_migration_in_transaction(&transaction, migration_sql, applied_at_ms)?;
-    transaction.commit().map_err(database_error)
-}
-
 fn apply_migration_in_transaction(
     transaction: &Transaction<'_>,
     migration_sql: &str,
+    version: i64,
     applied_at_ms: i64,
 ) -> Result<(), AslError> {
     transaction
@@ -179,7 +176,7 @@ fn apply_migration_in_transaction(
     transaction
         .execute(
             "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
-            params![SCHEMA_VERSION, applied_at_ms],
+            params![version, applied_at_ms],
         )
         .map_err(database_error)?;
     Ok(())
@@ -264,17 +261,17 @@ mod tests {
     }
 
     #[test]
-    fn initializes_v1_and_reopens_without_reapplying_migration() {
+    fn initializes_and_reopens_without_reapplying_migrations() {
         let database = TestDatabase::new();
 
         {
             let store = open_store(database.path()).unwrap();
-            assert_eq!(store.schema_version(), 1);
+            assert_eq!(store.schema_version(), 2);
             assert_eq!(store.policy_revision().unwrap(), 1);
         }
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.schema_version(), 2);
         assert_eq!(store.policy_revision().unwrap(), 1);
 
         let migration_count: i64 = store
@@ -283,7 +280,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
 
         let integrity: String = store
             .connection
@@ -325,7 +322,7 @@ mod tests {
         store.set_setting(key, value, 42).unwrap();
 
         assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
-        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.schema_version(), 2);
     }
 
     #[test]
@@ -338,7 +335,7 @@ mod tests {
                     version INTEGER PRIMARY KEY,
                     applied_at_ms INTEGER NOT NULL
                  );
-                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (2, 10);
+                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (3, 10);
                  CREATE TABLE preserved(value INTEGER);
                  INSERT INTO preserved(value) VALUES (7);",
             )
@@ -398,8 +395,10 @@ mod tests {
     fn migration_failure_rolls_back_the_complete_v1_schema() {
         let mut connection = Connection::open_in_memory().unwrap();
         let failing_migration = format!("{SCHEMA_V1}\nINSERT INTO absent_table VALUES (1);");
-        let result = apply_migration(&mut connection, &failing_migration, 1);
-        assert!(result.is_err());
+        {
+            let tx = connection.transaction().unwrap();
+            assert!(apply_migration_in_transaction(&tx, &failing_migration, 1, 10).is_err());
+        }
 
         let user_tables: i64 = connection
             .query_row(
@@ -410,5 +409,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(user_tables, 0);
+    }
+
+    #[test]
+    fn upgrades_an_existing_v1_store_without_losing_settings() {
+        let database = TestDatabase::new();
+        let mut old = Connection::open(database.path()).unwrap();
+        let tx = old.transaction().unwrap();
+        apply_migration_in_transaction(&tx, SCHEMA_V1, 1, 0).unwrap();
+        tx.execute("INSERT INTO settings VALUES ('keep', 'true', 0)", [])
+            .unwrap();
+        tx.commit().unwrap();
+        drop(old);
+        let upgraded = open_store(database.path()).unwrap();
+        assert_eq!(
+            upgraded.get_setting("keep").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(upgraded.schema_version(), 2);
     }
 }

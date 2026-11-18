@@ -16,6 +16,8 @@ pub enum AslError {
     UnsupportedSchemaVersion,
     InvalidDatabase,
     PolicyDenied,
+    QuotaExceeded,
+    SnapshotRecoveryRequired,
     GrantRevoked,
     NotFound,
     InvalidPolicyState,
@@ -43,6 +45,10 @@ impl fmt::Display for AslError {
             }
             Self::InvalidDatabase => formatter.write_str("database schema is invalid"),
             Self::PolicyDenied => formatter.write_str("access is denied by policy"),
+            Self::QuotaExceeded => formatter.write_str("local storage quota exceeded"),
+            Self::SnapshotRecoveryRequired => {
+                formatter.write_str("snapshot commit requires recovery")
+            }
             Self::GrantRevoked => formatter.write_str("grant has been revoked"),
             Self::NotFound => formatter.write_str("resource not found"),
             Self::InvalidPolicyState => formatter.write_str("policy state is invalid"),
@@ -73,6 +79,8 @@ impl std::error::Error for AslError {
             | Self::UnsupportedSchemaVersion
             | Self::InvalidDatabase
             | Self::PolicyDenied
+            | Self::QuotaExceeded
+            | Self::SnapshotRecoveryRequired
             | Self::GrantRevoked
             | Self::NotFound
             | Self::InvalidPolicyState

@@ -1,3 +1,5 @@
+pub(crate) mod snapshot;
+
 use std::fs::File;
 use std::io::{self, Read};
 use std::mem::size_of;
@@ -8,17 +10,19 @@ use std::sync::Arc;
 use asl_types::error::AslError;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    FILE_CREATE, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+    FILE_OPEN_REPARSE_POINT, FILE_STANDARD_LINK_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
+    FileStandardLinkInformation, NTCREATEFILE_CREATE_DISPOSITION, NtCreateFile,
+    NtQueryInformationFile,
 };
-use windows::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, UNICODE_STRING};
+use windows::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, RtlNtStatusToDosError, UNICODE_STRING};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_STANDARD_INFO, FILE_TRAVERSE,
-    FILE_TYPE_DISK, FileAttributeTagInfo, FileIdInfo, FileStandardInfo,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_STANDARD_INFO,
+    FILE_TRAVERSE, FILE_TYPE_DISK, FileAttributeTagInfo, FileIdInfo, FileStandardInfo,
     GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
     GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW,
     READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
@@ -29,7 +33,7 @@ use windows::core::{HSTRING, PWSTR};
 
 use crate::paths::{FileIdentity, validated_relative};
 
-struct PinnedDirectory {
+pub(crate) struct PinnedDirectory {
     pins: Vec<Arc<File>>,
     identity: FileIdentity,
     name: Vec<u16>,
@@ -108,6 +112,10 @@ impl SourceRoot {
         &self.directory.identity
     }
 
+    pub(crate) fn directory_watch(&self) -> io::Result<super::reconcile_watch::DirectoryWatch> {
+        super::reconcile_watch::DirectoryWatch::open(&self.directory.name)
+    }
+
     pub(crate) fn open_file(
         &self,
         components: &[String],
@@ -169,6 +177,9 @@ impl Read for SourceFile {
 }
 
 fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
+    if !path.is_absolute() {
+        return Err(AslError::InvalidStorageRoot);
+    }
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return Err(AslError::InvalidStorageRoot);
     };
@@ -248,6 +259,36 @@ fn relative_open_with_access(
     directory: bool,
     desired: FILE_ACCESS_RIGHTS,
 ) -> Result<File, AslError> {
+    relative_handle(
+        parent,
+        component,
+        if directory {
+            Entry::Directory
+        } else {
+            Entry::File
+        },
+        desired,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+    )
+    .map_err(|_| AslError::NotFound)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Directory,
+    File,
+    PrivateTemporary,
+}
+
+fn relative_handle(
+    parent: &File,
+    component: &str,
+    entry: Entry,
+    desired: FILE_ACCESS_RIGHTS,
+    share: FILE_SHARE_MODE,
+    disposition: NTCREATEFILE_CREATE_DISPOSITION,
+) -> Result<File, AslError> {
     // The caller passes one previously validated component. NT's counted
     // string cannot interpret it as an absolute path or another stream.
     let mut encoded: Vec<u16> = component.encode_utf16().collect();
@@ -268,10 +309,13 @@ fn relative_open_with_access(
     let mut status = IO_STATUS_BLOCK::default();
     let options = FILE_OPEN_REPARSE_POINT
         | FILE_SYNCHRONOUS_IO_NONALERT
-        | if directory {
-            FILE_DIRECTORY_FILE
-        } else {
-            FILE_NON_DIRECTORY_FILE
+        | match entry {
+            Entry::Directory => FILE_DIRECTORY_FILE,
+            Entry::File => FILE_NON_DIRECTORY_FILE,
+            Entry::PrivateTemporary if disposition == FILE_CREATE && share.0 == 0 => {
+                FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE
+            }
+            Entry::PrivateTemporary => return Err(AslError::InvalidPolicyState),
         };
     let result = unsafe {
         NtCreateFile(
@@ -281,18 +325,33 @@ fn relative_open_with_access(
             &mut status,
             None,
             FILE_FLAGS_AND_ATTRIBUTES(0),
-            FILE_SHARE_READ,
-            FILE_OPEN,
+            share,
+            disposition,
             options,
             None,
             0,
         )
     };
-    result.ok().map_err(|_| AslError::NotFound)?;
+    if result.is_err() {
+        return Err(
+            io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32).into(),
+        );
+    }
     Ok(unsafe { File::from_raw_handle(handle.0) })
 }
 
 fn inspect(file: &File, directory: bool) -> Result<Information, AslError> {
+    inspect_entry(
+        file,
+        if directory {
+            Entry::Directory
+        } else {
+            Entry::File
+        },
+    )
+}
+
+fn inspect_entry(file: &File, entry: Entry) -> Result<Information, AslError> {
     if unsafe { GetFileType(raw(file)) } != FILE_TYPE_DISK {
         return Err(AslError::NotFound);
     }
@@ -300,11 +359,16 @@ fn inspect(file: &File, directory: bool) -> Result<Information, AslError> {
     let standard: FILE_STANDARD_INFO = query(file, FileStandardInfo)?;
     if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
         || attributes.ReparseTag != 0
-        || standard.Directory != directory
-        || standard.DeletePending
-        || (!directory && standard.NumberOfLinks != 1)
+        || standard.Directory != (entry == Entry::Directory)
+        || (standard.DeletePending && entry != Entry::PrivateTemporary)
+        || (entry == Entry::File && standard.NumberOfLinks != 1)
     {
         return Err(AslError::NotFound);
+    }
+    if entry == Entry::PrivateTemporary {
+        // A pending deletion can exclude this name from the accessible link
+        // count. Require exactly one *total* link on the create-new handle.
+        check_single_link(file)?;
     }
     let id: FILE_ID_INFO = query(file, FileIdInfo)?;
     Ok(Information {
@@ -314,6 +378,33 @@ fn inspect(file: &File, directory: bool) -> Result<Information, AslError> {
         },
         standard,
     })
+}
+
+fn check_single_link(file: &File) -> Result<(), AslError> {
+    // The native query probes the address at 8-byte alignment, even though
+    // the generated link-info struct itself has only 4-byte alignment.
+    #[repr(C, align(8))]
+    struct Aligned(FILE_STANDARD_LINK_INFORMATION);
+    let mut result = Aligned(FILE_STANDARD_LINK_INFORMATION::default());
+    let links = &mut result.0;
+    let status = unsafe {
+        NtQueryInformationFile(
+            raw(file),
+            &mut IO_STATUS_BLOCK::default(),
+            (&raw mut *links).cast(),
+            size_of::<FILE_STANDARD_LINK_INFORMATION>() as u32,
+            FileStandardLinkInformation,
+        )
+    };
+    if status.is_err() {
+        return Err(
+            io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32).into(),
+        );
+    }
+    if links.Directory || links.TotalNumberOfLinks != 1 {
+        return Err(AslError::NotFound);
+    }
+    Ok(())
 }
 
 fn query<T: Default>(file: &File, class: FILE_INFO_BY_HANDLE_CLASS) -> Result<T, AslError> {
