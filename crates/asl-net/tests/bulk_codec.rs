@@ -188,8 +188,9 @@ async fn oversized_or_malformed_lengths_are_rejected_before_payload_read() {
         ErrorKind::InvalidData
     );
 
-    let mut trailing = vec![0; 91];
-    trailing.extend_from_slice(&[0]);
+    let mut trailing = vec![0; 92];
+    trailing[..6].copy_from_slice(b"ASLB01");
+    trailing[6] = 1;
     assert_eq!(
         BulkCodec
             .read_request(&BULK_PROTOCOL, &mut Cursor::new(trailing))
@@ -198,4 +199,37 @@ async fn oversized_or_malformed_lengths_are_rejected_before_payload_read() {
             .kind(),
         ErrorKind::InvalidData
     );
+}
+
+#[tokio::test]
+async fn response_header_is_validated_before_waiting_for_the_payload() {
+    for (status, inner_len) in [(0_u8, 1_u32), (1, 2)] {
+        let mut frame = 29_u32.to_be_bytes().to_vec();
+        frame.extend_from_slice(b"ASLR01");
+        frame.extend_from_slice(&[0; 16]);
+        frame.push(status);
+        frame.extend_from_slice(&inner_len.to_be_bytes());
+        frame.extend_from_slice(&[7; 2]);
+        let mut stream = Cursor::new(frame);
+        assert_eq!(
+            BulkCodec
+                .read_response(&BULK_PROTOCOL, &mut stream)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(stream.position(), 31);
+    }
+}
+
+#[test]
+fn debug_output_omits_lease_tokens_and_file_content() {
+    let mut request = request(BulkOperation::Manifest, 0);
+    request.lease_id = Hash32([197; 32]);
+    assert!(!format!("{request:?}").contains("197"));
+    let response = success_response(vec![198; 58]);
+    let debug = format!("{response:?}");
+    assert!(debug.contains("payload_len: 58"));
+    assert!(!debug.contains("198"));
 }

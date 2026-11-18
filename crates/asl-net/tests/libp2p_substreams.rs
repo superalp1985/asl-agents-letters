@@ -5,7 +5,10 @@ use asl_net::codec::{
     CONTROL_PROTOCOL, ControlCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
 };
 use asl_net::transport::TransportKind;
-use asl_types::protocol::{Ack, IdentityProof, IdentityProofRequest, WireFrame};
+use asl_types::{
+    manifest::{CHUNK_SIZE, Manifest, content_id, decode_manifest, encode_manifest},
+    protocol::{Ack, IdentityProof, IdentityProofRequest, WireFrame},
+};
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     futures::StreamExt,
@@ -230,7 +233,15 @@ async fn identity_proof_codec_runs_over_tcp_and_quic_request_response_substreams
 }
 
 #[tokio::test]
-async fn bulk_codec_runs_over_tcp_and_quic_request_response_substreams() {
+async fn largest_encoded_manifest_traverses_tcp_and_quic_substreams() {
+    let manifest = Manifest {
+        file_size: u64::from(CHUNK_SIZE) * 65_536,
+        file_hash: [4; 32],
+        chunk_hashes: vec![[5; 32]; 65_536],
+    };
+    let encoded = encode_manifest(&manifest).unwrap();
+    assert_eq!(encoded.len(), 2_097_210);
+    let expected_id = content_id(&encoded);
     for kind in [TransportKind::Tcp, TransportKind::Quic] {
         let mut listener = swarm(Keypair::generate_ed25519(), BulkCodec, BULK_PROTOCOL);
         listener.listen_on(endpoint(kind, 0)).unwrap();
@@ -245,14 +256,14 @@ async fn bulk_codec_runs_over_tcp_and_quic_request_response_substreams() {
         let request = BulkRequest {
             operation: BulkOperation::Manifest,
             request_id: [1; 16].into(),
-            content_id: [2; 32].into(),
+            content_id: expected_id.into(),
             lease_id: [3; 32].into(),
             chunk_index: 0,
         };
         let response = BulkResponse {
             request_id: request.request_id,
             status: BulkStatus::Success,
-            payload: vec![0x5a; 58],
+            payload: encoded.clone(),
         };
         let mut request_id = None;
         let mut received_request = false;
@@ -285,7 +296,9 @@ async fn bulk_codec_runs_over_tcp_and_quic_request_response_substreams() {
                             }) => {
                                 assert_eq!(peer, listener_peer);
                                 assert_eq!(Some(response_id), request_id);
-                                assert_eq!(incoming, response);
+                                assert_eq!(incoming.request_id, request.request_id);
+                                assert_eq!(incoming.status, BulkStatus::Success);
+                                assert_eq!(decode_manifest(&incoming.payload, expected_id).unwrap(), manifest);
                                 received_response = true;
                             }
                             SwarmEvent::Behaviour(Event::OutboundFailure { error, .. }) => panic!("bulk request failed: {error}"),
