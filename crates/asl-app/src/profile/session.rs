@@ -26,10 +26,16 @@ enum State {
     Closed,
 }
 
+#[derive(Eq, PartialEq)]
+enum ConnectionBinding {
+    InProcess(AuthenticatedPeer),
+    Ipc([u8; 16]),
+}
+
 struct PendingProof {
     hello: Hello,
     request: IdentityProofRequest,
-    token: RequestToken,
+    token: Option<RequestToken>,
     started_at_ms: u64,
 }
 
@@ -61,7 +67,7 @@ impl Error for DeviceAdmissionError {
 /// using a PeerId claimed in a remote payload.
 pub struct DeviceSession {
     peer: PeerId,
-    transport: Option<AuthenticatedPeer>,
+    transport: Option<ConnectionBinding>,
     state: State,
 }
 
@@ -69,15 +75,33 @@ impl DeviceSession {
     pub fn from_transport(connection: AuthenticatedPeer) -> Self {
         Self {
             peer: connection.peer_id().clone(),
-            transport: Some(connection),
+            transport: Some(ConnectionBinding::InProcess(connection)),
             state: State::AwaitingHello,
         }
     }
 
     pub fn connection_id(&self) -> Option<LocalConnectionId> {
-        self.transport
-            .as_ref()
-            .map(AuthenticatedPeer::connection_id)
+        match self.transport.as_ref() {
+            Some(ConnectionBinding::InProcess(connection)) => Some(connection.connection_id()),
+            Some(ConnectionBinding::Ipc(_)) | None => None,
+        }
+    }
+
+    pub fn ipc_connection_id(&self) -> Option<[u8; 16]> {
+        match self.transport.as_ref() {
+            Some(ConnectionBinding::Ipc(connection_id)) => Some(*connection_id),
+            Some(ConnectionBinding::InProcess(_)) | None => None,
+        }
+    }
+
+    /// Create a Core identity gate from `NetworkEvent::TransportConnected`.
+    /// The connection ID and peer must come from that authenticated event.
+    pub fn from_ipc_connection(connection_id: [u8; 16], peer: PeerId) -> Self {
+        Self {
+            peer,
+            transport: Some(ConnectionBinding::Ipc(connection_id)),
+            state: State::AwaitingHello,
+        }
     }
 
     #[cfg(test)]
@@ -91,7 +115,8 @@ impl DeviceSession {
 
     fn require_live(&self) -> Result<(), AslError> {
         match &self.transport {
-            Some(connection) if connection.is_live() => Ok(()),
+            Some(ConnectionBinding::InProcess(connection)) if connection.is_live() => Ok(()),
+            Some(ConnectionBinding::Ipc(_)) => Ok(()),
             #[cfg(test)]
             None => Ok(()),
             _ => Err(AslError::InvalidIdentity),
@@ -119,14 +144,51 @@ impl DeviceSession {
         resolver: &DurableIdentityResolver,
         now_ms: u64,
     ) -> Result<RequestToken, DeviceAdmissionError> {
+        let request = self.prepare_network_hello(hello, resolver, now_ms)?;
+        let Some(ConnectionBinding::InProcess(connection)) = self.transport.as_ref() else {
+            self.close();
+            return Err(DeviceAdmissionError::Session(AslError::InvalidIdentity));
+        };
+        let token = match transport.send_identity_proof_request(connection, request) {
+            Ok(token) => token,
+            Err(error) => {
+                self.close();
+                return Err(DeviceAdmissionError::Session(error.into()));
+            }
+        };
+        let State::AwaitingProof(pending) = &mut self.state else {
+            self.close();
+            return Err(DeviceAdmissionError::Session(AslError::InvalidMessage));
+        };
+        pending.token = Some(token.clone());
+        Ok(token)
+    }
+
+    /// Produces the same locally selected proof request for delivery through
+    /// the Core/Net IPC boundary.
+    pub fn begin_network_hello_ipc(
+        &mut self,
+        hello: Hello,
+        resolver: &DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<IdentityProofRequest, DeviceAdmissionError> {
+        if !matches!(self.transport.as_ref(), Some(ConnectionBinding::Ipc(_))) {
+            self.close();
+            return Err(DeviceAdmissionError::Session(AslError::InvalidIdentity));
+        }
+        self.prepare_network_hello(hello, resolver, now_ms)
+    }
+
+    fn prepare_network_hello(
+        &mut self,
+        hello: Hello,
+        resolver: &DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<IdentityProofRequest, DeviceAdmissionError> {
         self.consume_hello_attempt()
             .map_err(DeviceAdmissionError::Session)?;
         self.check_hello(&hello, now_ms)
             .map_err(DeviceAdmissionError::Session)?;
-        let connection = self
-            .transport
-            .as_ref()
-            .ok_or(DeviceAdmissionError::Session(AslError::InvalidIdentity))?;
         let finalized = resolver
             .light_client()
             .finalized(now_ms / 1_000)
@@ -140,16 +202,13 @@ impl DeviceSession {
             agent_id: hello.agent_id,
             checkpoint_hash: Hash32(finalized.block_hash()),
         };
-        let token = transport
-            .send_identity_proof_request(connection, request.clone())
-            .map_err(|error| DeviceAdmissionError::Session(error.into()))?;
         self.state = State::AwaitingProof(Box::new(PendingProof {
             hello,
-            request,
-            token: token.clone(),
+            request: request.clone(),
+            token: None,
             started_at_ms: now_ms,
         }));
-        Ok(token)
+        Ok(request)
     }
 
     /// Consumes a proof response from the driver on this connection.
@@ -166,12 +225,51 @@ impl DeviceSession {
         else {
             return Err(DeviceAdmissionError::Session(AslError::InvalidMessage));
         };
-        if self.transport.as_ref() != Some(connection)
-            || !token.belongs_to(connection)
-            || pending.token != token
+        if !matches!(
+            self.transport.as_ref(),
+            Some(ConnectionBinding::InProcess(bound)) if bound == connection
+        ) || !token.belongs_to(connection)
+            || pending.token.as_ref() != Some(&token)
         {
             return Err(DeviceAdmissionError::Session(AslError::InvalidIdentity));
         }
+        self.finish_proof(*pending, proof, history, resolver, now_ms)
+    }
+
+    /// Completes a proof response received over IPC. The NetworkBridge has
+    /// already bound its request token to this connection; Core additionally
+    /// checks the local pending request id before chain verification.
+    pub fn finish_network_hello_ipc(
+        &mut self,
+        connection_id: [u8; 16],
+        proof: &WireIdentityProof,
+        history: &mut RecordHistory,
+        resolver: &mut DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<(), DeviceAdmissionError> {
+        let State::AwaitingProof(pending) = std::mem::replace(&mut self.state, State::Closed)
+        else {
+            return Err(DeviceAdmissionError::Session(AslError::InvalidMessage));
+        };
+        if !matches!(
+            self.transport.as_ref(),
+            Some(ConnectionBinding::Ipc(bound)) if *bound == connection_id
+        ) || pending.token.is_some()
+            || pending.request.request_id != proof.request_id
+        {
+            return Err(DeviceAdmissionError::Session(AslError::InvalidIdentity));
+        }
+        self.finish_proof(*pending, proof, history, resolver, now_ms)
+    }
+
+    fn finish_proof(
+        &mut self,
+        pending: PendingProof,
+        proof: &WireIdentityProof,
+        history: &mut RecordHistory,
+        resolver: &mut DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<(), DeviceAdmissionError> {
         if now_ms < pending.started_at_ms {
             return Err(DeviceAdmissionError::Session(AslError::ExpiredMessage));
         }

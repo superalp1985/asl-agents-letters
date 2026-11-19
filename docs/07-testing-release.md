@@ -16,7 +16,7 @@
 | Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入、MCP stdout 集成及 T14 认证 peer 事件尚未验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
-| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付与 PeerId 一致性已通过 Windows AppContainer 子进程测试；Net/Core 连接事件、身份消息转发、生产监听、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
+| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
 | 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
 
 2026-11-17 T06a 合约验收：
@@ -47,6 +47,15 @@
 - 默认并行的 `cargo test --workspace --all-targets --locked` 连续两次在 `chain::http::tests::http_historical_sync_persists_every_verified_step_and_restores_offline` 的恢复步骤返回 `InvalidLocalState`；该测试单独运行通过，`asl-app` 单测串行运行通过，全工作区串行运行通过。并行敏感性尚未定位或修复，不能把默认并行测试记为通过。
 
 本轮只验证受保护设备密钥经私有管道交给 Net、Net 解码后计算的 PeerId 与本地身份精确一致，以及这些失败场景；没有验证 Net 使用该密钥建立 libp2p 连接、Core/Net 网络身份闸门、公网监听或完整 T14。
+
+2026-11-19 T14 Net/Core 运行时接线验证（Windows，Rust 1.100.0；Cargo、Rustup、target、临时目录和测试夹具均在 E 盘）：
+
+- `cargo test --workspace --all-targets --locked -- --test-threads=1`：通过。`asl-app` 133 项单元测试通过；Net driver 双向控制请求/响应 handle 映射、IPC 角色/长度边界和 Windows 条件性子进程用例均在本轮范围内。其他 workspace all-targets 通过；需外部目标、子进程入口或生产计时器的用例按设计 ignored。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo build --workspace --release --locked`：通过。
+
+验证限于本机 workspace 与 loopback transport；新增 Windows AppContainer 命令用例验证非 loopback 监听按策略拒绝并返回关联操作 ID。没有验证自动 Core 身份闸门、公网监听/拨号、DHT、mDNS、中继或完整 T14。Cargo 另报告 `proc-macro-error2 v2.0.1` 存在未来 Rust 兼容性提示；不影响本轮命令结果。
 
 ## 2. 阻断发布的反例
 

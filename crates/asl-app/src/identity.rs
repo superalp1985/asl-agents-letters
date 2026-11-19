@@ -163,6 +163,10 @@ impl DeviceIdentity {
         self.peer_id.clone()
     }
 
+    pub(crate) fn into_keypair(self) -> libp2p_identity::Keypair {
+        self.keypair
+    }
+
     pub fn save_protected_new(&self, path: &Path) -> Result<(), AslError> {
         let encoded = Zeroizing::new(
             self.keypair

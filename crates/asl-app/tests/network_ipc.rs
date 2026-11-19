@@ -1,10 +1,16 @@
 use asl_app::ipc::{
-    IpcMessage, IpcRole, MAX_IPC_IDENTITY_PROOF_FRAME_BYTES, decode_frame, encode_frame,
+    IpcMessage, IpcRole, MAX_IPC_BULK_PAYLOAD_BYTES, MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
+    NetworkErrorCode, NetworkProtocol, decode_frame, encode_frame,
+};
+use asl_net::{
+    codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
+    transport::TransportKind,
 };
 use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{AccountProof, IdentityProof, IdentityProofRequest, StorageProof},
 };
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn peer_id() -> PeerId {
     let keypair = libp2p_identity::Keypair::generate_ed25519();
@@ -174,4 +180,181 @@ fn identity_proof_ipc_messages_reject_frames_over_the_protocol_limit() {
         .copy_from_slice(&((MAX_IPC_IDENTITY_PROOF_FRAME_BYTES + 1) as u32).to_be_bytes());
 
     assert!(decode_frame(&bytes, IpcRole::Net, IpcRole::Core, 1).is_err());
+}
+
+#[test]
+fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
+    let peer = peer_id();
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001);
+    let control = asl_types::protocol::WireFrame::Ack(asl_types::protocol::Ack {
+        message_id: Id128([31; 16]),
+        received_id: Id128([32; 16]),
+    });
+    let bulk_request = BulkRequest {
+        operation: BulkOperation::Chunk,
+        request_id: Id128([33; 16]),
+        content_id: Hash32([34; 32]),
+        lease_id: Hash32([35; 32]),
+        chunk_index: 7,
+    };
+    let messages = [
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::Listen {
+                operation_id: [36; 16],
+                kind: TransportKind::Tcp,
+                address,
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::Dial {
+                operation_id: [37; 16],
+                kind: TransportKind::Quic,
+                address,
+                peer_id: peer,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::OperationAccepted {
+                operation_id: [36; 16],
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::OperationFailed {
+                operation_id: [37; 16],
+                code: NetworkErrorCode::Transport,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::Listening {
+                kind: TransportKind::Tcp,
+                address,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::ControlRequested {
+                connection_id: [38; 16],
+                response_id: [39; 16],
+                request: control.clone(),
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::ControlReceived {
+                connection_id: [38; 16],
+                request_id: [40; 16],
+                response: control.clone(),
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::SendControl {
+                connection_id: [38; 16],
+                request_id: [40; 16],
+                request: control.clone(),
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::ReplyControl {
+                connection_id: [38; 16],
+                response_id: [39; 16],
+                response: control,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::BulkRequested {
+                connection_id: [41; 16],
+                response_id: [42; 16],
+                request: bulk_request.clone(),
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::BulkReceived {
+                connection_id: [41; 16],
+                response: BulkResponse {
+                    request_id: bulk_request.request_id,
+                    status: BulkStatus::Success,
+                    payload: vec![43; 64],
+                },
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::SendBulk {
+                connection_id: [41; 16],
+                request: bulk_request,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::RequestFailed {
+                connection_id: [44; 16],
+                request_id: [45; 16],
+                protocol: NetworkProtocol::Bulk,
+                code: NetworkErrorCode::TimedOut,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::NetworkError {
+                code: NetworkErrorCode::Capacity,
+            },
+        ),
+    ];
+
+    for (sender, receiver, message) in messages {
+        let bytes = encode_frame(sender, receiver, 1, &message).unwrap();
+        assert_eq!(
+            decode_frame(&bytes, sender, receiver, 1).unwrap().message,
+            message
+        );
+    }
+}
+
+#[test]
+fn net_driver_ipc_rejects_wrong_roles_and_non_control_payloads() {
+    let request = IpcMessage::SendControl {
+        connection_id: [51; 16],
+        request_id: [52; 16],
+        request: asl_types::protocol::WireFrame::IdentityProofRequest(proof_request()),
+    };
+    assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &request).is_err());
+
+    let reply = IpcMessage::ReplyBulk {
+        connection_id: [53; 16],
+        response_id: [54; 16],
+        response: BulkResponse {
+            request_id: Id128([55; 16]),
+            status: BulkStatus::Success,
+            payload: vec![56; MAX_IPC_BULK_PAYLOAD_BYTES + 1],
+        },
+    };
+    assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &reply).is_err());
+
+    let peer_event = IpcMessage::PeerDisconnected {
+        connection_id: [57; 16],
+    };
+    assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &peer_event).is_err());
 }

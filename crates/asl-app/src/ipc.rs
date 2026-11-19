@@ -1,17 +1,26 @@
 use std::env;
 use std::io::{Read, Write};
 
+use asl_net::{
+    codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
+    transport::TransportKind,
+};
 use asl_types::{
     error::AslError,
     ids::PeerId,
+    manifest::MAX_MANIFEST_LEN,
     protocol::{
-        IdentityProof, IdentityProofRequest, MAX_EXTENDED_FRAME_BYTES, WireFrame, decode_control,
-        decode_frame as decode_asl_frame, encode_frame as encode_asl_frame,
+        IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES,
+        WireFrame, decode_control, decode_frame as decode_asl_frame, encode_control,
+        encode_frame as encode_asl_frame,
     },
 };
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use zeroize::Zeroizing;
 
 use crate::identity::{DeviceIdentity, MAX_DEVICE_KEY_BYTES};
+
+mod net_runtime;
 
 pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
@@ -23,6 +32,7 @@ const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
 pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
+pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
 
@@ -43,7 +53,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (
                     Self::Net | Self::Worker | Self::Extractor,
@@ -51,7 +61,7 @@ impl IpcRole {
                     1 | 3 | 5
                 )
                 | (Self::Net, Self::Core, 10..=13)
-                | (Self::Net, Self::Core, 16)
+                | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
         )
@@ -153,6 +163,117 @@ pub enum IpcMessage {
         response_id: [u8; 16],
         proof: IdentityProof,
     },
+    Listen {
+        operation_id: [u8; 16],
+        kind: TransportKind,
+        address: SocketAddr,
+    },
+    Dial {
+        operation_id: [u8; 16],
+        kind: TransportKind,
+        address: SocketAddr,
+        peer_id: PeerId,
+    },
+    OperationAccepted {
+        operation_id: [u8; 16],
+    },
+    OperationFailed {
+        operation_id: [u8; 16],
+        code: NetworkErrorCode,
+    },
+    Listening {
+        kind: TransportKind,
+        address: SocketAddr,
+    },
+    ControlRequested {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        request: WireFrame,
+    },
+    ControlReceived {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        response: WireFrame,
+    },
+    SendControl {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        request: WireFrame,
+    },
+    ReplyControl {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        response: WireFrame,
+    },
+    BulkRequested {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        request: BulkRequest,
+    },
+    BulkReceived {
+        connection_id: [u8; 16],
+        response: BulkResponse,
+    },
+    SendBulk {
+        connection_id: [u8; 16],
+        request: BulkRequest,
+    },
+    ReplyBulk {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        response: BulkResponse,
+    },
+    RequestFailed {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        protocol: NetworkProtocol,
+        code: NetworkErrorCode,
+    },
+    NetworkError {
+        code: NetworkErrorCode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum NetworkProtocol {
+    Control = 1,
+    IdentityProof = 2,
+    Bulk = 3,
+}
+
+impl NetworkProtocol {
+    fn from_wire(value: u8) -> Result<Self, AslError> {
+        match value {
+            1 => Ok(Self::Control),
+            2 => Ok(Self::IdentityProof),
+            3 => Ok(Self::Bulk),
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetworkErrorCode {
+    InvalidCommand = 1,
+    Capacity = 2,
+    Disconnected = 3,
+    TimedOut = 4,
+    Transport = 5,
+}
+
+impl NetworkErrorCode {
+    fn from_wire(value: u8) -> Result<Self, AslError> {
+        match value {
+            1 => Ok(Self::InvalidCommand),
+            2 => Ok(Self::Capacity),
+            3 => Ok(Self::Disconnected),
+            4 => Ok(Self::TimedOut),
+            5 => Ok(Self::Transport),
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,6 +469,140 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
             15
         }
+        IpcMessage::Listen {
+            operation_id,
+            kind,
+            address,
+        } => {
+            body.extend_from_slice(operation_id);
+            body.push(transport_kind_code(*kind));
+            append_socket_addr(&mut body, *address)?;
+            17
+        }
+        IpcMessage::Dial {
+            operation_id,
+            kind,
+            address,
+            peer_id,
+        } => {
+            body.extend_from_slice(operation_id);
+            body.push(transport_kind_code(*kind));
+            append_socket_addr(&mut body, *address)?;
+            let peer_bytes = peer_id.as_bytes();
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            18
+        }
+        IpcMessage::OperationAccepted { operation_id } => {
+            body.extend_from_slice(operation_id);
+            19
+        }
+        IpcMessage::OperationFailed { operation_id, code } => {
+            body.extend_from_slice(operation_id);
+            body.push(*code as u8);
+            20
+        }
+        IpcMessage::Listening { kind, address } => {
+            body.push(transport_kind_code(*kind));
+            append_socket_addr(&mut body, *address)?;
+            21
+        }
+        IpcMessage::ControlRequested {
+            connection_id,
+            response_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_control_frame(&mut body, request)?;
+            22
+        }
+        IpcMessage::ControlReceived {
+            connection_id,
+            request_id,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
+            append_control_frame(&mut body, response)?;
+            23
+        }
+        IpcMessage::SendControl {
+            connection_id,
+            request_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
+            append_control_frame(&mut body, request)?;
+            24
+        }
+        IpcMessage::ReplyControl {
+            connection_id,
+            response_id,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_control_frame(&mut body, response)?;
+            25
+        }
+        IpcMessage::BulkRequested {
+            connection_id,
+            response_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_bulk_request(&mut body, request);
+            26
+        }
+        IpcMessage::BulkReceived {
+            connection_id,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            append_bulk_response(&mut body, response)?;
+            27
+        }
+        IpcMessage::SendBulk {
+            connection_id,
+            request,
+        } => {
+            body.extend_from_slice(connection_id);
+            append_bulk_request(&mut body, request);
+            28
+        }
+        IpcMessage::ReplyBulk {
+            connection_id,
+            response_id,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_bulk_response(&mut body, response)?;
+            29
+        }
+        IpcMessage::RequestFailed {
+            connection_id,
+            request_id,
+            protocol,
+            code,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
+            body.push(*protocol as u8);
+            body.push(*code as u8);
+            30
+        }
+        IpcMessage::NetworkError { code } => {
+            body.push(*code as u8);
+            31
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -434,6 +689,105 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 PeerId::from_bytes(body[2..].to_vec()).map_err(|_| AslError::InvalidMessage)?;
             Ok(IpcMessage::NetReady { peer_id })
         }
+        17 if body.len() >= 24 => {
+            let kind = decode_transport_kind(body[16])?;
+            let (address, length) = decode_socket_addr(&body[17..])?;
+            if 17 + length != body.len() {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::Listen {
+                operation_id: body[..16].try_into().unwrap(),
+                kind,
+                address,
+            })
+        }
+        18 if body.len() >= 26 => {
+            let kind = decode_transport_kind(body[16])?;
+            let (address, address_length) = decode_socket_addr(&body[17..])?;
+            let peer_length_offset = 17 + address_length;
+            if body.len() < peer_length_offset + 2 {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_length = u16::from_be_bytes(
+                body[peer_length_offset..peer_length_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let peer_offset = peer_length_offset + 2;
+            if body.len() != peer_offset + peer_length {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_id = PeerId::from_bytes(body[peer_offset..].to_vec())
+                .map_err(|_| AslError::InvalidMessage)?;
+            Ok(IpcMessage::Dial {
+                operation_id: body[..16].try_into().unwrap(),
+                kind,
+                address,
+                peer_id,
+            })
+        }
+        19 if body.len() == 16 => Ok(IpcMessage::OperationAccepted {
+            operation_id: body.try_into().unwrap(),
+        }),
+        20 if body.len() == 17 => Ok(IpcMessage::OperationFailed {
+            operation_id: body[..16].try_into().unwrap(),
+            code: NetworkErrorCode::from_wire(body[16])?,
+        }),
+        21 if body.len() >= 8 => {
+            let kind = decode_transport_kind(body[0])?;
+            let (address, length) = decode_socket_addr(&body[1..])?;
+            if 1 + length != body.len() {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::Listening { kind, address })
+        }
+        22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            request: decode_control_frame(&body[32..])?,
+        }),
+        23 if body.len() >= 36 => Ok(IpcMessage::ControlReceived {
+            connection_id: body[..16].try_into().unwrap(),
+            request_id: body[16..32].try_into().unwrap(),
+            response: decode_control_frame(&body[32..])?,
+        }),
+        24 if body.len() >= 36 => Ok(IpcMessage::SendControl {
+            connection_id: body[..16].try_into().unwrap(),
+            request_id: body[16..32].try_into().unwrap(),
+            request: decode_control_frame(&body[32..])?,
+        }),
+        25 if body.len() >= 36 => Ok(IpcMessage::ReplyControl {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            response: decode_control_frame(&body[32..])?,
+        }),
+        26 if body.len() == 16 + 16 + BULK_REQUEST_IPC_BYTES => Ok(IpcMessage::BulkRequested {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            request: decode_bulk_request(&body[32..])?,
+        }),
+        27 if body.len() >= 37 => Ok(IpcMessage::BulkReceived {
+            connection_id: body[..16].try_into().unwrap(),
+            response: decode_bulk_response(&body[16..])?,
+        }),
+        28 if body.len() == 16 + BULK_REQUEST_IPC_BYTES => Ok(IpcMessage::SendBulk {
+            connection_id: body[..16].try_into().unwrap(),
+            request: decode_bulk_request(&body[16..])?,
+        }),
+        29 if body.len() >= 53 => Ok(IpcMessage::ReplyBulk {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            response: decode_bulk_response(&body[32..])?,
+        }),
+        30 if body.len() == 34 => Ok(IpcMessage::RequestFailed {
+            connection_id: body[..16].try_into().unwrap(),
+            request_id: body[16..32].try_into().unwrap(),
+            protocol: NetworkProtocol::from_wire(body[32])?,
+            code: NetworkErrorCode::from_wire(body[33])?,
+        }),
+        31 if body.len() == 1 => Ok(IpcMessage::NetworkError {
+            code: NetworkErrorCode::from_wire(body[0])?,
+        }),
         _ => Err(AslError::InvalidMessage),
     }
 }
@@ -480,6 +834,173 @@ fn decode_identity_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     decode_asl_frame(&bytes[4..])
 }
 
+const BULK_REQUEST_IPC_BYTES: usize = 85;
+const BULK_RESPONSE_HEADER_IPC_BYTES: usize = 21;
+
+fn append_control_frame(body: &mut Vec<u8>, frame: &WireFrame) -> Result<(), AslError> {
+    if !frame.is_control() {
+        return Err(AslError::InvalidMessage);
+    }
+    let bytes = encode_control(frame)?;
+    if bytes.len() > MAX_CONTROL_FRAME_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    append_length_prefixed(body, &bytes)
+}
+
+fn decode_control_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
+    let payload = decode_length_prefixed(bytes, MAX_CONTROL_FRAME_BYTES)?;
+    decode_control(payload)
+}
+
+fn append_length_prefixed(body: &mut Vec<u8>, bytes: &[u8]) -> Result<(), AslError> {
+    body.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn decode_length_prefixed(bytes: &[u8], max: usize) -> Result<&[u8], AslError> {
+    if bytes.len() < 4 {
+        return Err(AslError::InvalidMessage);
+    }
+    let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    if length == 0 || length > max || bytes.len() != 4 + length {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(&bytes[4..])
+}
+
+fn append_bulk_request(body: &mut Vec<u8>, request: &BulkRequest) {
+    body.push(request.operation as u8);
+    body.extend_from_slice(&request.request_id.0);
+    body.extend_from_slice(&request.content_id.0);
+    body.extend_from_slice(&request.lease_id.0);
+    body.extend_from_slice(&request.chunk_index.to_be_bytes());
+}
+
+fn decode_bulk_request(bytes: &[u8]) -> Result<BulkRequest, AslError> {
+    if bytes.len() != BULK_REQUEST_IPC_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let operation = match bytes[0] {
+        1 => BulkOperation::Manifest,
+        2 => BulkOperation::Chunk,
+        3 => BulkOperation::Inline,
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let chunk_index = u32::from_be_bytes(bytes[81..85].try_into().unwrap());
+    if operation != BulkOperation::Chunk && chunk_index != 0 {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(BulkRequest {
+        operation,
+        request_id: asl_types::ids::Id128(bytes[1..17].try_into().unwrap()),
+        content_id: asl_types::ids::Hash32(bytes[17..49].try_into().unwrap()),
+        lease_id: asl_types::ids::Hash32(bytes[49..81].try_into().unwrap()),
+        chunk_index,
+    })
+}
+
+fn append_bulk_response(body: &mut Vec<u8>, response: &BulkResponse) -> Result<(), AslError> {
+    if response.payload.len() > MAX_IPC_BULK_PAYLOAD_BYTES
+        || (response.status != BulkStatus::Success && !response.payload.is_empty())
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    body.extend_from_slice(&response.request_id.0);
+    body.push(response.status as u8);
+    body.extend_from_slice(
+        &u32::try_from(response.payload.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(&response.payload);
+    Ok(())
+}
+
+fn decode_bulk_response(bytes: &[u8]) -> Result<BulkResponse, AslError> {
+    if bytes.len() < BULK_RESPONSE_HEADER_IPC_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let status = match bytes[16] {
+        0 => BulkStatus::Success,
+        1 => BulkStatus::NotFound,
+        2 => BulkStatus::Busy,
+        3 => BulkStatus::Expired,
+        4 => BulkStatus::IntegrityFailed,
+        5 => BulkStatus::Cancelled,
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let payload_len = u32::from_be_bytes(bytes[17..21].try_into().unwrap()) as usize;
+    if payload_len > MAX_IPC_BULK_PAYLOAD_BYTES
+        || bytes.len() != BULK_RESPONSE_HEADER_IPC_BYTES + payload_len
+        || (status != BulkStatus::Success && payload_len != 0)
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(BulkResponse {
+        request_id: asl_types::ids::Id128(bytes[..16].try_into().unwrap()),
+        status,
+        payload: bytes[BULK_RESPONSE_HEADER_IPC_BYTES..].to_vec(),
+    })
+}
+
+fn transport_kind_code(kind: TransportKind) -> u8 {
+    match kind {
+        TransportKind::Tcp => 1,
+        TransportKind::Quic => 2,
+    }
+}
+
+fn decode_transport_kind(value: u8) -> Result<TransportKind, AslError> {
+    match value {
+        1 => Ok(TransportKind::Tcp),
+        2 => Ok(TransportKind::Quic),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn append_socket_addr(body: &mut Vec<u8>, address: SocketAddr) -> Result<(), AslError> {
+    match address.ip() {
+        IpAddr::V4(ip) => {
+            body.push(4);
+            body.extend_from_slice(&ip.octets());
+        }
+        IpAddr::V6(ip) => {
+            if matches!(address, SocketAddr::V6(value) if value.scope_id() != 0 || value.flowinfo() != 0)
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.push(6);
+            body.extend_from_slice(&ip.octets());
+        }
+    }
+    body.extend_from_slice(&address.port().to_be_bytes());
+    Ok(())
+}
+
+fn decode_socket_addr(bytes: &[u8]) -> Result<(SocketAddr, usize), AslError> {
+    let family = *bytes.first().ok_or(AslError::InvalidMessage)?;
+    let (ip, length) = match family {
+        4 if bytes.len() >= 7 => (
+            IpAddr::V4(Ipv4Addr::new(bytes[1], bytes[2], bytes[3], bytes[4])),
+            7,
+        ),
+        6 if bytes.len() >= 19 => (
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[1..17]).unwrap())),
+            19,
+        ),
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let port_offset = length - 2;
+    let port = u16::from_be_bytes(bytes[port_offset..length].try_into().unwrap());
+    Ok((SocketAddr::new(ip, port), length))
+}
+
 fn max_body_bytes(kind: u8) -> Option<usize> {
     Some(match kind {
         1..=3 => 0,
@@ -492,6 +1013,18 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         12 | 15 => 32 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
         13 | 14 => 16 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
         16 => 2 + 128,
+        17 => 16 + 1 + 19,
+        18 => 16 + 1 + 19 + 2 + 128,
+        19 => 16,
+        20 => 17,
+        21 => 1 + 19,
+        22..=25 => 32 + 4 + MAX_CONTROL_FRAME_BYTES,
+        26 => 32 + BULK_REQUEST_IPC_BYTES,
+        27 => 16 + BULK_RESPONSE_HEADER_IPC_BYTES + MAX_IPC_BULK_PAYLOAD_BYTES,
+        28 => 16 + BULK_REQUEST_IPC_BYTES,
+        29 => 32 + BULK_RESPONSE_HEADER_IPC_BYTES + MAX_IPC_BULK_PAYLOAD_BYTES,
+        30 => 34,
+        31 => 1,
         _ => return None,
     })
 }
@@ -606,21 +1139,14 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
         .ok_or(AslError::InvalidMessage)?;
 
     let stdin = std::io::stdin();
-    let device_identity = if role == IpcRole::Net {
-        Some(read_device_identity_prelude(&mut stdin.lock())?)
-    } else {
-        None
-    };
+    if role == IpcRole::Net {
+        let identity = read_device_identity_prelude(&mut stdin.lock())?;
+        return net_runtime::run(identity, stdin, std::io::stdout());
+    }
     let stdout = std::io::stdout();
     let mut reader = FrameReader::new(stdin.lock(), IpcRole::Core, role);
     let mut writer = FrameWriter::new(stdout.lock(), role, IpcRole::Core);
-    if let Some(identity) = &device_identity {
-        writer.send(&IpcMessage::NetReady {
-            peer_id: identity.peer_id(),
-        })?;
-    } else {
-        writer.send(&IpcMessage::Ready)?;
-    }
+    writer.send(&IpcMessage::Ready)?;
     loop {
         match reader.receive()?.message {
             IpcMessage::Shutdown => {
@@ -713,6 +1239,107 @@ mod tests {
             IpcMessage::NetReady {
                 peer_id: DeviceIdentity::generate().unwrap().peer_id(),
             },
+            IpcMessage::Listen {
+                operation_id: [10; 16],
+                kind: TransportKind::Tcp,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            },
+            IpcMessage::Dial {
+                operation_id: [11; 16],
+                kind: TransportKind::Quic,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            },
+            IpcMessage::OperationAccepted {
+                operation_id: [10; 16],
+            },
+            IpcMessage::OperationFailed {
+                operation_id: [11; 16],
+                code: NetworkErrorCode::Transport,
+            },
+            IpcMessage::Listening {
+                kind: TransportKind::Tcp,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+            },
+            IpcMessage::ControlRequested {
+                connection_id: [12; 16],
+                response_id: [13; 16],
+                request: WireFrame::Ack(asl_types::protocol::Ack {
+                    message_id: asl_types::ids::Id128([14; 16]),
+                    received_id: asl_types::ids::Id128([15; 16]),
+                }),
+            },
+            IpcMessage::ControlReceived {
+                connection_id: [12; 16],
+                request_id: [16; 16],
+                response: WireFrame::Ack(asl_types::protocol::Ack {
+                    message_id: asl_types::ids::Id128([17; 16]),
+                    received_id: asl_types::ids::Id128([14; 16]),
+                }),
+            },
+            IpcMessage::SendControl {
+                connection_id: [12; 16],
+                request_id: [16; 16],
+                request: WireFrame::Ack(asl_types::protocol::Ack {
+                    message_id: asl_types::ids::Id128([14; 16]),
+                    received_id: asl_types::ids::Id128([15; 16]),
+                }),
+            },
+            IpcMessage::ReplyControl {
+                connection_id: [12; 16],
+                response_id: [13; 16],
+                response: WireFrame::Ack(asl_types::protocol::Ack {
+                    message_id: asl_types::ids::Id128([17; 16]),
+                    received_id: asl_types::ids::Id128([14; 16]),
+                }),
+            },
+            IpcMessage::BulkRequested {
+                connection_id: [18; 16],
+                response_id: [19; 16],
+                request: BulkRequest {
+                    operation: BulkOperation::Chunk,
+                    request_id: asl_types::ids::Id128([20; 16]),
+                    content_id: asl_types::ids::Hash32([21; 32]),
+                    lease_id: asl_types::ids::Hash32([22; 32]),
+                    chunk_index: 1,
+                },
+            },
+            IpcMessage::BulkReceived {
+                connection_id: [18; 16],
+                response: BulkResponse {
+                    request_id: asl_types::ids::Id128([20; 16]),
+                    status: BulkStatus::Success,
+                    payload: vec![23; 64],
+                },
+            },
+            IpcMessage::SendBulk {
+                connection_id: [18; 16],
+                request: BulkRequest {
+                    operation: BulkOperation::Manifest,
+                    request_id: asl_types::ids::Id128([20; 16]),
+                    content_id: asl_types::ids::Hash32([21; 32]),
+                    lease_id: asl_types::ids::Hash32([22; 32]),
+                    chunk_index: 0,
+                },
+            },
+            IpcMessage::ReplyBulk {
+                connection_id: [18; 16],
+                response_id: [19; 16],
+                response: BulkResponse {
+                    request_id: asl_types::ids::Id128([20; 16]),
+                    status: BulkStatus::NotFound,
+                    payload: vec![],
+                },
+            },
+            IpcMessage::RequestFailed {
+                connection_id: [24; 16],
+                request_id: [25; 16],
+                protocol: NetworkProtocol::Bulk,
+                code: NetworkErrorCode::TimedOut,
+            },
+            IpcMessage::NetworkError {
+                code: NetworkErrorCode::Capacity,
+            },
         ];
         for message in messages {
             let (sender, receiver) = match message {
@@ -720,7 +1347,23 @@ mod tests {
                 | IpcMessage::Stopped
                 | IpcMessage::Pong { .. }
                 | IpcMessage::NetReady { .. } => (IpcRole::Net, IpcRole::Core),
-                IpcMessage::Shutdown | IpcMessage::Ping { .. } => (IpcRole::Core, IpcRole::Net),
+                IpcMessage::OperationAccepted { .. }
+                | IpcMessage::OperationFailed { .. }
+                | IpcMessage::Listening { .. }
+                | IpcMessage::ControlRequested { .. }
+                | IpcMessage::ControlReceived { .. }
+                | IpcMessage::BulkRequested { .. }
+                | IpcMessage::BulkReceived { .. }
+                | IpcMessage::RequestFailed { .. }
+                | IpcMessage::NetworkError { .. } => (IpcRole::Net, IpcRole::Core),
+                IpcMessage::Shutdown
+                | IpcMessage::Ping { .. }
+                | IpcMessage::Listen { .. }
+                | IpcMessage::Dial { .. }
+                | IpcMessage::SendControl { .. }
+                | IpcMessage::ReplyControl { .. }
+                | IpcMessage::SendBulk { .. }
+                | IpcMessage::ReplyBulk { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::RunTask { .. } => (IpcRole::Core, IpcRole::Worker),
                 IpcMessage::TaskResult { .. } | IpcMessage::TaskStarted { .. } => {
                     (IpcRole::Worker, IpcRole::Core)

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -22,6 +23,7 @@ use crate::paths::AppPaths;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PENDING_NETWORK_EVENTS: usize = 64;
 
 pub struct Supervisor {
     libraries: LocalLibraries,
@@ -64,12 +66,18 @@ impl Supervisor {
             .as_mut()
             .ok_or(AslError::SandboxUnavailable)?
             .send(&IpcMessage::Ping { nonce })?;
-        let frame = self.net.receive(NET_PING_TIMEOUT)?;
-        if frame.message == (IpcMessage::Pong { nonce }) {
-            Ok(())
-        } else {
-            Err(AslError::InvalidMessage)
-        }
+        self.net.wait_for_pong(nonce, NET_PING_TIMEOUT)
+    }
+
+    pub(crate) fn send_network_ipc(&mut self, message: IpcMessage) -> Result<(), AslError> {
+        self.net.send(&message)
+    }
+
+    pub(crate) fn receive_network_ipc(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<IpcMessage, AslError> {
+        self.net.receive_network_event(timeout)
     }
 
     /// Runs strict control-frame validation in a fresh, networkless worker.
@@ -98,6 +106,7 @@ struct NetRuntime {
     events: Option<Receiver<Result<IpcFrame, AslError>>>,
     reader_thread: Option<JoinHandle<()>>,
     next_nonce: u64,
+    pending_network_events: VecDeque<IpcMessage>,
 }
 
 impl NetRuntime {
@@ -137,6 +146,7 @@ impl NetRuntime {
             events: Some(receiver),
             reader_thread: Some(reader_thread),
             next_nonce: 1,
+            pending_network_events: VecDeque::new(),
         };
         match runtime.receive(STARTUP_TIMEOUT) {
             Ok(frame) => match validate_net_ready(frame.message, expected_peer_id) {
@@ -167,6 +177,46 @@ impl NetRuntime {
         }
     }
 
+    fn send(&mut self, message: &IpcMessage) -> Result<(), AslError> {
+        self.writer
+            .as_mut()
+            .ok_or(AslError::SandboxUnavailable)?
+            .send(message)
+    }
+
+    fn wait_for_pong(&mut self, nonce: u64, timeout: Duration) -> Result<(), AslError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AslError::SandboxUnavailable);
+            }
+            let message = self.receive(remaining)?.message;
+            match message {
+                IpcMessage::Pong { nonce: received } if received == nonce => return Ok(()),
+                message if is_network_event(&message) => {
+                    if self.pending_network_events.len() >= MAX_PENDING_NETWORK_EVENTS {
+                        return Err(AslError::SandboxUnavailable);
+                    }
+                    self.pending_network_events.push_back(message);
+                }
+                _ => return Err(AslError::InvalidMessage),
+            }
+        }
+    }
+
+    fn receive_network_event(&mut self, timeout: Duration) -> Result<IpcMessage, AslError> {
+        if let Some(event) = self.pending_network_events.pop_front() {
+            return Ok(event);
+        }
+        let frame = self.receive(timeout)?;
+        if is_network_event(&frame.message) {
+            Ok(frame.message)
+        } else {
+            Err(AslError::InvalidMessage)
+        }
+    }
+
     fn stop(&mut self) {
         self.writer.take();
         if let Some(child) = self.child.as_mut() {
@@ -178,6 +228,25 @@ impl NetRuntime {
             let _ = reader_thread.join();
         }
     }
+}
+
+fn is_network_event(message: &IpcMessage) -> bool {
+    matches!(
+        message,
+        IpcMessage::OperationAccepted { .. }
+            | IpcMessage::OperationFailed { .. }
+            | IpcMessage::Listening { .. }
+            | IpcMessage::PeerAuthenticated { .. }
+            | IpcMessage::PeerDisconnected { .. }
+            | IpcMessage::IdentityProofRequested { .. }
+            | IpcMessage::IdentityProofReceived { .. }
+            | IpcMessage::ControlRequested { .. }
+            | IpcMessage::ControlReceived { .. }
+            | IpcMessage::BulkRequested { .. }
+            | IpcMessage::BulkReceived { .. }
+            | IpcMessage::RequestFailed { .. }
+            | IpcMessage::NetworkError { .. }
+    )
 }
 
 fn validate_net_ready(message: IpcMessage, expected_peer_id: &PeerId) -> Result<(), AslError> {
@@ -352,7 +421,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn sandboxed_worker_failure_does_not_stop_net_or_core() {
+        use crate::ipc::NetworkErrorCode;
+        use crate::network::{NetworkCommand, NetworkEvent};
+        use asl_net::transport::TransportKind;
         use std::fs;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::path::PathBuf;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -412,6 +485,26 @@ mod tests {
             SandboxLauncher::new(net.clone(), worker, net.clone()).unwrap(),
         )
         .expect("real Net and Worker AppContainers must start");
+
+        let listen_operation = [13; 16];
+        supervisor
+            .send_network_command(NetworkCommand::Listen {
+                operation_id: listen_operation,
+                kind: TransportKind::Tcp,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            })
+            .unwrap();
+        assert_eq!(
+            supervisor
+                .receive_network_event(Duration::from_secs(5))
+                .unwrap(),
+            NetworkEvent::OperationFailed {
+                operation_id: listen_operation,
+                code: NetworkErrorCode::Transport,
+            },
+            "Net IPC must report the operation ID when address policy rejects a listener"
+        );
+
         supervisor.ping_net().unwrap();
         assert_eq!(
             supervisor.validate_control_frame([9; 16], &[0xff]).unwrap(),

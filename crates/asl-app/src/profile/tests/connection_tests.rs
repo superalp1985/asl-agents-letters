@@ -298,6 +298,76 @@ async fn network_hello_verifies_the_proof_and_directory_before_admission() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn ipc_device_session_binds_the_pending_proof_to_the_local_connection_handle() {
+    use crate::chain::identity_proof_to_wire;
+
+    let root = AgentIdentity::generate().unwrap();
+    let device = Keypair::generate_ed25519();
+    let peer = PeerId::from_bytes(device.public().to_peer_id().to_bytes()).unwrap();
+    let cert = certificate(&root, &peer, 1);
+    let directory = directory(&root, 7, vec![cert.clone()], vec![]);
+    let signed = signed_directory(&root, &directory, 1);
+    let mut values = [[0; 32]; 3];
+    values[0][12..].copy_from_slice(&root.controller_address());
+    values[1] = device_directory_commitment(&directory).unwrap().0;
+    values[2][23] = 1;
+    values[2][24..].copy_from_slice(&7_u64.to_be_bytes());
+    let (deployment, finalized, proof) = proof_fixture_for_agent(values, 8, root.agent_id());
+    let config = DurableResolverConfigV1 {
+        consensus: consensus_config(),
+        deployment,
+        max_cache_age_secs: 120,
+        cache_capacity: 2,
+    };
+    let database = TestChainDatabase::new();
+    let mut resolver = DurableIdentityResolver::create(
+        database.open(),
+        config,
+        bootstrapped().with_test_execution(finalized),
+        BOOTSTRAP_TIME,
+    )
+    .unwrap();
+    resolver
+        .accept_proof(root.agent_id(), &proof, BOOTSTRAP_TIME)
+        .unwrap();
+    let mut history = RecordHistory::new(root.agent_id(), 32).unwrap();
+    let connection_id = [71; 16];
+    let mut session = DeviceSession::from_ipc_connection(connection_id, peer);
+    let request = session
+        .begin_network_hello_ipc(hello(&cert), &resolver, NOW)
+        .unwrap();
+    assert_eq!(request.agent_id, root.agent_id());
+    assert_eq!(request.checkpoint_hash.0, proof.block_hash);
+    assert_eq!(session.ipc_connection_id(), Some(connection_id));
+
+    let wire = identity_proof_to_wire(&request, proof.clone(), signed.clone());
+    let mut wrong_connection = DeviceSession::from_ipc_connection([72; 16], cert.peer_id.clone());
+    let wrong_request = wrong_connection
+        .begin_network_hello_ipc(hello(&cert), &resolver, NOW)
+        .unwrap();
+    let wrong_wire = identity_proof_to_wire(&wrong_request, proof.clone(), signed.clone());
+    assert!(
+        wrong_connection
+            .finish_network_hello_ipc(connection_id, &wrong_wire, &mut history, &mut resolver, NOW,)
+            .is_err()
+    );
+    assert!(
+        wrong_connection
+            .finish_network_hello_ipc([72; 16], &wrong_wire, &mut history, &mut resolver, NOW,)
+            .is_err()
+    );
+
+    session
+        .finish_network_hello_ipc(connection_id, &wire, &mut history, &mut resolver, NOW)
+        .unwrap();
+    assert_eq!(
+        session.current_agent(&history, &mut resolver, NOW).unwrap(),
+        root.agent_id()
+    );
+}
+
 #[test]
 fn connected_is_not_verified_and_a_second_hello_closes_the_session() {
     let root = AgentIdentity::generate().unwrap();

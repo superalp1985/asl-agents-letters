@@ -328,6 +328,8 @@ T14 Net/Core IPC wire 切片（2026-11-19）：为传输 PeerId、断开事件�
 
 T14 设备身份启动交付切片（2026-11-19）：首次启动仅在 DPAPI 设备密钥文件缺失时生成 Ed25519 身份，以独占新建方式保存；损坏或非普通文件拒绝且不自动更换身份。Supervisor 将 protobuf 密钥通过现有私有继承输入管道的 `ASLK` v1 有界前导一次性交给 Net，最大 1 KiB；临时序列化、解密和管道接收缓冲均使用 `Zeroizing`，密钥未加入可 Clone/Debug 的 IPC 消息。Net 解码后从密钥导出 PeerId 并返回专用 `NetReady`；Supervisor 精确比对本机 PeerId，缺帧、错身份或 IPC 错误均停止 Net。新增往返、错误版本、畸形/超限预读、错 PeerId、本机持久化和损坏文件拒绝测试。Windows `asl-app` Supervisor 集成测试实际启动 AppContainer Net 并通过该握手。该切片只验证密钥交付与本机设备身份一致性；Net 尚未运行 libp2p driver、连接事件或身份证明转发，不代表公网身份验证或 T14 关闭。
 
+T14 Net/Core 运行时接线切片（2026-11-19）：Net 子进程现以 Tokio 驱动既有 `LocalTransport`，Core 可经 Supervisor 下发 TCP/QUIC loopback 监听、拨号、身份证明、控制和 bulk 命令，并接收有界结构化事件。连接 handle 由 Net 随机生成并映射到实际活动连接；request token 与 connection handle、协议及 Core request ID 关联，回复 handle 绑定来源连接/协议并限时有效。IPC 固定字段编码，不新增自由文本；地址只在传输层当前 loopback 策略允许后执行。Core 暴露的控制/bulk 入站事件明确命名为 `Unverified...`；`DeviceSession` 增加 IPC handle 绑定的证明请求/完成接口，错误连接或 request ID 会关闭会话。新增 Net driver 双向控制请求/响应句柄往返，以及 Windows AppContainer 子进程拒绝非 loopback 监听并返回关联操作失败事件的覆盖。此切片没有将 `DeviceSession` 自动接入 Supervisor 事件循环，也没有生产监听配置、公网策略、DHT、mDNS 或完整公网互测；因此普通业务帧仍须由后续 Core 身份闸门处理，T14 仍未关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。
