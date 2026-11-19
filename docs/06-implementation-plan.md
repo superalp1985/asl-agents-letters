@@ -511,8 +511,12 @@ T22 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 验收：先预留、校验再写、sync 再 durable；每个崩溃点恢复；已标块重验；磁盘满安全停止；无进展 5 分钟释放；坏 manifest/整文件 hash 不一致冷却 24 小时不循环下载。
 
 ```text
-cargo test -p asl-transfer --test resume_crash_points
+cargo test -p asl-store --test transfer_resume --offline
 ```
+
+T23 已完成下载持久化、恢复与额度切片（2026-11-19）：新增 SQLite schema v4 的 `transfer_cooldowns`，复用 `reservations`、`transfers`、`transfer_sources` 和 `transfer_chunks` 保存下载任务、来源、块状态及 24 小时完整性冷却。`asl-store::transfers::DownloadBroker` 在创建任务时先检查 write grant、全局/任务/陌生来源额度并提交 held reservation，再创建 manifest 与 `.part`；块写入必须通过 manifest 推导的精确长度和 BLAKE3，文件 `sync_all` 后才把块置为 `durable`。重启会重置 assigned、重验 durable 块、释放过期/撤权/缺失文件任务，并在所有块完成后重验整文件 hash、原子移动到授权目标。目标冲突不覆盖已有文件；完整 hash 不一致会释放预留、清理暂存并冷却该 content ID。
+
+T23 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-store --all-targets --offline` 通过 86 项、0 失败、1 项忽略；新增 `transfer_resume` 4 项覆盖 durable 块跨重启、损坏块回退、完整 hash 冷却和额度先于 `.part` 创建。`cargo clippy -p asl-store --all-targets --offline -- -D warnings`、`cargo fmt --all` 与 `git diff --check` 通过。尚未把 DownloadBroker 接到真实 Core/Net 请求、权限询问 UI、T22 内存调度器或公网多来源传输；磁盘满/掉电只覆盖到 SQLite 与文件同步边界，不能据此声称真实公网下载已完成。
 
 ### T24 — Inline、PDF 与头像 helper
 

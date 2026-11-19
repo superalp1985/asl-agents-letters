@@ -77,7 +77,7 @@ fn upgrades_v1_and_v2_prune_stale_text_but_preserve_history_and_live_references(
         for _ in 0..2 {
             let store = open_store(&path).unwrap();
             assert_index(&db, &expected);
-            assert_eq!(store.schema_version(), 3);
+            assert_eq!(store.schema_version(), 4);
             assert_eq!(count(&db, "SELECT count(*) FROM resources"), 6);
             assert_eq!(count(&db, "SELECT active FROM resources WHERE row_id=2"), 0);
         }

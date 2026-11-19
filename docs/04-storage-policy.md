@@ -147,6 +147,8 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 6. 仅重试未过期 outgoing，最多 3 次，间隔 1、5、30 秒；总有效期默认 10 分钟。
 7. 不把历史消息重新作为新 query 投喂模型。
 
+下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。
+
 ## 7. 清理、备份与身份迁移
 
 聊天默认 7 天、接收文件默认 30 天、失败 part 默认 3 天。用户授权允许的范围由配置保存；Agent 只能在范围内提前清理，不能擅自延长。

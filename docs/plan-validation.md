@@ -431,3 +431,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - `cargo test -p asl-transfer --all-targets --offline`：6 项通过、0 失败。覆盖最多 4 个来源、每来源最多 2 个并发块请求、总计最多 8 个请求、超时重派、坏 hash 三次禁用来源、精确块长度与 BLAKE3 校验、重复块不重复完成，以及 `Buffered` 到 `Durable` 的显式状态推进。
 - `cargo clippy -p asl-transfer --all-targets --offline -- -D warnings` 与 `cargo fmt --all -- --check`：通过。
 - 本轮只验证内存状态机；没有执行网络、磁盘、SQLite、断点恢复、磁盘额度、整文件 hash 或公网传输。T22 不关闭 T23，也不代表完整文件下载已完成。
+
+### 2026-11-19 T23：下载持久化、恢复与额度
+
+- `cargo test -p asl-store --all-targets --offline`：86 项通过、0 失败、1 项忽略；新增 `cargo test -p asl-store --test transfer_resume --offline` 的 4 项覆盖 durable 块跨重启、损坏块回退为 missing、完整 hash 错误冷却 24 小时，以及额度检查早于 `.part` 创建。
+- `cargo clippy -p asl-store --all-targets --offline -- -D warnings`、`cargo fmt --all`、`git diff --check`：通过。SQLite schema 从 v3 升至 v4，新增 `transfer_cooldowns`，既有 v1/v2/v3 升级测试同步通过。
+- 本轮验证了本机 Windows NTFS 上的 SQLite 预留、manifest/part 文件、块同步、durable 状态和授权目标完成；没有接入真实 Core/Net、T22 调度器、多来源公网传输、GUI 每次询问、磁盘满或掉电硬件场景。这些仍是后续集成验收范围。
