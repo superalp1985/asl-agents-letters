@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use asl_net::codec::{BulkRequest, BulkResponse};
 use asl_types::{
     error::AslError,
-    ids::{AgentId, PeerId},
+    ids::{AgentId, Id128, PeerId},
     protocol::{Hello, IdentityProof, WireFrame},
-    record::RecordPayload,
+    record::{RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
 
@@ -100,6 +100,43 @@ pub struct AdmissionBatch {
 }
 
 impl CoreAdmission {
+    pub fn for_local_identity(
+        identity: &crate::identity::AgentIdentity,
+        local_peer_id: PeerId,
+        local_signed_directory: Vec<u8>,
+        resolver: DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<Self, AslError> {
+        let signed = decode_record(&local_signed_directory)?;
+        let RecordPayload::DeviceDirectory(directory) = signed.record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if directory.agent_id != identity.agent_id() {
+            return Err(AslError::InvalidIdentity);
+        }
+        let device_certificate = directory
+            .devices
+            .into_iter()
+            .find(|certificate| certificate.peer_id == local_peer_id)
+            .ok_or(AslError::InvalidDeviceCertificate)?;
+        let local_hello = Hello {
+            message_id: Id128(fresh_id()?),
+            agent_id: identity.agent_id(),
+            peer_id: local_peer_id.clone(),
+            device_certificate,
+            major: 1,
+            minor: 0,
+            features: Vec::new(),
+        };
+        Self::new(
+            local_peer_id,
+            local_hello,
+            local_signed_directory,
+            resolver,
+            now_ms,
+        )
+    }
+
     /// The local advertisement must already be represented by an active,
     /// locally verified registry state and a signed directory containing its
     /// exact device certificate.

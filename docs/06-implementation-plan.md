@@ -332,6 +332,8 @@ T14 Net/Core 运行时接线切片（2026-11-19）：Net 子进程现以 Tokio �
 
 T14 Core 网络身份准入协调器切片（2026-11-19）：新增 `CoreAdmission`，显式协调活动连接的 Hello、身份链证明、签名设备目录和控制/bulk 收发。核验前只生成握手命令或关闭命令，不向 Agent 派发业务事件；出站业务控制/bulk 命令也必须通过同连接身份状态重验。新增 kind 32 `CloseConnection`，失败只关闭对应连接。Hello 请求应答先于身份证明请求派发；无效/过期握手请求失败会清理会话。该协调器目前由 Core 调用方显式构造，基础 `Supervisor::run` 尚未加载 registry/链状态 resolver、已签名设备目录或构造有效 Hello；本机根身份的存在不代表其已经锚定到链或获准入网。loopback 以外地址策略、公网运行、DHT/mDNS 和完整 T14 仍未验收。
 
+T14 Supervisor 本地身份绑定切片（2026-11-19）：`CoreAdmission::for_local_identity` 只从身份根对应 AgentId 的签名设备目录中选择当前 Net 设备的证书，再创建 Hello 并执行活动链、目录签名与 commitment 校验；调用者不能传入不同的根 AgentId 或 PeerId。Supervisor 自身持有该准入状态，网络事件/出站控制与 bulk 命令经过其内部门禁，不再由调用者替换准入器。准入仍须显式提供有效的本地链 resolver 和签名目录；`Supervisor::start/run` 尚未读取生产信任配置或自动启用联网，缺失配置不开放业务通信。
+
 T14 Core 准入与 T06 根身份启动模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 159 项，1 项忽略；`cargo test -p asl-net --all-targets --locked` 通过 25 项，1 项忽略。`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。覆盖范围仅为 `asl-app`、`asl-net` 与格式/静态 lint，不代表 workspace 全量测试或 T14 公网/生产验收。Cargo 提示 `proc-macro-error2 2.0.1` 含未来 Rust 版本兼容性问题；本轮未处理该无关依赖告警。
 
 ### T15 — 引导、中继、NAT 与基础设施

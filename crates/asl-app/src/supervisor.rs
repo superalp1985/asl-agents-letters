@@ -15,6 +15,7 @@ use asl_types::{
     ids::{AgentId, PeerId},
 };
 
+use crate::chain::DurableIdentityResolver;
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
@@ -22,6 +23,7 @@ use crate::ipc::{
 };
 use crate::libraries::LocalLibraries;
 use crate::paths::AppPaths;
+use crate::profile::CoreAdmission;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,9 +32,11 @@ const MAX_PENDING_NETWORK_EVENTS: usize = 64;
 
 pub struct Supervisor {
     agent_identity: AgentIdentity,
+    device_peer_id: PeerId,
     libraries: LocalLibraries,
     launcher: SandboxLauncher,
     net: NetRuntime,
+    pub(crate) admission: Option<CoreAdmission>,
 }
 
 impl Supervisor {
@@ -49,18 +53,40 @@ impl Supervisor {
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
         let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
         let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
+        let device_peer_id = device_identity.peer_id();
         let libraries = LocalLibraries::open(&paths)?;
         let net = NetRuntime::start(&launcher, &device_identity)?;
         Ok(Self {
             agent_identity,
+            device_peer_id,
             libraries,
             launcher,
             net,
+            admission: None,
         })
     }
 
     pub fn agent_id(&self) -> AgentId {
         self.agent_identity.agent_id()
+    }
+
+    pub fn activate_network_admission(
+        &mut self,
+        signed_directory: Vec<u8>,
+        resolver: DurableIdentityResolver,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if self.admission.is_some() {
+            return Err(AslError::PolicyDenied);
+        }
+        self.admission = Some(CoreAdmission::for_local_identity(
+            &self.agent_identity,
+            self.device_peer_id.clone(),
+            signed_directory,
+            resolver,
+            now_ms,
+        )?);
+        Ok(())
     }
 
     /// Trusted in-process entry point only; not dispatched from Net or Worker IPC.

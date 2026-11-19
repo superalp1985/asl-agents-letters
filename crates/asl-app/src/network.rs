@@ -12,7 +12,7 @@ use asl_types::{
 
 use crate::{
     ipc::{IpcMessage, NetworkErrorCode, NetworkProtocol},
-    profile::{AdmittedNetworkEvent, CoreAdmission},
+    profile::AdmittedNetworkEvent,
     supervisor::Supervisor,
 };
 
@@ -338,12 +338,15 @@ impl Supervisor {
 
     pub fn receive_admitted_network_event(
         &mut self,
-        admission: &mut CoreAdmission,
         timeout: Duration,
         now_ms: u64,
     ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
         let event = self.receive_network_event(timeout)?;
-        let batch = admission.handle_event(event, now_ms);
+        let batch = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .handle_event(event, now_ms);
         for command in batch.commands {
             self.send_network_command(command)?;
         }
@@ -352,10 +355,10 @@ impl Supervisor {
 
     pub fn send_admitted_network_command(
         &mut self,
-        admission: &mut CoreAdmission,
         command: NetworkCommand,
         now_ms: u64,
     ) -> Result<(), AslError> {
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
         let authorized = match &command {
             NetworkCommand::SendControl {
                 connection_id,

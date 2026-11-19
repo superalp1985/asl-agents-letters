@@ -518,9 +518,9 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     let local_signed = signed_directory(&local_root, &local_directory, 1);
     let (local_database, local_resolver) =
         durable_directory_resolver(&local_root, &local_directory);
-    let mut admission = CoreAdmission::new(
+    let mut admission = CoreAdmission::for_local_identity(
+        &local_root,
         local_device.peer_id(),
-        hello(&local_cert),
         local_signed.clone(),
         local_resolver,
         NOW,
@@ -530,6 +530,21 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     let (_remote_database, mut remote_resolver) =
         durable_directory_resolver(&local_root, &local_directory);
     let remote_hello = hello(&remote_cert);
+
+    let unlisted_device = DeviceIdentity::generate().unwrap();
+    let (_unlisted_database, unlisted_resolver) =
+        durable_directory_resolver(&local_root, &local_directory);
+    assert!(
+        CoreAdmission::for_local_identity(
+            &local_root,
+            unlisted_device.peer_id(),
+            local_signed.clone(),
+            unlisted_resolver,
+            NOW,
+        )
+        .is_err(),
+        "the local network device must be listed in the signed registry directory"
+    );
 
     let rejected_connection = [82; 16];
     admission.handle_event(
