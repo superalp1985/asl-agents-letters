@@ -19,10 +19,12 @@ use rand::{TryRng, rngs::SysRng};
 
 use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
+use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
-    FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
-    NetworkErrorCode, TaskStatus, WorkerOperation, write_device_identity_prelude,
+    ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
+    MAX_IPC_EXTRACTOR_INPUT_BYTES, MAX_IPC_TASK_PAYLOAD_BYTES, NetworkErrorCode, TaskStatus,
+    WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
@@ -55,7 +57,7 @@ impl Supervisor {
         let launcher = SandboxLauncher::new(
             directory.join("asl-net.exe"),
             directory.join("asl-worker.exe"),
-            directory.join("asl-worker.exe"),
+            directory.join("asl-extractor.exe"),
         )?;
         Self::start_with_launcher(paths, launcher)
     }
@@ -197,6 +199,17 @@ impl Supervisor {
         payload: &[u8],
     ) -> Result<TaskStatus, AslError> {
         run_worker_validation(&self.launcher, task_id, payload)
+    }
+
+    /// Extracts text in a fresh, networkless PDF helper process.
+    pub fn extract_pdf_text(&self, task_id: [u8; 16], pdf: &[u8]) -> Result<String, AslError> {
+        let output = run_extractor_task(&self.launcher, task_id, ExtractorOperation::PdfText, pdf)?;
+        String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
+    }
+
+    /// Sanitizes an avatar in a fresh, networkless image helper process.
+    pub fn sanitize_avatar(&self, task_id: [u8; 16], image: &[u8]) -> Result<Vec<u8>, AslError> {
+        run_extractor_task(&self.launcher, task_id, ExtractorOperation::Avatar, image)
     }
 
     pub fn run(self) -> Result<(), AslError> {
@@ -763,6 +776,64 @@ fn run_worker_validation_with(
     Ok(status)
 }
 
+fn run_extractor_task(
+    launcher: &SandboxLauncher,
+    task_id: [u8; 16],
+    operation: ExtractorOperation,
+    payload: &[u8],
+) -> Result<Vec<u8>, AslError> {
+    if payload.len() > MAX_IPC_EXTRACTOR_INPUT_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let (pipes, inherited) = InheritedPipes::new()?;
+    let mut child = launcher.spawn_sandbox(
+        SandboxRole::Extractor,
+        inherited,
+        SandboxLimits::for_role(SandboxRole::Extractor),
+    )?;
+    drop(pipes.error);
+
+    let mut reader = FrameReader::new(pipes.output, IpcRole::Extractor, IpcRole::Core);
+    let mut writer = FrameWriter::new(pipes.input, IpcRole::Core, IpcRole::Extractor);
+    if reader.receive()?.message != IpcMessage::Ready {
+        return Err(AslError::InvalidMessage);
+    }
+    writer.send(&IpcMessage::RunExtractorTask {
+        task_id,
+        operation,
+        payload: payload.to_vec(),
+    })?;
+    let (status, output) = match reader.receive()?.message {
+        IpcMessage::ExtractorResult {
+            task_id: received,
+            status,
+            payload,
+        } if received == task_id
+            && (status == ExtractorStatus::Completed || payload.is_empty()) =>
+        {
+            (status, payload)
+        }
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let maximum_output_bytes = match operation {
+        ExtractorOperation::PdfText => MAX_PDF_TEXT_BYTES,
+        ExtractorOperation::Avatar => MAX_AVATAR_BYTES,
+    };
+    let invalid_output = output.len() > maximum_output_bytes
+        || (operation == ExtractorOperation::Avatar && output.is_empty());
+    writer.send(&IpcMessage::Shutdown)?;
+    if reader.receive()?.message != IpcMessage::Stopped {
+        return Err(AslError::InvalidMessage);
+    }
+    if child.wait_timeout(SHUTDOWN_TIMEOUT)? != Some(0) {
+        return Err(AslError::SandboxUnavailable);
+    }
+    if status == ExtractorStatus::Rejected || invalid_output {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(output)
+}
+
 fn sibling_binary_directory() -> Result<PathBuf, AslError> {
     let executable = env::current_exe()?;
     let mut directory = executable
@@ -770,7 +841,10 @@ fn sibling_binary_directory() -> Result<PathBuf, AslError> {
         .ok_or(AslError::SandboxUnavailable)?
         .to_path_buf();
     loop {
-        if directory.join("asl-net.exe").is_file() && directory.join("asl-worker.exe").is_file() {
+        if directory.join("asl-net.exe").is_file()
+            && directory.join("asl-worker.exe").is_file()
+            && directory.join("asl-extractor.exe").is_file()
+        {
             return Ok(directory);
         }
         if !directory.pop() {
@@ -1021,6 +1095,7 @@ mod tests {
         use crate::ipc::NetworkErrorCode;
         use crate::network::{NetworkCommand, NetworkEvent};
         use asl_net::transport::TransportKind;
+        use image::ImageEncoder;
         use std::fs;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::path::PathBuf;
@@ -1074,12 +1149,14 @@ mod tests {
         let source = sibling_binary_directory().unwrap();
         let net = bin.join("asl-net.exe");
         let worker = bin.join("asl-worker.exe");
+        let extractor = bin.join("asl-extractor.exe");
         fs::copy(source.join("asl-net.exe"), &net).unwrap();
         fs::copy(source.join("asl-worker.exe"), &worker).unwrap();
+        fs::copy(source.join("asl-extractor.exe"), &extractor).unwrap();
 
         let mut supervisor = Supervisor::start_with_launcher(
             AppPaths::open(&home).unwrap(),
-            SandboxLauncher::new(net.clone(), worker, net.clone()).unwrap(),
+            SandboxLauncher::new(net.clone(), worker, extractor).unwrap(),
         )
         .expect("real Net and Worker AppContainers must start");
 
@@ -1106,6 +1183,32 @@ mod tests {
         assert_eq!(
             supervisor.validate_control_frame([9; 16], &[0xff]).unwrap(),
             TaskStatus::Invalid
+        );
+        let mut avatar = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut avatar)
+            .write_image(
+                &vec![120; 256 * 192 * 4],
+                256,
+                192,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let sanitized = supervisor.sanitize_avatar([14; 16], &avatar).unwrap();
+        assert!(sanitized.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(sanitized.len() <= crate::documents::MAX_AVATAR_BYTES);
+        let dimensions = image::load_from_memory(&sanitized).unwrap();
+        assert!(dimensions.width() <= crate::documents::MAX_AVATAR_EDGE);
+        assert!(dimensions.height() <= crate::documents::MAX_AVATAR_EDGE);
+        assert!(
+            supervisor
+                .extract_pdf_text([15; 16], &crate::documents::minimal_pdf())
+                .unwrap()
+                .contains("ASL PDF text")
+        );
+        assert!(
+            supervisor
+                .extract_pdf_text([16; 16], b"%PDF-invalid")
+                .is_err()
         );
         assert!(
             run_worker_validation_with(

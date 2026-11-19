@@ -34,6 +34,9 @@ const DEVICE_IDENTITY_PRELUDE_HEADER_BYTES: usize = 10;
 const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
+pub const MAX_IPC_EXTRACTOR_INPUT_BYTES: usize =
+    MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
+pub const MAX_IPC_EXTRACTOR_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
 const MAGIC: [u8; 4] = *b"ASLI";
@@ -60,6 +63,7 @@ impl IpcRole {
                 | (Self::Core, Self::Net, 34 | 35)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
+                | (Self::Core, Self::Extractor, 41)
                 | (
                     Self::Net | Self::Worker | Self::Extractor,
                     Self::Core,
@@ -70,6 +74,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 36..=39)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
+                | (Self::Extractor, Self::Core, 42)
         )
     }
 
@@ -93,6 +98,40 @@ impl WorkerOperation {
     fn from_wire(value: u8) -> Result<Self, AslError> {
         match value {
             1 => Ok(Self::ValidateControlFrame),
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ExtractorOperation {
+    PdfText = 1,
+    Avatar = 2,
+}
+
+impl ExtractorOperation {
+    fn from_wire(value: u8) -> Result<Self, AslError> {
+        match value {
+            1 => Ok(Self::PdfText),
+            2 => Ok(Self::Avatar),
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ExtractorStatus {
+    Completed = 1,
+    Rejected = 2,
+}
+
+impl ExtractorStatus {
+    fn from_wire(value: u8) -> Result<Self, AslError> {
+        match value {
+            1 => Ok(Self::Completed),
+            2 => Ok(Self::Rejected),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -129,6 +168,16 @@ pub enum IpcMessage {
     RunTask {
         task_id: [u8; 16],
         operation: WorkerOperation,
+        payload: Vec<u8>,
+    },
+    RunExtractorTask {
+        task_id: [u8; 16],
+        operation: ExtractorOperation,
+        payload: Vec<u8>,
+    },
+    ExtractorResult {
+        task_id: [u8; 16],
+        status: ExtractorStatus,
         payload: Vec<u8>,
     },
     TaskResult {
@@ -434,6 +483,44 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             );
             body.extend_from_slice(payload);
             6
+        }
+        IpcMessage::RunExtractorTask {
+            task_id,
+            operation,
+            payload,
+        } => {
+            if payload.len() > MAX_IPC_EXTRACTOR_INPUT_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(task_id);
+            body.push(*operation as u8);
+            body.extend_from_slice(
+                &u32::try_from(payload.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(payload);
+            41
+        }
+        IpcMessage::ExtractorResult {
+            task_id,
+            status,
+            payload,
+        } => {
+            if payload.len() > MAX_IPC_EXTRACTOR_OUTPUT_BYTES
+                || (*status == ExtractorStatus::Rejected && !payload.is_empty())
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(task_id);
+            body.push(*status as u8);
+            body.extend_from_slice(
+                &u32::try_from(payload.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(payload);
+            42
         }
         IpcMessage::TaskResult { task_id, status } => {
             body.extend_from_slice(task_id);
@@ -805,6 +892,41 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 task_id,
                 operation,
                 payload: body[TASK_BODY_HEADER_BYTES..].to_vec(),
+            })
+        }
+        41 if body.len() >= TASK_BODY_HEADER_BYTES => {
+            let task_id = body[..16].try_into().unwrap();
+            let operation = ExtractorOperation::from_wire(body[16])?;
+            let payload_len = u32::from_be_bytes(body[17..21].try_into().unwrap()) as usize;
+            let expected_len = TASK_BODY_HEADER_BYTES
+                .checked_add(payload_len)
+                .ok_or(AslError::InvalidMessage)?;
+            if body.len() != expected_len || payload_len > MAX_IPC_EXTRACTOR_INPUT_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RunExtractorTask {
+                task_id,
+                operation,
+                payload: body[TASK_BODY_HEADER_BYTES..].to_vec(),
+            })
+        }
+        42 if body.len() >= 21 => {
+            let task_id = body[..16].try_into().unwrap();
+            let status = ExtractorStatus::from_wire(body[16])?;
+            let payload_len = u32::from_be_bytes(body[17..21].try_into().unwrap()) as usize;
+            let expected_len = 21usize
+                .checked_add(payload_len)
+                .ok_or(AslError::InvalidMessage)?;
+            if body.len() != expected_len
+                || payload_len > MAX_IPC_EXTRACTOR_OUTPUT_BYTES
+                || (status == ExtractorStatus::Rejected && payload_len != 0)
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::ExtractorResult {
+                task_id,
+                status,
+                payload: body[21..].to_vec(),
             })
         }
         7 if body.len() == 17 => Ok(IpcMessage::TaskResult {
@@ -1304,6 +1426,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         1..=3 => 0,
         4..=5 => 8,
         6 => MAX_IPC_TASK_PAYLOAD_BYTES + TASK_BODY_HEADER_BYTES,
+        41 => MAX_IPC_EXTRACTOR_INPUT_BYTES + TASK_BODY_HEADER_BYTES,
+        42 => 21 + MAX_IPC_EXTRACTOR_OUTPUT_BYTES,
         7 => 17,
         8..=9 => 16,
         10 => 18 + 128,
@@ -1475,6 +1599,32 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
                     status: validate_control_payload(&payload),
                 })?;
             }
+            IpcMessage::RunExtractorTask {
+                task_id,
+                operation,
+                payload,
+            } if role == IpcRole::Extractor => {
+                let result = crate::documents::process(operation, &payload);
+                match result {
+                    Ok(output) if output.len() <= MAX_IPC_EXTRACTOR_OUTPUT_BYTES => {
+                        writer.send(&IpcMessage::ExtractorResult {
+                            task_id,
+                            status: ExtractorStatus::Completed,
+                            payload: output,
+                        })?;
+                    }
+                    _ => writer.send(&IpcMessage::ExtractorResult {
+                        task_id,
+                        status: ExtractorStatus::Rejected,
+                        payload: Vec::new(),
+                    })?,
+                }
+                if reader.receive()?.message != IpcMessage::Shutdown {
+                    return Err(AslError::InvalidMessage);
+                }
+                writer.send(&IpcMessage::Stopped)?;
+                return Ok(());
+            }
             _ => return Err(AslError::InvalidMessage),
         }
     }
@@ -1536,6 +1686,21 @@ mod tests {
                 task_id: [3; 16],
                 operation: WorkerOperation::ValidateControlFrame,
                 payload: vec![0x82, 0x01, 0x02],
+            },
+            IpcMessage::RunExtractorTask {
+                task_id: [30; 16],
+                operation: ExtractorOperation::PdfText,
+                payload: b"%PDF-1.7".to_vec(),
+            },
+            IpcMessage::ExtractorResult {
+                task_id: [30; 16],
+                status: ExtractorStatus::Completed,
+                payload: b"bounded extracted text".to_vec(),
+            },
+            IpcMessage::ExtractorResult {
+                task_id: [31; 16],
+                status: ExtractorStatus::Rejected,
+                payload: Vec::new(),
             },
             IpcMessage::TaskResult {
                 task_id: [3; 16],
@@ -1719,6 +1884,8 @@ mod tests {
                     (IpcRole::Core, IpcRole::Net)
                 }
                 IpcMessage::RunTask { .. } => (IpcRole::Core, IpcRole::Worker),
+                IpcMessage::RunExtractorTask { .. } => (IpcRole::Core, IpcRole::Extractor),
+                IpcMessage::ExtractorResult { .. } => (IpcRole::Extractor, IpcRole::Core),
                 IpcMessage::TaskResult { .. } | IpcMessage::TaskStarted { .. } => {
                     (IpcRole::Worker, IpcRole::Core)
                 }
@@ -1736,6 +1903,55 @@ mod tests {
             assert_eq!(decoded.message, message);
             assert_eq!(decoded.sequence, 7);
         }
+    }
+
+    #[test]
+    fn extractor_ipc_is_role_bound_and_payloads_are_bounded() {
+        let task = IpcMessage::RunExtractorTask {
+            task_id: [1; 16],
+            operation: ExtractorOperation::Avatar,
+            payload: vec![0; MAX_IPC_EXTRACTOR_INPUT_BYTES],
+        };
+        let frame = encode_frame(IpcRole::Core, IpcRole::Extractor, 1, &task).unwrap();
+        assert_eq!(
+            decode_frame(&frame, IpcRole::Core, IpcRole::Extractor, 1)
+                .unwrap()
+                .message,
+            task
+        );
+        assert!(
+            encode_frame(
+                IpcRole::Core,
+                IpcRole::Extractor,
+                1,
+                &IpcMessage::RunExtractorTask {
+                    task_id: [1; 16],
+                    operation: ExtractorOperation::Avatar,
+                    payload: vec![0; MAX_IPC_EXTRACTOR_INPUT_BYTES + 1],
+                }
+            )
+            .is_err()
+        );
+
+        let result = IpcMessage::ExtractorResult {
+            task_id: [1; 16],
+            status: ExtractorStatus::Rejected,
+            payload: Vec::new(),
+        };
+        assert!(encode_frame(IpcRole::Worker, IpcRole::Core, 1, &result).is_err());
+        assert!(
+            encode_frame(
+                IpcRole::Extractor,
+                IpcRole::Core,
+                1,
+                &IpcMessage::ExtractorResult {
+                    task_id: [1; 16],
+                    status: ExtractorStatus::Rejected,
+                    payload: vec![1],
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

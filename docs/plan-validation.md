@@ -437,3 +437,11 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - `cargo test -p asl-store --all-targets --offline`：86 项通过、0 失败、1 项忽略；新增 `cargo test -p asl-store --test transfer_resume --offline` 的 4 项覆盖 durable 块跨重启、损坏块回退为 missing、完整 hash 错误冷却 24 小时，以及额度检查早于 `.part` 创建。
 - `cargo clippy -p asl-store --all-targets --offline -- -D warnings`、`cargo fmt --all`、`git diff --check`：通过。SQLite schema 从 v3 升至 v4，新增 `transfer_cooldowns`，既有 v1/v2/v3 升级测试同步通过。
 - 本轮验证了本机 Windows NTFS 上的 SQLite 预留、manifest/part 文件、块同步、durable 状态和授权目标完成；没有接入真实 Core/Net、T22 调度器、多来源公网传输、GUI 每次询问、磁盘满或掉电硬件场景。这些仍是后续集成验收范围。
+
+### 2026-11-19 T24：Inline、PDF 与头像 Extractor
+
+- `asl-transfer::inline` 登记单次请求后才接受最多 32 KiB 内容，并核对 content ID、长度和 BLAKE3；最多 32 个待决请求，响应只在内存中返回。`cargo test -p asl-transfer --all-targets --locked --offline`：9 项通过。
+- `asl-extractor.exe` 通过仅限 Core -> Extractor 的 kind 41 输入和 Extractor -> Core 的 kind 42 结果处理固定 PDF/Avatar 操作；IPC 帧最多 4 MiB，输出最多 2 MiB，按 task ID 关联并在一次任务后退出。PDF 限 500 页、文本 2 MiB；头像限 PNG/JPEG/静态 WebP、尺寸/像素/解码内存，并规范化为不超过 128×128、64 KiB 的 PNG/WebP。
+- `cargo test -p asl-app --all-targets --locked --offline`：164 项单测通过；所有集成目标通过，包括 `hostile_documents` 3 项、`home_paths` 5 项、`identity` 8 项、`network_ipc` 7 项、`supervisor_ipc` 2 项及其余目标。既有 30 秒定时重扫测试 1 项按环境要求忽略。Windows AppContainer Supervisor 用例实际调用 Extractor 验证有效 PDF、拒绝无效 PDF并重编码头像。
+- `cargo clippy -p asl-app -p asl-transfer --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过。新增 `image-webp`、`lopdf`、`pdf-extract` 等依赖已锁定；Cargo 仍提示既有 `proc-macro-error2 2.0.1` 存在未来 Rust 兼容性问题。
+- 没有运行 workspace 全量测试、GUI、端到端网络文件传输、LAN/公网互通或正式发布打包；本结果只覆盖 T24 本机功能切片，不表示 T20–T24 的完整传输链路已验收。

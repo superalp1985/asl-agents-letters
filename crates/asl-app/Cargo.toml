@@ -24,10 +24,12 @@ serde.workspace = true
 serde_json.workspace = true
 cbor2.workspace = true
 blake3.workspace = true
+image.workspace = true
 alloy-rpc-types-eth.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 toml_edit = { version = "=0.25.19", default-features = false, features = ["parse", "serde"] }
+pdf-extract = "=0.12.1"
 
 [dev-dependencies]
 eframe.workspace = true

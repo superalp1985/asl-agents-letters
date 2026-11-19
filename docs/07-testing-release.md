@@ -14,6 +14,7 @@
 | Windows 源文件句柄 | T08 已实现并完成本任务系统验收；本机与用户云机均报告 22 项通过 | 云机先前完整日志覆盖真实 symlink/8.3 别名，盘符修正后用户反馈 22 通过、0 失败、1.27 秒；新反馈仅有结果摘要。不是 AppContainer 或完整产品验收，详见 `windows-source-handles.md` |
 | Windows AppContainer/Job Object | T09 实现与真实负向探针已完成首轮；任务验收部分完成 | 本机真实测试覆盖读文件/Worker 联网与子进程拒绝、ACL/继承句柄、资源限制、清理、Net 外网 TCP 连接和多播 membership；公网 TCP 只证连接握手，外部 UDP echo、libp2p QUIC 与 mDNS query/response 未验收。执行文件 ACL DACL 更新有真实跨进程 mutex 串行化测试。最后一次独立复核发现的并发问题已修；不是独立安全审计 |
 | Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入、MCP stdout 集成及 T14 认证 peer 事件尚未验收 |
+| Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
 | T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |

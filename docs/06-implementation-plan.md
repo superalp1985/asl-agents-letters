@@ -41,7 +41,7 @@ crates/
   asl-groups/src/{service,rooms,wire,catchup,storage}.rs
   asl-agent/src/{decision,prompt,gateway,runner,knowledge,reputation}.rs
   asl-app/src/{paths,supervisor,ipc,identity,backup,mcp,ui,update,diagnostics}.rs
-    bin/{asl,asl-core,asl-net,asl-worker,asl-infra}.rs
+    bin/{asl,asl-core,asl-net,asl-worker,asl-extractor,asl-infra}.rs
 crates/asl-app/tests/home_paths.rs
 tests/{integration,adversarial,network}/
 assets/{avatars,icons,licenses}/
@@ -522,11 +522,15 @@ T23 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 
 依赖 T23、T09。创建 transfer inline、app helper roles、受限头像重编码。
 
-验收：32KiB inline 上限、未经请求的附件不落盘；PDF 提取 10 秒/512MiB 限制、超页数/输出长度拒绝；解压炸弹/巨大像素/恶意 SVG 拒绝。PNG/WebP 头像重编码≤128×128、≤64KiB；不能自动执行或打开任何收到的文件。
+验收：32KiB inline 上限、未经请求的附件不落盘；PDF 提取 10 秒/512MiB 限制、超页数/输出长度拒绝；解压炸弹/巨大像素/恶意 SVG 拒绝。PDF 输入不落盘且限制在 IPC 4 MiB 帧内；PNG/JPEG/静态 WebP 头像重编码≤128×128、≤64KiB；不能自动执行或打开任何收到的文件。
 
 ```text
 cargo test -p asl-app --test hostile_documents
 ```
+
+T24 实现切片（2026-11-19）：`asl-transfer::inline` 仅接受已登记的一次性请求，限制 32 KiB 和 32 个待决请求，并核对 content ID、长度及 BLAKE3；inline 数据只返回内存，不创建文件。新增独立 `asl-extractor.exe` 与 Core 专用 kind 41/42 IPC，一次性 Extractor 任务只接收固定 PDF/Avatar 操作和受限字节，返回前绑定 task ID；Extractor 无用户目录和网络能力。PDF 最多 500 页、输入小于单帧上限、UTF-8 输出最多 2 MiB；头像仅接受 PNG/JPEG/静态 WebP，限制尺寸、像素和解码分配，缩放到最多 128×128 后重编码且不超过 64 KiB。没有添加收到文件的自动执行或打开路径。
+
+T24 集中验证（2026-11-19，Windows x64，Rust 1.100.0，Cargo 缓存/产物 E 盘）：`cargo test -p asl-app --all-targets --locked --offline` 通过 164 项单测及全部集成目标，其中 `hostile_documents` 3 项；1 项已有 30 秒重扫测试按环境要求忽略。Windows AppContainer 集成实测一次性 Extractor 对有效 PDF 提取文本、对无效 PDF 拒绝，并将 PNG 头像重编码到限制内。`cargo test -p asl-transfer --all-targets --locked --offline` 通过 9 项；`cargo clippy -p asl-app -p asl-transfer --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。没有运行全工作区测试、GUI、真实 LAN/公网传输或发布打包；T24 的本机功能切片不代表 T20–T24 完整文件传输系统全部验收。
 
 ### T25 — 模型 provider 与固定 HTTP 网关
 

@@ -1,5 +1,6 @@
 pub mod chain;
 mod chain_refresh;
+mod documents;
 pub mod identity;
 pub mod infrastructure;
 pub mod ipc;

@@ -47,6 +47,11 @@ serde_json = { version = "=1.0.154", features = ["raw_value"] }
 libp2p-identity = { version = "=0.3.1", features = ["peerid"] }
 bs58 = "=0.5.1"
 blake3 = "=1.8.7"
+image = { version = "=0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
 hex = "=0.4.3"
 k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "getrandom", "std"] }
 rand = "=0.10.4"
