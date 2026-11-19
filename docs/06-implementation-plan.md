@@ -472,6 +472,10 @@ T19 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-policy --test lease_revocation
 ```
 
+T20 已完成授权层 lease/fetch grant 切片（2026-11-19）：`LeaseManager` 只在进程内保存随机 256 bit lease，默认最多 60 秒，绑定签发时的认证 Peer、content ID、ReadChunk Permit、grant epoch、policy revision 和可选群 epoch。`issue_fetch_grant` 在签发前重新验证 Permit，`validate_fetch_grant` 在每次使用前重新验证；Peer、内容、过期、重启后的旧 lease、联系人撤销均统一返回 `not_found` 语义，无关 policy revision 变化不会误撤销仍有效的来源。fetch grant 不进入 T19 会话或 outbox。
+
+T20 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-policy --test lease_revocation --locked --offline` 通过 4 项、0 失败；`cargo clippy -p asl-policy --all-targets --locked --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。本轮仍未接入真实 Core 文件读取、manifest/chunk 服务、传输连接上下文、SQLite lease 审计或公网互测，不能将 T20 写成完整文件下载已完成。
+
 ### T21 — Bulk codec 与安全块服务
 
 依赖 T20、T04。创建 transfer bulk、net codec。
