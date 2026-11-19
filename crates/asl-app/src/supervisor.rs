@@ -5,7 +5,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asl_policy::sandbox::{
     BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
@@ -22,14 +22,17 @@ use crate::ipc::{
     TaskStatus, WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
+use crate::network::{NetworkCommand, NetworkEvent};
 use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::paths::AppPaths;
-use crate::profile::CoreAdmission;
+use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_NETWORK_EVENTS: usize = 64;
+const NETWORK_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Supervisor {
     agent_identity: AgentIdentity,
@@ -138,11 +141,64 @@ impl Supervisor {
         run_worker_validation(&self.launcher, task_id, payload)
     }
 
-    pub fn run(mut self) -> Result<(), AslError> {
+    pub fn run(self) -> Result<(), AslError> {
+        self.run_with_network_handler(|_| Vec::new())
+    }
+
+    /// Runs the authenticated network event pump. The handler sees only
+    /// identity-admitted peer events; returned application commands are
+    /// independently checked against the current connection admission.
+    pub fn run_with_network_handler(
+        mut self,
+        mut handler: impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+    ) -> Result<(), AslError> {
+        let mut next_health_check = Instant::now();
+        let mut next_ping = Instant::now();
         loop {
-            self.libraries.check_health()?;
-            self.ping_net()?;
-            thread::sleep(Duration::from_secs(5));
+            let now = Instant::now();
+            if now >= next_health_check {
+                self.libraries.check_health()?;
+                next_health_check = now + HEALTH_CHECK_INTERVAL;
+            }
+            if self
+                .net
+                .pending_pong
+                .is_some_and(|(_, deadline)| now >= deadline)
+            {
+                return Err(AslError::SandboxUnavailable);
+            }
+            if now >= next_ping {
+                self.net.start_ping(now)?;
+                next_ping = now + HEALTH_CHECK_INTERVAL;
+            }
+
+            let Some(message) = self
+                .net
+                .receive_runtime_message_optional(NETWORK_EVENT_POLL_INTERVAL)?
+            else {
+                continue;
+            };
+            let event = match message {
+                IpcMessage::Pong { nonce } => {
+                    self.net.acknowledge_pong(nonce)?;
+                    continue;
+                }
+                message if is_network_event(&message) => NetworkEvent::try_from(message)?,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let now_ms = unix_time_ms()?;
+            let batch = match self.admission.as_mut() {
+                Some(admission) => admission.handle_event(event, now_ms),
+                None => reject_unadmitted_event(event),
+            };
+            for command in batch.commands {
+                self.send_network_command(command)?;
+            }
+            for event in batch.events {
+                for command in handler(event) {
+                    self.send_admitted_network_command(command, now_ms)?;
+                }
+            }
         }
     }
 }
@@ -153,6 +209,7 @@ struct NetRuntime {
     events: Option<Receiver<Result<IpcFrame, AslError>>>,
     reader_thread: Option<JoinHandle<()>>,
     next_nonce: u64,
+    pending_pong: Option<(u64, Instant)>,
     pending_network_events: VecDeque<IpcMessage>,
 }
 
@@ -193,6 +250,7 @@ impl NetRuntime {
             events: Some(receiver),
             reader_thread: Some(reader_thread),
             next_nonce: 1,
+            pending_pong: None,
             pending_network_events: VecDeque::new(),
         };
         match runtime.receive(STARTUP_TIMEOUT) {
@@ -211,16 +269,20 @@ impl NetRuntime {
     }
 
     fn receive(&self, timeout: Duration) -> Result<IpcFrame, AslError> {
+        self.receive_optional(timeout)?
+            .ok_or(AslError::SandboxUnavailable)
+    }
+
+    fn receive_optional(&self, timeout: Duration) -> Result<Option<IpcFrame>, AslError> {
         match self
             .events
             .as_ref()
             .ok_or(AslError::SandboxUnavailable)?
             .recv_timeout(timeout)
         {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-                Err(AslError::SandboxUnavailable)
-            }
+            Ok(result) => result.map(Some),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(AslError::SandboxUnavailable),
         }
     }
 
@@ -229,6 +291,27 @@ impl NetRuntime {
             .as_mut()
             .ok_or(AslError::SandboxUnavailable)?
             .send(message)
+    }
+
+    fn start_ping(&mut self, now: Instant) -> Result<(), AslError> {
+        if self.pending_pong.is_some() {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let nonce = self.next_nonce;
+        self.next_nonce = nonce.checked_add(1).ok_or(AslError::InvalidMessage)?;
+        self.send(&IpcMessage::Ping { nonce })?;
+        self.pending_pong = Some((nonce, now + NET_PING_TIMEOUT));
+        Ok(())
+    }
+
+    fn acknowledge_pong(&mut self, nonce: u64) -> Result<(), AslError> {
+        match self.pending_pong {
+            Some((expected, _)) if expected == nonce => {
+                self.pending_pong = None;
+                Ok(())
+            }
+            _ => Err(AslError::InvalidMessage),
+        }
     }
 
     fn wait_for_pong(&mut self, nonce: u64, timeout: Duration) -> Result<(), AslError> {
@@ -253,14 +336,31 @@ impl NetRuntime {
     }
 
     fn receive_network_event(&mut self, timeout: Duration) -> Result<IpcMessage, AslError> {
-        if let Some(event) = self.pending_network_events.pop_front() {
-            return Ok(event);
+        self.receive_network_event_optional(timeout)?
+            .ok_or(AslError::SandboxUnavailable)
+    }
+
+    fn receive_network_event_optional(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<IpcMessage>, AslError> {
+        match self.receive_runtime_message_optional(timeout)? {
+            Some(message) if is_network_event(&message) => Ok(Some(message)),
+            Some(_) => Err(AslError::InvalidMessage),
+            None => Ok(None),
         }
-        let frame = self.receive(timeout)?;
-        if is_network_event(&frame.message) {
-            Ok(frame.message)
-        } else {
-            Err(AslError::InvalidMessage)
+    }
+
+    fn receive_runtime_message_optional(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<IpcMessage>, AslError> {
+        if let Some(event) = self.pending_network_events.pop_front() {
+            return Ok(Some(event));
+        }
+        match self.receive_optional(timeout)? {
+            Some(frame) => Ok(Some(frame.message)),
+            None => Ok(None),
         }
     }
 
@@ -294,6 +394,68 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::RequestFailed { .. }
             | IpcMessage::NetworkError { .. }
     )
+}
+
+fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
+    let mut batch = AdmissionBatch::default();
+    match event {
+        NetworkEvent::OperationAccepted { operation_id } => batch
+            .events
+            .push(AdmittedNetworkEvent::OperationAccepted { operation_id }),
+        NetworkEvent::OperationFailed { operation_id, code } => batch
+            .events
+            .push(AdmittedNetworkEvent::OperationFailed { operation_id, code }),
+        NetworkEvent::Listening { kind, address } => {
+            batch
+                .events
+                .push(AdmittedNetworkEvent::Listening { kind, address });
+        }
+        NetworkEvent::PeerDisconnected { connection_id } => {
+            batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
+                connection_id,
+                agent_id: None,
+            });
+        }
+        NetworkEvent::NetworkError { code } => {
+            batch
+                .events
+                .push(AdmittedNetworkEvent::NetworkError { code });
+        }
+        event => {
+            if let Some(connection_id) = event_connection_id(&event) {
+                batch
+                    .commands
+                    .push(NetworkCommand::CloseConnection { connection_id });
+            }
+        }
+    }
+    batch
+}
+
+fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
+    match event {
+        NetworkEvent::TransportConnected { connection_id, .. }
+        | NetworkEvent::IdentityProofRequested { connection_id, .. }
+        | NetworkEvent::IdentityProofReceived { connection_id, .. }
+        | NetworkEvent::UnverifiedControlRequest { connection_id, .. }
+        | NetworkEvent::UnverifiedControlResponse { connection_id, .. }
+        | NetworkEvent::UnverifiedBulkRequest { connection_id, .. }
+        | NetworkEvent::UnverifiedBulkResponse { connection_id, .. }
+        | NetworkEvent::RequestFailed { connection_id, .. } => Some(*connection_id),
+        NetworkEvent::OperationAccepted { .. }
+        | NetworkEvent::OperationFailed { .. }
+        | NetworkEvent::Listening { .. }
+        | NetworkEvent::PeerDisconnected { .. }
+        | NetworkEvent::NetworkError { .. } => None,
+    }
+}
+
+fn unix_time_ms() -> Result<u64, AslError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or(AslError::ExpiredMessage)
 }
 
 fn validate_net_ready(message: IpcMessage, expected_peer_id: &PeerId) -> Result<(), AslError> {
@@ -418,7 +580,100 @@ fn configured_root(value: Option<std::ffi::OsString>) -> Result<PathBuf, AslErro
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
+    use crate::ipc::NetworkErrorCode;
+    use asl_types::{error::ErrorCode, ids::Id128, protocol::ProtocolError};
     use std::io::Cursor;
+
+    #[test]
+    fn unadmitted_connections_are_closed_before_control_events_are_exposed() {
+        let connection_id = [23; 16];
+        let event = NetworkEvent::UnverifiedControlRequest {
+            connection_id,
+            response_id: [24; 16],
+            request: asl_types::protocol::WireFrame::Error(ProtocolError {
+                message_id: Id128([25; 16]),
+                code: ErrorCode::PolicyDenied,
+            }),
+        };
+
+        let batch = reject_unadmitted_event(event);
+
+        assert!(batch.events.is_empty());
+        assert_eq!(
+            batch.commands,
+            vec![NetworkCommand::CloseConnection { connection_id }]
+        );
+    }
+
+    #[test]
+    fn unadmitted_transport_status_remains_observable() {
+        let operation_id = [26; 16];
+
+        let batch = reject_unadmitted_event(NetworkEvent::OperationAccepted { operation_id });
+
+        assert!(batch.commands.is_empty());
+        assert_eq!(
+            batch.events,
+            vec![AdmittedNetworkEvent::OperationAccepted { operation_id }]
+        );
+    }
+
+    #[test]
+    fn network_event_poll_timeout_is_distinct_from_net_shutdown() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut runtime = NetRuntime {
+            child: None,
+            writer: None,
+            events: Some(receiver),
+            reader_thread: None,
+            next_nonce: 1,
+            pending_pong: None,
+            pending_network_events: VecDeque::new(),
+        };
+
+        assert_eq!(
+            runtime
+                .receive_network_event_optional(Duration::ZERO)
+                .unwrap(),
+            None
+        );
+        sender
+            .send(Ok(IpcFrame {
+                role: IpcRole::Net,
+                sequence: 1,
+                message: IpcMessage::NetworkError {
+                    code: NetworkErrorCode::Transport,
+                },
+            }))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .receive_network_event_optional(Duration::from_secs(1))
+                .unwrap(),
+            Some(IpcMessage::NetworkError {
+                code: NetworkErrorCode::Transport
+            })
+        );
+    }
+
+    #[test]
+    fn net_heartbeat_only_accepts_the_current_nonce() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let mut runtime = NetRuntime {
+            child: None,
+            writer: None,
+            events: Some(receiver),
+            reader_thread: None,
+            next_nonce: 2,
+            pending_pong: Some((41, Instant::now() + NET_PING_TIMEOUT)),
+            pending_network_events: VecDeque::new(),
+        };
+
+        assert!(runtime.acknowledge_pong(40).is_err());
+        assert!(runtime.pending_pong.is_some());
+        runtime.acknowledge_pong(41).unwrap();
+        assert!(runtime.pending_pong.is_none());
+    }
 
     #[test]
     fn net_ready_must_match_the_local_device_identity() {
