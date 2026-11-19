@@ -358,6 +358,10 @@ T16 地址策略与发现切片验证（2026-11-19，Windows x64，Rust 1.100.0�
 
 T16 启动设置与策略锁定切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-app --lib --locked --offline network_settings::tests` 通过 4 项，`startup_operation_wait_preserves_unrelated_network_events` 通过 1 项；`cargo test -p asl-net --all-targets --locked --offline` 通过 32 项、0 失败、1 项忽略。`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。覆盖版本化网络设置、默认关闭监听、地址生成、启动操作确认事件保留及默认策略锁定；未运行 `asl-app` 全量测试、AppContainer multicast、防火墙、真实 LAN/mDNS、NAT/公网或 workspace 全量验收。Cargo 仍提示 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性问题；本轮未处理该无关依赖告警。
 
+T16 mDNS 候选生命周期观察切片（2026-11-19）：Net 对 mDNS Discovered/Expired 使用同一地址策略和 PeerId 后缀校验，并按 PeerId、传输类型及 SocketAddr 跟踪有限候选集；发现后保留原自动拨号和身份准入路径，已记录候选过期时派发对应状态。新增 IPC kind 38 固定结构消息和上限，Net/Core 角色仅允许 Net 向 Core 发送；Supervisor 将事件转为无命令输出的 `LocalNetworkObservation`，独立于 Agent 业务 handler，即使本机尚无 Agent 链身份准入也可供本地观察。候选元数据不能表示连接在线或 Agent 身份有效。GUI 展示、候选持久快照、AppContainer multicast、真实 LAN 自动 Hello 和公网验收仍未完成，T16 未关闭。
+
+T16 mDNS 候选生命周期观察切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 46 项、0 失败、1 项忽略；另在修复测试中的重复匹配后，`cargo test -p asl-net --test relay_client --locked --offline` 通过 4 项。`cargo test -p asl-app --lib --locked --offline supervisor::tests::discovery_candidate_is_exposed_only_as_a_local_observation` 通过 1 项，`cargo test -p asl-app --test network_ipc --locked --offline` 通过 7 项。`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 和 `git diff --check` 通过。Cargo 保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示。没有运行 `asl-app` 全量测试或 workspace 全量测试；mDNS 生命周期由合成事件单测覆盖，未做真实 LAN/mDNS、AppContainer 组播、防火墙、公网互通或 GUI 验收。T16 未关闭。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。

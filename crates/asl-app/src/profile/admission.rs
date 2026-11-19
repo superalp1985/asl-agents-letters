@@ -328,6 +328,7 @@ impl CoreAdmission {
                     .events
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
+            NetworkEvent::DiscoveryCandidate { .. } => {}
             NetworkEvent::TransportConnected {
                 connection_id,
                 peer_id,

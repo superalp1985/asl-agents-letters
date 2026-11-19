@@ -25,7 +25,7 @@ use crate::ipc::{
     NetworkErrorCode, TaskStatus, WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
-use crate::network::{NetworkCommand, NetworkEvent};
+use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
 use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::network_settings::NetworkSettingsV1;
 use crate::paths::AppPaths;
@@ -207,8 +207,18 @@ impl Supervisor {
     /// identity-admitted peer events; returned application commands are
     /// independently checked against the current connection admission.
     pub fn run_with_network_handler(
+        self,
+        handler: impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+    ) -> Result<(), AslError> {
+        self.run_with_network_observers(handler, |_| {})
+    }
+
+    /// Passes local discovery observations to a read-only callback, separate from
+    /// the identity-admitted Agent event handler.
+    pub fn run_with_network_observers(
         mut self,
         mut handler: impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+        mut observer: impl FnMut(LocalNetworkObservation),
     ) -> Result<(), AslError> {
         let mut next_health_check = Instant::now();
         let mut next_ping = Instant::now();
@@ -254,6 +264,10 @@ impl Supervisor {
                 message if is_network_event(&message) => NetworkEvent::try_from(message)?,
                 _ => return Err(AslError::InvalidMessage),
             };
+            if let Some(observation) = event.as_local_observation() {
+                observer(observation);
+                continue;
+            }
             let now_ms = unix_time_ms()?;
             let batch = if self.network_admission_status != NetworkAdmissionStatus::Active {
                 reject_unadmitted_event(event)
@@ -557,6 +571,7 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::Listening { .. }
             | IpcMessage::RelayReserved { .. }
             | IpcMessage::RelayUnavailable { .. }
+            | IpcMessage::DiscoveryCandidate { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
@@ -596,6 +611,7 @@ fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
                 .events
                 .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
         }
+        NetworkEvent::DiscoveryCandidate { .. } => {}
         NetworkEvent::PeerDisconnected { connection_id } => {
             batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
                 connection_id,
@@ -633,6 +649,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::Listening { .. }
         | NetworkEvent::RelayReserved { .. }
         | NetworkEvent::RelayUnavailable { .. }
+        | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
     }
@@ -769,8 +786,29 @@ mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
     use crate::ipc::NetworkErrorCode;
+    use crate::network::LocalNetworkObservation;
+    use asl_net::transport::DiscoveryCandidateState;
     use asl_types::{error::ErrorCode, ids::Id128, protocol::ProtocolError};
     use std::io::Cursor;
+
+    #[test]
+    fn discovery_candidate_is_exposed_only_as_a_local_observation() {
+        let event = NetworkEvent::DiscoveryCandidate {
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            kind: TransportKind::Tcp,
+            address: "192.168.1.10:4001".parse().unwrap(),
+            state: DiscoveryCandidateState::Discovered,
+        };
+
+        assert!(matches!(
+            event.as_local_observation(),
+            Some(LocalNetworkObservation::DiscoveryCandidate {
+                state: DiscoveryCandidateState::Discovered,
+                ..
+            })
+        ));
+        assert!(reject_unadmitted_event(event).events.is_empty());
+    }
 
     #[test]
     fn unadmitted_connections_are_closed_before_control_events_are_exposed() {

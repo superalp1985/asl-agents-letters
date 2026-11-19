@@ -5,7 +5,7 @@ use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
     relay::MAX_RELAY_ENDPOINT_BYTES,
-    transport::TransportKind,
+    transport::{DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     error::AslError,
@@ -66,7 +66,7 @@ impl IpcRole {
                 )
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
-                | (Self::Net, Self::Core, 36..=37)
+                | (Self::Net, Self::Core, 36..=38)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
         )
@@ -204,6 +204,12 @@ pub enum IpcMessage {
     },
     RelayUnavailable {
         relay_peer_id: PeerId,
+    },
+    DiscoveryCandidate {
+        peer_id: PeerId,
+        kind: TransportKind,
+        address: SocketAddr,
+        state: DiscoveryCandidateState,
     },
     ControlRequested {
         connection_id: [u8; 16],
@@ -603,6 +609,27 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(peer_bytes);
             37
         }
+        IpcMessage::DiscoveryCandidate {
+            peer_id,
+            kind,
+            address,
+            state,
+        } => {
+            let peer_bytes = peer_id.as_bytes();
+            if peer_bytes.is_empty() || peer_bytes.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            body.push(transport_kind_code(*kind));
+            append_socket_addr(&mut body, *address)?;
+            body.push(*state as u8);
+            38
+        }
         IpcMessage::ControlRequested {
             connection_id,
             response_id,
@@ -897,6 +924,31 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             Ok(IpcMessage::RelayUnavailable {
                 relay_peer_id: PeerId::from_bytes(body[2..].to_vec())
                     .map_err(|_| AslError::InvalidMessage)?,
+            })
+        }
+        38 if body.len() >= 11 => {
+            let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            let peer_end = 2 + peer_len;
+            if peer_len == 0 || peer_len > 128 || body.len() < peer_end + 1 {
+                return Err(AslError::InvalidMessage);
+            }
+            let kind = decode_transport_kind(body[peer_end])?;
+            let (address, address_len) = decode_socket_addr(&body[peer_end + 1..])?;
+            let state_offset = peer_end + 1 + address_len;
+            if body.len() != state_offset + 1 {
+                return Err(AslError::InvalidMessage);
+            }
+            let state = match body[state_offset] {
+                1 => DiscoveryCandidateState::Discovered,
+                2 => DiscoveryCandidateState::Expired,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            Ok(IpcMessage::DiscoveryCandidate {
+                peer_id: PeerId::from_bytes(body[2..peer_end].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?,
+                kind,
+                address,
+                state,
             })
         }
         22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
@@ -1217,6 +1269,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         35 => 16 + 2 + 128,
         36 => 2 + 128 + 2 + MAX_RELAY_ENDPOINT_BYTES,
         37 => 2 + 128,
+        38 => 2 + 128 + 1 + 19 + 1,
         _ => return None,
     })
 }
@@ -1475,6 +1528,12 @@ mod tests {
             IpcMessage::RelayUnavailable {
                 relay_peer_id: DeviceIdentity::generate().unwrap().peer_id(),
             },
+            IpcMessage::DiscoveryCandidate {
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                kind: TransportKind::Quic,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 4002),
+                state: DiscoveryCandidateState::Discovered,
+            },
             IpcMessage::ControlRequested {
                 connection_id: [12; 16],
                 response_id: [13; 16],
@@ -1566,6 +1625,7 @@ mod tests {
                 | IpcMessage::Listening { .. }
                 | IpcMessage::RelayReserved { .. }
                 | IpcMessage::RelayUnavailable { .. }
+                | IpcMessage::DiscoveryCandidate { .. }
                 | IpcMessage::ControlRequested { .. }
                 | IpcMessage::ControlReceived { .. }
                 | IpcMessage::BulkRequested { .. }

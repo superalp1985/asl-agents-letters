@@ -68,6 +68,8 @@ T10 IPC v1 使用私有继承匿名管道、固定消息枚举、方向/角色�
 
 T14/T16 后续状态（2026-11-19）：Net 子进程默认仍驱动 loopback-only transport，Net/Core IPC 已接入监听、拨号、身份、控制、bulk 和网络地址策略命令/事件；活动连接和请求/响应句柄在 Net 内绑定。T16 地址策略已接入 Swarm 地址准入、mDNS 候选过滤及启动时设置加载。`state/network-settings-v1.json` 缺失时使用 LoopbackOnly、关闭监听、端口 0；存在时严格读取版本 1，先要求 Net 确认地址策略，再按设置选择性启动 TCP/QUIC 监听。回环策略绑定回环接口，其他策略通过网卡枚举只绑定策略允许的具体地址；配置错误或 Net 拒绝策略/监听时启动失败，不会退回较宽范围。此文件目前没有 GUI 编辑/保存流程；网卡热插拔更新、IPv6 链路本地作用域地址、AppContainer multicast 和真实 LAN/公网验收仍未完成。`CoreAdmission` 已协调 Hello、链证明和目录核验；入站身份证明在单一全局限速器后按 FIFO 校验，待验队列最多 16 份、等待超过 10 秒关闭连接，等待中的连接不获准业务帧。Supervisor 启动时读取本地版本化信任配置和签名设备目录，恢复或按显式 checkpoint 初始化链验证器，并仅在本机链身份、根地址、目录 commitment 与实际 Net PeerId 全部相符时创建准入状态；缺少配置、目录或有效链身份时保持关闭。常驻事件泵已接入握手、未准入连接关闭与应用回调；默认命令行入口不回答应用请求。启动后周期链同步、首次身份注册和 Agent 会话处理仍未完成，因此 T14 未关闭。
 
+T16 mDNS 观察通道：已筛选的发现/过期候选经 IPC kind 38 进入 Core 的独立本地只读观察回调，不进入 `CoreAdmission` 的 Agent 事件 handler，也不产生授权或联系人状态。候选记录和待派发观察均有固定容量；只有先前记录过且仍符合当前地址策略的候选才会报告过期。候选发现不是在线状态；GUI 展示、AppContainer 组播权限和真实 LAN 验收仍待完成。
+
 网络能力包括不同地址类型的适配必须真实验证；AppContainer 的网络权限不等于按域名限制出站。外部模型 HTTP 由 core 的固定网关发起。
 
 T09 实现已有按角色启动、独立 profile、子进程限制、Job 资源限制、显式管道继承、执行文件 ACL、期限 watchdog 和真实否定探针。剩余 TCP/UDP 外部端点、QUIC 及 mDNS 请求/响应必须单独实测；单独创建 multicast membership 不等于 mDNS 已验收。所有其他 ASL 子进程启动必须继续经过统一 broker/sandbox 启动路径，不能并行使用未采用句柄白名单的裸 `CreateProcess`。

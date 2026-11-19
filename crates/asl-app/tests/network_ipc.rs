@@ -2,9 +2,10 @@ use asl_app::ipc::{
     IpcMessage, IpcRole, MAX_IPC_BULK_PAYLOAD_BYTES, MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
     NetworkErrorCode, NetworkProtocol, decode_frame, encode_frame,
 };
+use asl_app::network::{LocalNetworkObservation, NetworkEvent};
 use asl_net::{
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
-    transport::TransportKind,
+    transport::{DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -250,6 +251,26 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
         (
             IpcRole::Net,
             IpcRole::Core,
+            IpcMessage::DiscoveryCandidate {
+                peer_id: peer_id(),
+                kind: TransportKind::Tcp,
+                address: "192.168.1.10:4001".parse().unwrap(),
+                state: DiscoveryCandidateState::Discovered,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::DiscoveryCandidate {
+                peer_id: peer_id(),
+                kind: TransportKind::Quic,
+                address: "[fe80::1]:4002".parse().unwrap(),
+                state: DiscoveryCandidateState::Expired,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
             IpcMessage::ControlRequested {
                 connection_id: [38; 16],
                 response_id: [39; 16],
@@ -338,6 +359,22 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
             message
         );
     }
+
+    let candidate = IpcMessage::DiscoveryCandidate {
+        peer_id: peer_id(),
+        kind: TransportKind::Tcp,
+        address: "192.168.1.10:4001".parse().unwrap(),
+        state: DiscoveryCandidateState::Discovered,
+    };
+    let event = NetworkEvent::try_from(candidate).unwrap();
+    let observation = event.as_local_observation();
+    assert!(matches!(
+        observation,
+        Some(LocalNetworkObservation::DiscoveryCandidate {
+            state: DiscoveryCandidateState::Discovered,
+            ..
+        })
+    ));
 }
 
 #[test]

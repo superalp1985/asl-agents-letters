@@ -56,6 +56,8 @@ const MAX_PENDING_INBOUND: usize = 8;
 const MAX_PENDING_OUTBOUND: usize = 8;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_PENDING_DISCOVERY_DIALS: usize = 8;
+const MAX_DISCOVERY_CANDIDATES: usize = 128;
+const MAX_PENDING_DISCOVERY_OBSERVATIONS: usize = 256;
 const MAX_RELAY_ENDPOINTS: usize = 8;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
@@ -67,10 +69,25 @@ const RELAY_RETRY_BASE: Duration = Duration::from_secs(1);
 const RELAY_RETRY_MAX: Duration = Duration::from_secs(60);
 const RELAY_RETRY_MAX_SHIFT: u32 = 6;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportKind {
     Tcp,
     Quic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DiscoveryCandidateState {
+    Discovered = 1,
+    Expired = 2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveryCandidate {
+    pub peer_id: PeerId,
+    pub kind: TransportKind,
+    pub address: SocketAddr,
+    pub state: DiscoveryCandidateState,
 }
 
 /// Opaque, process-local handle. A reconnect gets a new handle even for the same device.
@@ -170,6 +187,7 @@ pub enum TransportEvent {
     RelayUnavailable {
         relay_peer_id: libp2p::PeerId,
     },
+    DiscoveryCandidate(DiscoveryCandidate),
     InboundRejected,
     /// Authenticated device key only; no agent identity, certificate or grant is implied.
     Connected {
@@ -227,6 +245,8 @@ pub struct LocalTransport {
     policy_configured: bool,
     network_started: bool,
     pending_discovery_dials: HashSet<libp2p::PeerId>,
+    discovery_candidates: HashSet<(libp2p::PeerId, TransportKind, SocketAddr)>,
+    pending_discovery_observations: VecDeque<DiscoveryCandidate>,
     relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
     relay_listeners: HashMap<ListenerId, libp2p::PeerId>,
     relay_retries: HashMap<libp2p::PeerId, RelayRetry>,
@@ -274,6 +294,8 @@ impl LocalTransport {
             policy_configured: false,
             network_started: false,
             pending_discovery_dials: HashSet::new(),
+            discovery_candidates: HashSet::new(),
+            pending_discovery_observations: VecDeque::new(),
             relay_endpoints: HashMap::new(),
             relay_listeners: HashMap::new(),
             relay_retries: HashMap::new(),
@@ -493,6 +515,9 @@ impl LocalTransport {
             return Ok(event);
         }
         loop {
+            if let Some(candidate) = self.pending_discovery_observations.pop_front() {
+                return Ok(TransportEvent::DiscoveryCandidate(candidate));
+            }
             self.start_due_relay_retries();
             let event = if let Some(deadline) = self.next_relay_retry_deadline() {
                 tokio::select! {
@@ -574,7 +599,7 @@ impl LocalTransport {
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
-                    self.handle_discovery(event);
+                    self.handle_discovery(event)?;
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Relay(
                     libp2p::relay::client::Event::ReservationReqAccepted {
@@ -771,41 +796,89 @@ impl LocalTransport {
         Ok(())
     }
 
-    fn handle_discovery(&mut self, event: mdns::Event) {
-        let mdns::Event::Discovered(peers) = event else {
-            return;
-        };
+    fn handle_discovery(&mut self, event: mdns::Event) -> io::Result<()> {
+        match event {
+            mdns::Event::Discovered(peers) => {
+                for (peer_id, address) in peers {
+                    let Some(address) = policy_approved_discovery_address(
+                        self.address_policy,
+                        self.swarm.local_peer_id(),
+                        peer_id,
+                        address,
+                    ) else {
+                        continue;
+                    };
+                    let Some((kind, socket)) = bound_endpoint(&address) else {
+                        continue;
+                    };
+                    let candidate_key = (peer_id, kind, socket);
+                    if !self.discovery_candidates.contains(&candidate_key)
+                        && self.discovery_candidates.len() < MAX_DISCOVERY_CANDIDATES
+                    {
+                        self.discovery_candidates.insert(candidate_key);
+                        if self.pending_discovery_observations.len()
+                            < MAX_PENDING_DISCOVERY_OBSERVATIONS
+                        {
+                            self.pending_discovery_observations
+                                .push_back(DiscoveryCandidate {
+                                    peer_id: device_peer(peer_id)?,
+                                    kind,
+                                    address: socket,
+                                    state: DiscoveryCandidateState::Discovered,
+                                });
+                        }
+                    }
 
-        for (peer_id, address) in peers {
-            if self.swarm.is_connected(&peer_id)
-                || self.pending_discovery_dials.contains(&peer_id)
-                || self.pending_discovery_dials.len() >= MAX_PENDING_DISCOVERY_DIALS
-            {
-                continue;
+                    if self.swarm.is_connected(&peer_id)
+                        || self.pending_discovery_dials.contains(&peer_id)
+                        || self.pending_discovery_dials.len() >= MAX_PENDING_DISCOVERY_DIALS
+                    {
+                        continue;
+                    }
+                    if self
+                        .swarm
+                        .dial(
+                            DialOpts::peer_id(peer_id)
+                                .condition(PeerCondition::DisconnectedAndNotDialing)
+                                .addresses(vec![address])
+                                .build(),
+                        )
+                        .is_ok()
+                    {
+                        self.pending_discovery_dials.insert(peer_id);
+                        self.network_started = true;
+                    }
+                }
             }
-
-            let Some(address) = policy_approved_discovery_address(
-                self.address_policy,
-                self.swarm.local_peer_id(),
-                peer_id,
-                address,
-            ) else {
-                continue;
-            };
-            if self
-                .swarm
-                .dial(
-                    DialOpts::peer_id(peer_id)
-                        .condition(PeerCondition::DisconnectedAndNotDialing)
-                        .addresses(vec![address])
-                        .build(),
-                )
-                .is_ok()
-            {
-                self.pending_discovery_dials.insert(peer_id);
-                self.network_started = true;
+            mdns::Event::Expired(peers) => {
+                for (peer_id, address) in peers {
+                    let Some(address) = policy_approved_discovery_address(
+                        self.address_policy,
+                        self.swarm.local_peer_id(),
+                        peer_id,
+                        address,
+                    ) else {
+                        continue;
+                    };
+                    let Some((kind, socket)) = bound_endpoint(&address) else {
+                        continue;
+                    };
+                    if self.discovery_candidates.remove(&(peer_id, kind, socket))
+                        && self.pending_discovery_observations.len()
+                            < MAX_PENDING_DISCOVERY_OBSERVATIONS
+                    {
+                        self.pending_discovery_observations
+                            .push_back(DiscoveryCandidate {
+                                peer_id: device_peer(peer_id)?,
+                                kind,
+                                address: socket,
+                                state: DiscoveryCandidateState::Expired,
+                            });
+                    }
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -1348,6 +1421,57 @@ mod tests {
         assert!(
             policy_approved_discovery_address(AddressPolicy::LanOnly, &local, local, accepted)
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_candidate_observation_tracks_expiration_without_authenticating_peer() {
+        let local_key = Keypair::generate_ed25519();
+        let remote_peer = peer();
+        let address: Multiaddr = "/ip4/192.168.1.10/tcp/4001".parse().unwrap();
+        let mut transport = LocalTransport::new(local_key).unwrap();
+        transport
+            .set_address_policy(AddressPolicy::LanOnly)
+            .unwrap();
+
+        transport
+            .handle_discovery(mdns::Event::Discovered(vec![(
+                remote_peer,
+                address.clone(),
+            )]))
+            .unwrap();
+
+        let TransportEvent::DiscoveryCandidate(candidate) = transport.next_event().await.unwrap()
+        else {
+            panic!("expected an mDNS candidate observation");
+        };
+        assert_eq!(
+            candidate,
+            DiscoveryCandidate {
+                peer_id: device_peer(remote_peer).unwrap(),
+                kind: TransportKind::Tcp,
+                address: "192.168.1.10:4001".parse().unwrap(),
+                state: DiscoveryCandidateState::Discovered,
+            }
+        );
+        assert!(transport.live.is_empty());
+
+        transport
+            .handle_discovery(mdns::Event::Expired(vec![(remote_peer, address)]))
+            .unwrap();
+
+        let TransportEvent::DiscoveryCandidate(candidate) = transport.next_event().await.unwrap()
+        else {
+            panic!("expected an mDNS expiry observation");
+        };
+        assert_eq!(
+            candidate,
+            DiscoveryCandidate {
+                peer_id: device_peer(remote_peer).unwrap(),
+                kind: TransportKind::Tcp,
+                address: "192.168.1.10:4001".parse().unwrap(),
+                state: DiscoveryCandidateState::Expired,
+            }
         );
     }
 

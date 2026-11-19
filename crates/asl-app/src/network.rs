@@ -4,7 +4,7 @@ use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
     relay::relay_endpoint_config,
-    transport::TransportKind,
+    transport::{DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     error::AslError,
@@ -199,6 +199,12 @@ pub enum NetworkEvent {
     RelayUnavailable {
         relay_peer_id: PeerId,
     },
+    DiscoveryCandidate {
+        peer_id: PeerId,
+        kind: TransportKind,
+        address: SocketAddr,
+        state: DiscoveryCandidateState,
+    },
     /// The device transport is authenticated; the Agent identity is not.
     TransportConnected {
         connection_id: [u8; 16],
@@ -247,6 +253,35 @@ pub enum NetworkEvent {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalNetworkObservation {
+    DiscoveryCandidate {
+        peer_id: PeerId,
+        kind: TransportKind,
+        address: SocketAddr,
+        state: DiscoveryCandidateState,
+    },
+}
+
+impl NetworkEvent {
+    pub fn as_local_observation(&self) -> Option<LocalNetworkObservation> {
+        match self {
+            Self::DiscoveryCandidate {
+                peer_id,
+                kind,
+                address,
+                state,
+            } => Some(LocalNetworkObservation::DiscoveryCandidate {
+                peer_id: peer_id.clone(),
+                kind: *kind,
+                address: *address,
+                state: *state,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl TryFrom<IpcMessage> for NetworkEvent {
     type Error = AslError;
 
@@ -269,6 +304,17 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             IpcMessage::RelayUnavailable { relay_peer_id } => {
                 Ok(Self::RelayUnavailable { relay_peer_id })
             }
+            IpcMessage::DiscoveryCandidate {
+                peer_id,
+                kind,
+                address,
+                state,
+            } => Ok(Self::DiscoveryCandidate {
+                peer_id,
+                kind,
+                address,
+                state,
+            }),
             IpcMessage::PeerAuthenticated {
                 connection_id,
                 peer_id,

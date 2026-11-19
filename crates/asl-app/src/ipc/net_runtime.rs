@@ -583,6 +583,14 @@ impl NetworkBridge {
                         .map_err(|_| AslError::InvalidIdentity)?,
                 })?;
             }
+            TransportEvent::DiscoveryCandidate(candidate) => {
+                writer.send(&IpcMessage::DiscoveryCandidate {
+                    peer_id: candidate.peer_id,
+                    kind: candidate.kind,
+                    address: candidate.address,
+                    state: candidate.state,
+                })?;
+            }
             TransportEvent::InboundRejected => {}
             TransportEvent::Connected { connection } => {
                 let connection_id = fresh_handle(&self.connections)?;
