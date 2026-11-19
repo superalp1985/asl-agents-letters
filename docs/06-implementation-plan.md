@@ -386,6 +386,8 @@ T15 relay 断线重预约切片验证（2026-11-19，Windows x64，Rust 1.100.0�
 
 T15 多 relay 故障切换切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 44 项、0 失败、1 项忽略；覆盖退避 relay 从新拨号候选中排除、一个 relay 下线后通过另一入口完成认证连接，以及 relay 持续离线时重预约失败仍保留事件循环并继续退避。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。验证仅限本机 loopback TCP relay，不代表真实公网、NAT、DHT 或 Linux 基础设施已验收。
 
+T15 relay 分块数据切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 45 项、0 失败、1 项忽略；新增测试通过 RelayOnly 认证连接往返 4 个独立 128 KiB bulk chunk，并校验 chunk 序号、请求关联 ID、状态和内容。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。本测试只验证单机 TCP relay 上的顺序多块传输，不代表大文件断点续传、跨 relay 分块调度、真实公网带宽或 Linux 基础设施已验收。
+
 ### T16 — mDNS、地址策略与连接观察
 
 依赖 T14、T09。创建 net discovery。
