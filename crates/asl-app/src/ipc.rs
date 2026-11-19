@@ -9,10 +9,17 @@ use asl_types::{
         decode_frame as decode_asl_frame, encode_frame as encode_asl_frame,
     },
 };
+use zeroize::Zeroizing;
+
+use crate::identity::{DeviceIdentity, MAX_DEVICE_KEY_BYTES};
 
 pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 const TASK_BODY_HEADER_BYTES: usize = 21;
+const DEVICE_IDENTITY_PRELUDE_MAGIC: [u8; 4] = *b"ASLK";
+const DEVICE_IDENTITY_PRELUDE_VERSION: u16 = 1;
+const DEVICE_IDENTITY_PRELUDE_HEADER_BYTES: usize = 10;
+const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
 pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
@@ -44,6 +51,7 @@ impl IpcRole {
                     1 | 3 | 5
                 )
                 | (Self::Net, Self::Core, 10..=13)
+                | (Self::Net, Self::Core, 16)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
         )
@@ -132,6 +140,9 @@ pub enum IpcMessage {
     IdentityProofReceived {
         connection_id: [u8; 16],
         proof: IdentityProof,
+    },
+    NetReady {
+        peer_id: PeerId,
     },
     RequestIdentityProof {
         connection_id: [u8; 16],
@@ -309,6 +320,16 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
             13
         }
+        IpcMessage::NetReady { peer_id } => {
+            let peer_bytes = peer_id.as_bytes();
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            16
+        }
         IpcMessage::RequestIdentityProof {
             connection_id,
             request,
@@ -404,6 +425,15 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             response_id: body[16..32].try_into().unwrap(),
             proof: decode_identity_proof(&body[32..])?,
         }),
+        16 if body.len() >= 3 => {
+            let peer_length = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            if body.len() != 2 + peer_length {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_id =
+                PeerId::from_bytes(body[2..].to_vec()).map_err(|_| AslError::InvalidMessage)?;
+            Ok(IpcMessage::NetReady { peer_id })
+        }
         _ => Err(AslError::InvalidMessage),
     }
 }
@@ -461,6 +491,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         11 => 16,
         12 | 15 => 32 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
         13 | 14 => 16 + 4 + MAX_IPC_IDENTITY_PROOF_FRAME_BYTES,
+        16 => 2 + 128,
         _ => return None,
     })
 }
@@ -575,10 +606,21 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
         .ok_or(AslError::InvalidMessage)?;
 
     let stdin = std::io::stdin();
+    let device_identity = if role == IpcRole::Net {
+        Some(read_device_identity_prelude(&mut stdin.lock())?)
+    } else {
+        None
+    };
     let stdout = std::io::stdout();
     let mut reader = FrameReader::new(stdin.lock(), IpcRole::Core, role);
     let mut writer = FrameWriter::new(stdout.lock(), role, IpcRole::Core);
-    writer.send(&IpcMessage::Ready)?;
+    if let Some(identity) = &device_identity {
+        writer.send(&IpcMessage::NetReady {
+            peer_id: identity.peer_id(),
+        })?;
+    } else {
+        writer.send(&IpcMessage::Ready)?;
+    }
     loop {
         match reader.receive()?.message {
             IpcMessage::Shutdown => {
@@ -605,9 +647,44 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
     }
 }
 
+pub(crate) fn write_device_identity_prelude<W: Write>(
+    writer: &mut W,
+    identity: &DeviceIdentity,
+) -> Result<(), AslError> {
+    let secret = identity.to_ipc_secret()?;
+    let length = u32::try_from(secret.len()).map_err(|_| AslError::InvalidIdentity)?;
+    let mut header = [0u8; DEVICE_IDENTITY_PRELUDE_HEADER_BYTES];
+    header[..4].copy_from_slice(&DEVICE_IDENTITY_PRELUDE_MAGIC);
+    header[4..6].copy_from_slice(&DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes());
+    header[6..].copy_from_slice(&length.to_be_bytes());
+    writer.write_all(&header)?;
+    writer.write_all(&secret)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn read_device_identity_prelude<R: Read>(reader: &mut R) -> Result<DeviceIdentity, AslError> {
+    let mut header = [0u8; DEVICE_IDENTITY_PRELUDE_HEADER_BYTES];
+    reader.read_exact(&mut header)?;
+    if header[..4] != DEVICE_IDENTITY_PRELUDE_MAGIC {
+        return Err(AslError::InvalidMessage);
+    }
+    if header[4..6] != DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes() {
+        return Err(AslError::IncompatibleVersion);
+    }
+    let length = u32::from_be_bytes(header[6..10].try_into().unwrap()) as usize;
+    if length == 0 || length > MAX_DEVICE_IDENTITY_PRELUDE_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut secret = Zeroizing::new(vec![0u8; length]);
+    reader.read_exact(&mut secret)?;
+    DeviceIdentity::from_ipc_secret(&secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::DeviceIdentity;
     use std::io::Cursor;
 
     fn ready_frame(sender: IpcRole, sequence: u64) -> Vec<u8> {
@@ -633,12 +710,16 @@ mod tests {
             },
             IpcMessage::TaskStarted { task_id: [3; 16] },
             IpcMessage::TaskContinue { task_id: [3; 16] },
+            IpcMessage::NetReady {
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            },
         ];
         for message in messages {
             let (sender, receiver) = match message {
-                IpcMessage::Ready | IpcMessage::Stopped | IpcMessage::Pong { .. } => {
-                    (IpcRole::Net, IpcRole::Core)
-                }
+                IpcMessage::Ready
+                | IpcMessage::Stopped
+                | IpcMessage::Pong { .. }
+                | IpcMessage::NetReady { .. } => (IpcRole::Net, IpcRole::Core),
                 IpcMessage::Shutdown | IpcMessage::Ping { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::RunTask { .. } => (IpcRole::Core, IpcRole::Worker),
                 IpcMessage::TaskResult { .. } | IpcMessage::TaskStarted { .. } => {
@@ -658,6 +739,98 @@ mod tests {
             assert_eq!(decoded.message, message);
             assert_eq!(decoded.sequence, 7);
         }
+    }
+
+    #[test]
+    fn device_identity_startup_prelude_round_trips_over_the_private_stream() {
+        let identity = DeviceIdentity::generate().unwrap();
+        let expected_peer_id = identity.peer_id();
+        let mut bytes = Vec::new();
+
+        write_device_identity_prelude(&mut bytes, &identity).unwrap();
+        let received = read_device_identity_prelude(&mut Cursor::new(bytes)).unwrap();
+
+        assert_eq!(received.peer_id(), expected_peer_id);
+    }
+
+    #[test]
+    fn malformed_or_oversized_device_identity_preludes_are_rejected_before_body_read() {
+        struct HeaderOnly {
+            bytes: Cursor<Vec<u8>>,
+            body_read: bool,
+        }
+
+        impl Read for HeaderOnly {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.position() >= DEVICE_IDENTITY_PRELUDE_HEADER_BYTES as u64 {
+                    self.body_read = true;
+                }
+                self.bytes.read(buffer)
+            }
+        }
+
+        for (magic, version, length) in [
+            (*b"NOPE", DEVICE_IDENTITY_PRELUDE_VERSION, 32_u32),
+            (
+                DEVICE_IDENTITY_PRELUDE_MAGIC,
+                DEVICE_IDENTITY_PRELUDE_VERSION + 1,
+                32,
+            ),
+            (
+                DEVICE_IDENTITY_PRELUDE_MAGIC,
+                DEVICE_IDENTITY_PRELUDE_VERSION,
+                0,
+            ),
+            (
+                DEVICE_IDENTITY_PRELUDE_MAGIC,
+                DEVICE_IDENTITY_PRELUDE_VERSION,
+                (MAX_DEVICE_IDENTITY_PRELUDE_BYTES + 1) as u32,
+            ),
+        ] {
+            let mut header = Vec::new();
+            header.extend_from_slice(&magic);
+            header.extend_from_slice(&version.to_be_bytes());
+            header.extend_from_slice(&length.to_be_bytes());
+            let mut reader = HeaderOnly {
+                bytes: Cursor::new(header),
+                body_read: false,
+            };
+
+            assert!(read_device_identity_prelude(&mut reader).is_err());
+            assert!(!reader.body_read);
+        }
+    }
+
+    #[test]
+    fn invalid_or_truncated_device_key_payloads_are_rejected() {
+        for (length, payload) in [(1_u32, &[0xff][..]), (2, &[0x08][..])] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&DEVICE_IDENTITY_PRELUDE_MAGIC);
+            bytes.extend_from_slice(&DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes());
+            bytes.extend_from_slice(&length.to_be_bytes());
+            bytes.extend_from_slice(payload);
+            assert!(read_device_identity_prelude(&mut Cursor::new(bytes)).is_err());
+        }
+    }
+
+    #[test]
+    fn net_ready_is_net_only_and_rejects_malformed_peer_ids() {
+        let peer_id = DeviceIdentity::generate().unwrap().peer_id();
+        let message = IpcMessage::NetReady {
+            peer_id: peer_id.clone(),
+        };
+        let bytes = encode_frame(IpcRole::Net, IpcRole::Core, 1, &message).unwrap();
+        assert_eq!(
+            decode_frame(&bytes, IpcRole::Net, IpcRole::Core, 1)
+                .unwrap()
+                .message,
+            message
+        );
+        assert!(encode_frame(IpcRole::Worker, IpcRole::Core, 1, &message).is_err());
+
+        let mut malformed = bytes;
+        malformed[HEADER_BYTES + 2] = 0xff;
+        assert!(decode_frame(&malformed, IpcRole::Net, IpcRole::Core, 1).is_err());
     }
 
     #[test]

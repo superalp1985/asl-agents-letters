@@ -9,11 +9,12 @@ use std::time::Duration;
 use asl_policy::sandbox::{
     BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
 };
-use asl_types::error::AslError;
+use asl_types::{error::AslError, ids::PeerId};
 
+use crate::identity::DeviceIdentity;
 use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
-    TaskStatus, WorkerOperation,
+    TaskStatus, WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::paths::AppPaths;
@@ -40,8 +41,9 @@ impl Supervisor {
     }
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
+        let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
         let libraries = LocalLibraries::open(&paths)?;
-        let net = NetRuntime::start(&launcher)?;
+        let net = NetRuntime::start(&launcher, &device_identity)?;
         Ok(Self {
             libraries,
             launcher,
@@ -99,17 +101,25 @@ struct NetRuntime {
 }
 
 impl NetRuntime {
-    fn start(launcher: &SandboxLauncher) -> Result<Self, AslError> {
-        let (pipes, inherited) = InheritedPipes::new()?;
+    fn start(
+        launcher: &SandboxLauncher,
+        device_identity: &DeviceIdentity,
+    ) -> Result<Self, AslError> {
+        let (mut pipes, inherited) = InheritedPipes::new()?;
         let child = launcher.spawn_sandbox(
             SandboxRole::Net,
             inherited,
             SandboxLimits::for_role(SandboxRole::Net),
         )?;
-        Self::from_child(pipes, child)
+        write_device_identity_prelude(&mut pipes.input, device_identity)?;
+        Self::from_child(pipes, child, &device_identity.peer_id())
     }
 
-    fn from_child(pipes: BrokerPipes, child: SandboxChild) -> Result<Self, AslError> {
+    fn from_child(
+        pipes: BrokerPipes,
+        child: SandboxChild,
+        expected_peer_id: &PeerId,
+    ) -> Result<Self, AslError> {
         drop(pipes.error);
         let (sender, receiver) = mpsc::sync_channel(8);
         let reader_thread = thread::Builder::new()
@@ -129,11 +139,13 @@ impl NetRuntime {
             next_nonce: 1,
         };
         match runtime.receive(STARTUP_TIMEOUT) {
-            Ok(frame) if frame.message == IpcMessage::Ready => Ok(runtime),
-            Ok(_) => {
-                runtime.stop();
-                Err(AslError::InvalidMessage)
-            }
+            Ok(frame) => match validate_net_ready(frame.message, expected_peer_id) {
+                Ok(()) => Ok(runtime),
+                Err(error) => {
+                    runtime.stop();
+                    Err(error)
+                }
+            },
             Err(error) => {
                 runtime.stop();
                 Err(error)
@@ -165,6 +177,14 @@ impl NetRuntime {
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
         }
+    }
+}
+
+fn validate_net_ready(message: IpcMessage, expected_peer_id: &PeerId) -> Result<(), AslError> {
+    match message {
+        IpcMessage::NetReady { peer_id } if &peer_id == expected_peer_id => Ok(()),
+        IpcMessage::NetReady { .. } => Err(AslError::InvalidIdentity),
+        _ => Err(AslError::InvalidMessage),
     }
 }
 
@@ -281,7 +301,26 @@ fn configured_root(value: Option<std::ffi::OsString>) -> Result<PathBuf, AslErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::DeviceIdentity;
     use std::io::Cursor;
+
+    #[test]
+    fn net_ready_must_match_the_local_device_identity() {
+        let expected = DeviceIdentity::generate().unwrap().peer_id();
+        let other = DeviceIdentity::generate().unwrap().peer_id();
+
+        assert!(
+            validate_net_ready(
+                IpcMessage::NetReady {
+                    peer_id: expected.clone(),
+                },
+                &expected,
+            )
+            .is_ok()
+        );
+        assert!(validate_net_ready(IpcMessage::NetReady { peer_id: other }, &expected).is_err());
+        assert!(validate_net_ready(IpcMessage::Ready, &expected).is_err());
+    }
 
     #[test]
     fn cargo_test_binary_directory_resolves_to_target_directory() {

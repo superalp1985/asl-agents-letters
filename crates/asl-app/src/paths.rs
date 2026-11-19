@@ -71,6 +71,10 @@ impl AppPaths {
         &self.identity
     }
 
+    pub fn device_key(&self) -> PathBuf {
+        self.identity.join("device-key.dpapi")
+    }
+
     pub fn snapshots(&self) -> &Path {
         &self.snapshots
     }

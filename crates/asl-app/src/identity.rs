@@ -22,6 +22,7 @@ const ROOT_FILE_MAGIC: &[u8] = b"ASL-ROOT-v1\0";
 const DEVICE_FILE_MAGIC: &[u8] = b"ASL-DEVICE-KEY-v1\0";
 const ROOT_ADDRESS_LENGTH: usize = 20;
 const PRIVATE_KEY_LENGTH: usize = 32;
+pub(crate) const MAX_DEVICE_KEY_BYTES: usize = 1024;
 const MAX_DEVICE_CERTIFICATE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 pub struct AgentIdentity {
@@ -175,12 +176,51 @@ impl DeviceIdentity {
         write_protected_new(path, &plaintext)
     }
 
+    pub fn load_or_create_protected(path: &Path) -> Result<Self, AslError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Self::load_protected(path),
+            Ok(_) => Err(AslError::InvalidIdentity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let identity = Self::generate()?;
+                match identity.save_protected_new(path) {
+                    Ok(()) => Ok(identity),
+                    Err(AslError::Io(error))
+                        if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
+                        Self::load_protected(path)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn load_protected(path: &Path) -> Result<Self, AslError> {
         let ciphertext = fs::read(path)?;
-        let plaintext = unprotect_secret(&ciphertext)?;
+        let plaintext = Zeroizing::new(unprotect_secret(&ciphertext)?);
         let Some(encoded) = plaintext.strip_prefix(DEVICE_FILE_MAGIC) else {
             return Err(AslError::InvalidIdentity);
         };
+        Self::from_ipc_secret(encoded)
+    }
+
+    pub(crate) fn to_ipc_secret(&self) -> Result<Zeroizing<Vec<u8>>, AslError> {
+        let encoded = Zeroizing::new(
+            self.keypair
+                .to_protobuf_encoding()
+                .map_err(|_| AslError::InvalidIdentity)?,
+        );
+        if encoded.is_empty() || encoded.len() > MAX_DEVICE_KEY_BYTES {
+            return Err(AslError::InvalidIdentity);
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn from_ipc_secret(encoded: &[u8]) -> Result<Self, AslError> {
+        if encoded.is_empty() || encoded.len() > MAX_DEVICE_KEY_BYTES {
+            return Err(AslError::InvalidIdentity);
+        }
         let keypair = libp2p_identity::Keypair::from_protobuf_encoding(encoded)
             .map_err(|_| AslError::InvalidIdentity)?;
 
