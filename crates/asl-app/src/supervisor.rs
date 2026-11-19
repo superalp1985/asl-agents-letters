@@ -10,9 +10,12 @@ use std::time::Duration;
 use asl_policy::sandbox::{
     BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
 };
-use asl_types::{error::AslError, ids::PeerId};
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, PeerId},
+};
 
-use crate::identity::DeviceIdentity;
+use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
     TaskStatus, WorkerOperation, write_device_identity_prelude,
@@ -26,6 +29,7 @@ const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_NETWORK_EVENTS: usize = 64;
 
 pub struct Supervisor {
+    agent_identity: AgentIdentity,
     libraries: LocalLibraries,
     launcher: SandboxLauncher,
     net: NetRuntime,
@@ -43,14 +47,20 @@ impl Supervisor {
     }
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
+        let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
         let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
         let libraries = LocalLibraries::open(&paths)?;
         let net = NetRuntime::start(&launcher, &device_identity)?;
         Ok(Self {
+            agent_identity,
             libraries,
             launcher,
             net,
         })
+    }
+
+    pub fn agent_id(&self) -> AgentId {
+        self.agent_identity.agent_id()
     }
 
     /// Trusted in-process entry point only; not dispatched from Net or Worker IPC.

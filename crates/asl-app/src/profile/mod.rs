@@ -1,3 +1,4 @@
+mod admission;
 mod history;
 mod proof_response;
 mod publisher;
@@ -17,6 +18,7 @@ use crate::{
     identity::{AgentIdentity, verify_device_certificate, verify_root_signature},
 };
 
+pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 pub use history::RecordHistory;
 pub use proof_response::serve_local_identity_proof;
 pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};

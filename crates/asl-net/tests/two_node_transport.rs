@@ -63,6 +63,60 @@ async fn tcp_noise_yamux_loopback() {
 }
 
 #[tokio::test]
+async fn closing_an_authenticated_connection_emits_disconnects_on_both_sides() {
+    let dialer_identity = Keypair::generate_ed25519();
+    let dialer_peer = peer_id(&dialer_identity);
+    let mut dialer = LocalTransport::new(dialer_identity).unwrap();
+    let listener_identity = Keypair::generate_ed25519();
+    let listener_peer = peer_id(&listener_identity);
+    let mut listener = LocalTransport::new(listener_identity).unwrap();
+    listener
+        .listen(
+            TransportKind::Tcp,
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into(),
+        )
+        .unwrap();
+    let endpoint = match listener.next_event().await.unwrap() {
+        TransportEvent::Listening(TransportKind::Tcp, endpoint) => endpoint,
+        event => panic!("unexpected listener event: {event:?}"),
+    };
+    dialer
+        .dial(TransportKind::Tcp, endpoint, &listener_peer)
+        .unwrap();
+    let (dialer_event, listener_event) = tokio::join!(dialer.next_event(), listener.next_event());
+    let TransportEvent::Connected {
+        connection: dialer_connection,
+    } = dialer_event.unwrap()
+    else {
+        panic!("dialer did not authenticate the listener");
+    };
+    let TransportEvent::Connected {
+        connection: listener_connection,
+    } = listener_event.unwrap()
+    else {
+        panic!("listener did not authenticate the dialer");
+    };
+    assert_eq!(dialer_connection.peer_id(), &listener_peer);
+    assert_eq!(listener_connection.peer_id(), &dialer_peer);
+
+    dialer.close_connection(&dialer_connection).unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), dialer.next_event())
+            .await
+            .unwrap()
+            .unwrap(),
+        TransportEvent::Disconnected { peer, .. } if peer == listener_peer
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), listener.next_event())
+            .await
+            .unwrap()
+            .unwrap(),
+        TransportEvent::Disconnected { peer, .. } if peer == dialer_peer
+    ));
+}
+
+#[tokio::test]
 async fn quic_two_processes() {
     run_two_process_transport(TransportKind::Quic, false)
         .await

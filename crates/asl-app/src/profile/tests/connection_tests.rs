@@ -4,15 +4,51 @@ use crate::chain::{
     DurableIdentityResolver, DurableResolverConfigV1,
     test_support::{TestChainDatabase, bootstrapped, consensus_config},
 };
+#[cfg(windows)]
+use crate::network::{NetworkCommand, NetworkEvent};
 use crate::profile::DeviceSession;
 #[cfg(windows)]
-use crate::profile::{DeviceAdmissionError, serve_local_identity_proof};
+use crate::profile::{
+    AdmittedNetworkEvent, CoreAdmission, DeviceAdmissionError, serve_local_identity_proof,
+};
 use asl_net::transport::{LocalTransport, TransportEvent, TransportKind};
-use asl_types::protocol::{Feature, Hello};
+use asl_types::protocol::{Feature, Hello, WireFrame};
 use libp2p_identity::Keypair;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 use tokio::time::timeout;
+
+#[cfg(windows)]
+fn durable_directory_resolver(
+    root: &AgentIdentity,
+    directory: &DeviceDirectory,
+) -> (TestChainDatabase, DurableIdentityResolver) {
+    let commitment = device_directory_commitment(directory).unwrap();
+    let mut values = [[0; 32]; 3];
+    values[0][12..].copy_from_slice(&root.controller_address());
+    values[1] = commitment.0;
+    values[2][23] = 1;
+    values[2][24..].copy_from_slice(&directory.registry_sequence.to_be_bytes());
+    let (deployment, finalized, proof) = proof_fixture_for_agent(values, 8, root.agent_id());
+    let database = TestChainDatabase::new();
+    let config = DurableResolverConfigV1 {
+        consensus: consensus_config(),
+        deployment,
+        max_cache_age_secs: 120,
+        cache_capacity: 8,
+    };
+    let mut resolver = DurableIdentityResolver::create(
+        database.open(),
+        config,
+        bootstrapped().with_test_execution(finalized),
+        BOOTSTRAP_TIME,
+    )
+    .unwrap();
+    resolver
+        .accept_proof(root.agent_id(), &proof, BOOTSTRAP_TIME)
+        .unwrap();
+    (database, resolver)
+}
 
 fn hello(cert: &DeviceCertificate) -> Hello {
     Hello {
@@ -461,4 +497,236 @@ fn chain_rotation_expiry_or_history_advance_require_a_new_handshake() {
         let mut fresh = directory_resolver(&root, &d);
         assert!(session.current_agent(&history, &mut fresh, NOW).is_err());
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn core_admission_only_emits_application_events_after_proof_verification() {
+    use asl_types::protocol::{Ack, IdentityProofRequest};
+
+    let local_root = AgentIdentity::generate().unwrap();
+    let local_device = DeviceIdentity::generate().unwrap();
+    let remote_device = DeviceIdentity::generate().unwrap();
+    let local_cert = certificate(&local_root, &local_device.peer_id(), 1);
+    let remote_cert = certificate(&local_root, &remote_device.peer_id(), 2);
+    let local_directory = directory(
+        &local_root,
+        7,
+        vec![local_cert.clone(), remote_cert.clone()],
+        vec![],
+    );
+    let local_signed = signed_directory(&local_root, &local_directory, 1);
+    let (local_database, local_resolver) =
+        durable_directory_resolver(&local_root, &local_directory);
+    let mut admission = CoreAdmission::new(
+        local_device.peer_id(),
+        hello(&local_cert),
+        local_signed.clone(),
+        local_resolver,
+        NOW,
+    )
+    .unwrap();
+
+    let (_remote_database, mut remote_resolver) =
+        durable_directory_resolver(&local_root, &local_directory);
+    let remote_hello = hello(&remote_cert);
+
+    let rejected_connection = [82; 16];
+    admission.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id: rejected_connection,
+            peer_id: remote_device.peer_id(),
+        },
+        NOW,
+    );
+    let rejected = admission.handle_event(
+        NetworkEvent::UnverifiedControlRequest {
+            connection_id: rejected_connection,
+            response_id: [83; 16],
+            request: WireFrame::Ack(Ack {
+                message_id: Id128([84; 16]),
+                received_id: Id128([85; 16]),
+            }),
+        },
+        NOW,
+    );
+    assert!(rejected.events.is_empty());
+    assert_eq!(
+        rejected.commands,
+        vec![NetworkCommand::CloseConnection {
+            connection_id: rejected_connection
+        }]
+    );
+
+    let failed_connection = [80; 16];
+    let started = admission.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id: failed_connection,
+            peer_id: remote_device.peer_id(),
+        },
+        NOW,
+    );
+    let hello_request_id = started
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            NetworkCommand::SendControl {
+                request_id,
+                request: WireFrame::Hello(_),
+                ..
+            } => Some(*request_id),
+            _ => None,
+        })
+        .unwrap();
+    let failed = admission.handle_event(
+        NetworkEvent::RequestFailed {
+            connection_id: failed_connection,
+            request_id: hello_request_id,
+            protocol: crate::ipc::NetworkProtocol::Control,
+            code: crate::ipc::NetworkErrorCode::TimedOut,
+        },
+        NOW,
+    );
+    assert!(failed.events.is_empty());
+    assert_eq!(
+        failed.commands,
+        vec![NetworkCommand::CloseConnection {
+            connection_id: failed_connection,
+        }]
+    );
+
+    let connection_id = [86; 16];
+    let connected = admission.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id,
+            peer_id: remote_device.peer_id(),
+        },
+        NOW,
+    );
+    assert!(matches!(
+        connected.commands.as_slice(),
+        [NetworkCommand::SendControl {
+            request: WireFrame::Hello(_),
+            ..
+        }]
+    ));
+    assert!(
+        admission
+            .authorize_control_command(
+                connection_id,
+                [87; 16],
+                WireFrame::Ack(Ack {
+                    message_id: Id128([88; 16]),
+                    received_id: Id128([89; 16]),
+                }),
+                NOW,
+            )
+            .is_err(),
+        "outbound application traffic must remain behind the identity gate"
+    );
+
+    let hello_batch = admission.handle_event(
+        NetworkEvent::UnverifiedControlRequest {
+            connection_id,
+            response_id: [90; 16],
+            request: WireFrame::Hello(remote_hello.clone()),
+        },
+        NOW,
+    );
+    assert!(hello_batch.events.is_empty());
+    assert_eq!(hello_batch.commands.len(), 2);
+    let proof_request = hello_batch
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            NetworkCommand::RequestIdentityProof { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(hello_batch.commands.iter().any(|command| matches!(
+        command,
+        NetworkCommand::ReplyControl {
+            response: WireFrame::Hello(_),
+            ..
+        }
+    )));
+    assert!(
+        admission
+            .handle_event(
+                NetworkEvent::IdentityProofRequested {
+                    connection_id,
+                    response_id: [91; 16],
+                    request: IdentityProofRequest {
+                        request_id: Id128([92; 16]),
+                        agent_id: local_root.agent_id(),
+                        checkpoint_hash: proof_request.checkpoint_hash,
+                    },
+                },
+                NOW,
+            )
+            .commands
+            .iter()
+            .any(|command| matches!(command, NetworkCommand::ReplyIdentityProof { .. }))
+    );
+    let remote_proof = serve_local_identity_proof(
+        &remote_hello,
+        &local_signed,
+        &proof_request,
+        &mut remote_resolver,
+        NOW,
+    )
+    .unwrap()
+    .unwrap();
+    let admitted = admission.handle_event(
+        NetworkEvent::IdentityProofReceived {
+            connection_id,
+            proof: remote_proof,
+        },
+        NOW,
+    );
+    assert_eq!(
+        admitted.events,
+        vec![AdmittedNetworkEvent::PeerAdmitted {
+            connection_id,
+            peer_id: remote_device.peer_id(),
+            agent_id: local_root.agent_id(),
+        }]
+    );
+    assert!(
+        admission
+            .authorize_control_command(
+                connection_id,
+                [93; 16],
+                WireFrame::Ack(Ack {
+                    message_id: Id128([94; 16]),
+                    received_id: Id128([95; 16]),
+                }),
+                NOW,
+            )
+            .is_ok()
+    );
+
+    let control = WireFrame::Ack(Ack {
+        message_id: Id128([96; 16]),
+        received_id: Id128([97; 16]),
+    });
+    let delivered = admission.handle_event(
+        NetworkEvent::UnverifiedControlRequest {
+            connection_id,
+            response_id: [98; 16],
+            request: control.clone(),
+        },
+        NOW,
+    );
+    assert_eq!(
+        delivered.events,
+        vec![AdmittedNetworkEvent::ControlRequest {
+            connection_id,
+            agent_id: local_root.agent_id(),
+            response_id: [98; 16],
+            request: control,
+        }]
+    );
+    drop(admission);
+    drop(local_database);
 }

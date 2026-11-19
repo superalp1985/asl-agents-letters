@@ -75,6 +75,10 @@ impl AppPaths {
         self.identity.join("device-key.dpapi")
     }
 
+    pub fn agent_root_key(&self) -> PathBuf {
+        self.identity.join("agent-root.dpapi")
+    }
+
     pub fn snapshots(&self) -> &Path {
         &self.snapshots
     }

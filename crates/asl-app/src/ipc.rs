@@ -54,6 +54,7 @@ impl IpcRole {
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
             ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29)
+                | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (
                     Self::Net | Self::Worker | Self::Extractor,
@@ -231,6 +232,9 @@ pub enum IpcMessage {
     },
     NetworkError {
         code: NetworkErrorCode,
+    },
+    CloseConnection {
+        connection_id: [u8; 16],
     },
 }
 
@@ -603,6 +607,10 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.push(*code as u8);
             31
         }
+        IpcMessage::CloseConnection { connection_id } => {
+            body.extend_from_slice(connection_id);
+            32
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -787,6 +795,9 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
         }),
         31 if body.len() == 1 => Ok(IpcMessage::NetworkError {
             code: NetworkErrorCode::from_wire(body[0])?,
+        }),
+        32 if body.len() == 16 => Ok(IpcMessage::CloseConnection {
+            connection_id: body.try_into().unwrap(),
         }),
         _ => Err(AslError::InvalidMessage),
     }
@@ -1025,6 +1036,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         29 => 32 + BULK_RESPONSE_HEADER_IPC_BYTES + MAX_IPC_BULK_PAYLOAD_BYTES,
         30 => 34,
         31 => 1,
+        32 => 16,
         _ => return None,
     })
 }
@@ -1250,6 +1262,9 @@ mod tests {
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
                 peer_id: DeviceIdentity::generate().unwrap().peer_id(),
             },
+            IpcMessage::CloseConnection {
+                connection_id: [11; 16],
+            },
             IpcMessage::OperationAccepted {
                 operation_id: [10; 16],
             },
@@ -1360,6 +1375,7 @@ mod tests {
                 | IpcMessage::Ping { .. }
                 | IpcMessage::Listen { .. }
                 | IpcMessage::Dial { .. }
+                | IpcMessage::CloseConnection { .. }
                 | IpcMessage::SendControl { .. }
                 | IpcMessage::ReplyControl { .. }
                 | IpcMessage::SendBulk { .. }

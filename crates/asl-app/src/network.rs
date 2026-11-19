@@ -12,6 +12,7 @@ use asl_types::{
 
 use crate::{
     ipc::{IpcMessage, NetworkErrorCode, NetworkProtocol},
+    profile::{AdmittedNetworkEvent, CoreAdmission},
     supervisor::Supervisor,
 };
 
@@ -27,6 +28,9 @@ pub enum NetworkCommand {
         kind: TransportKind,
         address: SocketAddr,
         peer_id: PeerId,
+    },
+    CloseConnection {
+        connection_id: [u8; 16],
     },
     RequestIdentityProof {
         connection_id: [u8; 16],
@@ -83,6 +87,9 @@ impl NetworkCommand {
                 address,
                 peer_id,
             },
+            Self::CloseConnection { connection_id } => {
+                IpcMessage::CloseConnection { connection_id }
+            }
             Self::RequestIdentityProof {
                 connection_id,
                 request,
@@ -288,13 +295,107 @@ impl TryFrom<IpcMessage> for NetworkEvent {
 }
 
 impl Supervisor {
+    pub fn listen_network(
+        &mut self,
+        operation_id: [u8; 16],
+        kind: TransportKind,
+        address: SocketAddr,
+    ) -> Result<(), AslError> {
+        self.send_network_command(NetworkCommand::Listen {
+            operation_id,
+            kind,
+            address,
+        })
+    }
+
+    pub fn dial_network(
+        &mut self,
+        operation_id: [u8; 16],
+        kind: TransportKind,
+        address: SocketAddr,
+        peer_id: PeerId,
+    ) -> Result<(), AslError> {
+        self.send_network_command(NetworkCommand::Dial {
+            operation_id,
+            kind,
+            address,
+            peer_id,
+        })
+    }
+
     /// Commands are Core-only. Control payloads remain untrusted until the
     /// caller's per-connection DeviceSession has admitted the peer.
-    pub fn send_network_command(&mut self, command: NetworkCommand) -> Result<(), AslError> {
+    pub(crate) fn send_network_command(&mut self, command: NetworkCommand) -> Result<(), AslError> {
         self.send_network_ipc(command.into_ipc())
     }
 
-    pub fn receive_network_event(&mut self, timeout: Duration) -> Result<NetworkEvent, AslError> {
+    pub(crate) fn receive_network_event(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<NetworkEvent, AslError> {
         NetworkEvent::try_from(self.receive_network_ipc(timeout)?)
+    }
+
+    pub fn receive_admitted_network_event(
+        &mut self,
+        admission: &mut CoreAdmission,
+        timeout: Duration,
+        now_ms: u64,
+    ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
+        let event = self.receive_network_event(timeout)?;
+        let batch = admission.handle_event(event, now_ms);
+        for command in batch.commands {
+            self.send_network_command(command)?;
+        }
+        Ok(batch.events)
+    }
+
+    pub fn send_admitted_network_command(
+        &mut self,
+        admission: &mut CoreAdmission,
+        command: NetworkCommand,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let authorized = match &command {
+            NetworkCommand::SendControl {
+                connection_id,
+                request_id,
+                request,
+            } => admission.authorize_control_command(
+                *connection_id,
+                *request_id,
+                request.clone(),
+                now_ms,
+            )?,
+            NetworkCommand::ReplyControl {
+                connection_id,
+                response_id,
+                response,
+            } => admission.authorize_control_reply(
+                *connection_id,
+                *response_id,
+                response.clone(),
+                now_ms,
+            )?,
+            NetworkCommand::SendBulk {
+                connection_id,
+                request,
+            } => admission.authorize_bulk_command(*connection_id, request.clone(), now_ms)?,
+            NetworkCommand::ReplyBulk {
+                connection_id,
+                response_id,
+                response,
+            } => admission.authorize_bulk_reply(
+                *connection_id,
+                *response_id,
+                response.clone(),
+                now_ms,
+            )?,
+            _ => return Err(AslError::InvalidMessage),
+        };
+        if authorized != command {
+            return Err(AslError::InvalidMessage);
+        }
+        self.send_network_command(command)
     }
 }

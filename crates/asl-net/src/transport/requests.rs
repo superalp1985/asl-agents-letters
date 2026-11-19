@@ -184,7 +184,7 @@ impl LocalTransport {
             .map_err(|_| io::ErrorKind::BrokenPipe.into())
     }
 
-    fn require_live(&self, connection: &AuthenticatedPeer) -> io::Result<()> {
+    pub(super) fn require_live(&self, connection: &AuthenticatedPeer) -> io::Result<()> {
         if !connection.is_live()
             || self
                 .live

@@ -80,6 +80,10 @@ impl DeviceSession {
         }
     }
 
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer
+    }
+
     pub fn connection_id(&self) -> Option<LocalConnectionId> {
         match self.transport.as_ref() {
             Some(ConnectionBinding::InProcess(connection)) => Some(connection.connection_id()),

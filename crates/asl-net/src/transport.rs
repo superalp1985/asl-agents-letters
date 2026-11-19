@@ -277,6 +277,17 @@ impl LocalTransport {
             .map_err(dial_error)
     }
 
+    /// Close only the authenticated connection represented by this handle.
+    pub fn close_connection(&mut self, connection: &AuthenticatedPeer) -> io::Result<()> {
+        self.require_live(connection)?;
+        self.requests.close_connection(connection.connection_id);
+        if self.swarm.close_connection(connection.connection_id.0) {
+            Ok(())
+        } else {
+            Err(io::ErrorKind::NotConnected.into())
+        }
+    }
+
     /// Failed inbound handshakes are reported without stopping the listener.
     pub async fn next_event(&mut self) -> io::Result<TransportEvent> {
         require_runtime()?;

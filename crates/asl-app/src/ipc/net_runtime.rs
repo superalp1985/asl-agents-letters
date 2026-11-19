@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Stdin, Stdout, Write},
     thread,
     time::{Duration, Instant},
@@ -94,6 +94,7 @@ struct NetworkBridge {
     transport: LocalTransport,
     connections: HashMap<[u8; 16], AuthenticatedPeer>,
     connection_handles: HashMap<LocalConnectionId, [u8; 16]>,
+    closing: HashSet<[u8; 16]>,
     responses: HashMap<[u8; 16], PendingResponse>,
     requests: HashMap<([u8; 16], [u8; 16], NetworkProtocol), PendingRequest>,
 }
@@ -104,6 +105,7 @@ impl NetworkBridge {
             transport,
             connections: HashMap::new(),
             connection_handles: HashMap::new(),
+            closing: HashSet::new(),
             responses: HashMap::new(),
             requests: HashMap::new(),
         }
@@ -146,11 +148,26 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::CloseConnection { connection_id } => {
+                self.close_connection(connection_id)
+                    .map_err(|error| error_code(&error))?;
+                Ok(false)
+            }
             IpcMessage::RequestIdentityProof {
                 connection_id,
                 request,
             } => {
                 let request_id = request.request_id.0;
+                if self.closing.contains(&connection_id) {
+                    self.send_request_failure(
+                        connection_id,
+                        request_id,
+                        NetworkProtocol::IdentityProof,
+                        NetworkErrorCode::Disconnected,
+                        writer,
+                    )?;
+                    return Ok(false);
+                }
                 let key = (connection_id, request_id, NetworkProtocol::IdentityProof);
                 if self.requests.contains_key(&key)
                     || self.requests.len() >= MAX_PENDING_IPC_REQUESTS
@@ -269,6 +286,21 @@ impl NetworkBridge {
         }
     }
 
+    fn close_connection(&mut self, connection_id: [u8; 16]) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Ok(());
+        }
+        let connection = self
+            .connections
+            .get(&connection_id)
+            .ok_or(io::ErrorKind::NotConnected)?;
+        self.transport.close_connection(connection)?;
+        self.closing.insert(connection_id);
+        self.responses
+            .retain(|_, response| response.connection_id != connection_id);
+        Ok(())
+    }
+
     fn send_request_failure<W: Write>(
         &self,
         connection_id: [u8; 16],
@@ -294,6 +326,9 @@ impl NetworkBridge {
         request: WireFrame,
         writer: &mut FrameWriter<W>,
     ) -> Result<(), NetworkErrorCode> {
+        if self.closing.contains(&connection_id) {
+            return Err(NetworkErrorCode::Disconnected);
+        }
         let key = (connection_id, request_id, NetworkProtocol::Control);
         if self.requests.contains_key(&key) {
             writer
@@ -357,6 +392,9 @@ impl NetworkBridge {
         request: BulkRequest,
         writer: &mut FrameWriter<W>,
     ) -> Result<(), NetworkErrorCode> {
+        if self.closing.contains(&connection_id) {
+            return Err(NetworkErrorCode::Disconnected);
+        }
         let request_id = request.request_id.0;
         let key = (connection_id, request_id, NetworkProtocol::Bulk);
         if self.requests.contains_key(&key) {
@@ -421,6 +459,9 @@ impl NetworkBridge {
         response_id: [u8; 16],
         proof: IdentityProof,
     ) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         let entry = self
             .responses
             .get(&response_id)
@@ -445,6 +486,9 @@ impl NetworkBridge {
         response_id: [u8; 16],
         response: WireFrame,
     ) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         let entry = self
             .responses
             .get(&response_id)
@@ -468,6 +512,9 @@ impl NetworkBridge {
         response_id: [u8; 16],
         response: BulkResponse,
     ) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         let entry = self
             .responses
             .get(&response_id)
@@ -508,6 +555,7 @@ impl NetworkBridge {
             }
             TransportEvent::Disconnected { connection_id, .. } => {
                 if let Some(handle) = self.connection_handles.remove(&connection_id) {
+                    self.closing.remove(&handle);
                     self.connections.remove(&handle);
                     self.responses
                         .retain(|_, response| response.connection_id != handle);
@@ -673,6 +721,9 @@ impl NetworkBridge {
         let Some(&connection_id) = self.connection_handles.get(&local_id) else {
             return Ok(());
         };
+        if self.closing.contains(&connection_id) {
+            return Ok(());
+        }
         let response_id = fresh_handle(&self.responses)?;
         self.responses.insert(
             response_id,

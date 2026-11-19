@@ -168,7 +168,7 @@ T05 实现记录（2026-11-17）：SQLite `open_store` 与 schema v1 迁移已�
 
 依赖 T05。创建 policy windows/dpapi 和 app identity 组合模块；测试用新生成身份，不读真实密钥。
 
-接口拆为 `AgentIdentity::generate()`、`agent_id()`、`issue_device_certificate(device_peer_id, serial, issued_at_ms, expires_at_ms)`、`verify_device_certificate(...)` 和独立 `DeviceIdentity::generate()`。身份根使用 secp256k1 ECDSA；证书按 `docs/03-protocol.md` 的规范字节构造，经 Keccak-256 后签名，65 字节签名为 `r || s || v`，其中 `s` 为 low-S、`v` 为 27/28。AgentId 按 `specs/identity-registry-v1.md` 派生。根密钥及设备私钥使用 Windows 当前用户 DPAPI 保护；存储路径由调用方提供，创建使用 create-new，不覆盖旧身份。加载失败不静默生成新身份。此任务不把根密钥注入 net，也不把设备 PeerId 当作稳定联系人身份。具体 Rust 密码学 crate/API 须核实成熟度与许可后固定，不自写椭圆曲线逻辑。
+接口拆为 `AgentIdentity::generate()`、`load_or_create_protected(path)`、`agent_id()`、`issue_device_certificate(device_peer_id, serial, issued_at_ms, expires_at_ms)`、`verify_device_certificate(...)` 和独立 `DeviceIdentity` 接口。身份根使用 secp256k1 ECDSA；证书按 `docs/03-protocol.md` 的规范字节构造，经 Keccak-256 后签名，65 字节签名为 `r || s || v`，其中 `s` 为 low-S、`v` 为 27/28。AgentId 按 `specs/identity-registry-v1.md` 派生。根密钥及设备私钥使用 Windows 当前用户 DPAPI 保护；存储路径由调用方提供，创建使用 create-new，不覆盖旧身份。`load_or_create_protected` 只在文件缺失时创建；现有文件损坏或类型不符时拒绝，不静默替换身份。此任务不把根密钥注入 net，也不把设备 PeerId 当作稳定联系人身份。具体 Rust 密码学 crate/API 须核实成熟度与许可后固定，不自写椭圆曲线逻辑。
 
 ```rust
 let root = AgentIdentity::generate().unwrap();
@@ -186,7 +186,7 @@ assert!(verify_device_certificate(
 
 验收：重启后 AgentId 不变；设备密钥轮换后新 PeerId 由同一身份根认证；签名篡改、错误 AgentId/PeerId、过期/回滚 serial 均拒绝；net 只接收设备密钥内存副本且仅经私有 IPC；worker、日志、诊断无密钥；重置必须显式授权。PAKE/签名算法只复用已审查库，不自创协议。
 
-T06 实现记录（2026-11-17）：已固定并编译 `k256 0.14.0`、`sha3 0.12.0`、`rand 0.10.4`；完成根身份/AgentId 派生、独立 libp2p Ed25519 设备密钥、设备证书签发与本地验证、Windows 当前用户 DPAPI 保护文件、由 `AppPaths` 数据根派生的 identity 目录。工作区测试、Clippy、格式检查通过。尚未实现或验收：身份链最终化状态/撤销证明、net 私有 IPC 密钥交付、设备证书目录/链 commitment、PAKE、跨用户/跨机器恢复及迁移 UI。DPAPI 仅完成当前用户本机往返测试；身份与路径模块仍需独立安全复核。
+T06 实现记录（更新于 2026-11-19）：已固定并编译 `k256 0.14.0`、`sha3 0.12.0`、`rand 0.10.4`；完成根身份/AgentId 派生、独立 libp2p Ed25519 设备密钥、设备证书签发与本地验证、Windows 当前用户 DPAPI 保护文件、由 `AppPaths` 数据根派生的 identity 目录。`Supervisor` 启动时通过 create-once 接口加载或生成根身份与设备身份；现有密钥文件损坏时拒绝启动，不自动换身份。此处只创建本机身份，不代表已登记到链或可完成网络准入。尚未实现或验收：身份链最终化状态/撤销证明、设备证书目录/链 commitment、PAKE、跨用户/跨机器恢复及迁移 UI。DPAPI 仅完成当前用户本机往返测试；身份与路径模块仍需独立安全复核。
 
 ### T06a — 最小公共链身份合约（已实现，2026-11-17）
 
@@ -329,6 +329,10 @@ T14 Net/Core IPC wire 切片（2026-11-19）：为传输 PeerId、断开事件�
 T14 设备身份启动交付切片（2026-11-19）：首次启动仅在 DPAPI 设备密钥文件缺失时生成 Ed25519 身份，以独占新建方式保存；损坏或非普通文件拒绝且不自动更换身份。Supervisor 将 protobuf 密钥通过现有私有继承输入管道的 `ASLK` v1 有界前导一次性交给 Net，最大 1 KiB；临时序列化、解密和管道接收缓冲均使用 `Zeroizing`，密钥未加入可 Clone/Debug 的 IPC 消息。Net 解码后从密钥导出 PeerId 并返回专用 `NetReady`；Supervisor 精确比对本机 PeerId，缺帧、错身份或 IPC 错误均停止 Net。新增往返、错误版本、畸形/超限预读、错 PeerId、本机持久化和损坏文件拒绝测试。Windows `asl-app` Supervisor 集成测试实际启动 AppContainer Net 并通过该握手。该切片只验证密钥交付与本机设备身份一致性；Net 尚未运行 libp2p driver、连接事件或身份证明转发，不代表公网身份验证或 T14 关闭。
 
 T14 Net/Core 运行时接线切片（2026-11-19）：Net 子进程现以 Tokio 驱动既有 `LocalTransport`，Core 可经 Supervisor 下发 TCP/QUIC loopback 监听、拨号、身份证明、控制和 bulk 命令，并接收有界结构化事件。连接 handle 由 Net 随机生成并映射到实际活动连接；request token 与 connection handle、协议及 Core request ID 关联，回复 handle 绑定来源连接/协议并限时有效。IPC 固定字段编码，不新增自由文本；地址只在传输层当前 loopback 策略允许后执行。Core 暴露的控制/bulk 入站事件明确命名为 `Unverified...`；`DeviceSession` 增加 IPC handle 绑定的证明请求/完成接口，错误连接或 request ID 会关闭会话。新增 Net driver 双向控制请求/响应句柄往返，以及 Windows AppContainer 子进程拒绝非 loopback 监听并返回关联操作失败事件的覆盖。此切片没有将 `DeviceSession` 自动接入 Supervisor 事件循环，也没有生产监听配置、公网策略、DHT、mDNS 或完整公网互测；因此普通业务帧仍须由后续 Core 身份闸门处理，T14 仍未关闭。
+
+T14 Core 网络身份准入协调器切片（2026-11-19）：新增 `CoreAdmission`，显式协调活动连接的 Hello、身份链证明、签名设备目录和控制/bulk 收发。核验前只生成握手命令或关闭命令，不向 Agent 派发业务事件；出站业务控制/bulk 命令也必须通过同连接身份状态重验。新增 kind 32 `CloseConnection`，失败只关闭对应连接。Hello 请求应答先于身份证明请求派发；无效/过期握手请求失败会清理会话。该协调器目前由 Core 调用方显式构造，基础 `Supervisor::run` 尚未加载 registry/链状态 resolver、已签名设备目录或构造有效 Hello；本机根身份的存在不代表其已经锚定到链或获准入网。loopback 以外地址策略、公网运行、DHT/mDNS 和完整 T14 仍未验收。
+
+T14 Core 准入与 T06 根身份启动模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 159 项，1 项忽略；`cargo test -p asl-net --all-targets --locked` 通过 25 项，1 项忽略。`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。覆盖范围仅为 `asl-app`、`asl-net` 与格式/静态 lint，不代表 workspace 全量测试或 T14 公网/生产验收。Cargo 提示 `proc-macro-error2 2.0.1` 含未来 Rust 版本兼容性问题；本轮未处理该无关依赖告警。
 
 ### T15 — 引导、中继、NAT 与基础设施
 

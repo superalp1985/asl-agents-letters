@@ -92,6 +92,26 @@ impl AgentIdentity {
         })
     }
 
+    pub fn load_or_create_protected(path: &Path) -> Result<Self, AslError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Self::load_protected(path),
+            Ok(_) => Err(AslError::InvalidIdentity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let identity = Self::generate()?;
+                match identity.save_protected_new(path) {
+                    Ok(()) => Ok(identity),
+                    Err(AslError::Io(error))
+                        if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
+                        Self::load_protected(path)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn issue_device_certificate(
         &self,
         peer_id: PeerId,

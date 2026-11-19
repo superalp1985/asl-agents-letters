@@ -218,6 +218,13 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
             },
         ),
         (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::CloseConnection {
+                connection_id: [49; 16],
+            },
+        ),
+        (
             IpcRole::Net,
             IpcRole::Core,
             IpcMessage::OperationAccepted {
@@ -357,4 +364,9 @@ fn net_driver_ipc_rejects_wrong_roles_and_non_control_payloads() {
         connection_id: [57; 16],
     };
     assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &peer_event).is_err());
+
+    let close = IpcMessage::CloseConnection {
+        connection_id: [58; 16],
+    };
+    assert!(encode_frame(IpcRole::Net, IpcRole::Core, 1, &close).is_err());
 }
