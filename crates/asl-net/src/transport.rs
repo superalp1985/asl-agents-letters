@@ -1,7 +1,7 @@
-//! Explicit loopback endpoints only, pending the T16 address policy.
+//! Authenticated transports with policy-filtered IP endpoints.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     convert::Infallible,
     hash::{Hash, Hasher},
     io,
@@ -11,9 +11,12 @@ use std::{
     time::Duration,
 };
 
+use crate::address_policy::{
+    AddressPolicy, allows_ip, allows_listen_ip, validate_multiaddr, validate_transport_address,
+};
 mod behaviour;
 mod requests;
-use behaviour::{AslBehaviour, BehaviourEvent};
+use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
 use requests::Requests;
 
 use asl_types::ids::PeerId;
@@ -26,6 +29,7 @@ use libp2p::{
     },
     futures::StreamExt,
     identity::Keypair,
+    mdns,
     multiaddr::Protocol,
     noise,
     request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
@@ -43,10 +47,11 @@ use crate::codec::{
     IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
 };
 
-const MAX_LISTENERS: usize = 4;
+const MAX_LISTENERS: usize = 16;
 const MAX_PENDING_INBOUND: usize = 8;
 const MAX_PENDING_OUTBOUND: usize = 8;
 const MAX_CONNECTIONS: usize = 16;
+const MAX_PENDING_DISCOVERY_DIALS: usize = 8;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
 const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
@@ -203,11 +208,16 @@ pub struct LocalTransport {
     swarm: Swarm<AslBehaviour>,
     listeners: HashSet<ListenerId>,
     requests: Requests,
+    address_policy: AddressPolicy,
+    policy_configured: bool,
+    network_started: bool,
+    pending_discovery_dials: HashSet<libp2p::PeerId>,
 }
 
 impl LocalTransport {
     pub fn new(identity: Keypair) -> io::Result<Self> {
-        let behaviour = AslBehaviour::new();
+        let local_peer_id = identity.public().to_peer_id();
+        let behaviour = AslBehaviour::new(local_peer_id);
         let swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_tcp(tcp::Config::default(), noise::Config::new, || {
@@ -235,21 +245,95 @@ impl LocalTransport {
             swarm,
             listeners: HashSet::new(),
             requests: Requests::new(),
+            address_policy: AddressPolicy::LoopbackOnly,
+            policy_configured: false,
+            network_started: false,
+            pending_discovery_dials: HashSet::new(),
         })
     }
 
-    /// Port zero requests an ephemeral port; `Listening` reports the bound endpoint.
+    /// Port zero requests an ephemeral port; `Listening` reports each bound endpoint.
     pub fn listen(&mut self, kind: TransportKind, addr: SocketAddr) -> io::Result<()> {
-        let endpoint = loopback_endpoint(kind, addr)?;
-        if self.listeners.len() >= MAX_LISTENERS {
-            return Err(io::Error::other("listener limit reached"));
+        if !allows_listen_ip(self.address_policy, addr.ip()) {
+            return Err(io::ErrorKind::PermissionDenied.into());
         }
+        if addr.ip().is_unspecified() {
+            return self.listen_on_policy_interfaces(kind, addr.port());
+        }
+        self.validate_socket_scope(addr)?;
         require_runtime()?;
+        self.reserve_listener_capacity(1)?;
+        let endpoint = socket_endpoint(kind, addr)?;
         let id = self
             .swarm
             .listen_on(endpoint)
-            .map_err(|_| io::Error::other("cannot bind loopback endpoint"))?;
+            .map_err(|_| io::Error::other("cannot bind network listener"))?;
         self.listeners.insert(id);
+        self.network_started = true;
+        Ok(())
+    }
+
+    /// Bind every current interface allowed by policy. Wildcard listeners are never
+    /// handed to libp2p, so mDNS advertises concrete interface addresses only.
+    pub fn listen_on_policy_interfaces(
+        &mut self,
+        kind: TransportKind,
+        port: u16,
+    ) -> io::Result<()> {
+        let mut addresses = BTreeSet::new();
+        for interface in if_addrs::get_if_addrs()? {
+            let ip = interface.ip();
+            if ip.is_unspecified()
+                || !allows_ip(self.address_policy, ip)
+                || matches!(ip, IpAddr::V6(address) if address.is_unicast_link_local())
+            {
+                continue;
+            }
+            addresses.insert(SocketAddr::new(ip, port));
+        }
+        if addresses.is_empty() {
+            return Err(io::ErrorKind::AddrNotAvailable.into());
+        }
+        self.reserve_listener_capacity(addresses.len())?;
+        require_runtime()?;
+
+        let mut created = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let endpoint = socket_endpoint(kind, address)?;
+            match self.swarm.listen_on(endpoint) {
+                Ok(id) => created.push(id),
+                Err(_) => {
+                    for id in created {
+                        let _ = self.swarm.remove_listener(id);
+                        self.listeners.remove(&id);
+                    }
+                    return Err(io::Error::other("cannot bind policy-approved interface"));
+                }
+            }
+        }
+        self.listeners.extend(created);
+        self.network_started = true;
+        Ok(())
+    }
+
+    pub fn set_address_policy(&mut self, policy: AddressPolicy) -> io::Result<()> {
+        if self.policy_configured
+            || self.network_started
+            || !self.listeners.is_empty()
+            || !self.live.is_empty()
+        {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        if policy == self.address_policy {
+            self.policy_configured = true;
+            return Ok(());
+        }
+        if policy.includes_lan() {
+            require_runtime()?;
+        }
+        self.swarm.behaviour_mut().set_address_policy(policy)?;
+        self.address_policy = policy;
+        self.policy_configured = true;
         Ok(())
     }
 
@@ -260,7 +344,11 @@ impl LocalTransport {
         addr: SocketAddr,
         expected: &PeerId,
     ) -> io::Result<()> {
-        let endpoint = loopback_endpoint(kind, addr)?;
+        if !allows_ip(self.address_policy, addr.ip()) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.validate_socket_scope(addr)?;
+        let endpoint = socket_endpoint(kind, addr)?;
         let peer = libp2p::PeerId::from_bytes(expected.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         if addr.port() == 0 || peer == *self.swarm.local_peer_id() {
@@ -274,7 +362,9 @@ impl LocalTransport {
                     .addresses(vec![endpoint])
                     .build(),
             )
-            .map_err(dial_error)
+            .map_err(dial_error)?;
+        self.network_started = true;
+        Ok(())
     }
 
     /// Close only the authenticated connection represented by this handle.
@@ -306,6 +396,7 @@ impl LocalTransport {
                     connection_id,
                     ..
                 } => {
+                    self.pending_discovery_dials.remove(&peer_id);
                     let peer = device_peer(peer_id)?;
                     let connection_id = LocalConnectionId(connection_id);
                     let owner = Arc::new(());
@@ -347,24 +438,106 @@ impl LocalTransport {
                         return Ok(event);
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
+                    self.handle_discovery(event);
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Admission(never)) => match never {},
                 SwarmEvent::ListenerClosed { listener_id, .. } => {
                     self.listeners.remove(&listener_id);
-                    return Err(io::Error::other("loopback listener closed"));
+                    return Err(io::Error::other("network listener closed"));
                 }
                 SwarmEvent::ListenerError { .. } => {
-                    return Err(io::Error::other("loopback listener error"));
+                    return Err(io::Error::other("network listener error"));
                 }
                 SwarmEvent::IncomingConnectionError { .. } => {
                     return Ok(TransportEvent::InboundRejected);
                 }
-                SwarmEvent::OutgoingConnectionError { error, .. } => {
+                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    let was_discovery = match peer_id {
+                        Some(peer_id) => self.pending_discovery_dials.remove(&peer_id),
+                        None => {
+                            let had_discovery_dials = !self.pending_discovery_dials.is_empty();
+                            self.pending_discovery_dials.clear();
+                            had_discovery_dials
+                        }
+                    };
+                    if was_discovery {
+                        continue;
+                    }
                     return Err(dial_error(error));
                 }
                 _ => {}
             }
         }
     }
+
+    fn validate_socket_scope(&self, address: SocketAddr) -> io::Result<()> {
+        if matches!(address, SocketAddr::V6(value) if value.scope_id() != 0 || value.flowinfo() != 0)
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(())
+    }
+
+    fn reserve_listener_capacity(&self, requested: usize) -> io::Result<()> {
+        if self.listeners.len().saturating_add(requested) > MAX_LISTENERS {
+            return Err(io::Error::other("listener limit reached"));
+        }
+        Ok(())
+    }
+
+    fn handle_discovery(&mut self, event: mdns::Event) {
+        let mdns::Event::Discovered(peers) = event else {
+            return;
+        };
+
+        for (peer_id, address) in peers {
+            if self.swarm.is_connected(&peer_id)
+                || self.pending_discovery_dials.contains(&peer_id)
+                || self.pending_discovery_dials.len() >= MAX_PENDING_DISCOVERY_DIALS
+            {
+                continue;
+            }
+
+            let Some(address) = policy_approved_discovery_address(
+                self.address_policy,
+                self.swarm.local_peer_id(),
+                peer_id,
+                address,
+            ) else {
+                continue;
+            };
+            if self
+                .swarm
+                .dial(
+                    DialOpts::peer_id(peer_id)
+                        .condition(PeerCondition::DisconnectedAndNotDialing)
+                        .addresses(vec![address])
+                        .build(),
+                )
+                .is_ok()
+            {
+                self.pending_discovery_dials.insert(peer_id);
+                self.network_started = true;
+            }
+        }
+    }
+}
+
+fn policy_approved_discovery_address(
+    policy: AddressPolicy,
+    local_peer: &libp2p::PeerId,
+    peer: libp2p::PeerId,
+    address: Multiaddr,
+) -> Option<Multiaddr> {
+    if peer == *local_peer || validate_multiaddr(policy, &peer, &address).is_err() {
+        return None;
+    }
+    Some(if matches!(address.iter().last(), Some(Protocol::P2p(_))) {
+        address
+    } else {
+        address.with(Protocol::P2p(peer))
+    })
 }
 
 fn require_runtime() -> io::Result<()> {
@@ -388,14 +561,7 @@ fn dial_error(error: DialError) -> io::Error {
     .into()
 }
 
-fn loopback_endpoint(kind: TransportKind, addr: SocketAddr) -> io::Result<Multiaddr> {
-    if !addr.ip().is_loopback() {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    // IP multiaddrs cannot represent either of these IPv6 socket fields.
-    if matches!(addr, SocketAddr::V6(v6) if v6.scope_id() != 0 || v6.flowinfo() != 0) {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
+pub(crate) fn socket_endpoint(kind: TransportKind, addr: SocketAddr) -> io::Result<Multiaddr> {
     let ip = Multiaddr::from(addr.ip());
     Ok(match kind {
         TransportKind::Tcp => ip.with(Protocol::Tcp(addr.port())),
@@ -417,20 +583,47 @@ fn bound_endpoint(addr: &Multiaddr) -> Option<(TransportKind, SocketAddr)> {
         }
         _ => return None,
     };
-    (ip.is_loopback() && port != 0 && parts.next().is_none())
-        .then_some((kind, SocketAddr::new(ip, port)))
+    if port == 0 {
+        return None;
+    }
+    match parts.next() {
+        Some(Protocol::P2p(_)) if parts.next().is_none() => {}
+        None => {}
+        _ => return None,
+    }
+    (ip.is_unspecified() || !ip.is_multicast()).then_some((kind, SocketAddr::new(ip, port)))
+}
+
+fn valid_inbound_endpoint(policy: AddressPolicy, address: &Multiaddr, local: bool) -> bool {
+    let Some((_, socket)) = bound_endpoint(address) else {
+        return false;
+    };
+    if local {
+        allows_listen_ip(policy, socket.ip())
+    } else {
+        validate_transport_address(policy, address).is_ok()
+    }
 }
 
 // Keep only live identities. Each pending handshake owns its own reservation,
 // even if an inbound and an outbound handshake involve the same peer.
-#[derive(Default)]
 struct Admission {
     established: HashSet<libp2p::PeerId>,
     pending_outgoing: HashSet<ConnectionId>,
     pending_incoming: HashSet<ConnectionId>,
+    policy: AddressPolicy,
 }
 
 impl Admission {
+    fn new(policy: AddressPolicy) -> Self {
+        Self {
+            established: HashSet::new(),
+            pending_outgoing: HashSet::new(),
+            pending_incoming: HashSet::new(),
+            policy,
+        }
+    }
+
     fn at_capacity(&self) -> bool {
         self.established.len() + self.pending_outgoing.len() + self.pending_incoming.len()
             >= MAX_CONNECTIONS
@@ -457,8 +650,10 @@ impl NetworkBehaviour for Admission {
         if self.pending_incoming.len() >= MAX_PENDING_INBOUND || self.at_capacity() {
             return Err(ConnectionDenied::new("inbound limit reached"));
         }
-        if bound_endpoint(local).is_none() || bound_endpoint(remote).is_none() {
-            return Err(ConnectionDenied::new("not a loopback connection"));
+        if !valid_inbound_endpoint(self.policy, local, true)
+            || !valid_inbound_endpoint(self.policy, remote, false)
+        {
+            return Err(ConnectionDenied::new("inbound address denied by policy"));
         }
         self.pending_incoming.insert(id);
         Ok(())
@@ -474,9 +669,14 @@ impl NetworkBehaviour for Admission {
         if self.pending_outgoing.len() >= MAX_PENDING_OUTBOUND || self.at_capacity() {
             return Err(ConnectionDenied::new("outbound limit reached"));
         }
-        if peer.is_none() || !matches!(addresses, [addr] if bound_endpoint(addr).is_some()) {
+        let Some(peer) = peer else {
             return Err(ConnectionDenied::new(
-                "dial requires one loopback endpoint and peer",
+                "dial requires one policy-approved IP endpoint and peer",
+            ));
+        };
+        if !matches!(addresses, [addr] if validate_multiaddr(self.policy, &peer, addr).is_ok()) {
+            return Err(ConnectionDenied::new(
+                "dial requires one policy-approved IP endpoint and peer",
             ));
         }
         self.pending_outgoing.insert(id);
@@ -487,10 +687,15 @@ impl NetworkBehaviour for Admission {
         &mut self,
         id: ConnectionId,
         peer: libp2p::PeerId,
-        _: &Multiaddr,
-        _: &Multiaddr,
+        local: &Multiaddr,
+        remote: &Multiaddr,
     ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
         self.pending_incoming.remove(&id);
+        if !valid_inbound_endpoint(self.policy, local, true)
+            || !valid_inbound_endpoint(self.policy, remote, false)
+        {
+            return Err(ConnectionDenied::new("inbound address denied by policy"));
+        }
         self.admit(peer)
     }
 
@@ -498,11 +703,14 @@ impl NetworkBehaviour for Admission {
         &mut self,
         id: ConnectionId,
         peer: libp2p::PeerId,
-        _: &Multiaddr,
+        addr: &Multiaddr,
         _: Endpoint,
         _: PortUse,
     ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
         self.pending_outgoing.remove(&id);
+        if validate_multiaddr(self.policy, &peer, addr).is_err() {
+            return Err(ConnectionDenied::new("outbound address denied by policy"));
+        }
         self.admit(peer)
     }
 
@@ -552,11 +760,98 @@ mod tests {
     }
 
     fn endpoint() -> Multiaddr {
-        loopback_endpoint(
+        socket_endpoint(
             TransportKind::Tcp,
             SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 1).into(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn selecting_the_default_policy_locks_out_later_scope_changes() {
+        let mut transport = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
+        transport
+            .set_address_policy(AddressPolicy::LoopbackOnly)
+            .unwrap();
+
+        assert_eq!(
+            transport
+                .set_address_policy(AddressPolicy::Hybrid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn inbound_endpoints_obey_local_and_remote_address_scopes() {
+        let lan_listener =
+            socket_endpoint(TransportKind::Tcp, "192.168.1.2:4001".parse().unwrap()).unwrap();
+        let wildcard_listener =
+            socket_endpoint(TransportKind::Tcp, "0.0.0.0:4001".parse().unwrap()).unwrap();
+        let lan_peer =
+            socket_endpoint(TransportKind::Tcp, "10.0.0.4:4002".parse().unwrap()).unwrap();
+        let public_peer =
+            socket_endpoint(TransportKind::Tcp, "8.8.8.8:4002".parse().unwrap()).unwrap();
+
+        assert!(valid_inbound_endpoint(
+            AddressPolicy::LanOnly,
+            &lan_listener,
+            true
+        ));
+        assert!(valid_inbound_endpoint(
+            AddressPolicy::LanOnly,
+            &wildcard_listener,
+            true
+        ));
+        assert!(valid_inbound_endpoint(
+            AddressPolicy::LanOnly,
+            &lan_peer,
+            false
+        ));
+        assert!(!valid_inbound_endpoint(
+            AddressPolicy::LanOnly,
+            &public_peer,
+            false
+        ));
+        assert!(valid_inbound_endpoint(
+            AddressPolicy::InternetOnly,
+            &public_peer,
+            false
+        ));
+        assert!(!valid_inbound_endpoint(
+            AddressPolicy::InternetOnly,
+            &lan_peer,
+            false
+        ));
+    }
+
+    #[test]
+    fn discovery_filters_scope_identity_and_self_before_dialing() {
+        let local = peer();
+        let remote = peer();
+        let lan_addr: Multiaddr = "/ip4/192.168.1.10/tcp/4001".parse().unwrap();
+        let public_addr: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().unwrap();
+        let wrong_peer: Multiaddr = format!("/ip4/192.168.1.10/tcp/4001/p2p/{local}")
+            .parse()
+            .unwrap();
+
+        let accepted =
+            policy_approved_discovery_address(AddressPolicy::LanOnly, &local, remote, lan_addr)
+                .unwrap();
+        assert_eq!(accepted.iter().last(), Some(Protocol::P2p(remote)));
+        assert!(
+            policy_approved_discovery_address(AddressPolicy::LanOnly, &local, remote, public_addr)
+                .is_none()
+        );
+        assert!(
+            policy_approved_discovery_address(AddressPolicy::LanOnly, &local, remote, wrong_peer)
+                .is_none()
+        );
+        assert!(
+            policy_approved_discovery_address(AddressPolicy::LanOnly, &local, local, accepted)
+                .is_none()
+        );
     }
 
     #[test]
@@ -612,7 +907,7 @@ mod tests {
 
     #[test]
     fn inbound_connection_does_not_release_a_pending_dial_for_the_same_peer() {
-        let mut admission = Admission::default();
+        let mut admission = Admission::new(AddressPolicy::LoopbackOnly);
         let peer = peer();
         let addr = endpoint();
         let inbound = ConnectionId::new_unchecked(1);
@@ -657,7 +952,7 @@ mod tests {
 
     #[test]
     fn inbound_outbound_and_established_share_one_connection_budget() {
-        let mut admission = Admission::default();
+        let mut admission = Admission::new(AddressPolicy::LoopbackOnly);
         let addr = endpoint();
         let mut incoming = 1..;
         let mut outgoing = MAX_CONNECTIONS + 1..;

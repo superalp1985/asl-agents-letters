@@ -1,29 +1,18 @@
 schema_version = 1
-mode = "bootstrap-relay"
+mode = "relay-only"
 data_root = "/var/lib/asl-infra"
-identity_file = "/var/lib/asl-infra/identity.key"
+identity_file = "identity.key"
 listen = [
   "/ip4/0.0.0.0/tcp/4001",
   "/ip4/0.0.0.0/udp/4001/quic-v1"
 ]
-bootstrap_multiaddrs = []
-
-[dht]
-protocol = "/asl/kad/1.0.0"
-max_records = 10000
-max_bytes = 67108864
-max_record_value_bytes = 8192
 
 [relay]
 enabled = true
 max_reservations = 128
+max_reservations_per_peer = 4
+reservation_duration_seconds = 3600
 max_circuits = 64
+max_circuits_per_peer = 4
 max_circuit_seconds = 300
 max_circuit_bytes = 134217728
-max_peer_bytes_per_hour = 8589934592
-max_total_bytes_per_hour = 107374182400
-
-[agent]
-enabled = false
-accept_file_shares = false
-model_providers = []

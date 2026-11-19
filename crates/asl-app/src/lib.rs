@@ -1,10 +1,12 @@
 pub mod chain;
 mod chain_refresh;
 pub mod identity;
+pub mod infrastructure;
 pub mod ipc;
 pub mod libraries;
 pub mod network;
 pub mod network_identity;
+pub mod network_settings;
 pub mod paths;
 pub mod profile;
 pub mod supervisor;

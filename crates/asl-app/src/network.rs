@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use asl_net::{
+    address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
     transport::TransportKind,
 };
@@ -61,6 +62,10 @@ pub enum NetworkCommand {
         connection_id: [u8; 16],
         response_id: [u8; 16],
         response: BulkResponse,
+    },
+    SetAddressPolicy {
+        operation_id: [u8; 16],
+        policy: AddressPolicy,
     },
 }
 
@@ -139,6 +144,13 @@ impl NetworkCommand {
                 connection_id,
                 response_id,
                 response,
+            },
+            Self::SetAddressPolicy {
+                operation_id,
+                policy,
+            } => IpcMessage::SetAddressPolicy {
+                operation_id,
+                policy,
             },
         }
     }
@@ -295,6 +307,17 @@ impl TryFrom<IpcMessage> for NetworkEvent {
 }
 
 impl Supervisor {
+    pub fn set_network_address_policy(
+        &mut self,
+        operation_id: [u8; 16],
+        policy: AddressPolicy,
+    ) -> Result<(), AslError> {
+        self.send_network_command(NetworkCommand::SetAddressPolicy {
+            operation_id,
+            policy,
+        })
+    }
+
     pub fn listen_network(
         &mut self,
         operation_id: [u8; 16],

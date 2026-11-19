@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 use asl_net::codec::{BulkRequest, BulkResponse};
 use asl_types::{
@@ -18,6 +21,10 @@ use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 
 const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
+const MAX_PENDING_PROOFS: usize = MAX_ADMISSION_CONNECTIONS;
+const PROOF_BUDGET_CAPACITY: u8 = 2;
+const PROOF_BUDGET_REFILL: Duration = Duration::from_millis(500);
+const MAX_QUEUED_PROOF_AGE: Duration = Duration::from_secs(10);
 
 pub struct CoreAdmission {
     local_hello: Hello,
@@ -25,6 +32,8 @@ pub struct CoreAdmission {
     local_controller: Option<[u8; 20]>,
     resolver: DurableIdentityResolver,
     peers: HashMap<[u8; 16], PeerAdmission>,
+    pending_proofs: VecDeque<[u8; 16]>,
+    proof_budget: ProofVerificationBudget,
 }
 
 struct PeerAdmission {
@@ -33,8 +42,50 @@ struct PeerAdmission {
     hello_response_seen: bool,
     remote_hello: Option<Hello>,
     pending_proof_id: Option<[u8; 16]>,
+    pending_proof: Option<QueuedProof>,
     history: Option<RecordHistory>,
     admitted_agent: Option<AgentId>,
+}
+
+struct QueuedProof {
+    proof: IdentityProof,
+    received_at: Instant,
+}
+
+struct ProofVerificationBudget {
+    tokens: u8,
+    last_refill: Instant,
+}
+
+impl ProofVerificationBudget {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: PROOF_BUDGET_CAPACITY,
+            last_refill: now,
+        }
+    }
+
+    fn try_acquire(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last_refill);
+        let intervals = elapsed.as_millis() / PROOF_BUDGET_REFILL.as_millis();
+        if intervals > 0 {
+            let refill = intervals.min(u128::from(PROOF_BUDGET_CAPACITY)) as u8;
+            self.tokens = self
+                .tokens
+                .saturating_add(refill)
+                .min(PROOF_BUDGET_CAPACITY);
+            let elapsed_intervals = intervals.min(u128::from(u32::MAX)) as u32;
+            self.last_refill = self
+                .last_refill
+                .checked_add(PROOF_BUDGET_REFILL * elapsed_intervals)
+                .unwrap_or(now);
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,6 +224,8 @@ impl CoreAdmission {
             local_controller: None,
             resolver,
             peers: HashMap::new(),
+            pending_proofs: VecDeque::new(),
+            proof_budget: ProofVerificationBudget::new(Instant::now()),
         })
     }
 
@@ -224,6 +277,18 @@ impl CoreAdmission {
         batch
     }
 
+    pub fn poll(&mut self, now_ms: u64) -> AdmissionBatch {
+        let mut batch = AdmissionBatch::default();
+        self.drain_proofs(now_ms, &mut batch);
+        batch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exhaust_proof_budget_for_test(&mut self) {
+        self.proof_budget.tokens = 0;
+        self.proof_budget.last_refill = Instant::now();
+    }
+
     /// Processes raw Net events and emits only handshake commands or events
     /// whose Agent identity has been revalidated for this exact connection.
     pub fn handle_event(&mut self, event: NetworkEvent, now_ms: u64) -> AdmissionBatch {
@@ -254,6 +319,8 @@ impl CoreAdmission {
                     peer.session.close();
                     agent
                 });
+                self.pending_proofs
+                    .retain(|pending| *pending != connection_id);
                 batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
                     connection_id,
                     agent_id,
@@ -290,7 +357,7 @@ impl CoreAdmission {
             NetworkEvent::IdentityProofReceived {
                 connection_id,
                 proof,
-            } => self.finish_proof(connection_id, proof, now_ms, &mut batch),
+            } => self.queue_proof(connection_id, proof, &mut batch),
             NetworkEvent::UnverifiedControlRequest {
                 connection_id,
                 response_id,
@@ -420,6 +487,7 @@ impl CoreAdmission {
                     .push(AdmittedNetworkEvent::NetworkError { code });
             }
         }
+        self.drain_proofs(now_ms, &mut batch);
         batch
     }
 
@@ -516,6 +584,7 @@ impl CoreAdmission {
                 hello_response_seen: false,
                 remote_hello: None,
                 pending_proof_id: None,
+                pending_proof: None,
                 history: None,
                 admitted_agent: None,
             },
@@ -596,6 +665,64 @@ impl CoreAdmission {
         });
     }
 
+    fn queue_proof(
+        &mut self,
+        connection_id: [u8; 16],
+        proof: IdentityProof,
+        batch: &mut AdmissionBatch,
+    ) {
+        let pending = self.peers.get(&connection_id).is_some_and(|peer| {
+            peer.pending_proof_id == Some(proof.request_id.0)
+                && peer.pending_proof.is_none()
+                && peer.history.is_some()
+        });
+        if !pending || self.pending_proofs.len() >= MAX_PENDING_PROOFS {
+            self.close(connection_id, batch);
+            return;
+        }
+        if let Some(peer) = self.peers.get_mut(&connection_id) {
+            peer.pending_proof = Some(QueuedProof {
+                proof,
+                received_at: Instant::now(),
+            });
+        }
+        self.pending_proofs.push_back(connection_id);
+    }
+
+    fn drain_proofs(&mut self, now_ms: u64, batch: &mut AdmissionBatch) {
+        loop {
+            let Some(connection_id) = self.pending_proofs.front().copied() else {
+                return;
+            };
+            let Some(queued) = self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.pending_proof.as_ref())
+            else {
+                self.pending_proofs.pop_front();
+                continue;
+            };
+            if queued.received_at.elapsed() >= MAX_QUEUED_PROOF_AGE {
+                self.pending_proofs.pop_front();
+                self.close(connection_id, batch);
+                continue;
+            }
+            if !self.proof_budget.try_acquire(Instant::now()) {
+                return;
+            }
+            self.pending_proofs.pop_front();
+            let Some(proof) = self
+                .peers
+                .get_mut(&connection_id)
+                .and_then(|peer| peer.pending_proof.take())
+                .map(|queued| queued.proof)
+            else {
+                continue;
+            };
+            self.finish_proof(connection_id, proof, now_ms, batch);
+        }
+    }
+
     fn finish_proof(
         &mut self,
         connection_id: [u8; 16],
@@ -603,22 +730,6 @@ impl CoreAdmission {
         now_ms: u64,
         batch: &mut AdmissionBatch,
     ) {
-        let pending = self
-            .peers
-            .get(&connection_id)
-            .is_some_and(|peer| peer.pending_proof_id == Some(proof.request_id.0));
-        if !pending {
-            self.close(connection_id, batch);
-            return;
-        }
-        if !self
-            .peers
-            .get(&connection_id)
-            .is_some_and(|peer| peer.history.is_some())
-        {
-            self.close(connection_id, batch);
-            return;
-        }
         let proof_succeeded = self.peers.get_mut(&connection_id).is_some_and(|peer| {
             peer.history.as_mut().is_some_and(|history| {
                 peer.session
@@ -677,6 +788,8 @@ impl CoreAdmission {
     }
 
     fn close(&mut self, connection_id: [u8; 16], batch: &mut AdmissionBatch) {
+        self.pending_proofs
+            .retain(|pending| *pending != connection_id);
         if let Some(mut peer) = self.peers.remove(&connection_id) {
             peer.session.close();
             batch
@@ -714,4 +827,36 @@ fn fresh_id() -> Result<[u8; 16], AslError> {
         }
     }
     Err(AslError::InvalidIdentity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_budget_limits_bursts_and_refills_at_two_per_second() {
+        let start = Instant::now();
+        let mut budget = ProofVerificationBudget::new(start);
+
+        assert!(budget.try_acquire(start));
+        assert!(budget.try_acquire(start));
+        assert!(!budget.try_acquire(start));
+        assert!(!budget.try_acquire(start + Duration::from_millis(499)));
+        assert!(budget.try_acquire(start + Duration::from_millis(500)));
+        assert!(!budget.try_acquire(start + Duration::from_millis(500)));
+        assert!(budget.try_acquire(start + Duration::from_secs(5)));
+        assert!(budget.try_acquire(start + Duration::from_secs(5)));
+        assert!(!budget.try_acquire(start + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn proof_budget_does_not_refill_when_time_moves_backwards() {
+        let start = Instant::now();
+        let mut budget = ProofVerificationBudget::new(start);
+
+        assert!(budget.try_acquire(start));
+        assert!(budget.try_acquire(start));
+        assert!(!budget.try_acquire(start - Duration::from_secs(1)));
+        assert!(budget.try_acquire(start + PROOF_BUDGET_REFILL));
+    }
 }

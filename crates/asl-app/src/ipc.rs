@@ -2,6 +2,7 @@ use std::env;
 use std::io::{Read, Write};
 
 use asl_net::{
+    address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
     transport::TransportKind,
 };
@@ -53,7 +54,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (
@@ -235,6 +236,10 @@ pub enum IpcMessage {
     },
     CloseConnection {
         connection_id: [u8; 16],
+    },
+    SetAddressPolicy {
+        operation_id: [u8; 16],
+        policy: AddressPolicy,
     },
 }
 
@@ -611,6 +616,14 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(connection_id);
             32
         }
+        IpcMessage::SetAddressPolicy {
+            operation_id,
+            policy,
+        } => {
+            body.extend_from_slice(operation_id);
+            body.push(address_policy_code(*policy));
+            33
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -799,6 +812,10 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
         32 if body.len() == 16 => Ok(IpcMessage::CloseConnection {
             connection_id: body.try_into().unwrap(),
         }),
+        33 if body.len() == 17 => Ok(IpcMessage::SetAddressPolicy {
+            operation_id: body[..16].try_into().unwrap(),
+            policy: decode_address_policy(body[16])?,
+        }),
         _ => Err(AslError::InvalidMessage),
     }
 }
@@ -975,6 +992,25 @@ fn decode_transport_kind(value: u8) -> Result<TransportKind, AslError> {
     }
 }
 
+fn address_policy_code(policy: AddressPolicy) -> u8 {
+    match policy {
+        AddressPolicy::LoopbackOnly => 1,
+        AddressPolicy::LanOnly => 2,
+        AddressPolicy::InternetOnly => 3,
+        AddressPolicy::Hybrid => 4,
+    }
+}
+
+fn decode_address_policy(value: u8) -> Result<AddressPolicy, AslError> {
+    match value {
+        1 => Ok(AddressPolicy::LoopbackOnly),
+        2 => Ok(AddressPolicy::LanOnly),
+        3 => Ok(AddressPolicy::InternetOnly),
+        4 => Ok(AddressPolicy::Hybrid),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
 fn append_socket_addr(body: &mut Vec<u8>, address: SocketAddr) -> Result<(), AslError> {
     match address.ip() {
         IpAddr::V4(ip) => {
@@ -1037,6 +1073,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         30 => 34,
         31 => 1,
         32 => 16,
+        33 => 17,
         _ => return None,
     })
 }
@@ -1265,6 +1302,10 @@ mod tests {
             IpcMessage::CloseConnection {
                 connection_id: [11; 16],
             },
+            IpcMessage::SetAddressPolicy {
+                operation_id: [26; 16],
+                policy: AddressPolicy::LanOnly,
+            },
             IpcMessage::OperationAccepted {
                 operation_id: [10; 16],
             },
@@ -1379,7 +1420,8 @@ mod tests {
                 | IpcMessage::SendControl { .. }
                 | IpcMessage::ReplyControl { .. }
                 | IpcMessage::SendBulk { .. }
-                | IpcMessage::ReplyBulk { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::ReplyBulk { .. }
+                | IpcMessage::SetAddressPolicy { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::RunTask { .. } => (IpcRole::Core, IpcRole::Worker),
                 IpcMessage::TaskResult { .. } | IpcMessage::TaskStarted { .. } => {
                     (IpcRole::Worker, IpcRole::Core)

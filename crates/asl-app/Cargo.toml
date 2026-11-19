@@ -27,6 +27,7 @@ blake3.workspace = true
 alloy-rpc-types-eth.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
+toml_edit = { version = "=0.25.19", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 eframe.workspace = true

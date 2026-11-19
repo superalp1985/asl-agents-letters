@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asl_net::transport::TransportKind;
 use asl_policy::sandbox::{
     BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
 };
@@ -14,17 +15,19 @@ use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
 };
+use rand::{TryRng, rngs::SysRng};
 
 use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
-    TaskStatus, WorkerOperation, write_device_identity_prelude,
+    NetworkErrorCode, TaskStatus, WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::network::{NetworkCommand, NetworkEvent};
 use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
+use crate::network_settings::NetworkSettingsV1;
 use crate::paths::AppPaths;
 use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 
@@ -58,6 +61,7 @@ impl Supervisor {
     }
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
+        let network_settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
         let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
         let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
         let device_peer_id = device_identity.peer_id();
@@ -65,7 +69,7 @@ impl Supervisor {
         let network_admission =
             load_network_admission(&paths, &agent_identity, device_peer_id.clone())?;
         let net = NetRuntime::start(&launcher, &device_identity)?;
-        Ok(Self {
+        let mut supervisor = Self {
             agent_identity,
             device_peer_id,
             libraries,
@@ -74,7 +78,49 @@ impl Supervisor {
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
-        })
+        };
+        supervisor.apply_network_settings(&network_settings)?;
+        Ok(supervisor)
+    }
+
+    fn apply_network_settings(&mut self, settings: &NetworkSettingsV1) -> Result<(), AslError> {
+        self.send_startup_network_operation(|operation_id| NetworkCommand::SetAddressPolicy {
+            operation_id,
+            policy: settings.address_policy(),
+        })?;
+
+        if !settings.listen_on_interfaces {
+            return Ok(());
+        }
+
+        for (kind, port) in [
+            (TransportKind::Tcp, settings.tcp_port),
+            (TransportKind::Quic, settings.quic_port),
+        ] {
+            self.send_startup_network_operation(|operation_id| NetworkCommand::Listen {
+                operation_id,
+                kind,
+                address: settings.listener_address(port),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn send_startup_network_operation(
+        &mut self,
+        command: impl FnOnce([u8; 16]) -> NetworkCommand,
+    ) -> Result<(), AslError> {
+        let mut operation_id = [0; 16];
+        for _ in 0..8 {
+            SysRng
+                .try_fill_bytes(&mut operation_id)
+                .map_err(|_| AslError::InvalidIdentity)?;
+            if operation_id != [0; 16] {
+                self.send_network_command(command(operation_id))?;
+                return self.net.wait_for_operation(operation_id, STARTUP_TIMEOUT);
+            }
+        }
+        Err(AslError::InvalidIdentity)
     }
 
     pub fn agent_id(&self) -> AgentId {
@@ -159,6 +205,15 @@ impl Supervisor {
         let mut next_ping = Instant::now();
         loop {
             self.process_chain_refresh()?;
+            if self.network_admission_status == NetworkAdmissionStatus::Active {
+                let now_ms = unix_time_ms()?;
+                let batch = self
+                    .admission
+                    .as_mut()
+                    .map(|admission| admission.poll(now_ms))
+                    .unwrap_or_default();
+                self.dispatch_admission_batch(batch, now_ms, &mut handler)?;
+            }
             let now = Instant::now();
             if now >= next_health_check {
                 self.libraries.check_health()?;
@@ -199,15 +254,25 @@ impl Supervisor {
                     None => reject_unadmitted_event(event),
                 }
             };
-            for command in batch.commands {
-                self.send_network_command(command)?;
-            }
-            for event in batch.events {
-                for command in handler(event) {
-                    self.send_admitted_network_command(command, now_ms)?;
-                }
+            self.dispatch_admission_batch(batch, now_ms, &mut handler)?;
+        }
+    }
+
+    fn dispatch_admission_batch(
+        &mut self,
+        batch: AdmissionBatch,
+        now_ms: u64,
+        handler: &mut impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+    ) -> Result<(), AslError> {
+        for command in batch.commands {
+            self.send_network_command(command)?;
+        }
+        for event in batch.events {
+            for command in handler(event) {
+                self.send_admitted_network_command(command, now_ms)?;
             }
         }
+        Ok(())
     }
 
     fn process_chain_refresh(&mut self) -> Result<(), AslError> {
@@ -331,6 +396,44 @@ impl NetRuntime {
     fn receive(&self, timeout: Duration) -> Result<IpcFrame, AslError> {
         self.receive_optional(timeout)?
             .ok_or(AslError::SandboxUnavailable)
+    }
+
+    fn wait_for_operation(
+        &mut self,
+        operation_id: [u8; 16],
+        timeout: Duration,
+    ) -> Result<(), AslError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AslError::SandboxUnavailable);
+            }
+            let Some(frame) = self.receive_optional(remaining)? else {
+                return Err(AslError::SandboxUnavailable);
+            };
+            match frame.message {
+                IpcMessage::OperationAccepted {
+                    operation_id: received,
+                } if received == operation_id => return Ok(()),
+                IpcMessage::OperationFailed {
+                    operation_id: received,
+                    code,
+                } if received == operation_id => {
+                    return Err(match code {
+                        NetworkErrorCode::InvalidCommand => AslError::PolicyDenied,
+                        _ => AslError::SandboxUnavailable,
+                    });
+                }
+                message if is_network_event(&message) => {
+                    if self.pending_network_events.len() >= MAX_PENDING_NETWORK_EVENTS {
+                        return Err(AslError::SandboxUnavailable);
+                    }
+                    self.pending_network_events.push_back(message);
+                }
+                _ => return Err(AslError::InvalidMessage),
+            }
+        }
     }
 
     fn receive_optional(&self, timeout: Duration) -> Result<Option<IpcFrame>, AslError> {
@@ -709,6 +812,49 @@ mod tests {
         assert_eq!(
             runtime
                 .receive_network_event_optional(Duration::from_secs(1))
+                .unwrap(),
+            Some(IpcMessage::NetworkError {
+                code: NetworkErrorCode::Transport
+            })
+        );
+    }
+
+    #[test]
+    fn startup_operation_wait_preserves_unrelated_network_events() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let operation_id = [43; 16];
+        sender
+            .send(Ok(IpcFrame {
+                role: IpcRole::Net,
+                sequence: 1,
+                message: IpcMessage::NetworkError {
+                    code: NetworkErrorCode::Transport,
+                },
+            }))
+            .unwrap();
+        sender
+            .send(Ok(IpcFrame {
+                role: IpcRole::Net,
+                sequence: 2,
+                message: IpcMessage::OperationAccepted { operation_id },
+            }))
+            .unwrap();
+        let mut runtime = NetRuntime {
+            child: None,
+            writer: None,
+            events: Some(receiver),
+            reader_thread: None,
+            next_nonce: 1,
+            pending_pong: None,
+            pending_network_events: VecDeque::new(),
+        };
+
+        runtime
+            .wait_for_operation(operation_id, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .receive_runtime_message_optional(Duration::ZERO)
                 .unwrap(),
             Some(IpcMessage::NetworkError {
                 code: NetworkErrorCode::Transport

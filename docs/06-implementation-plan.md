@@ -348,9 +348,21 @@ T14 周期链状态续验切片（2026-11-19）：新增独立链同步线程，
 
 T14 周期链状态续验模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 169 项、0 失败、1 项忽略；`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。验证范围为 `asl-app`/`asl-net`、固定链服务夹具、Core 身份续验、SQLite 持久化与格式/lint；未运行 workspace 全量测试、真实公网链服务、首次注册、远端身份批量续验或公网互通验收。Cargo 保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示，本轮未处理该无关依赖告警。
 
+T14 身份证明验证预算切片（2026-11-19）：Net 已解析并绑定连接的身份证明响应进入 Core 后，不再立即执行 MPT/签名目录验证；每个 Supervisor 共用一个单调时钟 token bucket，限制为每秒 2 份、突发最多 2 份。最多 16 份排队，按接收 FIFO 验证；Supervisor 每轮事件等待均泵送队列。排队期间连接仍处于待验证态，不能收发应用帧；排队超过 10 秒、断连或容量不符时关闭连接并清除其队列项。限速位于昂贵链/签名验证之前；网络 codec、子流数、请求总量及连接数仍由既有各层限制。该切片不降低链证明验证标准、不授予低额度旁路，也不改变线协议或地址策略。
+
+T14 身份证明验证预算模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 171 项、0 失败、1 项忽略；`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。新增单调预算测试覆盖突发上限、每秒补充、长空闲不累积额外额度及时钟回拨；Core 准入集成用例覆盖身份证明排队期间应用命令仍拒绝、额度补充后经轮询完成验证。测试/格式/lint 范围为 `asl-app`/`asl-net`。未运行 workspace 全量测试、真实公网/多运营商链服务、AppContainer 公网负载、72 小时运行或独立安全审计。Cargo 仍提示 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性问题。
+
+T16 地址策略、mDNS 与启动设置切片（2026-11-19）：地址分类现区分回环、私网、链路本地、全球单播和特殊用途网段；Swarm 入站本地/远端地址、出站拨号地址与 mDNS 发现地址都按同一显式策略复核。新增版本化设置读取 `state/network-settings-v1.json`：文件缺失时为 LoopbackOnly、不监听、TCP/QUIC 端口均为 0；未知字段、错误版本或超限文件拒绝启动。NetReady 后先发送地址策略并等待对应操作确认，再按配置启动 TCP/QUIC 监听；启动阶段其他网络事件会保留给常驻事件泵。回环策略绑定 loopback，其余策略通过通配请求触发网卡枚举，最终只绑定策略允许的具体网卡地址。此设置目前只有启动读取，没有 GUI 编辑/保存。策略须在首次监听/拨号前设置且进程内不可切换。LanOnly/Hybrid 才启用 libp2p mDNS；mDNS 候选须通过范围与 PeerId 后缀校验，最多 8 个候选并行自动拨号，拨号仍使用候选 PeerId 固定目标并进入既有链身份验证。DNS 地址继续拒绝，不做隐式解析；IPv6 链路本地作用域地址未纳入网卡枚举。网卡热插拔更新、候选过期 UI、AppContainer multicast、真实 LAN 自动 hello 或公网互通验收未完成；T16 未关闭。
+
+T16 地址策略与发现切片验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-net --all-targets --locked --offline` 通过 31 项、0 失败、1 项忽略；`cargo test -p asl-app ipc::tests::fixed_messages_round_trip_with_role_and_sequence_binding --lib --locked --offline` 通过；`cargo clippy -p asl-net -p asl-app --all-targets --locked --offline -- -D warnings` 通过，格式化已运行。联合包测试中 `asl-app` 其余 144 项通过；IPC 用例已单独修复并复验通过，`supervisor::tests::sandboxed_worker_failure_does_not_stop_net_or_core` 在本机因 Windows 子进程组件启动返回 `NotFound`，尚未在原云机复验。没有运行 workspace 全量测试、真实 LAN/mDNS、防火墙/AppContainer 或公网互测；本记录不代表 T16 整体验收。
+
+T16 启动设置与策略锁定切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-app --lib --locked --offline network_settings::tests` 通过 4 项，`startup_operation_wait_preserves_unrelated_network_events` 通过 1 项；`cargo test -p asl-net --all-targets --locked --offline` 通过 32 项、0 失败、1 项忽略。`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。覆盖版本化网络设置、默认关闭监听、地址生成、启动操作确认事件保留及默认策略锁定；未运行 `asl-app` 全量测试、AppContainer multicast、防火墙、真实 LAN/mDNS、NAT/公网或 workspace 全量验收。Cargo 仍提示 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性问题；本轮未处理该无关依赖告警。
+
 ### T15 — 引导、中继、NAT 与基础设施
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。
+
+T15 中继服务切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC 监听与调用方提供的稳定 PeerId 密钥；预约和电路总数、单 peer 数、预约期限、电路期限及单电路字节上限由 `RelayServerLimits` 控制，libp2p 默认 peer/IP 请求速率限制保留。新增严格版本化 relay-only TOML 配置、Linux `asl-infra` 入口和非 root systemd 示例；身份密钥仅首次生成，存储在配置指定目录，Linux 文件权限限制为 0600，未知配置、符号链接、权限过宽或损坏密钥均拒绝，不会静默重建身份。样例仅定义监听，不代表已部署公网服务。relay 客户端接线与多入口 failover、AutoNAT/DCUtR/DHT、每小时 peer/总字节桶和真实公网部署仍未完成；没有可发布的真实 bootstrap/relay 地址，因此未生成虚构 network-seeds。T15 未关闭。
 
 基础设施只做 DHT/AutoNAT/relay，不具备 Agent 文件和模型能力。支持配置多个入口、稳定运营密钥、reservation/circuit/字节/时间/全局限制。
 
@@ -361,6 +373,10 @@ T14 周期链状态续验模块验证（2026-11-19，Windows x64，Rust 1.100.0�
 ```text
 cargo test -p asl-net --test relay_failover
 ```
+
+T15 relay 服务核心切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 36 项、0 失败、1 项忽略，覆盖 relay 限额拒绝、稳定 PeerId、relay multiaddr 顺序及 loopback TCP 监听；格式检查、`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings` 与 `git diff --check` 通过。未测试实际 relay 电路转发、多中继切换、NAT/DCUtR、Linux systemd、远端公网或每小时总流量限制；本记录不代表 T15 整体验收。Cargo 保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示。
+
+T15 relay-only 配置和入口切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo check -p asl-app --bin asl-infra --locked --offline` 通过；`cargo test -p asl-app --lib --locked --offline -- --skip supervisor::tests::sandboxed_worker_failure_does_not_stop_net_or_core` 通过 152 项；`cargo test -p asl-net --all-targets --locked --offline` 通过 37 项、0 失败、1 项忽略；Clippy、格式和 `git diff --check` 通过。被跳过的 AppContainer 用例在本机子进程启动阶段 EOF，未作为通过计入。Linux Rust target 下载未完成，故 Linux 专属密钥文件权限/恢复和 systemd 入口尚未编译或运行；实际电路转发、多个入口切换、NAT、真实公网部署和总字节桶也未验收。T15 仍未关闭。
 
 ### T16 — mDNS、地址策略与连接观察
 

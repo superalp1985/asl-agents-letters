@@ -87,6 +87,10 @@ impl AppPaths {
         self.state.join("network-identity-v1.json")
     }
 
+    pub fn network_settings_configuration(&self) -> PathBuf {
+        self.state.join("network-settings-v1.json")
+    }
+
     pub fn snapshots(&self) -> &Path {
         &self.snapshots
     }

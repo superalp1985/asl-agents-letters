@@ -711,13 +711,31 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     )
     .unwrap()
     .unwrap();
-    let admitted = admission.handle_event(
+    admission.exhaust_proof_budget_for_test();
+    let queued = admission.handle_event(
         NetworkEvent::IdentityProofReceived {
             connection_id,
             proof: remote_proof,
         },
         NOW,
     );
+    assert!(queued.events.is_empty());
+    assert!(
+        admission
+            .authorize_control_command(
+                connection_id,
+                [102; 16],
+                WireFrame::Ack(Ack {
+                    message_id: Id128([103; 16]),
+                    received_id: Id128([104; 16]),
+                }),
+                NOW,
+            )
+            .is_err(),
+        "a proof waiting for the CPU budget must not admit application traffic"
+    );
+    std::thread::sleep(Duration::from_millis(510));
+    let admitted = admission.poll(NOW);
     assert_eq!(
         admitted.events,
         vec![AdmittedNetworkEvent::PeerAdmitted {

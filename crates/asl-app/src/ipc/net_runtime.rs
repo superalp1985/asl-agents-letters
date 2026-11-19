@@ -148,6 +148,14 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::SetAddressPolicy {
+                operation_id,
+                policy,
+            } => {
+                let result = self.transport.set_address_policy(policy);
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;
