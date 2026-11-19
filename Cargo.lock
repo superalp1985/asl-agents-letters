@@ -1000,6 +1000,7 @@ dependencies = [
  "asl-net",
  "asl-policy",
  "asl-types",
+ "blake3",
 ]
 
 [[package]]

@@ -425,3 +425,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - This is only the IPC wire contract. No Supervisor/Net runtime mapping, device-key handoff, socket command handling, Core `DeviceSession` call, AppContainer networking, or public-network test was performed.
 
 已有链 HTTP 历史同步测试曾在一次全量运行中于本地恢复时返回 `InvalidLocalState`；随后单项与全量重跑均通过。未确认该偶发失败的原因，本批未修改链 HTTP 或恢复代码。
+
+### 2026-11-19 T22：纯多来源调度器
+
+- `cargo test -p asl-transfer --all-targets --offline`：6 项通过、0 失败。覆盖最多 4 个来源、每来源最多 2 个并发块请求、总计最多 8 个请求、超时重派、坏 hash 三次禁用来源、精确块长度与 BLAKE3 校验、重复块不重复完成，以及 `Buffered` 到 `Durable` 的显式状态推进。
+- `cargo clippy -p asl-transfer --all-targets --offline -- -D warnings` 与 `cargo fmt --all -- --check`：通过。
+- 本轮只验证内存状态机；没有执行网络、磁盘、SQLite、断点恢复、磁盘额度、整文件 hash 或公网传输。T22 不关闭 T23，也不代表完整文件下载已完成。

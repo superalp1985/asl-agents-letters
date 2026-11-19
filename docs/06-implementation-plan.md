@@ -497,8 +497,12 @@ T21 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 测试用假时钟固定来源 A/B/C/D：每来源最多 2、全下载最多 4 来源；超时重派；正确块 Verified；3 个坏 hash 禁用来源；重复块不重复完成。
 
 ```text
-cargo test -p asl-transfer --test scheduler_faults
+cargo test -p asl-transfer --all-targets --offline
 ```
+
+T22 已完成纯状态多来源调度切片（2026-11-19）：`asl-transfer::scheduler::Scheduler` 接受已验证 manifest 的文件大小和块 hash，最多保留 4 个来源、每来源最多 2 个活动块、总计最多 8 个活动块；按固定超时回收未完成分配，坏 hash 累计 3 次后仅在当前传输内禁用来源。收到的数据先做精确块长度和 BLAKE3 校验，成功后进入 `Buffered`，由上层持久化成功后显式标记 `Durable`；重复完成、错 Peer、错块和非活动分配均不会改变完成状态。该模块不访问网络、路径或磁盘，也不产生来源发现或授权结论。
+
+T22 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-transfer --all-targets --offline` 通过 6 项、0 失败；覆盖来源/总并发上限、超时重派、3 次坏 hash 禁用、块 hash 与精确长度校验、重复块去重和 Buffered/Durable 状态。`cargo clippy -p asl-transfer --all-targets --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。尚未接入真实网络请求、磁盘写入、恢复、总文件 hash、配额或公网传输；这些仍属于 T23 及后续集成，不能将 T22 写成完整下载已完成。
 
 ### T23 — 下载持久化、恢复与额度
 

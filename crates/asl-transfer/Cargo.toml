@@ -9,3 +9,4 @@ rust-version.workspace = true
 asl-net = { path = "../asl-net" }
 asl-policy = { path = "../asl-policy" }
 asl-types = { path = "../asl-types" }
+blake3.workspace = true
