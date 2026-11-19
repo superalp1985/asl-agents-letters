@@ -79,7 +79,8 @@ async fn next_reservation_after_recovery(
             | TransportEvent::Listening(_, _)
             | TransportEvent::RelayReserved { .. }
             | TransportEvent::RelayUnavailable { .. }
-            | TransportEvent::DiscoveryCandidate(_) => {}
+            | TransportEvent::DiscoveryCandidate(_)
+            | TransportEvent::DhtRecordCandidate { .. } => {}
             event => panic!("unexpected relay event during recovery: {event:?}"),
         }
     }
@@ -152,7 +153,8 @@ async fn next_connected(
             | TransportEvent::Listening(_, _)
             | TransportEvent::RelayReserved { .. }
             | TransportEvent::RelayUnavailable { .. }
-            | TransportEvent::DiscoveryCandidate(_) => {}
+            | TransportEvent::DiscoveryCandidate(_)
+            | TransportEvent::DhtRecordCandidate { .. } => {}
             TransportEvent::Connected { .. }
             | TransportEvent::Disconnected { .. }
             | TransportEvent::ControlRequest { .. }

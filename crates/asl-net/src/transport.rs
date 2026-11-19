@@ -8,12 +8,13 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, Weak},
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::address_policy::{
     AddressPolicy, allows_ip, allows_listen_ip, validate_multiaddr, validate_transport_address,
 };
+use crate::dht::{DhtAudience, MAX_DHT_PROVIDER_ADDRESSES, MAX_DHT_VALUE_BYTES};
 use crate::relay::{
     RelayEndpoint, parse_relay_endpoint, parse_relay_listen_multiaddr, parse_relay_route,
     relay_route_address,
@@ -33,6 +34,7 @@ use libp2p::{
     },
     futures::StreamExt,
     identity::Keypair,
+    kad::{self, RecordKey, store::RecordStore},
     mdns,
     multiaddr::Protocol,
     noise,
@@ -45,6 +47,7 @@ use libp2p::{
     },
     tcp, yamux,
 };
+use rand::{TryRng, rngs::SysRng};
 
 use crate::codec::{
     BULK_PROTOCOL, BulkCodec, BulkRequest, BulkResponse, CONTROL_PROTOCOL, ControlCodec,
@@ -58,6 +61,8 @@ const MAX_CONNECTIONS: usize = 16;
 const MAX_PENDING_DISCOVERY_DIALS: usize = 8;
 const MAX_DISCOVERY_CANDIDATES: usize = 128;
 const MAX_PENDING_DISCOVERY_OBSERVATIONS: usize = 256;
+const MAX_PENDING_DHT_RECORDS: usize = 32;
+const DHT_CANDIDATE_LIFETIME: Duration = Duration::from_secs(10);
 const MAX_RELAY_ENDPOINTS: usize = 8;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
@@ -188,6 +193,11 @@ pub enum TransportEvent {
         relay_peer_id: libp2p::PeerId,
     },
     DiscoveryCandidate(DiscoveryCandidate),
+    DhtRecordCandidate {
+        candidate_id: [u8; 16],
+        key: [u8; 32],
+        value: Vec<u8>,
+    },
     InboundRejected,
     /// Authenticated device key only; no agent identity, certificate or grant is implied.
     Connected {
@@ -251,6 +261,7 @@ pub struct LocalTransport {
     relay_listeners: HashMap<ListenerId, libp2p::PeerId>,
     relay_retries: HashMap<libp2p::PeerId, RelayRetry>,
     reserved_relays: HashSet<libp2p::PeerId>,
+    pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
 }
 
 struct RelayRetry {
@@ -300,6 +311,7 @@ impl LocalTransport {
             relay_listeners: HashMap::new(),
             relay_retries: HashMap::new(),
             reserved_relays: HashSet::new(),
+            pending_dht_records: HashMap::new(),
         })
     }
 
@@ -497,6 +509,71 @@ impl LocalTransport {
         Ok(())
     }
 
+    pub fn add_dht_peer(&mut self, peer: &PeerId, address: &Multiaddr) -> io::Result<()> {
+        let peer =
+            libp2p::PeerId::from_bytes(peer.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        validate_multiaddr(self.address_policy, &peer, address)
+            .map_err(|_| io::ErrorKind::PermissionDenied)?;
+        self.swarm
+            .behaviour_mut()
+            .dht
+            .add_address(&peer, address.clone());
+        self.network_started = true;
+        Ok(())
+    }
+
+    pub fn start_providing(
+        &mut self,
+        key: RecordKey,
+        audience: DhtAudience,
+    ) -> io::Result<kad::QueryId> {
+        if !audience.allows_public_advertisement() {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if key.as_ref().len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.swarm
+            .behaviour_mut()
+            .dht
+            .start_providing(key)
+            .map_err(|_| io::Error::other("DHT provider capacity reached"))
+    }
+
+    pub fn get_providers(&mut self, key: RecordKey) -> io::Result<kad::QueryId> {
+        if key.as_ref().len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(self.swarm.behaviour_mut().dht.get_providers(key))
+    }
+
+    pub fn get_record(&mut self, key: RecordKey) -> io::Result<kad::QueryId> {
+        if key.as_ref().len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(self.swarm.behaviour_mut().dht.get_record(key))
+    }
+
+    pub fn decide_dht_record(&mut self, candidate_id: [u8; 16], accept: bool) -> io::Result<()> {
+        let (mut record, expires_at) = self
+            .pending_dht_records
+            .remove(&candidate_id)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if expires_at <= tokio::time::Instant::now() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        if !accept {
+            return Ok(());
+        }
+        record.expires = Some(Instant::now() + Duration::from_secs(30 * 60));
+        self.swarm
+            .behaviour_mut()
+            .dht
+            .store_mut()
+            .put(record)
+            .map_err(|_| io::Error::other("DHT record capacity reached"))
+    }
+
     /// Close only the authenticated connection represented by this handle.
     pub fn close_connection(&mut self, connection: &AuthenticatedPeer) -> io::Result<()> {
         self.require_live(connection)?;
@@ -515,11 +592,21 @@ impl LocalTransport {
             return Ok(event);
         }
         loop {
+            let now = tokio::time::Instant::now();
+            self.pending_dht_records
+                .retain(|_, (_, expires)| *expires > now);
             if let Some(candidate) = self.pending_discovery_observations.pop_front() {
                 return Ok(TransportEvent::DiscoveryCandidate(candidate));
             }
             self.start_due_relay_retries();
-            let event = if let Some(deadline) = self.next_relay_retry_deadline() {
+            let deadline = [
+                self.next_relay_retry_deadline(),
+                self.next_pending_dht_deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let event = if let Some(deadline) = deadline {
                 tokio::select! {
                     event = self.swarm.select_next_some() => event,
                     _ = tokio::time::sleep_until(deadline) => continue,
@@ -600,6 +687,11 @@ impl LocalTransport {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
                     self.handle_discovery(event)?;
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Kad(event)) => {
+                    if let Some(event) = self.handle_dht(event)? {
+                        return Ok(event);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Relay(
                     libp2p::relay::client::Event::ReservationReqAccepted {
@@ -811,6 +903,10 @@ impl LocalTransport {
                     let Some((kind, socket)) = bound_endpoint(&address) else {
                         continue;
                     };
+                    self.swarm
+                        .behaviour_mut()
+                        .dht
+                        .add_address(&peer_id, address.clone());
                     let candidate_key = (peer_id, kind, socket);
                     if !self.discovery_candidates.contains(&candidate_key)
                         && self.discovery_candidates.len() < MAX_DISCOVERY_CANDIDATES
@@ -879,6 +975,88 @@ impl LocalTransport {
             }
         }
         Ok(())
+    }
+
+    fn handle_dht(&mut self, event: kad::Event) -> io::Result<Option<TransportEvent>> {
+        let record = match event {
+            kad::Event::InboundRequest {
+                request:
+                    kad::InboundRequest::PutRecord {
+                        record: Some(record),
+                        ..
+                    },
+            } => record,
+            kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))),
+                ..
+            } => peer_record.record,
+            kad::Event::InboundRequest {
+                request:
+                    kad::InboundRequest::AddProvider {
+                        record: Some(mut record),
+                    },
+            } => {
+                if record.key.as_ref().len() != 32 {
+                    return Ok(None);
+                }
+                let mut addresses = Vec::new();
+                for address in record.addresses {
+                    if addresses.len() == MAX_DHT_PROVIDER_ADDRESSES {
+                        break;
+                    }
+                    if validate_multiaddr(self.address_policy, &record.provider, &address).is_ok() {
+                        addresses.push(address);
+                    }
+                }
+                record.addresses = addresses;
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .dht
+                    .store_mut()
+                    .add_provider(record);
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        };
+
+        if record.key.as_ref().len() != 32
+            || record.value.is_empty()
+            || record.value.len() > MAX_DHT_VALUE_BYTES
+            || self.pending_dht_records.len() >= MAX_PENDING_DHT_RECORDS
+        {
+            return Ok(None);
+        }
+
+        let key: [u8; 32] = record.key.as_ref().try_into().unwrap();
+        let mut candidate_id = [0; 16];
+        for _ in 0..8 {
+            SysRng
+                .try_fill_bytes(&mut candidate_id)
+                .map_err(|_| io::Error::other("cannot allocate DHT request handle"))?;
+            if candidate_id != [0; 16] && !self.pending_dht_records.contains_key(&candidate_id) {
+                self.pending_dht_records.insert(
+                    candidate_id,
+                    (
+                        record.clone(),
+                        tokio::time::Instant::now() + DHT_CANDIDATE_LIFETIME,
+                    ),
+                );
+                return Ok(Some(TransportEvent::DhtRecordCandidate {
+                    candidate_id,
+                    key,
+                    value: record.value,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_pending_dht_deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending_dht_records
+            .values()
+            .map(|(_, deadline)| *deadline)
+            .min()
     }
 }
 
@@ -1351,6 +1529,27 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn public_provider_advertising_is_the_only_allowed_scope() {
+        let mut transport = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
+        let key = crate::dht::content_key(asl_types::ids::Hash32([8; 32]));
+
+        for audience in [
+            DhtAudience::Contacts,
+            DhtAudience::Peers,
+            DhtAudience::Group,
+        ] {
+            assert_eq!(
+                transport
+                    .start_providing(key.clone(), audience)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        assert!(transport.start_providing(key, DhtAudience::Public).is_ok());
     }
 
     #[test]

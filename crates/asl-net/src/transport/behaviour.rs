@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::address_policy::{AddressPolicy, validate_multiaddr};
+use crate::dht::BoundedRecordStore;
 use libp2p::{
-    mdns, relay,
+    kad, mdns, relay,
     request_response::ProtocolSupport,
     swarm::{THandlerInEvent, dummy},
 };
@@ -18,6 +19,7 @@ pub(super) struct AslBehaviour {
     admission: Admission,
     discovery: DiscoveryBehaviour,
     relay: relay::client::Behaviour,
+    pub(super) dht: kad::Behaviour<BoundedRecordStore>,
     pub(super) control: request_response::Behaviour<ControlCodec>,
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
@@ -29,6 +31,7 @@ pub(super) enum BehaviourEvent {
     Admission(Infallible),
     Discovery(DiscoveryEvent),
     Relay(relay::client::Event),
+    Kad(kad::Event),
     Control(request_response::Event<WireFrame, WireFrame>),
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
@@ -54,6 +57,12 @@ impl From<DiscoveryEvent> for BehaviourEvent {
 impl From<relay::client::Event> for BehaviourEvent {
     fn from(value: relay::client::Event) -> Self {
         Self::Relay(value)
+    }
+}
+
+impl From<kad::Event> for BehaviourEvent {
+    fn from(value: kad::Event) -> Self {
+        Self::Kad(value)
     }
 }
 
@@ -90,10 +99,22 @@ impl AslBehaviour {
             )
         }
 
+        let store = BoundedRecordStore::new(local_peer_id);
+        let mut kad_config = kad::Config::new(libp2p::StreamProtocol::new("/asl/kad/1.0.0"));
+        kad_config
+            .set_record_filtering(kad::StoreInserts::FilterBoth)
+            .set_record_ttl(Some(Duration::from_secs(30 * 60)))
+            .set_publication_interval(Some(Duration::from_secs(10 * 60)))
+            .set_provider_record_ttl(Some(Duration::from_secs(60 * 60)))
+            .set_provider_publication_interval(Some(Duration::from_secs(15 * 60)));
+        let mut dht = kad::Behaviour::with_config(local_peer_id, store, kad_config);
+        dht.set_mode(Some(kad::Mode::Server));
+
         Self {
             admission: Admission::new(local_peer_id, AddressPolicy::LoopbackOnly),
             discovery: DiscoveryBehaviour::new(local_peer_id),
             relay,
+            dht,
             control: request_response(ControlCodec, CONTROL_PROTOCOL),
             identity_proof: request_response(IdentityProofCodec, IDENTITY_PROOF_PROTOCOL),
             bulk: request_response(BulkCodec, BULK_PROTOCOL),

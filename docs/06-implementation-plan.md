@@ -416,6 +416,12 @@ cargo test -p asl-net --test discovery_policy
 cargo test -p asl-net --test dht_limits
 ```
 
+T17 DHT 记录过滤切片（2026-11-19）：新增 `asl-net::dht::BoundedRecordStore`，仅接受严格解码后的 profile、device directory 和 short-code signed record；记录键按版本化 domain 与 AgentId/kind 分离，概念键、内容键和短码 provider 查找键独立。store 限制单值 8 KiB、记录数 10,000、记录与 provider 估算总占用 64 MiB、每个 key 最多 20 个 provider、每个 provider 最多 8 个地址，并在写入新值时回收过期记录和 provider 的占额。Kademlia TTL/续发窗口固定为记录 30 分钟/10 分钟、provider 1 小时/15 分钟。`start_providing` 只接受 public audience；contacts、peers 和 group 不进入公共 provider 广告。入站 PutRecord 不直接落库，Net 只产生有界候选并经 IPC 交 Core；Core 重新校验记录键、根签名、当前链身份状态和本地序号历史后，显式回传接受或拒绝，未能完成准入的候选被拒绝。provider 地址仍先经过本机地址策略过滤，短码碰撞通过多个 provider 候选保留，不覆盖单值记录。
+
+本切片已实现 net store、Kademlia 行为接线、Core 准入闸门、IPC 候选/决定消息及本机覆盖；DHT store、记录历史和待决候选仍为进程内存，尚未持久化，未完成跨公网节点互操作、真实 bootstrap/AutoNAT/DCUtR、查询路由、资源索引与文件传输集成。因此不能写成全网身份绑定、重启防回滚或完整 T17/T18 已完成。
+
+T17 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-net --all-targets --locked --offline` 通过 56 项、0 失败、1 项忽略；覆盖 DHT key/domain 分离、短码多 provider、签名记录序号冲突、8 KiB/10,000 条/64 MiB 有界 store、过期占额回收、公共 provider 范围、Net/Core IPC 及已有 TCP/QUIC/relay 测试。`cargo test -p asl-app --all-targets --locked --offline` 通过 182 项、0 失败、2 项忽略；包含 DHT 候选的 Core 身份/链状态准入、拒绝回传和 IPC 编解码。`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 和 `git diff --check` 均通过；本轮没有运行真实公网 DHT、跨实现互操作、持久化恢复、AppContainer mDNS/公网策略或 GUI 验收。Cargo 仍保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示。
+
 ### T18 — 有界查询路由
 
 依赖 T12、T17。创建 agent query router。

@@ -799,3 +799,99 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     drop(admission);
     drop(local_database);
 }
+
+#[cfg(windows)]
+#[test]
+fn dht_records_are_cached_only_after_key_signature_and_chain_admission() {
+    let root = AgentIdentity::generate().unwrap();
+    let local_device = DeviceIdentity::generate().unwrap();
+    let cert = certificate(&root, &local_device.peer_id(), 1);
+    let directory = directory(&root, 7, vec![cert], vec![]);
+    let signed_directory = signed_directory(&root, &directory, 1);
+    let (database, resolver, _) = durable_directory_resolver(&root, &directory);
+    let mut admission = CoreAdmission::for_local_identity(
+        &root,
+        local_device.peer_id(),
+        signed_directory,
+        resolver,
+        NOW,
+    )
+    .unwrap();
+
+    let bytes = sign_record(
+        &root,
+        RecordPayload::Profile(Profile {
+            agent_id: root.agent_id(),
+            sequence: 1,
+            capabilities: vec![ConceptRef::RUST],
+            avatar: None,
+        }),
+        1,
+        NOW,
+        LIFETIME,
+    )
+    .unwrap();
+    let key = asl_net::dht::identity_record_key(root.agent_id(), RecordKind::Profile).unwrap();
+    let valid = admission.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id: [120; 16],
+            key: key.as_ref().try_into().unwrap(),
+            value: bytes.clone(),
+        },
+        NOW,
+    );
+    assert_eq!(
+        valid.commands,
+        vec![NetworkCommand::DecideDhtRecord {
+            candidate_id: [120; 16],
+            accept: true,
+        }]
+    );
+    assert!(matches!(
+        valid.events.as_slice(),
+        [AdmittedNetworkEvent::DhtRecordAvailable {
+            agent_id,
+            kind: RecordKind::Profile,
+            sequence: 1,
+            record,
+        }] if *agent_id == root.agent_id() && record == &bytes
+    ));
+
+    let mut invalid_signature = asl_types::record::decode_record(&bytes).unwrap();
+    invalid_signature.signature.0[0] ^= 1;
+    let invalid_signature = asl_types::record::encode_record(&invalid_signature).unwrap();
+    let rejected = admission.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id: [121; 16],
+            key: key.as_ref().try_into().unwrap(),
+            value: invalid_signature,
+        },
+        NOW,
+    );
+    assert_eq!(
+        rejected.commands,
+        vec![NetworkCommand::DecideDhtRecord {
+            candidate_id: [121; 16],
+            accept: false,
+        }]
+    );
+    assert!(rejected.events.is_empty());
+
+    let wrong_key = admission.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id: [122; 16],
+            key: [0; 32],
+            value: bytes,
+        },
+        NOW,
+    );
+    assert_eq!(
+        wrong_key.commands,
+        vec![NetworkCommand::DecideDhtRecord {
+            candidate_id: [122; 16],
+            accept: false,
+        }]
+    );
+    assert!(wrong_key.events.is_empty());
+    drop(database);
+}

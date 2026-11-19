@@ -174,6 +174,15 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::DecideDhtRecord {
+                candidate_id,
+                accept,
+            } => {
+                self.transport
+                    .decide_dht_record(candidate_id, accept)
+                    .map_err(|error| error_code(&error))?;
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;
@@ -589,6 +598,17 @@ impl NetworkBridge {
                     kind: candidate.kind,
                     address: candidate.address,
                     state: candidate.state,
+                })?;
+            }
+            TransportEvent::DhtRecordCandidate {
+                candidate_id,
+                key,
+                value,
+            } => {
+                writer.send(&IpcMessage::DhtRecordCandidate {
+                    candidate_id,
+                    key,
+                    value,
                 })?;
             }
             TransportEvent::InboundRejected => {}

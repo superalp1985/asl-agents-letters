@@ -271,6 +271,23 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
         (
             IpcRole::Net,
             IpcRole::Core,
+            IpcMessage::DhtRecordCandidate {
+                candidate_id: [60; 16],
+                key: [61; 32],
+                value: vec![0x82, 0x01, 0x02],
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::DecideDhtRecord {
+                candidate_id: [62; 16],
+                accept: false,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
             IpcMessage::ControlRequested {
                 connection_id: [38; 16],
                 response_id: [39; 16],
@@ -406,4 +423,31 @@ fn net_driver_ipc_rejects_wrong_roles_and_non_control_payloads() {
         connection_id: [58; 16],
     };
     assert!(encode_frame(IpcRole::Net, IpcRole::Core, 1, &close).is_err());
+
+    let candidate = IpcMessage::DhtRecordCandidate {
+        candidate_id: [59; 16],
+        key: [60; 32],
+        value: vec![1],
+    };
+    assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &candidate).is_err());
+
+    let oversized = IpcMessage::DhtRecordCandidate {
+        candidate_id: [59; 16],
+        key: [60; 32],
+        value: vec![1; asl_net::dht::MAX_DHT_VALUE_BYTES + 1],
+    };
+    assert!(encode_frame(IpcRole::Net, IpcRole::Core, 1, &oversized).is_err());
+
+    assert!(
+        encode_frame(
+            IpcRole::Net,
+            IpcRole::Core,
+            1,
+            &IpcMessage::DecideDhtRecord {
+                candidate_id: [59; 16],
+                accept: false,
+            },
+        )
+        .is_err()
+    );
 }

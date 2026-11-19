@@ -76,6 +76,10 @@ pub enum NetworkCommand {
         operation_id: [u8; 16],
         peer_id: PeerId,
     },
+    DecideDhtRecord {
+        candidate_id: [u8; 16],
+        accept: bool,
+    },
 }
 
 impl NetworkCommand {
@@ -175,6 +179,13 @@ impl NetworkCommand {
                 operation_id,
                 peer_id,
             },
+            Self::DecideDhtRecord {
+                candidate_id,
+                accept,
+            } => IpcMessage::DecideDhtRecord {
+                candidate_id,
+                accept,
+            },
         }
     }
 }
@@ -204,6 +215,11 @@ pub enum NetworkEvent {
         kind: TransportKind,
         address: SocketAddr,
         state: DiscoveryCandidateState,
+    },
+    DhtRecordCandidate {
+        candidate_id: [u8; 16],
+        key: [u8; 32],
+        value: Vec<u8>,
     },
     /// The device transport is authenticated; the Agent identity is not.
     TransportConnected {
@@ -314,6 +330,15 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 kind,
                 address,
                 state,
+            }),
+            IpcMessage::DhtRecordCandidate {
+                candidate_id,
+                key,
+                value,
+            } => Ok(Self::DhtRecordCandidate {
+                candidate_id,
+                key,
+                value,
             }),
             IpcMessage::PeerAuthenticated {
                 connection_id,

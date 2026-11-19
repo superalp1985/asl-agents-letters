@@ -572,6 +572,7 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::RelayReserved { .. }
             | IpcMessage::RelayUnavailable { .. }
             | IpcMessage::DiscoveryCandidate { .. }
+            | IpcMessage::DhtRecordCandidate { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
@@ -612,6 +613,12 @@ fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
                 .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
         }
         NetworkEvent::DiscoveryCandidate { .. } => {}
+        NetworkEvent::DhtRecordCandidate { candidate_id, .. } => {
+            batch.commands.push(NetworkCommand::DecideDhtRecord {
+                candidate_id,
+                accept: false,
+            })
+        }
         NetworkEvent::PeerDisconnected { connection_id } => {
             batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
                 connection_id,
@@ -650,6 +657,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::RelayReserved { .. }
         | NetworkEvent::RelayUnavailable { .. }
         | NetworkEvent::DiscoveryCandidate { .. }
+        | NetworkEvent::DhtRecordCandidate { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
     }
@@ -808,6 +816,24 @@ mod tests {
             })
         ));
         assert!(reject_unadmitted_event(event).events.is_empty());
+    }
+
+    #[test]
+    fn dht_record_candidates_are_rejected_when_core_identity_is_unavailable() {
+        let batch = reject_unadmitted_event(NetworkEvent::DhtRecordCandidate {
+            candidate_id: [27; 16],
+            key: [28; 32],
+            value: vec![0x01],
+        });
+
+        assert!(batch.events.is_empty());
+        assert_eq!(
+            batch.commands,
+            vec![NetworkCommand::DecideDhtRecord {
+                candidate_id: [27; 16],
+                accept: false,
+            }]
+        );
     }
 
     #[test]

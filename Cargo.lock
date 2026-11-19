@@ -951,8 +951,10 @@ name = "asl-net"
 version = "0.1.0"
 dependencies = [
  "asl-types",
+ "blake3",
  "if-addrs",
  "libp2p",
+ "rand 0.10.4",
  "tokio",
 ]
 

@@ -8,7 +8,7 @@ use asl_types::{
     error::AslError,
     ids::{AgentId, Id128, PeerId},
     protocol::{Hello, IdentityProof, WireFrame},
-    record::{RecordPayload, decode_record},
+    record::{RecordKind, RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
 
@@ -21,6 +21,7 @@ use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 
 const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
+const MAX_DHT_RECORD_OWNERS: usize = 10_000;
 const MAX_PENDING_PROOFS: usize = MAX_ADMISSION_CONNECTIONS;
 const PROOF_BUDGET_CAPACITY: u8 = 2;
 const PROOF_BUDGET_REFILL: Duration = Duration::from_millis(500);
@@ -32,6 +33,7 @@ pub struct CoreAdmission {
     local_controller: Option<[u8; 20]>,
     resolver: DurableIdentityResolver,
     peers: HashMap<[u8; 16], PeerAdmission>,
+    dht_histories: HashMap<AgentId, RecordHistory>,
     pending_proofs: VecDeque<[u8; 16]>,
     proof_budget: ProofVerificationBudget,
 }
@@ -150,6 +152,12 @@ pub enum AdmittedNetworkEvent {
     NetworkError {
         code: crate::ipc::NetworkErrorCode,
     },
+    DhtRecordAvailable {
+        agent_id: AgentId,
+        kind: RecordKind,
+        sequence: u64,
+        record: Vec<u8>,
+    },
 }
 
 #[derive(Default)]
@@ -224,6 +232,8 @@ impl CoreAdmission {
         if !directory.devices.contains(&local_hello.device_certificate) {
             return Err(AslError::InvalidDeviceCertificate);
         }
+        let mut dht_histories = HashMap::new();
+        dht_histories.insert(local_hello.agent_id, history);
 
         Ok(Self {
             local_hello,
@@ -231,6 +241,7 @@ impl CoreAdmission {
             local_controller: None,
             resolver,
             peers: HashMap::new(),
+            dht_histories,
             pending_proofs: VecDeque::new(),
             proof_budget: ProofVerificationBudget::new(Instant::now()),
         })
@@ -329,6 +340,11 @@ impl CoreAdmission {
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
             NetworkEvent::DiscoveryCandidate { .. } => {}
+            NetworkEvent::DhtRecordCandidate {
+                candidate_id,
+                key,
+                value,
+            } => self.admit_dht_record(candidate_id, key, value, now_ms, &mut batch),
             NetworkEvent::TransportConnected {
                 connection_id,
                 peer_id,
@@ -509,6 +525,61 @@ impl CoreAdmission {
         }
         self.drain_proofs(now_ms, &mut batch);
         batch
+    }
+
+    fn admit_dht_record(
+        &mut self,
+        candidate_id: [u8; 16],
+        key: [u8; 32],
+        value: Vec<u8>,
+        now_ms: u64,
+        batch: &mut AdmissionBatch,
+    ) {
+        let reject = || NetworkCommand::DecideDhtRecord {
+            candidate_id,
+            accept: false,
+        };
+        let Ok(signed) = decode_record(&value) else {
+            batch.commands.push(reject());
+            return;
+        };
+        let agent_id = signed.record.payload.agent_id();
+        let kind = signed.record.payload.kind();
+        let Ok(expected_key) = asl_net::dht::identity_record_key(agent_id, kind) else {
+            batch.commands.push(reject());
+            return;
+        };
+        if expected_key.as_ref() != key
+            || (!self.dht_histories.contains_key(&agent_id)
+                && self.dht_histories.len() >= MAX_DHT_RECORD_OWNERS)
+        {
+            batch.commands.push(reject());
+            return;
+        }
+        let Ok(verified) = super::verify_record(&value, agent_id, now_ms, &mut self.resolver)
+        else {
+            batch.commands.push(reject());
+            return;
+        };
+        let history = self.dht_histories.entry(agent_id).or_insert_with(|| {
+            RecordHistory::new(agent_id, MAX_DEVICE_OBSERVATIONS)
+                .expect("fixed DHT history limit is valid")
+        });
+        if history.observe(&verified).is_err() {
+            batch.commands.push(reject());
+            return;
+        }
+
+        batch.commands.push(NetworkCommand::DecideDhtRecord {
+            candidate_id,
+            accept: true,
+        });
+        batch.events.push(AdmittedNetworkEvent::DhtRecordAvailable {
+            agent_id,
+            kind,
+            sequence: verified.signed().record.sequence,
+            record: value,
+        });
     }
 
     pub fn authorize_control_command(

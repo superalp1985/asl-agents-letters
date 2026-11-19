@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
+    dht::MAX_DHT_VALUE_BYTES,
     relay::MAX_RELAY_ENDPOINT_BYTES,
     transport::{DiscoveryCandidateState, TransportKind},
 };
@@ -55,7 +56,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40)
                 | (Self::Core, Self::Net, 34 | 35)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
@@ -66,7 +67,7 @@ impl IpcRole {
                 )
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
-                | (Self::Net, Self::Core, 36..=38)
+                | (Self::Net, Self::Core, 36..=39)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
         )
@@ -211,6 +212,11 @@ pub enum IpcMessage {
         address: SocketAddr,
         state: DiscoveryCandidateState,
     },
+    DhtRecordCandidate {
+        candidate_id: [u8; 16],
+        key: [u8; 32],
+        value: Vec<u8>,
+    },
     ControlRequested {
         connection_id: [u8; 16],
         response_id: [u8; 16],
@@ -264,6 +270,10 @@ pub enum IpcMessage {
     SetAddressPolicy {
         operation_id: [u8; 16],
         policy: AddressPolicy,
+    },
+    DecideDhtRecord {
+        candidate_id: [u8; 16],
+        accept: bool,
     },
 }
 
@@ -734,6 +744,35 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.push(address_policy_code(*policy));
             33
         }
+        IpcMessage::DhtRecordCandidate {
+            candidate_id,
+            key,
+            value,
+        } => {
+            if *candidate_id == [0; 16] || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(candidate_id);
+            body.extend_from_slice(key);
+            body.extend_from_slice(
+                &u16::try_from(value.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(value);
+            39
+        }
+        IpcMessage::DecideDhtRecord {
+            candidate_id,
+            accept,
+        } => {
+            if *candidate_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(candidate_id);
+            body.push(u8::from(*accept));
+            40
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -949,6 +988,27 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 kind,
                 address,
                 state,
+            })
+        }
+        39 if body.len() >= 51 => {
+            let value_len = u16::from_be_bytes(body[48..50].try_into().unwrap()) as usize;
+            if body[..16] == [0; 16]
+                || value_len == 0
+                || value_len > MAX_DHT_VALUE_BYTES
+                || body.len() != 50 + value_len
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::DhtRecordCandidate {
+                candidate_id: body[..16].try_into().unwrap(),
+                key: body[16..48].try_into().unwrap(),
+                value: body[50..].to_vec(),
+            })
+        }
+        40 if body.len() == 17 && body[..16] != [0; 16] && body[16] <= 1 => {
+            Ok(IpcMessage::DecideDhtRecord {
+                candidate_id: body[..16].try_into().unwrap(),
+                accept: body[16] == 1,
             })
         }
         22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
@@ -1270,6 +1330,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         36 => 2 + 128 + 2 + MAX_RELAY_ENDPOINT_BYTES,
         37 => 2 + 128,
         38 => 2 + 128 + 1 + 19 + 1,
+        39 => 50 + MAX_DHT_VALUE_BYTES,
+        40 => 17,
         _ => return None,
     })
 }
@@ -1534,6 +1596,15 @@ mod tests {
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 4002),
                 state: DiscoveryCandidateState::Discovered,
             },
+            IpcMessage::DhtRecordCandidate {
+                candidate_id: [29; 16],
+                key: [30; 32],
+                value: vec![0x51, 0x52, 0x53],
+            },
+            IpcMessage::DecideDhtRecord {
+                candidate_id: [31; 16],
+                accept: true,
+            },
             IpcMessage::ControlRequested {
                 connection_id: [12; 16],
                 response_id: [13; 16],
@@ -1626,6 +1697,7 @@ mod tests {
                 | IpcMessage::RelayReserved { .. }
                 | IpcMessage::RelayUnavailable { .. }
                 | IpcMessage::DiscoveryCandidate { .. }
+                | IpcMessage::DhtRecordCandidate { .. }
                 | IpcMessage::ControlRequested { .. }
                 | IpcMessage::ControlReceived { .. }
                 | IpcMessage::BulkRequested { .. }
@@ -1641,7 +1713,8 @@ mod tests {
                 | IpcMessage::ReplyControl { .. }
                 | IpcMessage::SendBulk { .. }
                 | IpcMessage::ReplyBulk { .. }
-                | IpcMessage::SetAddressPolicy { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::SetAddressPolicy { .. }
+                | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)
                 }

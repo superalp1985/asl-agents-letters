@@ -111,7 +111,17 @@ payload              payload_length bytes, deterministic CBOR per CDDL
 
 身份根密钥对上述原始字节作域分离签名。载荷和签名封装后仍需满足 8 KiB 记录上限。链状态中的 AgentId 必须等于记录 owner。
 
-记录验证：kind、长度、根密钥签名、AgentId owner、时间窗口、最大 TTL、sequence 单调性、payload CDDL、同 owner 存储份额全部通过才入库。net 必须接入 Kademlia 的入站过滤事件，由验证器决定是否写入记录存储。启动时通过测试验证“未通过过滤的 PUT 不落库”。
+记录验证：kind、长度、根密钥签名、AgentId owner、时间窗口、最大 TTL、sequence 单调性、payload CDDL、记录键与 owner/kind 的绑定全部通过才入库。net 使用 Kademlia `FilterBoth`，将入站 PUT 暂存为限量候选并通过私有 IPC 交 Core；Core 使用当前链状态 resolver、`verify_record` 和本地 `RecordHistory` 决定接受或拒绝。Core 未启用、身份非 Active、签名/键/时效/序号检查失败时均明确拒绝；候选在通过前不会进入 DHT store 或 Agent handler。provider PUT 是不同类型的未认证发现指针，不得等同于身份声明；其 PeerId 地址仍经本机网络策略过滤，后续身份握手独立验证。
+
+identity record key 使用下列域分离派生，禁止共用键或接受任意 key/value 配对：
+
+```text
+profile key = BLAKE3("ASL-PROFILE-v1\0" || agent_id_bytes)
+device directory key = BLAKE3("ASL-DEVICE-DIRECTORY-v1\0" || agent_id_bytes)
+short-code claim key = BLAKE3("ASL-SHORT-CODE-CLAIM-v1\0" || agent_id_bytes)
+```
+
+短码的多候选发现键只用于 provider 查询，不作单值 record key。Agent 完成直接身份验证后，短码声明使用其按 AgentId 隔离的短码记录键读取；因此短码碰撞不会发生单值覆盖。记录和 provider store 均有单值、数量、地址及总字节上限。DHT store 与防回滚观察当前为本进程内存状态，不能视为重启后的持久记录或高水位。
 
 `kind=2` 的 device directory 严格包含版本、AgentId、最多 64 个设备证书及撤销 serial；同一目录不得重复 PeerId 或 serial。设备证书有效期最多 30 天，目录自身最长 30 分钟并周期续发。目录的规范 CBOR commitment 必须与链上 `stateCommitment` 匹配。已钉住联系人本地记住见过的最高目录 sequence/设备 serial，拒绝回滚。断链期间无法证明最新全局撤销状态，GUI 不宣传离线撤销的实时保证。
 
@@ -137,7 +147,7 @@ profile key = BLAKE3("ASL-PROFILE-v1\0" + agent_id_bytes)
 
 只对 public 范围资源发布 concept/content provider。contacts 与指定 peers 的资源仅在获准直询中返回；hash 和概念 ID 都不是保密技术。
 
-持久短码按固定版本算法从 AgentId 派生，显示为分组十进制数字。短码只提供查找便利，不是身份、认证凭据或全局唯一名称。DHT 使用 `BLAKE3("ASL-HANDLE-v1\0" + normalized_code_utf8)` 查找，并允许同一键返回多个候选。每个候选必须提供身份根签名的 AgentId/短码声明；客户端校验链身份状态后仍将候选保持为未核验联系人，直到 PAKE/指纹步骤完成。DHT 隐瞒、日蚀和离线仍可能造成漏查。
+持久短码按固定版本算法从 AgentId 派生，显示为分组十进制数字。短码只提供查找便利，不是身份、认证凭据或全局唯一名称。DHT 使用 `BLAKE3("ASL-HANDLE-v1\0" + 16 位补零十进制 ASCII)` 查找，并通过可返回多个 PeerId 的 provider 记录发现候选。任何候选均不代表 Agent 身份或授权；直接握手得到 AgentId 后，客户端读取并验证该 AgentId 对应的身份根签名短码声明和有效链状态，完成 PAKE/指纹步骤前仍保持未核验联系人。DHT 隐瞒、日蚀和离线仍可能造成漏查。
 
 固定 1.0 派生算法：`n = LE64(BLAKE3("ASL-HANDLE-ID-v1\0" || agent_id_bytes)[0..8]) mod 10^16`，左侧补零至 16 位，界面按每 4 位分组。输出碰撞是合法状态，禁止抢占/覆盖或声称全局唯一。数字短码只用于发现，不进行链上注册，不作为凭证。身份解析通过版本化 `IdentityResolver` 接口。
 
