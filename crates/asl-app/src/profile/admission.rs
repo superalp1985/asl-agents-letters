@@ -101,6 +101,13 @@ pub enum AdmittedNetworkEvent {
         kind: asl_net::transport::TransportKind,
         address: std::net::SocketAddr,
     },
+    RelayReserved {
+        relay_peer_id: PeerId,
+        address: Vec<u8>,
+    },
+    RelayUnavailable {
+        relay_peer_id: PeerId,
+    },
     PeerAdmitted {
         connection_id: [u8; 16],
         peer_id: PeerId,
@@ -308,6 +315,18 @@ impl CoreAdmission {
                 batch
                     .events
                     .push(AdmittedNetworkEvent::Listening { kind, address });
+            }
+            NetworkEvent::RelayReserved {
+                relay_peer_id,
+                address,
+            } => batch.events.push(AdmittedNetworkEvent::RelayReserved {
+                relay_peer_id,
+                address,
+            }),
+            NetworkEvent::RelayUnavailable { relay_peer_id } => {
+                batch
+                    .events
+                    .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
             NetworkEvent::TransportConnected {
                 connection_id,

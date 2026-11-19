@@ -84,10 +84,19 @@ impl Supervisor {
     }
 
     fn apply_network_settings(&mut self, settings: &NetworkSettingsV1) -> Result<(), AslError> {
+        settings.validate()?;
         self.send_startup_network_operation(|operation_id| NetworkCommand::SetAddressPolicy {
             operation_id,
             policy: settings.address_policy(),
         })?;
+
+        for address in &settings.relay_addresses {
+            let address = asl_net::relay::relay_endpoint_config(address)?;
+            self.send_startup_network_operation(|operation_id| NetworkCommand::ReserveRelay {
+                operation_id,
+                address,
+            })?;
+        }
 
         if !settings.listen_on_interfaces {
             return Ok(());
@@ -546,6 +555,8 @@ fn is_network_event(message: &IpcMessage) -> bool {
         IpcMessage::OperationAccepted { .. }
             | IpcMessage::OperationFailed { .. }
             | IpcMessage::Listening { .. }
+            | IpcMessage::RelayReserved { .. }
+            | IpcMessage::RelayUnavailable { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
@@ -572,6 +583,18 @@ fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
             batch
                 .events
                 .push(AdmittedNetworkEvent::Listening { kind, address });
+        }
+        NetworkEvent::RelayReserved {
+            relay_peer_id,
+            address,
+        } => batch.events.push(AdmittedNetworkEvent::RelayReserved {
+            relay_peer_id,
+            address,
+        }),
+        NetworkEvent::RelayUnavailable { relay_peer_id } => {
+            batch
+                .events
+                .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
         }
         NetworkEvent::PeerDisconnected { connection_id } => {
             batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
@@ -608,6 +631,8 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         NetworkEvent::OperationAccepted { .. }
         | NetworkEvent::OperationFailed { .. }
         | NetworkEvent::Listening { .. }
+        | NetworkEvent::RelayReserved { .. }
+        | NetworkEvent::RelayUnavailable { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
     }

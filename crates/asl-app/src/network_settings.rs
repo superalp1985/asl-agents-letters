@@ -6,6 +6,7 @@ use std::{
 };
 
 use asl_net::address_policy::AddressPolicy;
+use asl_net::relay::{MAX_RELAY_ENDPOINT_BYTES, relay_endpoint_config};
 use asl_types::error::AslError;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,7 @@ pub enum NetworkAddressScopeV1 {
     LanOnly,
     InternetOnly,
     Hybrid,
+    RelayOnly,
 }
 
 impl From<NetworkAddressScopeV1> for AddressPolicy {
@@ -27,6 +29,7 @@ impl From<NetworkAddressScopeV1> for AddressPolicy {
             NetworkAddressScopeV1::LanOnly => Self::LanOnly,
             NetworkAddressScopeV1::InternetOnly => Self::InternetOnly,
             NetworkAddressScopeV1::Hybrid => Self::Hybrid,
+            NetworkAddressScopeV1::RelayOnly => Self::RelayOnly,
         }
     }
 }
@@ -39,6 +42,8 @@ pub struct NetworkSettingsV1 {
     pub listen_on_interfaces: bool,
     pub tcp_port: u16,
     pub quic_port: u16,
+    #[serde(default)]
+    pub relay_addresses: Vec<String>,
 }
 
 impl Default for NetworkSettingsV1 {
@@ -49,6 +54,7 @@ impl Default for NetworkSettingsV1 {
             listen_on_interfaces: false,
             tcp_port: 0,
             quic_port: 0,
+            relay_addresses: Vec::new(),
         }
     }
 }
@@ -63,6 +69,7 @@ impl NetworkSettingsV1 {
         if settings.version != 1 {
             return Err(AslError::InvalidIdentity);
         }
+        settings.validate()?;
         Ok(settings)
     }
 
@@ -75,9 +82,32 @@ impl NetworkSettingsV1 {
             NetworkAddressScopeV1::LoopbackOnly => Ipv4Addr::LOCALHOST,
             NetworkAddressScopeV1::LanOnly
             | NetworkAddressScopeV1::InternetOnly
-            | NetworkAddressScopeV1::Hybrid => Ipv4Addr::UNSPECIFIED,
+            | NetworkAddressScopeV1::Hybrid
+            | NetworkAddressScopeV1::RelayOnly => Ipv4Addr::UNSPECIFIED,
         };
         SocketAddr::new(IpAddr::V4(ip), port)
+    }
+
+    pub fn validate(&self) -> Result<(), AslError> {
+        const MAX_RELAY_ADDRESSES: usize = 8;
+        if self.relay_addresses.len() > MAX_RELAY_ADDRESSES
+            || self
+                .relay_addresses
+                .iter()
+                .any(|address| address.len() > MAX_RELAY_ENDPOINT_BYTES)
+            || (self.address_scope == NetworkAddressScopeV1::RelayOnly
+                && (self.listen_on_interfaces || self.relay_addresses.is_empty()))
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut unique = std::collections::HashSet::new();
+        for address in &self.relay_addresses {
+            let parsed = relay_endpoint_config(address).map_err(|_| AslError::InvalidIdentity)?;
+            if !unique.insert(parsed) {
+                return Err(AslError::InvalidIdentity);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +198,7 @@ mod tests {
             listen_on_interfaces: true,
             tcp_port: 0,
             quic_port: 40_000,
+            relay_addresses: vec![],
         };
         fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
         assert_eq!(NetworkSettingsV1::load(&path).unwrap(), settings);
@@ -205,5 +236,25 @@ mod tests {
 
         fs::write(&path, vec![b' '; MAX_NETWORK_SETTINGS_BYTES as usize + 1]).unwrap();
         assert!(NetworkSettingsV1::load(&path).is_err());
+    }
+
+    #[test]
+    fn relay_only_requires_configured_relays_and_disables_interface_listening() {
+        let relay_peer_id = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut settings = NetworkSettingsV1 {
+            address_scope: NetworkAddressScopeV1::RelayOnly,
+            relay_addresses: vec![format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}")],
+            ..NetworkSettingsV1::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        settings.listen_on_interfaces = true;
+        assert!(settings.validate().is_err());
+
+        settings.listen_on_interfaces = false;
+        settings.relay_addresses.clear();
+        assert!(settings.validate().is_err());
     }
 }

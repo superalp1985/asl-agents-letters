@@ -3,6 +3,7 @@ use std::{net::SocketAddr, time::Duration};
 use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
+    relay::relay_endpoint_config,
     transport::TransportKind,
 };
 use asl_types::{
@@ -66,6 +67,14 @@ pub enum NetworkCommand {
     SetAddressPolicy {
         operation_id: [u8; 16],
         policy: AddressPolicy,
+    },
+    ReserveRelay {
+        operation_id: [u8; 16],
+        address: Vec<u8>,
+    },
+    DialViaRelays {
+        operation_id: [u8; 16],
+        peer_id: PeerId,
     },
 }
 
@@ -152,6 +161,20 @@ impl NetworkCommand {
                 operation_id,
                 policy,
             },
+            Self::ReserveRelay {
+                operation_id,
+                address,
+            } => IpcMessage::ReserveRelay {
+                operation_id,
+                address,
+            },
+            Self::DialViaRelays {
+                operation_id,
+                peer_id,
+            } => IpcMessage::DialViaRelays {
+                operation_id,
+                peer_id,
+            },
         }
     }
 }
@@ -168,6 +191,13 @@ pub enum NetworkEvent {
     Listening {
         kind: TransportKind,
         address: SocketAddr,
+    },
+    RelayReserved {
+        relay_peer_id: PeerId,
+        address: Vec<u8>,
+    },
+    RelayUnavailable {
+        relay_peer_id: PeerId,
     },
     /// The device transport is authenticated; the Agent identity is not.
     TransportConnected {
@@ -229,6 +259,16 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 Ok(Self::OperationFailed { operation_id, code })
             }
             IpcMessage::Listening { kind, address } => Ok(Self::Listening { kind, address }),
+            IpcMessage::RelayReserved {
+                relay_peer_id,
+                address,
+            } => Ok(Self::RelayReserved {
+                relay_peer_id,
+                address,
+            }),
+            IpcMessage::RelayUnavailable { relay_peer_id } => {
+                Ok(Self::RelayUnavailable { relay_peer_id })
+            }
             IpcMessage::PeerAuthenticated {
                 connection_id,
                 peer_id,
@@ -342,6 +382,29 @@ impl Supervisor {
             operation_id,
             kind,
             address,
+            peer_id,
+        })
+    }
+
+    pub fn reserve_network_relay(
+        &mut self,
+        operation_id: [u8; 16],
+        address: &str,
+    ) -> Result<(), AslError> {
+        let address = relay_endpoint_config(address).map_err(|_| AslError::InvalidMessage)?;
+        self.send_network_command(NetworkCommand::ReserveRelay {
+            operation_id,
+            address,
+        })
+    }
+
+    pub fn dial_network_via_relays(
+        &mut self,
+        operation_id: [u8; 16],
+        peer_id: PeerId,
+    ) -> Result<(), AslError> {
+        self.send_network_command(NetworkCommand::DialViaRelays {
+            operation_id,
             peer_id,
         })
     }

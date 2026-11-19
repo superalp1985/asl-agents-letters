@@ -141,7 +141,7 @@ fuzz 工具、SBOM 工具及其版本在 T02 锁定；记录实际工具版本�
 
 ## 7. Linux 自托管入口
 
-发布 `asl-infra` x86_64 Linux 包、`specs/infra.example.toml` 对应配置和 systemd unit。非 root 用户运行，TCP/UDP 端口默认为 4001，身份持久化，配置/密钥目录只对服务用户可读。
+发布 `asl-infra` x86_64 Linux 包、`specs/infra.example.toml` 对应配置和 systemd unit。非 root 用户运行，TCP/UDP 端口默认为 4001，身份持久化，配置/密钥目录只对服务用户可读。通配监听需显式填写真实 `external_addresses`；示例使用的文档网段不能直接部署。
 
 运营者配置 reservation、circuit、流量与存储上限，属于基础设施保护而非产品收费。中继看到连接元数据和流量大小，不能承诺它完全不知谁与谁通信。
 

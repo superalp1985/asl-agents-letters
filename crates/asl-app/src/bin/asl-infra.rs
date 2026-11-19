@@ -37,6 +37,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = InfrastructureConfigV1::load(Path::new(&config_path))?;
     let identity = load_or_create_relay_identity(&config)?;
     let mut server = RelayServer::new(identity, config.relay_limits())?;
+    for (kind, address) in config.external_addresses()? {
+        server.add_external_address(kind, address)?;
+    }
     for (kind, address) in config.listen_addresses()? {
         server.listen(kind, address)?;
     }

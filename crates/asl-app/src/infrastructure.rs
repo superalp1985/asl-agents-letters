@@ -27,6 +27,8 @@ pub struct InfrastructureConfigV1 {
     pub data_root: PathBuf,
     pub identity_file: PathBuf,
     pub listen: Vec<String>,
+    #[serde(default)]
+    pub external_addresses: Vec<String>,
     pub relay: RelayServerConfigV1,
 }
 
@@ -92,6 +94,26 @@ impl InfrastructureConfigV1 {
             .collect()
     }
 
+    pub fn external_addresses(
+        &self,
+    ) -> Result<Vec<(TransportKind, std::net::SocketAddr)>, AslError> {
+        self.external_addresses
+            .iter()
+            .map(|address| {
+                let (kind, socket) =
+                    parse_relay_listen_multiaddr(address).map_err(|_| AslError::InvalidMessage)?;
+                if socket.ip().is_unspecified()
+                    || socket.ip().is_multicast()
+                    || matches!(socket.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                    || matches!(socket.ip(), std::net::IpAddr::V6(ip) if ip.is_unicast_link_local())
+                {
+                    return Err(AslError::InvalidMessage);
+                }
+                Ok((kind, socket))
+            })
+            .collect()
+    }
+
     pub fn identity_path(&self) -> PathBuf {
         self.data_root.join(&self.identity_file)
     }
@@ -123,6 +145,19 @@ impl InfrastructureConfigV1 {
             if addresses[..index].contains(address) {
                 return Err(AslError::InvalidMessage);
             }
+        }
+        let external_addresses = self.external_addresses()?;
+        for (index, address) in external_addresses.iter().enumerate() {
+            if external_addresses[..index].contains(address) {
+                return Err(AslError::InvalidMessage);
+            }
+        }
+        if external_addresses.is_empty()
+            && addresses
+                .iter()
+                .all(|(_, address)| address.ip().is_unspecified())
+        {
+            return Err(AslError::InvalidMessage);
         }
         Ok(())
     }
@@ -231,6 +266,7 @@ mode = "relay-only"
 data_root = "/var/lib/asl-infra"
 identity_file = "identity.key"
 listen = ["/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/udp/4001/quic-v1"]
+external_addresses = ["/ip4/203.0.113.1/tcp/4001", "/ip4/203.0.113.1/udp/4001/quic-v1"]
 
 [relay]
 enabled = true
@@ -268,6 +304,7 @@ max_circuit_bytes = 134217728
             config.data_root.join("identity.key")
         );
         assert_eq!(config.listen_addresses().unwrap().len(), 2);
+        assert_eq!(config.external_addresses().unwrap().len(), 2);
         assert_eq!(config.relay_limits(), RelayServerLimits::default());
     }
 
@@ -298,6 +335,21 @@ max_circuit_bytes = 134217728
         assert!(
             InfrastructureConfigV1::parse(
                 &valid.replace("/ip4/0.0.0.0/tcp/4001", "/dns4/relay.example/tcp/4001")
+            )
+            .is_err()
+        );
+        assert!(
+            InfrastructureConfigV1::parse(
+                &valid.replace(
+                    "external_addresses = [\"/ip4/203.0.113.1/tcp/4001\", \"/ip4/203.0.113.1/udp/4001/quic-v1\"]",
+                    "external_addresses = []"
+                )
+            )
+            .is_err()
+        );
+        assert!(
+            InfrastructureConfigV1::parse(
+                &valid.replace("/ip4/203.0.113.1/tcp/4001", "/ip4/0.0.0.0/tcp/4001")
             )
             .is_err()
         );

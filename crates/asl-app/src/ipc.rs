@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
+    relay::MAX_RELAY_ENDPOINT_BYTES,
     transport::TransportKind,
 };
 use asl_types::{
@@ -55,6 +56,7 @@ impl IpcRole {
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
             ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33)
+                | (Self::Core, Self::Net, 34 | 35)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (
@@ -64,6 +66,7 @@ impl IpcRole {
                 )
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
+                | (Self::Net, Self::Core, 36..=37)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
         )
@@ -176,6 +179,14 @@ pub enum IpcMessage {
         address: SocketAddr,
         peer_id: PeerId,
     },
+    ReserveRelay {
+        operation_id: [u8; 16],
+        address: Vec<u8>,
+    },
+    DialViaRelays {
+        operation_id: [u8; 16],
+        peer_id: PeerId,
+    },
     OperationAccepted {
         operation_id: [u8; 16],
     },
@@ -186,6 +197,13 @@ pub enum IpcMessage {
     Listening {
         kind: TransportKind,
         address: SocketAddr,
+    },
+    RelayReserved {
+        relay_peer_id: PeerId,
+        address: Vec<u8>,
+    },
+    RelayUnavailable {
+        relay_peer_id: PeerId,
     },
     ControlRequested {
         connection_id: [u8; 16],
@@ -506,6 +524,36 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(peer_bytes);
             18
         }
+        IpcMessage::ReserveRelay {
+            operation_id,
+            address,
+        } => {
+            if address.is_empty() || address.len() > MAX_RELAY_ENDPOINT_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(
+                &u16::try_from(address.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(address);
+            34
+        }
+        IpcMessage::DialViaRelays {
+            operation_id,
+            peer_id,
+        } => {
+            body.extend_from_slice(operation_id);
+            let peer_bytes = peer_id.as_bytes();
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            35
+        }
         IpcMessage::OperationAccepted { operation_id } => {
             body.extend_from_slice(operation_id);
             19
@@ -519,6 +567,41 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.push(transport_kind_code(*kind));
             append_socket_addr(&mut body, *address)?;
             21
+        }
+        IpcMessage::RelayReserved {
+            relay_peer_id,
+            address,
+        } => {
+            if address.is_empty() || address.len() > MAX_RELAY_ENDPOINT_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_bytes = relay_peer_id.as_bytes();
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            body.extend_from_slice(
+                &u16::try_from(address.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(address);
+            36
+        }
+        IpcMessage::RelayUnavailable { relay_peer_id } => {
+            let peer_bytes = relay_peer_id.as_bytes();
+            if peer_bytes.is_empty() || peer_bytes.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(peer_bytes.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer_bytes);
+            37
         }
         IpcMessage::ControlRequested {
             connection_id,
@@ -747,6 +830,30 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 peer_id,
             })
         }
+        34 if body.len() >= 19 => {
+            let address_len = u16::from_be_bytes(body[16..18].try_into().unwrap()) as usize;
+            if address_len == 0
+                || address_len > MAX_RELAY_ENDPOINT_BYTES
+                || body.len() != 18 + address_len
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::ReserveRelay {
+                operation_id: body[..16].try_into().unwrap(),
+                address: body[18..].to_vec(),
+            })
+        }
+        35 if body.len() >= 19 => {
+            let peer_len = u16::from_be_bytes(body[16..18].try_into().unwrap()) as usize;
+            if peer_len == 0 || body.len() != 18 + peer_len {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::DialViaRelays {
+                operation_id: body[..16].try_into().unwrap(),
+                peer_id: PeerId::from_bytes(body[18..].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?,
+            })
+        }
         19 if body.len() == 16 => Ok(IpcMessage::OperationAccepted {
             operation_id: body.try_into().unwrap(),
         }),
@@ -761,6 +868,36 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 return Err(AslError::InvalidMessage);
             }
             Ok(IpcMessage::Listening { kind, address })
+        }
+        36 if body.len() >= 6 => {
+            let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            let peer_offset = 2 + peer_len;
+            if peer_len == 0 || body.len() < peer_offset + 2 {
+                return Err(AslError::InvalidMessage);
+            }
+            let address_len =
+                u16::from_be_bytes(body[peer_offset..peer_offset + 2].try_into().unwrap()) as usize;
+            if address_len == 0
+                || address_len > MAX_RELAY_ENDPOINT_BYTES
+                || body.len() != peer_offset + 2 + address_len
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RelayReserved {
+                relay_peer_id: PeerId::from_bytes(body[2..peer_offset].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?,
+                address: body[peer_offset + 2..].to_vec(),
+            })
+        }
+        37 if body.len() >= 3 => {
+            let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            if peer_len == 0 || peer_len > 128 || body.len() != 2 + peer_len {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RelayUnavailable {
+                relay_peer_id: PeerId::from_bytes(body[2..].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?,
+            })
         }
         22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
             connection_id: body[..16].try_into().unwrap(),
@@ -998,6 +1135,7 @@ fn address_policy_code(policy: AddressPolicy) -> u8 {
         AddressPolicy::LanOnly => 2,
         AddressPolicy::InternetOnly => 3,
         AddressPolicy::Hybrid => 4,
+        AddressPolicy::RelayOnly => 5,
     }
 }
 
@@ -1007,6 +1145,7 @@ fn decode_address_policy(value: u8) -> Result<AddressPolicy, AslError> {
         2 => Ok(AddressPolicy::LanOnly),
         3 => Ok(AddressPolicy::InternetOnly),
         4 => Ok(AddressPolicy::Hybrid),
+        5 => Ok(AddressPolicy::RelayOnly),
         _ => Err(AslError::InvalidMessage),
     }
 }
@@ -1074,6 +1213,10 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         31 => 1,
         32 => 16,
         33 => 17,
+        34 => 18 + MAX_RELAY_ENDPOINT_BYTES,
+        35 => 16 + 2 + 128,
+        36 => 2 + 128 + 2 + MAX_RELAY_ENDPOINT_BYTES,
+        37 => 2 + 128,
         _ => return None,
     })
 }
@@ -1306,6 +1449,14 @@ mod tests {
                 operation_id: [26; 16],
                 policy: AddressPolicy::LanOnly,
             },
+            IpcMessage::ReserveRelay {
+                operation_id: [27; 16],
+                address: b"/ip4/127.0.0.1/tcp/4001/p2p/local-test".to_vec(),
+            },
+            IpcMessage::DialViaRelays {
+                operation_id: [28; 16],
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            },
             IpcMessage::OperationAccepted {
                 operation_id: [10; 16],
             },
@@ -1316,6 +1467,13 @@ mod tests {
             IpcMessage::Listening {
                 kind: TransportKind::Tcp,
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+            },
+            IpcMessage::RelayReserved {
+                relay_peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                address: b"/ip4/127.0.0.1/tcp/4001/p2p/local-test/p2p-circuit".to_vec(),
+            },
+            IpcMessage::RelayUnavailable {
+                relay_peer_id: DeviceIdentity::generate().unwrap().peer_id(),
             },
             IpcMessage::ControlRequested {
                 connection_id: [12; 16],
@@ -1406,6 +1564,8 @@ mod tests {
                 IpcMessage::OperationAccepted { .. }
                 | IpcMessage::OperationFailed { .. }
                 | IpcMessage::Listening { .. }
+                | IpcMessage::RelayReserved { .. }
+                | IpcMessage::RelayUnavailable { .. }
                 | IpcMessage::ControlRequested { .. }
                 | IpcMessage::ControlReceived { .. }
                 | IpcMessage::BulkRequested { .. }
@@ -1422,6 +1582,9 @@ mod tests {
                 | IpcMessage::SendBulk { .. }
                 | IpcMessage::ReplyBulk { .. }
                 | IpcMessage::SetAddressPolicy { .. } => (IpcRole::Core, IpcRole::Net),
+                IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
+                    (IpcRole::Core, IpcRole::Net)
+                }
                 IpcMessage::RunTask { .. } => (IpcRole::Core, IpcRole::Worker),
                 IpcMessage::TaskResult { .. } | IpcMessage::TaskStarted { .. } => {
                     (IpcRole::Worker, IpcRole::Core)

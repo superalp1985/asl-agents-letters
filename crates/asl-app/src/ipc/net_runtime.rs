@@ -148,6 +148,24 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::ReserveRelay {
+                operation_id,
+                address,
+            } => {
+                let result = asl_net::relay::parse_relay_endpoint_bytes(address)
+                    .map_err(|_| io::ErrorKind::InvalidInput.into())
+                    .and_then(|address| self.transport.reserve_relay(&address).map(|_| ()));
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::DialViaRelays {
+                operation_id,
+                peer_id,
+            } => {
+                let result = self.transport.dial_via_relays(&peer_id);
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
             IpcMessage::SetAddressPolicy {
                 operation_id,
                 policy,
@@ -548,6 +566,22 @@ impl NetworkBridge {
         match event {
             TransportEvent::Listening(kind, address) => {
                 writer.send(&IpcMessage::Listening { kind, address })?;
+            }
+            TransportEvent::RelayReserved {
+                relay_peer_id,
+                address,
+            } => {
+                writer.send(&IpcMessage::RelayReserved {
+                    relay_peer_id: asl_types::ids::PeerId::from_bytes(relay_peer_id.to_bytes())
+                        .map_err(|_| AslError::InvalidIdentity)?,
+                    address: address.to_vec(),
+                })?;
+            }
+            TransportEvent::RelayUnavailable { relay_peer_id } => {
+                writer.send(&IpcMessage::RelayUnavailable {
+                    relay_peer_id: asl_types::ids::PeerId::from_bytes(relay_peer_id.to_bytes())
+                        .map_err(|_| AslError::InvalidIdentity)?,
+                })?;
             }
             TransportEvent::InboundRejected => {}
             TransportEvent::Connected { connection } => {

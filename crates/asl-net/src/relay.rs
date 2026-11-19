@@ -12,6 +12,7 @@ use libp2p::{
 use crate::transport::{TransportKind, socket_endpoint};
 
 const MAX_RELAY_LISTENERS: usize = 16;
+pub const MAX_RELAY_ENDPOINT_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayServerLimits {
@@ -22,6 +23,20 @@ pub struct RelayServerLimits {
     pub max_circuits_per_peer: usize,
     pub max_circuit_duration: Duration,
     pub max_circuit_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayEndpoint {
+    pub peer_id: PeerId,
+    pub address: Multiaddr,
+    pub transport: TransportKind,
+    pub socket: SocketAddr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayRoute {
+    pub endpoint: RelayEndpoint,
+    pub target_peer_id: Option<PeerId>,
 }
 
 impl Default for RelayServerLimits {
@@ -123,15 +138,54 @@ impl RelayServer {
         Ok(())
     }
 
-    pub async fn run(mut self) -> io::Result<()> {
+    pub fn add_external_address(
+        &mut self,
+        kind: TransportKind,
+        address: SocketAddr,
+    ) -> io::Result<()> {
+        if address.port() == 0
+            || address.ip().is_unspecified()
+            || address.ip().is_multicast()
+            || matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+            || matches!(address.ip(), std::net::IpAddr::V6(ip) if ip.is_unicast_link_local())
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.swarm
+            .add_external_address(socket_endpoint(kind, address)?);
+        Ok(())
+    }
+
+    pub async fn next_event(&mut self) -> io::Result<Multiaddr> {
         loop {
             match self.swarm.select_next_some().await {
+                SwarmEvent::NewListenAddr { mut address, .. } => {
+                    if matches!(
+                        address.iter().last(),
+                        Some(libp2p::multiaddr::Protocol::P2p(peer_id))
+                            if peer_id == self.peer_id()
+                    ) {
+                        address.pop();
+                    }
+                    if let Ok((kind, socket)) = parse_relay_listen_multiaddr(&address.to_string())
+                        && !socket.ip().is_unspecified()
+                    {
+                        self.add_external_address(kind, socket)?;
+                    }
+                    return Ok(address);
+                }
                 SwarmEvent::ListenerError { .. } | SwarmEvent::ListenerClosed { .. } => {
                     return Err(io::Error::other("relay listener stopped"));
                 }
                 SwarmEvent::Behaviour(_) => {}
                 _ => {}
             }
+        }
+    }
+
+    pub async fn run(mut self) -> io::Result<()> {
+        loop {
+            self.next_event().await?;
         }
     }
 }
@@ -147,6 +201,118 @@ pub fn relay_multiaddr(
     multiaddr.push(libp2p::multiaddr::Protocol::P2pCircuit);
     multiaddr.push(libp2p::multiaddr::Protocol::P2p(target_peer_id.to_owned()));
     Ok(multiaddr)
+}
+
+pub fn parse_relay_endpoint(address: &Multiaddr) -> io::Result<RelayEndpoint> {
+    let mut parts = address.iter();
+    let ip: std::net::IpAddr = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::Ip4(ip)) => ip.into(),
+        Some(libp2p::multiaddr::Protocol::Ip6(ip)) => ip.into(),
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let (transport, port) = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::Tcp(port)) => (TransportKind::Tcp, port),
+        Some(libp2p::multiaddr::Protocol::Udp(port))
+            if parts.next() == Some(libp2p::multiaddr::Protocol::QuicV1) =>
+        {
+            (TransportKind::Quic, port)
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let peer_id = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::P2p(peer_id)) if parts.next().is_none() => peer_id,
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    if port == 0
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || matches!(ip, std::net::IpAddr::V4(address) if address.is_broadcast())
+        || matches!(ip, std::net::IpAddr::V6(address) if address.is_unicast_link_local())
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+
+    Ok(RelayEndpoint {
+        peer_id,
+        address: socket_endpoint(transport, SocketAddr::new(ip, port))?
+            .with(libp2p::multiaddr::Protocol::P2p(peer_id)),
+        transport,
+        socket: SocketAddr::new(ip, port),
+    })
+}
+
+pub fn parse_relay_route(address: &Multiaddr) -> io::Result<RelayRoute> {
+    let mut parts = address.iter();
+    let ip: std::net::IpAddr = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::Ip4(ip)) => ip.into(),
+        Some(libp2p::multiaddr::Protocol::Ip6(ip)) => ip.into(),
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let (transport, port) = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::Tcp(port)) => (TransportKind::Tcp, port),
+        Some(libp2p::multiaddr::Protocol::Udp(port))
+            if parts.next() == Some(libp2p::multiaddr::Protocol::QuicV1) =>
+        {
+            (TransportKind::Quic, port)
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let peer_id = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    if parts.next() != Some(libp2p::multiaddr::Protocol::P2pCircuit) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let target_peer_id = match parts.next() {
+        Some(libp2p::multiaddr::Protocol::P2p(peer_id)) if parts.next().is_none() => Some(peer_id),
+        None => None,
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    if port == 0
+        || ip.is_multicast()
+        || matches!(ip, std::net::IpAddr::V4(address) if address.is_broadcast())
+        || matches!(ip, std::net::IpAddr::V6(address) if address.is_unicast_link_local())
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+
+    Ok(RelayRoute {
+        endpoint: RelayEndpoint {
+            peer_id,
+            address: socket_endpoint(transport, SocketAddr::new(ip, port))?
+                .with(libp2p::multiaddr::Protocol::P2p(peer_id)),
+            transport,
+            socket: SocketAddr::new(ip, port),
+        },
+        target_peer_id,
+    })
+}
+
+pub fn relay_route_address(endpoint: &Multiaddr, target_peer_id: &PeerId) -> io::Result<Multiaddr> {
+    let endpoint = parse_relay_endpoint(endpoint)?;
+    Ok(endpoint
+        .address
+        .with(libp2p::multiaddr::Protocol::P2pCircuit)
+        .with(libp2p::multiaddr::Protocol::P2p(*target_peer_id)))
+}
+
+pub fn relay_endpoint_config(value: &str) -> io::Result<Vec<u8>> {
+    if value.len() > MAX_RELAY_ENDPOINT_BYTES {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let address = Multiaddr::from_str(value).map_err(|_| io::ErrorKind::InvalidInput)?;
+    parse_relay_endpoint(&address)?;
+    Ok(address.to_vec())
+}
+
+pub fn parse_relay_endpoint_bytes(bytes: Vec<u8>) -> io::Result<Multiaddr> {
+    if bytes.is_empty() || bytes.len() > MAX_RELAY_ENDPOINT_BYTES {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let address = Multiaddr::try_from(bytes).map_err(|_| io::ErrorKind::InvalidInput)?;
+    parse_relay_endpoint(&address)?;
+    Ok(address)
 }
 
 pub fn parse_relay_listen_multiaddr(value: &str) -> io::Result<(TransportKind, SocketAddr)> {
@@ -255,6 +421,34 @@ mod tests {
             address.to_string(),
             format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}/p2p-circuit/p2p/{target_peer_id}")
         );
+    }
+
+    #[test]
+    fn relay_endpoint_and_route_parsers_require_exact_peer_bound_ip_paths() {
+        let relay_peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let target_peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let endpoint: Multiaddr = format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}")
+            .parse()
+            .unwrap();
+        let parsed = parse_relay_endpoint(&endpoint).unwrap();
+        assert_eq!(parsed.peer_id, relay_peer_id);
+        assert_eq!(parsed.transport, TransportKind::Tcp);
+        assert_eq!(parsed.socket, SocketAddr::from(([127, 0, 0, 1], 4_001)));
+
+        let route = relay_route_address(&endpoint, &target_peer_id).unwrap();
+        let parsed_route = parse_relay_route(&route).unwrap();
+        assert_eq!(parsed_route.endpoint, parsed);
+        assert_eq!(parsed_route.target_peer_id, Some(target_peer_id));
+
+        for invalid in [
+            format!("/dns4/relay.example/tcp/4001/p2p/{relay_peer_id}"),
+            format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}/ws"),
+            format!("/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{relay_peer_id}/p2p-circuit"),
+            format!("/ip6/fe80::1/tcp/4001/p2p/{relay_peer_id}"),
+        ] {
+            let address: Multiaddr = invalid.parse().unwrap();
+            assert!(parse_relay_endpoint(&address).is_err(), "{address}");
+        }
     }
 
     #[test]

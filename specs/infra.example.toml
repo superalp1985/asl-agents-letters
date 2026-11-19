@@ -6,6 +6,11 @@ listen = [
   "/ip4/0.0.0.0/tcp/4001",
   "/ip4/0.0.0.0/udp/4001/quic-v1"
 ]
+# Replace documentation-only addresses with reachable public endpoints.
+external_addresses = [
+  "/ip4/203.0.113.1/tcp/4001",
+  "/ip4/203.0.113.1/udp/4001/quic-v1"
+]
 
 [relay]
 enabled = true

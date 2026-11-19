@@ -14,6 +14,10 @@ use std::{
 use crate::address_policy::{
     AddressPolicy, allows_ip, allows_listen_ip, validate_multiaddr, validate_transport_address,
 };
+use crate::relay::{
+    RelayEndpoint, parse_relay_endpoint, parse_relay_listen_multiaddr, parse_relay_route,
+    relay_route_address,
+};
 mod behaviour;
 mod requests;
 use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
@@ -52,6 +56,7 @@ const MAX_PENDING_INBOUND: usize = 8;
 const MAX_PENDING_OUTBOUND: usize = 8;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_PENDING_DISCOVERY_DIALS: usize = 8;
+const MAX_RELAY_ENDPOINTS: usize = 8;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
 const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
@@ -155,6 +160,13 @@ impl ResponseToken {
 #[derive(Debug)]
 pub enum TransportEvent {
     Listening(TransportKind, SocketAddr),
+    RelayReserved {
+        relay_peer_id: libp2p::PeerId,
+        address: Multiaddr,
+    },
+    RelayUnavailable {
+        relay_peer_id: libp2p::PeerId,
+    },
     InboundRejected,
     /// Authenticated device key only; no agent identity, certificate or grant is implied.
     Connected {
@@ -212,12 +224,14 @@ pub struct LocalTransport {
     policy_configured: bool,
     network_started: bool,
     pending_discovery_dials: HashSet<libp2p::PeerId>,
+    relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
+    relay_listeners: HashMap<ListenerId, libp2p::PeerId>,
+    reserved_relays: HashSet<libp2p::PeerId>,
 }
 
 impl LocalTransport {
     pub fn new(identity: Keypair) -> io::Result<Self> {
         let local_peer_id = identity.public().to_peer_id();
-        let behaviour = AslBehaviour::new(local_peer_id);
         let swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_tcp(tcp::Config::default(), noise::Config::new, || {
@@ -231,7 +245,9 @@ impl LocalTransport {
                 config.max_connection_data = 16 * 1024;
                 config
             })
-            .with_behaviour(|_| behaviour)
+            .with_relay_client(noise::Config::new, yamux::Config::default)
+            .map_err(|_| io::Error::other("cannot configure relay client"))?
+            .with_behaviour(|_, relay| AslBehaviour::new(local_peer_id, relay))
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
@@ -249,6 +265,9 @@ impl LocalTransport {
             policy_configured: false,
             network_started: false,
             pending_discovery_dials: HashSet::new(),
+            relay_endpoints: HashMap::new(),
+            relay_listeners: HashMap::new(),
+            reserved_relays: HashSet::new(),
         })
     }
 
@@ -367,6 +386,86 @@ impl LocalTransport {
         Ok(())
     }
 
+    pub fn reserve_relay(&mut self, address: &Multiaddr) -> io::Result<libp2p::PeerId> {
+        let endpoint = parse_relay_endpoint(address)?;
+        if endpoint.peer_id == *self.swarm.local_peer_id()
+            || (self.address_policy != AddressPolicy::RelayOnly
+                && !allows_ip(self.address_policy, endpoint.socket.ip()))
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if let Some(existing) = self.relay_endpoints.get(&endpoint.peer_id) {
+            if existing != &endpoint {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            if self
+                .relay_listeners
+                .values()
+                .any(|peer_id| *peer_id == endpoint.peer_id)
+            {
+                return Ok(endpoint.peer_id);
+            }
+        }
+        if !self.relay_endpoints.contains_key(&endpoint.peer_id)
+            && self.relay_endpoints.len() >= MAX_RELAY_ENDPOINTS
+        {
+            return Err(io::Error::other("relay endpoint limit reached"));
+        }
+        if self.listeners.len() >= MAX_LISTENERS {
+            return Err(io::Error::other("network listener limit reached"));
+        }
+        require_runtime()?;
+        let listener = self
+            .swarm
+            .listen_on(endpoint.address.clone().with(Protocol::P2pCircuit))
+            .map_err(|_| io::Error::other("cannot reserve relay circuit"))?;
+        if let Err(error) = self
+            .swarm
+            .behaviour_mut()
+            .allow_relay_endpoint(endpoint.clone())
+        {
+            self.swarm.remove_listener(listener);
+            return Err(error);
+        }
+        self.listeners.insert(listener);
+        self.relay_listeners.insert(listener, endpoint.peer_id);
+        self.relay_endpoints
+            .insert(endpoint.peer_id, endpoint.clone());
+        self.network_started = true;
+        Ok(endpoint.peer_id)
+    }
+
+    pub fn is_relay_reserved(&self, relay_peer_id: &libp2p::PeerId) -> bool {
+        self.reserved_relays.contains(relay_peer_id)
+    }
+
+    pub fn dial_via_relays(&mut self, expected: &PeerId) -> io::Result<()> {
+        let peer = libp2p::PeerId::from_bytes(expected.as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        if peer == *self.swarm.local_peer_id() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let addresses = self
+            .relay_endpoints
+            .values()
+            .map(|relay| relay_route_address(&relay.address, &peer))
+            .collect::<io::Result<Vec<_>>>()?;
+        if addresses.is_empty() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        require_runtime()?;
+        self.swarm
+            .dial(
+                DialOpts::peer_id(peer)
+                    .condition(PeerCondition::DisconnectedAndNotDialing)
+                    .addresses(addresses)
+                    .build(),
+            )
+            .map_err(dial_error)?;
+        self.network_started = true;
+        Ok(())
+    }
+
     /// Close only the authenticated connection represented by this handle.
     pub fn close_connection(&mut self, connection: &AuthenticatedPeer) -> io::Result<()> {
         self.require_live(connection)?;
@@ -386,7 +485,13 @@ impl LocalTransport {
         }
         loop {
             match self.swarm.select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => {
+                SwarmEvent::NewListenAddr {
+                    listener_id,
+                    address,
+                } => {
+                    if self.relay_listeners.contains_key(&listener_id) {
+                        continue;
+                    }
                     let (kind, addr) =
                         bound_endpoint(&address).ok_or(io::ErrorKind::InvalidData)?;
                     return Ok(TransportEvent::Listening(kind, addr));
@@ -396,6 +501,9 @@ impl LocalTransport {
                     connection_id,
                     ..
                 } => {
+                    if self.relay_endpoints.contains_key(&peer_id) {
+                        continue;
+                    }
                     self.pending_discovery_dials.remove(&peer_id);
                     let peer = device_peer(peer_id)?;
                     let connection_id = LocalConnectionId(connection_id);
@@ -415,6 +523,10 @@ impl LocalTransport {
                     connection_id,
                     ..
                 } => {
+                    if self.relay_endpoints.contains_key(&peer_id) {
+                        self.reserved_relays.remove(&peer_id);
+                        continue;
+                    }
                     let connection_id = LocalConnectionId(connection_id);
                     self.live.remove(&connection_id);
                     self.requests.close_connection(connection_id);
@@ -441,9 +553,37 @@ impl LocalTransport {
                 SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
                     self.handle_discovery(event);
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Relay(
+                    libp2p::relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal: false,
+                        ..
+                    },
+                )) => {
+                    self.reserved_relays.insert(relay_peer_id);
+                    if let Some(endpoint) = self.relay_endpoints.get(&relay_peer_id) {
+                        let address = endpoint
+                            .address
+                            .clone()
+                            .with(Protocol::P2pCircuit)
+                            .with(Protocol::P2p(*self.swarm.local_peer_id()));
+                        return Ok(TransportEvent::RelayReserved {
+                            relay_peer_id,
+                            address,
+                        });
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Relay(
+                    libp2p::relay::client::Event::ReservationReqAccepted { .. },
+                )) => {}
+                SwarmEvent::Behaviour(BehaviourEvent::Relay(_)) => {}
                 SwarmEvent::Behaviour(BehaviourEvent::Admission(never)) => match never {},
                 SwarmEvent::ListenerClosed { listener_id, .. } => {
                     self.listeners.remove(&listener_id);
+                    if let Some(relay_peer_id) = self.relay_listeners.remove(&listener_id) {
+                        self.reserved_relays.remove(&relay_peer_id);
+                        return Ok(TransportEvent::RelayUnavailable { relay_peer_id });
+                    }
                     return Err(io::Error::other("network listener closed"));
                 }
                 SwarmEvent::ListenerError { .. } => {
@@ -608,20 +748,118 @@ fn valid_inbound_endpoint(policy: AddressPolicy, address: &Multiaddr, local: boo
 // Keep only live identities. Each pending handshake owns its own reservation,
 // even if an inbound and an outbound handshake involve the same peer.
 struct Admission {
+    local_peer_id: libp2p::PeerId,
     established: HashSet<libp2p::PeerId>,
     pending_outgoing: HashSet<ConnectionId>,
     pending_incoming: HashSet<ConnectionId>,
     policy: AddressPolicy,
+    relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
 }
 
 impl Admission {
-    fn new(policy: AddressPolicy) -> Self {
+    fn new(local_peer_id: libp2p::PeerId, policy: AddressPolicy) -> Self {
         Self {
+            local_peer_id,
             established: HashSet::new(),
             pending_outgoing: HashSet::new(),
             pending_incoming: HashSet::new(),
             policy,
+            relay_endpoints: HashMap::new(),
         }
+    }
+
+    fn allow_relay_endpoint(&mut self, endpoint: RelayEndpoint) -> io::Result<()> {
+        if endpoint.peer_id == self.local_peer_id
+            || (self.policy != AddressPolicy::RelayOnly
+                && !allows_ip(self.policy, endpoint.socket.ip()))
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        match self.relay_endpoints.get(&endpoint.peer_id) {
+            Some(existing) if existing == &endpoint => Ok(()),
+            Some(_) => Err(io::ErrorKind::AlreadyExists.into()),
+            None => {
+                self.relay_endpoints.insert(endpoint.peer_id, endpoint);
+                Ok(())
+            }
+        }
+    }
+
+    fn matches_relay_route(
+        &self,
+        expected_peer: Option<libp2p::PeerId>,
+        address: &Multiaddr,
+    ) -> bool {
+        let Ok(route) = parse_relay_route(address) else {
+            return false;
+        };
+        let target_matches = match expected_peer {
+            Some(expected) => route.target_peer_id == Some(expected),
+            None => route.target_peer_id.is_some(),
+        };
+        target_matches && self.matches_configured_relay(&route.endpoint)
+    }
+
+    fn allows_outbound_address(&self, expected_peer: libp2p::PeerId, address: &Multiaddr) -> bool {
+        self.matches_relay_endpoint(expected_peer, address)
+            || validate_multiaddr(self.policy, &expected_peer, address).is_ok()
+            || self.matches_relay_route(Some(expected_peer), address)
+    }
+
+    fn allows_inbound_connection(
+        &self,
+        expected_peer: Option<libp2p::PeerId>,
+        local_address: &Multiaddr,
+        remote_address: &Multiaddr,
+    ) -> bool {
+        if valid_inbound_endpoint(self.policy, local_address, true)
+            && valid_inbound_endpoint(self.policy, remote_address, false)
+        {
+            return true;
+        }
+
+        let Ok(route) = parse_relay_route(local_address) else {
+            return false;
+        };
+        let target_matches = route
+            .target_peer_id
+            .is_none_or(|target| target == self.local_peer_id);
+        let mut remote_parts = remote_address.iter();
+        let source_matches = matches!(
+            remote_parts.next(),
+            Some(Protocol::P2p(source))
+                if remote_parts.next().is_none()
+                    && expected_peer.map_or(source != self.local_peer_id, |peer| source == peer)
+        );
+        target_matches && source_matches && self.matches_configured_relay(&route.endpoint)
+    }
+
+    fn matches_relay_endpoint(&self, expected_peer: libp2p::PeerId, address: &Multiaddr) -> bool {
+        let Some(endpoint) = self.relay_endpoints.get(&expected_peer) else {
+            return false;
+        };
+        let mut socket_address = address.clone();
+        match socket_address.iter().last() {
+            Some(Protocol::P2p(peer)) if peer == expected_peer => {
+                socket_address.pop();
+            }
+            Some(Protocol::P2p(_)) => return false,
+            _ => {}
+        }
+        parse_relay_listen_multiaddr(&socket_address.to_string()).is_ok_and(
+            |(transport, socket)| endpoint.transport == transport && endpoint.socket == socket,
+        )
+    }
+
+    fn matches_configured_relay(&self, candidate: &RelayEndpoint) -> bool {
+        self.relay_endpoints
+            .get(&candidate.peer_id)
+            .is_some_and(|endpoint| {
+                endpoint.transport == candidate.transport
+                    && endpoint.socket == candidate.socket
+                    && (self.policy == AddressPolicy::RelayOnly
+                        || allows_ip(self.policy, endpoint.socket.ip()))
+            })
     }
 
     fn at_capacity(&self) -> bool {
@@ -650,9 +888,7 @@ impl NetworkBehaviour for Admission {
         if self.pending_incoming.len() >= MAX_PENDING_INBOUND || self.at_capacity() {
             return Err(ConnectionDenied::new("inbound limit reached"));
         }
-        if !valid_inbound_endpoint(self.policy, local, true)
-            || !valid_inbound_endpoint(self.policy, remote, false)
-        {
+        if !self.allows_inbound_connection(None, local, remote) {
             return Err(ConnectionDenied::new("inbound address denied by policy"));
         }
         self.pending_incoming.insert(id);
@@ -674,7 +910,12 @@ impl NetworkBehaviour for Admission {
                 "dial requires one policy-approved IP endpoint and peer",
             ));
         };
-        if !matches!(addresses, [addr] if validate_multiaddr(self.policy, &peer, addr).is_ok()) {
+        if addresses.is_empty()
+            || addresses.len() > MAX_RELAY_ENDPOINTS
+            || !addresses
+                .iter()
+                .all(|address| self.allows_outbound_address(peer, address))
+        {
             return Err(ConnectionDenied::new(
                 "dial requires one policy-approved IP endpoint and peer",
             ));
@@ -691,9 +932,7 @@ impl NetworkBehaviour for Admission {
         remote: &Multiaddr,
     ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
         self.pending_incoming.remove(&id);
-        if !valid_inbound_endpoint(self.policy, local, true)
-            || !valid_inbound_endpoint(self.policy, remote, false)
-        {
+        if !self.allows_inbound_connection(Some(peer), local, remote) {
             return Err(ConnectionDenied::new("inbound address denied by policy"));
         }
         self.admit(peer)
@@ -708,7 +947,7 @@ impl NetworkBehaviour for Admission {
         _: PortUse,
     ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
         self.pending_outgoing.remove(&id);
-        if validate_multiaddr(self.policy, &peer, addr).is_err() {
+        if !self.allows_outbound_address(peer, addr) {
             return Err(ConnectionDenied::new("outbound address denied by policy"));
         }
         self.admit(peer)
@@ -780,6 +1019,74 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn relay_only_policy_rejects_direct_endpoints() {
+        let local_peer = peer();
+        let direct = endpoint().with(Protocol::P2p(peer()));
+        let mut admission = Admission::new(local_peer, AddressPolicy::RelayOnly);
+        assert!(
+            admission
+                .handle_pending_outbound_connection(
+                    ConnectionId::new_unchecked(1),
+                    Some(peer()),
+                    std::slice::from_ref(&direct),
+                    Endpoint::Dialer,
+                )
+                .is_err()
+        );
+        assert!(!valid_inbound_endpoint(
+            AddressPolicy::RelayOnly,
+            &endpoint(),
+            false
+        ));
+
+        let relay_peer = peer();
+        let relay_address = endpoint().with(Protocol::P2p(relay_peer));
+        let relay_endpoint = parse_relay_endpoint(&relay_address).unwrap();
+        admission.allow_relay_endpoint(relay_endpoint).unwrap();
+        assert!(admission.allows_outbound_address(relay_peer, &endpoint()));
+
+        let target_peer = peer();
+        let route = relay_route_address(&relay_address, &target_peer).unwrap();
+        assert!(admission.allows_outbound_address(target_peer, &route));
+
+        let local_route = relay_address.with(Protocol::P2pCircuit);
+        let remote_address = Multiaddr::empty().with(Protocol::P2p(target_peer));
+        let pending = ConnectionId::new_unchecked(10);
+        assert!(
+            admission
+                .handle_pending_inbound_connection(pending, &local_route, &remote_address,)
+                .is_ok()
+        );
+        assert!(
+            admission
+                .handle_established_inbound_connection(
+                    pending,
+                    target_peer,
+                    &local_route,
+                    &remote_address,
+                )
+                .is_ok()
+        );
+
+        let pending = ConnectionId::new_unchecked(11);
+        assert!(
+            admission
+                .handle_pending_inbound_connection(pending, &local_route, &remote_address,)
+                .is_ok()
+        );
+        assert!(
+            admission
+                .handle_established_inbound_connection(
+                    pending,
+                    peer(),
+                    &local_route,
+                    &remote_address,
+                )
+                .is_err()
         );
     }
 
@@ -907,7 +1214,7 @@ mod tests {
 
     #[test]
     fn inbound_connection_does_not_release_a_pending_dial_for_the_same_peer() {
-        let mut admission = Admission::new(AddressPolicy::LoopbackOnly);
+        let mut admission = Admission::new(peer(), AddressPolicy::LoopbackOnly);
         let peer = peer();
         let addr = endpoint();
         let inbound = ConnectionId::new_unchecked(1);
@@ -952,7 +1259,7 @@ mod tests {
 
     #[test]
     fn inbound_outbound_and_established_share_one_connection_budget() {
-        let mut admission = Admission::new(AddressPolicy::LoopbackOnly);
+        let mut admission = Admission::new(peer(), AddressPolicy::LoopbackOnly);
         let addr = endpoint();
         let mut incoming = 1..;
         let mut outgoing = MAX_CONNECTIONS + 1..;

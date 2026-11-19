@@ -362,7 +362,9 @@ T16 启动设置与策略锁定切片验证（2026-11-19，Windows x64，Rust 1.
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。
 
-T15 中继服务切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC 监听与调用方提供的稳定 PeerId 密钥；预约和电路总数、单 peer 数、预约期限、电路期限及单电路字节上限由 `RelayServerLimits` 控制，libp2p 默认 peer/IP 请求速率限制保留。新增严格版本化 relay-only TOML 配置、Linux `asl-infra` 入口和非 root systemd 示例；身份密钥仅首次生成，存储在配置指定目录，Linux 文件权限限制为 0600，未知配置、符号链接、权限过宽或损坏密钥均拒绝，不会静默重建身份。样例仅定义监听，不代表已部署公网服务。relay 客户端接线与多入口 failover、AutoNAT/DCUtR/DHT、每小时 peer/总字节桶和真实公网部署仍未完成；没有可发布的真实 bootstrap/relay 地址，因此未生成虚构 network-seeds。T15 未关闭。
+T15 中继切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC、稳定 PeerId、预约/电路/时长/单电路字节上限及 libp2p 默认 peer/IP 请求速率限制。中继可从具体监听地址自动发布外部地址；通配监听必须在严格版本化配置中指定 `external_addresses`，不能以不可达地址伪装可用性。Linux `asl-infra` 使用配置目录中的身份密钥，权限限为 0600；未知配置、符号链接、过宽权限或损坏密钥均拒绝且不静默重建。客户端已接入预约、预约成功/失败事件和 relay-only 拨号；入站 relay 电路按配置端点准入，并在握手后绑定远端 PeerId。单机 TCP relay v2 集成测试覆盖 reservation 到认证电路。配置样例中的外部 IP 属文档专用网段，部署前必须替换；当前没有已部署的公网入口或可发布 bootstrap 地址。
+
+多入口失效恢复、DHT/AutoNAT/DCUtR、每小时 peer/总字节桶、Linux 原生目标验证和真实公网部署仍未完成，因此没有生成虚构 `network-seeds.json`。T15 未关闭。
 
 基础设施只做 DHT/AutoNAT/relay，不具备 Agent 文件和模型能力。支持配置多个入口、稳定运营密钥、reservation/circuit/字节/时间/全局限制。
 
@@ -371,12 +373,14 @@ T15 中继服务切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 li
 发布前部署实际入口，生成打包用 network-seeds.json，字段为 version/network_id/generated_at_ms/expires_at_ms/nodes。nodes 每项含 operator_id/peer_id/multiaddrs/roles，roles 仅 bootstrap/relay/autonat；最多 32 个节点、每节点 8 个地址。由发布清单签名保护，不能填不可达假地址交付。用户自定义入口可替换整份内置列表，不需要中央准入。
 
 ```text
-cargo test -p asl-net --test relay_failover
+cargo test -p asl-net --test relay_client
 ```
 
 T15 relay 服务核心切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 36 项、0 失败、1 项忽略，覆盖 relay 限额拒绝、稳定 PeerId、relay multiaddr 顺序及 loopback TCP 监听；格式检查、`cargo clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings` 与 `git diff --check` 通过。未测试实际 relay 电路转发、多中继切换、NAT/DCUtR、Linux systemd、远端公网或每小时总流量限制；本记录不代表 T15 整体验收。Cargo 保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示。
 
 T15 relay-only 配置和入口切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo check -p asl-app --bin asl-infra --locked --offline` 通过；`cargo test -p asl-app --lib --locked --offline -- --skip supervisor::tests::sandboxed_worker_failure_does_not_stop_net_or_core` 通过 152 项；`cargo test -p asl-net --all-targets --locked --offline` 通过 37 项、0 失败、1 项忽略；Clippy、格式和 `git diff --check` 通过。被跳过的 AppContainer 用例在本机子进程启动阶段 EOF，未作为通过计入。Linux Rust target 下载未完成，故 Linux 专属密钥文件权限/恢复和 systemd 入口尚未编译或运行；实际电路转发、多个入口切换、NAT、真实公网部署和总字节桶也未验收。T15 仍未关闭。
+
+T15 relay client 与可达地址切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 39 项、0 失败、1 项忽略；包含两个 RelayOnly 节点通过本机 relay v2 建立认证电路。`asl-app`/`asl-net` 全目标测试、严格 Clippy、格式和 diff 检查均完成；一次最终联合重跑中，既有 `chain::http::tests::http_historical_sync_persists_every_verified_step_and_restores_offline` 偶发 `InvalidLocalState`，单测复跑通过，且此前联合运行通过 153 个 App 单元测试。AppContainer 子进程测试按本机已知环境问题跳过。Windows 本机没有验证 Linux 专属 `asl-infra` 主程序、systemd、公网/NAT、多个 relay 的故障恢复或 DHT/AutoNAT/DCUtR；Cargo 保留 `proc-macro-error2 2.0.1` 未来 Rust 兼容性提示。
 
 ### T16 — mDNS、地址策略与连接观察
 

@@ -3,7 +3,7 @@
 use super::*;
 use crate::address_policy::{AddressPolicy, validate_multiaddr};
 use libp2p::{
-    mdns,
+    mdns, relay,
     request_response::ProtocolSupport,
     swarm::{THandlerInEvent, dummy},
 };
@@ -17,6 +17,7 @@ use std::{
 pub(super) struct AslBehaviour {
     admission: Admission,
     discovery: DiscoveryBehaviour,
+    relay: relay::client::Behaviour,
     pub(super) control: request_response::Behaviour<ControlCodec>,
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
@@ -27,6 +28,7 @@ pub(super) enum BehaviourEvent {
     #[allow(dead_code)]
     Admission(Infallible),
     Discovery(DiscoveryEvent),
+    Relay(relay::client::Event),
     Control(request_response::Event<WireFrame, WireFrame>),
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
@@ -49,6 +51,12 @@ impl From<DiscoveryEvent> for BehaviourEvent {
     }
 }
 
+impl From<relay::client::Event> for BehaviourEvent {
+    fn from(value: relay::client::Event) -> Self {
+        Self::Relay(value)
+    }
+}
+
 impl From<request_response::Event<WireFrame, WireFrame>> for BehaviourEvent {
     fn from(value: request_response::Event<WireFrame, WireFrame>) -> Self {
         Self::Control(value)
@@ -68,7 +76,7 @@ impl From<request_response::Event<BulkRequest, BulkResponse>> for BehaviourEvent
 }
 
 impl AslBehaviour {
-    pub(super) fn new(local_peer_id: libp2p::PeerId) -> Self {
+    pub(super) fn new(local_peer_id: libp2p::PeerId, relay: relay::client::Behaviour) -> Self {
         fn request_response<C: request_response::Codec + Clone + Send + 'static>(
             codec: C,
             protocol: C::Protocol,
@@ -83,8 +91,9 @@ impl AslBehaviour {
         }
 
         Self {
-            admission: Admission::new(AddressPolicy::LoopbackOnly),
+            admission: Admission::new(local_peer_id, AddressPolicy::LoopbackOnly),
             discovery: DiscoveryBehaviour::new(local_peer_id),
+            relay,
             control: request_response(ControlCodec, CONTROL_PROTOCOL),
             identity_proof: request_response(IdentityProofCodec, IDENTITY_PROOF_PROTOCOL),
             bulk: request_response(BulkCodec, BULK_PROTOCOL),
@@ -95,6 +104,13 @@ impl AslBehaviour {
         self.discovery.set_address_policy(policy)?;
         self.admission.policy = policy;
         Ok(())
+    }
+
+    pub(super) fn allow_relay_endpoint(
+        &mut self,
+        endpoint: crate::relay::RelayEndpoint,
+    ) -> io::Result<()> {
+        self.admission.allow_relay_endpoint(endpoint)
     }
 }
 

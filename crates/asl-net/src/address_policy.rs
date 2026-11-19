@@ -8,6 +8,7 @@ pub enum AddressPolicy {
     LanOnly,
     InternetOnly,
     Hybrid,
+    RelayOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +53,10 @@ pub fn allows_ip(policy: AddressPolicy, address: IpAddr) -> bool {
 
 pub fn allows_listen_ip(policy: AddressPolicy, address: IpAddr) -> bool {
     if address.is_unspecified() {
-        return policy != AddressPolicy::LoopbackOnly;
+        return matches!(
+            policy,
+            AddressPolicy::LanOnly | AddressPolicy::InternetOnly | AddressPolicy::Hybrid
+        );
     }
     allows_ip(policy, address)
 }
@@ -127,6 +131,7 @@ impl AddressPolicy {
                 class,
                 AddressClass::Private | AddressClass::LinkLocal | AddressClass::Public
             ),
+            Self::RelayOnly => false,
         }
     }
 
