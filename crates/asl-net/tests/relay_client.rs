@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     net::{IpAddr, SocketAddr},
     time::Duration,
@@ -81,6 +82,38 @@ async fn next_reservation_after_recovery(
     }
 }
 
+async fn next_reservations(transport: &mut LocalTransport, expected: &[libp2p::PeerId]) {
+    let expected = expected.iter().copied().collect::<HashSet<_>>();
+    let mut reserved = HashSet::new();
+    while reserved.len() < expected.len() {
+        match transport.next_event().await.unwrap() {
+            TransportEvent::RelayReserved { relay_peer_id, .. }
+                if expected.contains(&relay_peer_id) =>
+            {
+                reserved.insert(relay_peer_id);
+            }
+            TransportEvent::RelayUnavailable { relay_peer_id } => {
+                panic!("relay became unavailable before reservation: {relay_peer_id}");
+            }
+            TransportEvent::InboundRejected
+            | TransportEvent::Listening(_, _)
+            | TransportEvent::RelayReserved { .. } => {}
+            event => panic!("unexpected relay event: {event:?}"),
+        }
+    }
+}
+
+async fn next_unavailable(transport: &mut LocalTransport, expected: libp2p::PeerId) {
+    loop {
+        if matches!(
+            transport.next_event().await.unwrap(),
+            TransportEvent::RelayUnavailable { relay_peer_id } if relay_peer_id == expected
+        ) {
+            return;
+        }
+    }
+}
+
 async fn next_connected(
     transport: &mut LocalTransport,
     expected: libp2p::PeerId,
@@ -94,10 +127,8 @@ async fn next_connected(
             }
             TransportEvent::InboundRejected
             | TransportEvent::Listening(_, _)
-            | TransportEvent::RelayReserved { .. } => {}
-            TransportEvent::RelayUnavailable { relay_peer_id } => {
-                panic!("relay became unavailable: {relay_peer_id}");
-            }
+            | TransportEvent::RelayReserved { .. }
+            | TransportEvent::RelayUnavailable { .. } => {}
             TransportEvent::Connected { .. }
             | TransportEvent::Disconnected { .. }
             | TransportEvent::ControlRequest { .. }
@@ -199,20 +230,20 @@ async fn client_re_reserves_automatically_after_relay_restarts() {
 
     relay_task.abort();
     let _ = relay_task.await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if matches!(
-                client.next_event().await.unwrap(),
-                TransportEvent::RelayUnavailable { relay_peer_id: failed }
-                    if failed == relay_peer_id
-            ) {
-                break;
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        next_unavailable(&mut client, relay_peer_id),
+    )
     .await
     .unwrap();
     assert!(!client.is_relay_reserved(&relay_peer_id));
+
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        next_unavailable(&mut client, relay_peer_id),
+    )
+    .await
+    .unwrap();
 
     let (relay_task, restarted_address) = start_relay(&relay_key, bind_address).await;
     assert_eq!(restarted_address, relay_address);
@@ -225,4 +256,70 @@ async fn client_re_reserves_automatically_after_relay_restarts() {
     assert!(reservation.to_string().contains("/p2p-circuit"));
     assert!(client.is_relay_reserved(&relay_peer_id));
     relay_task.abort();
+}
+
+#[tokio::test]
+async fn clients_use_the_remaining_relay_when_another_relay_is_offline() {
+    let failed_key = Keypair::generate_ed25519();
+    let failed_peer_id = failed_key.public().to_peer_id();
+    let (failed_task, failed_address) =
+        start_relay(&failed_key, "127.0.0.1:0".parse().unwrap()).await;
+    let active_key = Keypair::generate_ed25519();
+    let active_peer_id = active_key.public().to_peer_id();
+    let (active_task, active_address) =
+        start_relay(&active_key, "127.0.0.1:0".parse().unwrap()).await;
+
+    let requester_key = Keypair::generate_ed25519();
+    let requester_peer_id = requester_key.public().to_peer_id();
+    let responder_key = Keypair::generate_ed25519();
+    let responder_peer_id = responder_key.public().to_peer_id();
+    let mut requester = LocalTransport::new(requester_key).unwrap();
+    let mut responder = LocalTransport::new(responder_key).unwrap();
+    requester
+        .set_address_policy(AddressPolicy::RelayOnly)
+        .unwrap();
+    responder
+        .set_address_policy(AddressPolicy::RelayOnly)
+        .unwrap();
+    for transport in [&mut requester, &mut responder] {
+        transport.reserve_relay(&failed_address).unwrap();
+        transport.reserve_relay(&active_address).unwrap();
+    }
+
+    let expected_relays = [failed_peer_id, active_peer_id];
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            next_reservations(&mut requester, &expected_relays),
+            next_reservations(&mut responder, &expected_relays)
+        )
+    })
+    .await
+    .unwrap();
+
+    failed_task.abort();
+    let _ = failed_task.await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            next_unavailable(&mut requester, failed_peer_id),
+            next_unavailable(&mut responder, failed_peer_id)
+        )
+    })
+    .await
+    .unwrap();
+
+    requester
+        .dial_via_relays(&asl_types::ids::PeerId::from_bytes(responder_peer_id.to_bytes()).unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            next_connected(&mut requester, responder_peer_id),
+            next_connected(&mut responder, requester_peer_id)
+        )
+    })
+    .await
+    .unwrap()
+    .0
+    .unwrap();
+
+    active_task.abort();
 }

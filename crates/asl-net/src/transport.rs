@@ -458,11 +458,7 @@ impl LocalTransport {
         if peer == *self.swarm.local_peer_id() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let addresses = self
-            .relay_endpoints
-            .values()
-            .map(|relay| relay_route_address(&relay.address, &peer))
-            .collect::<io::Result<Vec<_>>>()?;
+        let addresses = self.relay_route_addresses(&peer)?;
         if addresses.is_empty() {
             return Err(io::ErrorKind::NotConnected.into());
         }
@@ -635,6 +631,17 @@ impl LocalTransport {
                     return Ok(TransportEvent::InboundRejected);
                 }
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    if let Some(relay_peer_id) = peer_id
+                        && self.relay_endpoints.contains_key(&relay_peer_id)
+                        && !self.swarm.is_connected(&relay_peer_id)
+                    {
+                        if self.fail_relay_peer(relay_peer_id) {
+                            return Ok(TransportEvent::RelayUnavailable { relay_peer_id });
+                        }
+                        if self.relay_retries.contains_key(&relay_peer_id) {
+                            continue;
+                        }
+                    }
                     let was_discovery = match peer_id {
                         Some(peer_id) => self.pending_discovery_dials.remove(&peer_id),
                         None => {
@@ -651,6 +658,14 @@ impl LocalTransport {
                 _ => {}
             }
         }
+    }
+
+    fn relay_route_addresses(&self, target: &libp2p::PeerId) -> io::Result<Vec<Multiaddr>> {
+        self.relay_endpoints
+            .iter()
+            .filter(|(relay_peer_id, _)| !self.relay_retries.contains_key(relay_peer_id))
+            .map(|(_, relay)| relay_route_address(&relay.address, target))
+            .collect()
     }
 
     fn next_relay_retry_deadline(&self) -> Option<tokio::time::Instant> {
@@ -1165,6 +1180,36 @@ mod tests {
         assert_eq!(relay_retry_delay(2), Duration::from_secs(2));
         assert_eq!(relay_retry_delay(7), Duration::from_secs(60));
         assert_eq!(relay_retry_delay(u32::MAX), RELAY_RETRY_MAX);
+    }
+
+    #[test]
+    fn relay_routes_skip_endpoints_in_backoff() {
+        let target_peer = peer();
+        let failed_peer = peer();
+        let available_peer = peer();
+        let failed_endpoint =
+            parse_relay_endpoint(&endpoint().with(Protocol::P2p(failed_peer))).unwrap();
+        let available_endpoint =
+            parse_relay_endpoint(&endpoint().with(Protocol::P2p(available_peer))).unwrap();
+        let mut transport = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
+        transport
+            .relay_endpoints
+            .insert(failed_peer, failed_endpoint);
+        transport
+            .relay_endpoints
+            .insert(available_peer, available_endpoint.clone());
+        transport.relay_retries.insert(
+            failed_peer,
+            RelayRetry {
+                attempts: 1,
+                retry_at: Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+            },
+        );
+
+        assert_eq!(
+            transport.relay_route_addresses(&target_peer).unwrap(),
+            vec![relay_route_address(&available_endpoint.address, &target_peer).unwrap()]
+        );
     }
 
     #[test]

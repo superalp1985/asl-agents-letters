@@ -362,9 +362,9 @@ T16 启动设置与策略锁定切片验证（2026-11-19，Windows x64，Rust 1.
 
 依赖 T14。创建 net relay、app/bin/asl-infra、Linux systemd 示例。
 
-T15 中继切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC、稳定 PeerId、预约/电路/时长/单电路字节上限及 libp2p 默认 peer/IP 请求速率限制。中继可从具体监听地址自动发布外部地址；通配监听必须在严格版本化配置中指定 `external_addresses`，不能以不可达地址伪装可用性。Linux `asl-infra` 使用配置目录中的身份密钥，权限限为 0600；未知配置、符号链接、过宽权限或损坏密钥均拒绝且不静默重建。客户端已接入预约、预约成功/失败事件和 relay-only 拨号；入站 relay 电路按配置端点准入，并在握手后绑定远端 PeerId。relay listener 关闭、地址过期或最后一条 relay 连接断开后，会报告不可用并按 1 至 60 秒有上限的指数退避自动重预约；首次预约成功后清除退避状态。单机 TCP relay v2 集成测试覆盖 reservation 到认证电路及同地址 relay 重启后的自动恢复。配置样例中的外部 IP 属文档专用网段，部署前必须替换；当前没有已部署的公网入口或可发布 bootstrap 地址。
+T15 中继切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC、稳定 PeerId、预约/电路/时长/单电路字节上限及 libp2p 默认 peer/IP 请求速率限制。中继可从具体监听地址自动发布外部地址；通配监听必须在严格版本化配置中指定 `external_addresses`，不能以不可达地址伪装可用性。Linux `asl-infra` 使用配置目录中的身份密钥，权限限为 0600；未知配置、符号链接、过宽权限或损坏密钥均拒绝且不静默重建。客户端已接入预约、预约成功/失败事件和 relay-only 拨号；入站 relay 电路按配置端点准入，并在握手后绑定远端 PeerId。relay listener 关闭、地址过期或最后一条 relay 连接断开后，会报告不可用并按 1 至 60 秒有上限的指数退避自动重预约；首次预约成功后清除退避状态，退避中的 relay 不再作为新拨号候选。单机 TCP relay v2 集成测试覆盖 reservation 到认证电路、同地址 relay 重启后的自动恢复，以及一个 relay 离线时经另一个 relay 建立认证连接。配置样例中的外部 IP 属文档专用网段，部署前必须替换；当前没有已部署的公网入口或可发布 bootstrap 地址。
 
-多个 relay 之间的故障切换、DHT/AutoNAT/DCUtR、每小时 peer/总字节桶、Linux 原生目标验证和真实公网部署仍未完成，因此没有生成虚构 `network-seeds.json`。T15 未关闭。
+双 relay 基础故障切换（一个入口离线、另一个可用）和同地址恢复已有本机测试；真实公网互通、DHT/AutoNAT/DCUtR、每小时 peer/总字节桶、Linux 原生目标验证仍未完成，因此没有生成虚构 `network-seeds.json`。T15 未关闭。
 
 基础设施只做 DHT/AutoNAT/relay，不具备 Agent 文件和模型能力。支持配置多个入口、稳定运营密钥、reservation/circuit/字节/时间/全局限制。
 
@@ -383,6 +383,8 @@ T15 relay-only 配置和入口切片验证（2026-11-19，Windows x64，Rust 1.1
 T15 relay client 与可达地址切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 39 项、0 失败、1 项忽略；包含两个 RelayOnly 节点通过本机 relay v2 建立认证电路。`asl-app`/`asl-net` 全目标测试、严格 Clippy、格式和 diff 检查均完成；一次最终联合重跑中，既有 `chain::http::tests::http_historical_sync_persists_every_verified_step_and_restores_offline` 偶发 `InvalidLocalState`，单测复跑通过，且此前联合运行通过 153 个 App 单元测试。AppContainer 子进程测试按本机已知环境问题跳过。Windows 本机没有验证 Linux 专属 `asl-infra` 主程序、systemd、公网/NAT、多个 relay 的故障恢复或 DHT/AutoNAT/DCUtR；Cargo 保留 `proc-macro-error2 2.0.1` 未来 Rust 兼容性提示。
 
 T15 relay 断线重预约切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 42 项、0 失败、1 项忽略；新增集成测试确认配置 relay 停机后产生不可用状态，同一 PeerId/地址恢复后客户端经有上限指数退避自动重新预约。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。仅验证单个本机 TCP relay 的停机/恢复，不代表多个 relay 故障切换、真实公网或 NAT 恢复已验收；Linux 专属入口和既有 Cargo 兼容性提示不在本轮范围。
+
+T15 多 relay 故障切换切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 44 项、0 失败、1 项忽略；覆盖退避 relay 从新拨号候选中排除、一个 relay 下线后通过另一入口完成认证连接，以及 relay 持续离线时重预约失败仍保留事件循环并继续退避。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。验证仅限本机 loopback TCP relay，不代表真实公网、NAT、DHT 或 Linux 基础设施已验收。
 
 ### T16 — mDNS、地址策略与连接观察
 
