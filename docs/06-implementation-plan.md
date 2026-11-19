@@ -434,6 +434,12 @@ T17 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-agent --test bounded_queries
 ```
 
+T18 有界查询路由切片（2026-11-19）：新增 `asl-agent::QueryRouter` 纯状态路由器和结构化 `OutgoingTask`。出站任务先按本地联系人顺序产生直询动作，最多保留 16 个去重 PeerId；联系人全部结束后，只有 public scope 才产生最多 3 个概念 DHT lookup 动作，DHT 返回的 provider 只补足剩余直询名额。contacts-only 任务不会产生 DHT 动作，所有动作都绑定同一 root task、独立 message ID 和不超过 10 秒的时间窗。入站 `Query` 仅登记为本地执行候选，按 PeerId/message_id 去重并限 20,000 条、10 分钟保留；重复、过期或超界查询不再次执行，也没有把 query 转发给其他节点的动作。超时会清空待派发动作，过期后不再新增网络工作。
+
+本切片只完成有界路由状态机与纯集成覆盖，尚未把动作接入实际 DHT driver、联系人持久表、`asl-store` SQLite 本地检索、Core/Agent handler 或真实三节点网络；不能写成完整查询、回答或资源发现已完成。
+
+T18 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-agent --all-targets --locked --offline` 通过 8 项、0 失败；`cargo test -p asl-agent --test bounded_queries --locked --offline` 通过 3 项、0 失败。覆盖联系人优先、contacts-only 不泄露 DHT term、DHT provider 16 节点上限、查询超时、入站重放去重和环形路由不转发。`cargo clippy -p asl-agent --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 和 `git diff --check` 均通过。真实 DHT provider、SQLite 本地检索、网络三节点和 GUI 未在本轮验收。
+
 ### T18a — 数字短码与 PAKE 配对
 
 依赖 T06、T14、T17。创建 `asl-net/src/pairing` 与身份解析 adapter。持久 16 位短码只查询候选；首次核验使用二维码/签名邀请或有期限的一次性 PAKE 码。PAKE 依赖需在本任务锁定前审查维护状态、许可和 API；不自行设计或拼接密码学协议。
