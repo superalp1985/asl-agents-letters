@@ -334,15 +334,19 @@ T14 Core 网络身份准入协调器切片（2026-11-19）：新增 `CoreAdmissi
 
 T14 Supervisor 本地身份绑定切片（2026-11-19）：`CoreAdmission::for_local_identity` 只从身份根对应 AgentId 的签名设备目录中选择当前 Net 设备的证书，再创建 Hello 并执行活动链、目录签名与 commitment 校验；调用者不能传入不同的根 AgentId 或 PeerId。Supervisor 自身持有该准入状态，网络事件/出站控制与 bulk 命令经过其内部门禁，不再由调用者替换准入器。准入仍须显式提供有效的本地链 resolver 和签名目录；`Supervisor::start/run` 尚未读取生产信任配置或自动启用联网，缺失配置不开放业务通信。
 
-T14 启动身份准入加载切片（2026-11-19）：新增严格版本化的 `network-identity-v1.json` 与固定位置的签名设备目录加载。配置必须提供部署、共识/fork/checkpoint、HTTP 服务入口和缓存限制；不设默认 RPC、合约地址或信任 checkpoint。启动时仅从既有 SQLite 链快照恢复，或以本地配置 checkpoint 通过指定服务 bootstrap；随后同步最终性并获取本机 AgentId 的状态证明。只有当前根地址仍为 Active 且已签名设备目录/设备 PeerId/链上 commitment 一致时才启用 `CoreAdmission`。缺少配置、目录、链服务或链上锚定分别保持未准入状态；损坏的本机链快照或不匹配目录失败关闭。首次注册/目录承诺签名、GUI 配置与启动后的周期同步仍未实现。
+T14 启动身份准入加载切片（2026-11-19）：新增严格版本化的 `network-identity-v1.json` 与固定位置的签名设备目录加载。配置必须提供部署、共识/fork/checkpoint、HTTP 服务入口和缓存限制；不设默认 RPC、合约地址或信任 checkpoint。启动时仅从既有 SQLite 链快照恢复，或以本地配置 checkpoint 通过指定服务 bootstrap；随后同步最终性并获取本机 AgentId 的状态证明。只有当前根地址仍为 Active 且已签名设备目录/设备 PeerId/链上 commitment 一致时才启用 `CoreAdmission`。缺少配置、目录、链服务或链上锚定分别保持未准入状态；损坏的本机链快照或不匹配目录失败关闭。首次注册、目录承诺签名和 GUI 配置仍未实现；启动后的周期续验见下方独立切片。
 
-T14 Supervisor 网络事件泵切片（2026-11-19）：`Supervisor::run_with_network_handler` 以有界 Net/Core IPC 接收队列驱动 `CoreAdmission`，自动完成 Hello、身份链证明请求/响应和断开清理；无有效本机准入时，对远端连接及应用帧只发关闭命令，不向 handler 暴露载荷。通过准入的结构化事件交给本地 handler；其返回的控制/bulk 命令再次经过 peer、连接和会话状态校验。默认 `run()` 使用静默 handler，不伪造回答；实际 Agent 会话运行时尚未接入。事件轮询超时与 Net 子进程 EOF 分开处理；异步 Ping/Pong 与周期健康检查不阻塞事件接收。公网 listener、周期链同步、首次注册仍不在此切片范围。
+T14 Supervisor 网络事件泵切片（2026-11-19）：`Supervisor::run_with_network_handler` 以有界 Net/Core IPC 接收队列驱动 `CoreAdmission`，自动完成 Hello、身份链证明请求/响应和断开清理；无有效本机准入时，对远端连接及应用帧只发关闭命令，不向 handler 暴露载荷。通过准入的结构化事件交给本地 handler；其返回的控制/bulk 命令再次经过 peer、连接和会话状态校验。默认 `run()` 使用静默 handler，不伪造回答；实际 Agent 会话运行时尚未接入。事件轮询超时与 Net 子进程 EOF 分开处理；异步 Ping/Pong 与周期健康检查不阻塞事件接收。公网 listener 与首次注册仍未完成；周期链同步由下方后续切片补上。
 
 T14 Core 准入与 T06 根身份启动模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 159 项，1 项忽略；`cargo test -p asl-net --all-targets --locked` 通过 25 项，1 项忽略。`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。覆盖范围仅为 `asl-app`、`asl-net` 与格式/静态 lint，不代表 workspace 全量测试或 T14 公网/生产验收。Cargo 提示 `proc-macro-error2 2.0.1` 含未来 Rust 版本兼容性问题；本轮未处理该无关依赖告警。
 
 T14 启动准入加载模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 163 项、1 项忽略；`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。覆盖仅含 `asl-app`/`asl-net` 与格式、静态 lint；未运行 workspace 全量测试、公网互操作、首次注册或周期同步验收。Cargo 提示 `proc-macro-error2 2.0.1` 未来 Rust 兼容性告警，本轮未处理。
 
 T14 Supervisor 网络事件泵模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 167 项、1 项忽略；`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。覆盖为 `asl-app`/`asl-net`、格式与静态 lint；未运行 workspace 全量测试、公网互操作、Agent handler 集成或链周期同步。Cargo 提示 `proc-macro-error2 2.0.1` 未来 Rust 兼容性告警，本轮未处理。
+
+T14 周期链状态续验切片（2026-11-19）：新增独立链同步线程，按配置的身份证明缓存时限周期同步最终性并请求本机 AgentId 的注册表证明；刷新间隔由缓存时限推导，失败重试受配置 HTTP 超时约束。后台只操作独立 `EthereumLightClient` 副本，不读写共享 SQLite；更新及证明经 Core 原有 MPT verifier 和 durable resolver 单写入路径验证/提交，避免 HTTP 阻塞 Supervisor 或与证明缓存发生 CAS 写入竞争。本机根地址、Active 状态、签名设备目录 commitment、当前设备证书及有效期在每次续验后重验；链服务不可用或身份/目录失效时关闭当前会话并暂停所有应用帧，恢复有效续验后重新开放。没有新增 RPC 地址、协议字段或依赖。远端已准入身份仍按既有 `max_cache_age_secs` 缓存时限失效，不由此切片主动逐个拉取远端最新证明；首次注册、UI 配置、公网 listener 和公网互通验收仍未完成。
+
+T14 周期链状态续验模块验证（2026-11-19，Windows x64，Rust 1.100.0）：`cargo test -p asl-app --all-targets --locked` 通过 169 项、0 失败、1 项忽略；`cargo clippy -p asl-app -p asl-net --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check` 通过。验证范围为 `asl-app`/`asl-net`、固定链服务夹具、Core 身份续验、SQLite 持久化与格式/lint；未运行 workspace 全量测试、真实公网链服务、首次注册、远端身份批量续验或公网互通验收。Cargo 保留 `proc-macro-error2 2.0.1` 的未来 Rust 兼容性提示，本轮未处理该无关依赖告警。
 
 ### T15 — 引导、中继、NAT 与基础设施
 

@@ -10,7 +10,7 @@ use asl_types::{
 use rand::{TryRng, rngs::SysRng};
 
 use crate::{
-    chain::DurableIdentityResolver,
+    chain::{DurableIdentityResolver, IdentityResolution, IdentityResolver, RegistryStatus},
     network::{NetworkCommand, NetworkEvent},
 };
 
@@ -22,6 +22,7 @@ const MAX_DEVICE_OBSERVATIONS: usize = 128;
 pub struct CoreAdmission {
     local_hello: Hello,
     local_signed_directory: Vec<u8>,
+    local_controller: Option<[u8; 20]>,
     resolver: DurableIdentityResolver,
     peers: HashMap<[u8; 16], PeerAdmission>,
 }
@@ -128,13 +129,15 @@ impl CoreAdmission {
             minor: 0,
             features: Vec::new(),
         };
-        Self::new(
+        let mut admission = Self::new(
             local_peer_id,
             local_hello,
             local_signed_directory,
             resolver,
             now_ms,
-        )
+        )?;
+        admission.local_controller = Some(identity.controller_address());
+        Ok(admission)
     }
 
     /// The local advertisement must already be represented by an active,
@@ -167,9 +170,58 @@ impl CoreAdmission {
         Ok(Self {
             local_hello,
             local_signed_directory,
+            local_controller: None,
             resolver,
             peers: HashMap::new(),
         })
+    }
+
+    pub fn refresh_local_identity(
+        &mut self,
+        light_client: crate::chain::EthereumLightClient,
+        proof: &crate::chain::IdentityProofV1,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        let agent_id = self.local_hello.agent_id;
+        let now_secs = now_ms / 1_000;
+        self.resolver
+            .update_light_client(light_client, now_secs)
+            .map_err(|_| AslError::InvalidIdentity)?;
+        self.resolver
+            .accept_proof(agent_id, proof, now_secs)
+            .map_err(|_| AslError::InvalidIdentity)?;
+
+        let Some(controller) = self.local_controller else {
+            return Err(AslError::InvalidIdentity);
+        };
+        let IdentityResolution::Verified(identity) = self.resolver.resolve(agent_id, now_secs)
+        else {
+            return Ok(false);
+        };
+        if identity.state().status != RegistryStatus::Active
+            || identity.state().controller != controller
+        {
+            return Ok(false);
+        }
+
+        let mut history = RecordHistory::new(agent_id, MAX_DEVICE_OBSERVATIONS)?;
+        let directory = history.accept(&self.local_signed_directory, now_ms, &mut self.resolver)?;
+        let RecordPayload::DeviceDirectory(directory) = &directory.signed().record.payload else {
+            return Ok(false);
+        };
+        let certificate = &self.local_hello.device_certificate;
+        Ok(directory.devices.contains(certificate)
+            && now_ms >= certificate.issued_at_ms
+            && now_ms < certificate.expires_at_ms)
+    }
+
+    pub fn close_all(&mut self) -> AdmissionBatch {
+        let mut batch = AdmissionBatch::default();
+        let connections: Vec<_> = self.peers.keys().copied().collect();
+        for connection_id in connections {
+            self.close(connection_id, &mut batch);
+        }
+        batch
     }
 
     /// Processes raw Net events and emits only handshake commands or events

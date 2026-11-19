@@ -16,6 +16,7 @@ use asl_types::{
 };
 
 use crate::chain::DurableIdentityResolver;
+use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole, MAX_IPC_TASK_PAYLOAD_BYTES,
@@ -42,6 +43,7 @@ pub struct Supervisor {
     net: NetRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
+    chain_refresh: Option<ChainRefreshWorker>,
 }
 
 impl Supervisor {
@@ -71,6 +73,7 @@ impl Supervisor {
             net,
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
+            chain_refresh: network_admission.refresh_worker,
         })
     }
 
@@ -155,6 +158,7 @@ impl Supervisor {
         let mut next_health_check = Instant::now();
         let mut next_ping = Instant::now();
         loop {
+            self.process_chain_refresh()?;
             let now = Instant::now();
             if now >= next_health_check {
                 self.libraries.check_health()?;
@@ -187,9 +191,13 @@ impl Supervisor {
                 _ => return Err(AslError::InvalidMessage),
             };
             let now_ms = unix_time_ms()?;
-            let batch = match self.admission.as_mut() {
-                Some(admission) => admission.handle_event(event, now_ms),
-                None => reject_unadmitted_event(event),
+            let batch = if self.network_admission_status != NetworkAdmissionStatus::Active {
+                reject_unadmitted_event(event)
+            } else {
+                match self.admission.as_mut() {
+                    Some(admission) => admission.handle_event(event, now_ms),
+                    None => reject_unadmitted_event(event),
+                }
             };
             for command in batch.commands {
                 self.send_network_command(command)?;
@@ -200,6 +208,58 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    fn process_chain_refresh(&mut self) -> Result<(), AslError> {
+        let Some(event) = self
+            .chain_refresh
+            .as_ref()
+            .and_then(ChainRefreshWorker::try_recv)
+        else {
+            return Ok(());
+        };
+        match event {
+            ChainRefreshEvent::Updated(candidate) => {
+                let now_ms = unix_time_ms()?;
+                let result = self.admission.as_mut().map(|admission| {
+                    admission.refresh_local_identity(
+                        candidate.light_client,
+                        &candidate.proof,
+                        now_ms,
+                    )
+                });
+                match result {
+                    Some(Ok(true)) => {
+                        self.network_admission_status = NetworkAdmissionStatus::Active;
+                    }
+                    Some(Ok(false)) => {
+                        self.suspend_network_admission(
+                            NetworkAdmissionStatus::RegistryAnchorMissing,
+                        )?;
+                    }
+                    Some(Err(_)) | None => {
+                        self.suspend_network_admission(NetworkAdmissionStatus::ChainUnavailable)?;
+                    }
+                }
+            }
+            ChainRefreshEvent::Unavailable => {
+                self.suspend_network_admission(NetworkAdmissionStatus::ChainUnavailable)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn suspend_network_admission(
+        &mut self,
+        status: NetworkAdmissionStatus,
+    ) -> Result<(), AslError> {
+        self.network_admission_status = status;
+        if let Some(admission) = self.admission.as_mut() {
+            for command in admission.close_all().commands {
+                self.send_network_command(command)?;
+            }
+        }
+        Ok(())
     }
 }
 

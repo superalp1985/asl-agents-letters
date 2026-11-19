@@ -14,6 +14,7 @@ use crate::{
         ChainHttpClient, ChainHttpConfigV1, DurableIdentityResolver, DurableResolverConfigV1,
         IdentityResolution, IdentityResolver, RegistryStatus,
     },
+    chain_refresh::ChainRefreshWorker,
     identity::AgentIdentity,
     paths::AppPaths,
     profile::CoreAdmission,
@@ -41,6 +42,7 @@ pub enum NetworkAdmissionStatus {
 pub(crate) struct NetworkAdmissionSetup {
     pub status: NetworkAdmissionStatus,
     pub admission: Option<CoreAdmission>,
+    pub refresh_worker: Option<ChainRefreshWorker>,
 }
 
 impl NetworkIdentityConfigurationV1 {
@@ -126,6 +128,13 @@ pub(crate) fn load_network_admission(
         return Ok(setup(NetworkAdmissionStatus::RegistryAnchorMissing));
     }
 
+    let refresh_worker = ChainRefreshWorker::start(
+        configuration.http,
+        resolver.light_client().clone(),
+        identity.agent_id(),
+        configuration.resolver.deployment,
+        configuration.resolver.max_cache_age_secs,
+    )?;
     let admission = CoreAdmission::for_local_identity(
         identity,
         local_peer_id,
@@ -136,6 +145,7 @@ pub(crate) fn load_network_admission(
     Ok(NetworkAdmissionSetup {
         status: NetworkAdmissionStatus::Active,
         admission: Some(admission),
+        refresh_worker: Some(refresh_worker),
     })
 }
 
@@ -190,6 +200,7 @@ fn setup(status: NetworkAdmissionStatus) -> NetworkAdmissionSetup {
     NetworkAdmissionSetup {
         status,
         admission: None,
+        refresh_worker: None,
     }
 }
 

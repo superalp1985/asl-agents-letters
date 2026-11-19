@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(windows)]
 use crate::chain::{
-    DurableIdentityResolver, DurableResolverConfigV1,
+    DurableIdentityResolver, DurableResolverConfigV1, IdentityProofV1,
     test_support::{TestChainDatabase, bootstrapped, consensus_config},
 };
 #[cfg(windows)]
@@ -22,7 +22,7 @@ use tokio::time::timeout;
 fn durable_directory_resolver(
     root: &AgentIdentity,
     directory: &DeviceDirectory,
-) -> (TestChainDatabase, DurableIdentityResolver) {
+) -> (TestChainDatabase, DurableIdentityResolver, IdentityProofV1) {
     let commitment = device_directory_commitment(directory).unwrap();
     let mut values = [[0; 32]; 3];
     values[0][12..].copy_from_slice(&root.controller_address());
@@ -47,7 +47,7 @@ fn durable_directory_resolver(
     resolver
         .accept_proof(root.agent_id(), &proof, BOOTSTRAP_TIME)
         .unwrap();
-    (database, resolver)
+    (database, resolver, proof)
 }
 
 fn hello(cert: &DeviceCertificate) -> Hello {
@@ -516,7 +516,7 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
         vec![],
     );
     let local_signed = signed_directory(&local_root, &local_directory, 1);
-    let (local_database, local_resolver) =
+    let (local_database, local_resolver, _) =
         durable_directory_resolver(&local_root, &local_directory);
     let mut admission = CoreAdmission::for_local_identity(
         &local_root,
@@ -527,12 +527,12 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     )
     .unwrap();
 
-    let (_remote_database, mut remote_resolver) =
+    let (_remote_database, mut remote_resolver, _) =
         durable_directory_resolver(&local_root, &local_directory);
     let remote_hello = hello(&remote_cert);
 
     let unlisted_device = DeviceIdentity::generate().unwrap();
-    let (_unlisted_database, unlisted_resolver) =
+    let (_unlisted_database, unlisted_resolver, _) =
         durable_directory_resolver(&local_root, &local_directory);
     assert!(
         CoreAdmission::for_local_identity(
@@ -544,6 +544,25 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
         )
         .is_err(),
         "the local network device must be listed in the signed registry directory"
+    );
+
+    let (_refresh_database, refresh_resolver, refresh_proof) =
+        durable_directory_resolver(&local_root, &local_directory);
+    assert!(
+        admission
+            .refresh_local_identity(refresh_resolver.light_client().clone(), &refresh_proof, NOW,)
+            .unwrap()
+    );
+    let mut invalid_refresh_proof = refresh_proof.clone();
+    invalid_refresh_proof.storage[0].value[31] ^= 1;
+    assert!(
+        admission
+            .refresh_local_identity(
+                refresh_resolver.light_client().clone(),
+                &invalid_refresh_proof,
+                NOW,
+            )
+            .is_err()
     );
 
     let rejected_connection = [82; 16];
@@ -741,6 +760,23 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
             response_id: [98; 16],
             request: control,
         }]
+    );
+    assert_eq!(
+        admission.close_all().commands,
+        vec![NetworkCommand::CloseConnection { connection_id }]
+    );
+    assert!(
+        admission
+            .authorize_control_command(
+                connection_id,
+                [99; 16],
+                WireFrame::Ack(Ack {
+                    message_id: Id128([100; 16]),
+                    received_id: Id128([101; 16]),
+                }),
+                NOW,
+            )
+            .is_err()
     );
     drop(admission);
     drop(local_database);

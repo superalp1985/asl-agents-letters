@@ -379,6 +379,32 @@ async fn http_historical_sync_persists_every_verified_step_and_restores_offline(
 
 #[cfg(windows)]
 #[tokio::test]
+async fn light_client_sync_updates_only_the_supplied_candidate() {
+    let server = historical_server();
+    let client = ChainHttpClient::new(client_config(
+        vec![server.endpoint()],
+        vec![server.endpoint()],
+    ))
+    .unwrap();
+    let mut candidate = client
+        .bootstrap(consensus_config(), FINALITY_NOW)
+        .await
+        .unwrap();
+    let before_period = candidate.update_period();
+
+    let report = client
+        .synchronize_light_client(&mut candidate, FINALITY_NOW)
+        .await
+        .unwrap();
+
+    assert_eq!(report.committee_updates, 6);
+    assert_eq!(report.finalized, synced().finalized(FINALITY_NOW).unwrap());
+    assert_ne!(candidate.update_period(), before_period);
+    assert_eq!(candidate.finalized(FINALITY_NOW).unwrap(), report.finalized);
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn total_sync_request_budget_stops_retries_and_keeps_verified_checkpoint() {
     let server = Server::start(|_, _| {
         let mut reply = Reply::json(b"{}".to_vec());

@@ -264,6 +264,40 @@ impl DurableIdentityResolver {
         self.config.deployment
     }
 
+    pub fn update_light_client(
+        &mut self,
+        light_client: EthereumLightClient,
+        now_secs: u64,
+    ) -> Result<(), ChainError> {
+        self.ensure_storage()?;
+        if light_client.config() != &self.config.consensus {
+            return Err(ChainError::InvalidConfiguration);
+        }
+        let finalized = light_client.finalized(now_secs)?;
+        let previous = self
+            .resolver
+            .light_client()
+            .observed_execution()
+            .ok_or(ChainError::InvalidLocalState)?;
+        if finalized.chain_id() != previous.chain_id()
+            || finalized.block_number() < previous.block_number()
+            || finalized.beacon_slot() < previous.beacon_slot()
+            || finalized.timestamp_secs() < previous.timestamp_secs()
+        {
+            return Err(ChainError::Rollback);
+        }
+        if finalized.block_number() == previous.block_number()
+            && (finalized.block_hash() != previous.block_hash()
+                || finalized.state_root() != previous.state_root())
+        {
+            return Err(ChainError::ConflictingFinality);
+        }
+
+        let mut candidate = self.resolver.clone();
+        *candidate.light_client_mut() = light_client;
+        self.commit(candidate, self.bundle.clone(), now_secs)
+    }
+
     pub fn apply_update_json(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
         self.update_consensus(now_secs, |client| client.apply_update_json(bytes, now_secs))
     }

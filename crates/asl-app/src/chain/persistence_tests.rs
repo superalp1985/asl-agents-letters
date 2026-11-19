@@ -62,6 +62,29 @@ fn finalized_consensus_roundtrips_and_can_resume_from_stale_finality() {
     );
 }
 
+#[test]
+fn refreshed_light_client_is_committed_without_dropping_identity_observations() {
+    let database = TestChainDatabase::new();
+    let (mut durable, proof) = synthetic(&database, 1, 1);
+    durable
+        .accept_proof(proof.agent_id, &proof, BOOTSTRAP_TIME)
+        .unwrap();
+
+    durable.update_light_client(synced(), FINALITY_NOW).unwrap();
+    let finalized = durable.light_client().finalized(FINALITY_NOW).unwrap();
+    assert_eq!(finalized, synced().finalized(FINALITY_NOW).unwrap());
+    assert_eq!(durable.bundle.observations.len(), 1);
+
+    drop(durable);
+    let restored =
+        DurableIdentityResolver::restore(database.open(), config(), FINALITY_NOW).unwrap();
+    assert_eq!(
+        restored.light_client().finalized(FINALITY_NOW).unwrap(),
+        finalized
+    );
+    assert_eq!(restored.bundle.observations.len(), 1);
+}
+
 use serde_json::Value;
 
 #[test]

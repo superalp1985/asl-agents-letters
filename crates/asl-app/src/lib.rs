@@ -1,4 +1,5 @@
 pub mod chain;
+mod chain_refresh;
 pub mod identity;
 pub mod ipc;
 pub mod libraries;
