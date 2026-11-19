@@ -364,7 +364,7 @@ T16 启动设置与策略锁定切片验证（2026-11-19，Windows x64，Rust 1.
 
 T15 中继切片（2026-11-19）：`asl-net::relay::RelayServer` 复用 libp2p relay v2，支持 TCP/QUIC、稳定 PeerId、预约/电路/时长/单电路字节上限及 libp2p 默认 peer/IP 请求速率限制。中继可从具体监听地址自动发布外部地址；通配监听必须在严格版本化配置中指定 `external_addresses`，不能以不可达地址伪装可用性。Linux `asl-infra` 使用配置目录中的身份密钥，权限限为 0600；未知配置、符号链接、过宽权限或损坏密钥均拒绝且不静默重建。客户端已接入预约、预约成功/失败事件和 relay-only 拨号；入站 relay 电路按配置端点准入，并在握手后绑定远端 PeerId。relay listener 关闭、地址过期或最后一条 relay 连接断开后，会报告不可用并按 1 至 60 秒有上限的指数退避自动重预约；首次预约成功后清除退避状态，退避中的 relay 不再作为新拨号候选。单机 TCP relay v2 集成测试覆盖 reservation 到认证电路、同地址 relay 重启后的自动恢复，以及一个 relay 离线时经另一个 relay 建立认证连接。配置样例中的外部 IP 属文档专用网段，部署前必须替换；当前没有已部署的公网入口或可发布 bootstrap 地址。
 
-双 relay 基础故障切换（一个入口离线、另一个可用）和同地址恢复已有本机测试；真实公网互通、DHT/AutoNAT/DCUtR、每小时 peer/总字节桶、Linux 原生目标验证仍未完成，因此没有生成虚构 `network-seeds.json`。T15 未关闭。
+双 relay 基础故障切换（一个入口离线、另一个可用）和同地址恢复已有本机测试；Linux `asl-infra` 原生目标编译已于 2026-11-19 在 WSL Ubuntu x86_64 完成，但运行时、密钥权限行为和 systemd 尚未验证。真实公网互通、DHT/AutoNAT/DCUtR、每小时 peer/总字节桶仍未完成，因此没有生成虚构 `network-seeds.json`。T15 未关闭。
 
 基础设施只做 DHT/AutoNAT/relay，不具备 Agent 文件和模型能力。支持配置多个入口、稳定运营密钥、reservation/circuit/字节/时间/全局限制。
 
@@ -387,6 +387,8 @@ T15 relay 断线重预约切片验证（2026-11-19，Windows x64，Rust 1.100.0�
 T15 多 relay 故障切换切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 44 项、0 失败、1 项忽略；覆盖退避 relay 从新拨号候选中排除、一个 relay 下线后通过另一入口完成认证连接，以及 relay 持续离线时重预约失败仍保留事件循环并继续退避。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。验证仅限本机 loopback TCP relay，不代表真实公网、NAT、DHT 或 Linux 基础设施已验收。
 
 T15 relay 分块数据切片验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘缓存）：`cargo test -p asl-net --all-targets --locked --offline` 通过 45 项、0 失败、1 项忽略；新增测试通过 RelayOnly 认证连接往返 4 个独立 128 KiB bulk chunk，并校验 chunk 序号、请求关联 ID、状态和内容。`cargo clippy -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。本测试只验证单机 TCP relay 上的顺序多块传输，不代表大文件断点续传、跨 relay 分块调度、真实公网带宽或 Linux 基础设施已验收。
+
+T15 Linux 基础设施原生编译切片验证（2026-11-19，WSL Ubuntu x86_64，Rust 1.100.0，Cargo 离线模式，工具链/缓存/产物位于 E 盘）：`cargo check -p asl-app --bin asl-infra --locked --offline` 通过。WSL 缺少 `pkg-config` 命令，但已有 OpenSSL 开发头文件和库；本次仅为构建进程指定其路径，没有安装系统包或更改系统级配置。编译输出有既存 `proc-macro-error2 2.0.1` 未来兼容性提示。此次只确认 Linux 目标可编译；未运行 `asl-infra`，未实测 Linux 密钥文件权限/符号链接拒绝、systemd 服务或真实网络。T15 仍未关闭。
 
 ### T16 — mDNS、地址策略与连接观察
 
