@@ -1,7 +1,13 @@
 //! Bounded autonomous task state machine.
 
+mod conversation;
 mod query;
 
+pub use conversation::{
+    CONVERSATION_WINDOW_MS, Conversation, ConversationMessageKind, InboundDecision,
+    MAX_CONVERSATION_ROUNDS, MAX_OUTBOX_RETRIES, MAX_SEMANTIC_MESSAGES, PendingDelivery,
+    RETRY_DELAYS_MS,
+};
 pub use query::{
     INBOUND_DEDUP_WINDOW_MS, InboundQueryDecision, MAX_ACTIVE_TASKS, MAX_DHT_TERMS,
     MAX_INBOUND_DEDUP, MAX_QUERY_PEERS, OutgoingTask, QUERY_WINDOW_MS, QueryAction, QueryRouter,

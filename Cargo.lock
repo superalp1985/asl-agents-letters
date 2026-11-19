@@ -985,6 +985,7 @@ dependencies = [
  "bs58",
  "hex",
  "jieba-rs",
+ "libp2p-identity",
  "rand 0.10.4",
  "rusqlite",
  "serde",

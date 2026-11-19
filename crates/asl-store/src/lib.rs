@@ -8,6 +8,7 @@ use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub mod chain;
+pub mod conversation;
 pub mod resources;
 pub mod search;
 

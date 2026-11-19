@@ -456,6 +456,10 @@ T18 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-agent --test conversation_lifecycle
 ```
 
+T19 已完成本地状态机与 SQLite 存储切片（2026-11-19）：`asl-agent::Conversation` 实现任务关联、Peer 绑定、3 回合/6 条语义消息预算、重复消息去重、10 分钟 outbox 窗口和最多 3 次离线重试；`asl-store::conversation` 将任务、CBOR `messages.body_cbor`、`outbox` 和 `processed_requests` 写入同一 SQLite 事务。回答、确认和错误只能挂到已有任务，未知回答不会创建任务；fetch request、fetch grant 和 lease 不进入聊天记录或 outbox。已有 schema v1 的表直接复用，本轮没有新增迁移。
+
+T19 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-agent -p asl-store --all-targets --locked --offline` 通过 93 项、0 失败、1 项忽略；新增 `asl-agent/tests/conversation_lifecycle.rs` 3 项和 `asl-store/tests/conversation_lifecycle.rs` 2 项，覆盖预算、重试、未知回答、非会话帧、重启后的 `processed_requests` 和 outbox 恢复。`cargo clippy -p asl-agent -p asl-store --all-targets --locked --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。真实 Core/Net handler、SQLite 与网络运行时的联调、三节点公网互测和 GUI 仍未完成，不能将 T19 写成完整端到端会话已完成。
+
 ### T20 — Fetch、lease 与撤销栅栏
 
 依赖 T19、T07。创建 policy leases 和 core fetch handler。
