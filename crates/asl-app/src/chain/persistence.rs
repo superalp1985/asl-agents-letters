@@ -22,6 +22,7 @@ use super::{
 const SNAPSHOT_DOMAIN: &str = "ASL-LOCAL-CHAIN-1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableResolverConfigV1 {
     pub consensus: ConsensusConfigV1,
     pub deployment: RegistryDeploymentV1,
@@ -91,12 +92,26 @@ pub struct DurableIdentityResolver {
 }
 
 impl DurableIdentityResolver {
+    pub fn validate_config(config: &DurableResolverConfigV1) -> Result<(), ChainError> {
+        config.consensus.validate()?;
+        config.deployment.validate()?;
+        if config.consensus.chain_id != config.deployment.chain_id
+            || config.max_cache_age_secs == 0
+            || config.max_cache_age_secs > config.consensus.max_finality_age_secs
+            || !(1..=128).contains(&config.cache_capacity)
+        {
+            return Err(ChainError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+
     pub fn create(
         store: Store,
         config: DurableResolverConfigV1,
         light_client: EthereumLightClient,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        Self::validate_config(&config)?;
         if light_client.config() != &config.consensus
             || store
                 .load_chain_bundle(config.consensus.chain_id)
@@ -145,6 +160,7 @@ impl DurableIdentityResolver {
         config: DurableResolverConfigV1,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        Self::validate_config(&config)?;
         let (bundle, saved) = authenticated_snapshot(&store, &config, now_secs)?;
         let client = EthereumLightClient::from_local_state(
             config.consensus.clone(),

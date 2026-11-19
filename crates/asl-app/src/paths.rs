@@ -79,6 +79,14 @@ impl AppPaths {
         self.identity.join("agent-root.dpapi")
     }
 
+    pub fn signed_device_directory(&self) -> PathBuf {
+        self.identity.join("device-directory.cbor")
+    }
+
+    pub fn network_identity_configuration(&self) -> PathBuf {
+        self.state.join("network-identity-v1.json")
+    }
+
     pub fn snapshots(&self) -> &Path {
         &self.snapshots
     }

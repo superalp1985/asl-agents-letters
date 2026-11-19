@@ -22,6 +22,7 @@ use crate::ipc::{
     TaskStatus, WorkerOperation, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
+use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::paths::AppPaths;
 use crate::profile::CoreAdmission;
 
@@ -37,6 +38,7 @@ pub struct Supervisor {
     launcher: SandboxLauncher,
     net: NetRuntime,
     pub(crate) admission: Option<CoreAdmission>,
+    network_admission_status: NetworkAdmissionStatus,
 }
 
 impl Supervisor {
@@ -55,6 +57,8 @@ impl Supervisor {
         let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
         let device_peer_id = device_identity.peer_id();
         let libraries = LocalLibraries::open(&paths)?;
+        let network_admission =
+            load_network_admission(&paths, &agent_identity, device_peer_id.clone())?;
         let net = NetRuntime::start(&launcher, &device_identity)?;
         Ok(Self {
             agent_identity,
@@ -62,12 +66,17 @@ impl Supervisor {
             libraries,
             launcher,
             net,
-            admission: None,
+            admission: network_admission.admission,
+            network_admission_status: network_admission.status,
         })
     }
 
     pub fn agent_id(&self) -> AgentId {
         self.agent_identity.agent_id()
+    }
+
+    pub fn network_admission_status(&self) -> NetworkAdmissionStatus {
+        self.network_admission_status
     }
 
     pub fn activate_network_admission(
@@ -79,13 +88,15 @@ impl Supervisor {
         if self.admission.is_some() {
             return Err(AslError::PolicyDenied);
         }
-        self.admission = Some(CoreAdmission::for_local_identity(
+        let admission = CoreAdmission::for_local_identity(
             &self.agent_identity,
             self.device_peer_id.clone(),
             signed_directory,
             resolver,
             now_ms,
-        )?);
+        )?;
+        self.admission = Some(admission);
+        self.network_admission_status = NetworkAdmissionStatus::Active;
         Ok(())
     }
 

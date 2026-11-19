@@ -19,13 +19,15 @@ use super::{
 const MAX_BEACON_BYTES: usize = 256 * 1024;
 const MAX_RPC_BYTES: usize = 768 * 1024;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainEndpointV1 {
     pub url: String,
     pub allow_loopback_http: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainHttpConfigV1 {
     pub version: u16,
     pub beacon_endpoints: Vec<ChainEndpointV1>,

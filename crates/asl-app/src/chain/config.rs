@@ -5,6 +5,7 @@ pub const INTERFACE_VERSION: u16 = 1;
 pub const MAX_CHECKPOINT_AGE_SECS: u64 = 14 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryDeploymentV1 {
     pub version: u16,
     pub chain_id: u64,
@@ -26,18 +27,21 @@ impl RegistryDeploymentV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckpointV1 {
     pub beacon_root: [u8; 32],
     pub slot: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForkV1 {
     pub epoch: u64,
     pub version: [u8; 4],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForksV1 {
     pub genesis: ForkV1,
     pub altair: ForkV1,
@@ -50,6 +54,7 @@ pub struct ForksV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConsensusConfigV1 {
     pub version: u16,
     pub chain_id: u64,

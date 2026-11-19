@@ -3,6 +3,7 @@ pub mod identity;
 pub mod ipc;
 pub mod libraries;
 pub mod network;
+pub mod network_identity;
 pub mod paths;
 pub mod profile;
 pub mod supervisor;

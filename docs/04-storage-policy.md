@@ -7,9 +7,11 @@
 ```text
 data/
   config.toml
+  state/network-identity-v1.json
   state/asl.sqlite3
   identity/agent-root-secp256k1.dpapi
   identity/device-key.dpapi
+  identity/device-directory.cbor
   credentials/providers.dpapi
   snapshots/ab/<content_id>.blob
   manifests/ab/<content_id>.mnf
@@ -22,6 +24,8 @@ data/
 ```
 
 首次启动只在 `identity/device-key.dpapi` 不存在时生成 Ed25519 设备密钥，并以独占新建方式保存；已有文件无法解密、格式错误或不是普通文件时停止启动，不会静默换身份。设备密钥由 DPAPI 保护，Net 子进程只在启动时通过私有继承管道接收一次。
+
+`state/network-identity-v1.json` 由本地操作者配置版本化链部署、最终性 checkpoint、缓存限额及 beacon/execution 服务入口；其中没有默认合约地址、RPC 地址或 checkpoint。`identity/device-directory.cbor` 是当前根身份签名的设备目录。任一文件缺失时网络身份准入保持关闭；身份根、目录 commitment 与本机最终化链状态全部一致后才会开放准入。
 
 路径全部由程序用已验证 ID 推导，不能从 peer、模型或文档中接受路径字符串。存储命名空间按对象种类区分，不提供裸块 hash 读取 API。程序自身密钥、凭据、数据库、缓存和 logs 禁止被普通共享 grant 覆盖；头像/经验只有显式生成的资源引用可发布。
 

@@ -134,9 +134,11 @@ Gloas execution headers are independently RLP-hashed before exposing a root.
 Bootstrap does not pretend a stale finalized checkpoint is fresh; the durable
 adapter can retain it while fetching verified updates.
 
-These are callable adapters, not an enabled background service. Supervisor
-scheduling, host-wide request/CPU budgets and Windows process limits remain later
-integration work.
+These are bounded adapters. Supervisor startup now loads explicit local chain
+trust configuration, restores or bootstraps the durable resolver, and performs
+the configured finality/proof acquisition needed for local identity admission.
+Periodic post-start synchronization, host-wide request/CPU budgets and Windows
+process limits remain later integration work.
 
 ## Durable Recovery
 
