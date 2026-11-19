@@ -4,3 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+asl-net = { path = "../asl-net" }
+asl-policy = { path = "../asl-policy" }
+asl-types = { path = "../asl-types" }

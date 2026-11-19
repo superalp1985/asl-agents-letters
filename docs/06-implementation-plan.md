@@ -486,6 +486,10 @@ T20 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-transfer --test bulk_codec
 ```
 
+T21 已完成传输授权规划切片（2026-11-19）：复用现有 `asl-net` 固定 91 字节 bulk codec，在 `asl-transfer::bulk` 先验证当前 Peer 的 lease 和 manifest content ID，再按已验证 manifest 生成 `Manifest`、`Chunk` 或 `Inline` 的固定读取计划。chunk offset/length 由固定 1 MiB 块尺寸和 manifest 推导，不能由远端指定任意范围；越界块、非零固定 index、超 32 KiB inline、错误 manifest、错误 lease 和过期授权统一拒绝。该模块不接收路径、不按裸 hash 读盘，也不执行实际文件 IO。
+
+T21 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-transfer --all-targets --offline` 通过 2 项、0 失败；`cargo clippy -p asl-transfer --all-targets --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。真实 bulk handler、manifest/chunk 磁盘读取、响应请求 ID 状态机、多来源调度和公网传输仍待后续 T22/T23，不能将本切片写成完整文件服务已完成。
+
 ### T22 — 纯多来源调度器
 
 依赖 T21。创建 transfer scheduler/verify。实现协议中的 ChunkScheduler，不做网络或磁盘 IO。

@@ -996,6 +996,11 @@ dependencies = [
 [[package]]
 name = "asl-transfer"
 version = "0.1.0"
+dependencies = [
+ "asl-net",
+ "asl-policy",
+ "asl-types",
+]
 
 [[package]]
 name = "asl-types"
