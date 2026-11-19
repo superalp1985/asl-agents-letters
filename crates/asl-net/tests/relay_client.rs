@@ -1,4 +1,8 @@
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use asl_net::{
     address_policy::AddressPolicy,
@@ -6,6 +10,39 @@ use asl_net::{
     transport::{LocalTransport, TransportEvent, TransportKind},
 };
 use libp2p::{Multiaddr, identity::Keypair, multiaddr::Protocol};
+
+async fn start_relay(
+    key: &Keypair,
+    bind_address: SocketAddr,
+) -> (tokio::task::JoinHandle<io::Result<()>>, Multiaddr) {
+    let relay_peer_id = key.public().to_peer_id();
+    let mut relay = RelayServer::new(key.clone(), Default::default()).unwrap();
+    relay.listen(TransportKind::Tcp, bind_address).unwrap();
+    let address = tokio::time::timeout(Duration::from_secs(5), relay.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    let address = match address.iter().last() {
+        Some(Protocol::P2p(peer_id)) if peer_id == relay_peer_id => address,
+        Some(Protocol::P2p(_)) => panic!("relay listener announced a different peer id"),
+        _ => address.with(Protocol::P2p(relay_peer_id)),
+    };
+    (tokio::spawn(relay.run()), address)
+}
+
+fn socket_address(address: &Multiaddr) -> SocketAddr {
+    let mut parts = address.iter();
+    let ip = match parts.next().unwrap() {
+        Protocol::Ip4(ip) => IpAddr::V4(ip),
+        Protocol::Ip6(ip) => IpAddr::V6(ip),
+        _ => panic!("relay address is not an IP endpoint"),
+    };
+    let port = match parts.next().unwrap() {
+        Protocol::Tcp(port) => port,
+        _ => panic!("relay address is not a TCP endpoint"),
+    };
+    SocketAddr::new(ip, port)
+}
 
 async fn next_reserved(transport: &mut LocalTransport, expected: libp2p::PeerId) -> Multiaddr {
     loop {
@@ -21,6 +58,25 @@ async fn next_reserved(transport: &mut LocalTransport, expected: libp2p::PeerId)
                 panic!("relay became unavailable: {relay_peer_id}");
             }
             event => panic!("unexpected relay reservation event: {event:?}"),
+        }
+    }
+}
+
+async fn next_reservation_after_recovery(
+    transport: &mut LocalTransport,
+    expected: libp2p::PeerId,
+) -> Multiaddr {
+    loop {
+        match transport.next_event().await.unwrap() {
+            TransportEvent::RelayReserved {
+                relay_peer_id,
+                address,
+            } if relay_peer_id == expected => return address,
+            TransportEvent::InboundRejected
+            | TransportEvent::Listening(_, _)
+            | TransportEvent::RelayReserved { .. }
+            | TransportEvent::RelayUnavailable { .. } => {}
+            event => panic!("unexpected relay event during recovery: {event:?}"),
         }
     }
 }
@@ -119,5 +175,54 @@ async fn two_clients_establish_an_authenticated_connection_through_relay_v2() {
     .0
     .unwrap();
 
+    relay_task.abort();
+}
+
+#[tokio::test]
+async fn client_re_reserves_automatically_after_relay_restarts() {
+    let relay_key = Keypair::generate_ed25519();
+    let relay_peer_id = relay_key.public().to_peer_id();
+    let (relay_task, relay_address) = start_relay(&relay_key, "127.0.0.1:0".parse().unwrap()).await;
+    let bind_address = socket_address(&relay_address);
+
+    let client_key = Keypair::generate_ed25519();
+    let mut client = LocalTransport::new(client_key).unwrap();
+    client.set_address_policy(AddressPolicy::RelayOnly).unwrap();
+    client.reserve_relay(&relay_address).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        next_reserved(&mut client, relay_peer_id),
+    )
+    .await
+    .unwrap();
+    assert!(client.is_relay_reserved(&relay_peer_id));
+
+    relay_task.abort();
+    let _ = relay_task.await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                client.next_event().await.unwrap(),
+                TransportEvent::RelayUnavailable { relay_peer_id: failed }
+                    if failed == relay_peer_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!client.is_relay_reserved(&relay_peer_id));
+
+    let (relay_task, restarted_address) = start_relay(&relay_key, bind_address).await;
+    assert_eq!(restarted_address, relay_address);
+    let reservation = tokio::time::timeout(
+        Duration::from_secs(15),
+        next_reservation_after_recovery(&mut client, relay_peer_id),
+    )
+    .await
+    .unwrap();
+    assert!(reservation.to_string().contains("/p2p-circuit"));
+    assert!(client.is_relay_reserved(&relay_peer_id));
     relay_task.abort();
 }

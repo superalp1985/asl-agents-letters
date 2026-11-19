@@ -63,6 +63,9 @@ const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_RETRY_BASE: Duration = Duration::from_secs(1);
+const RELAY_RETRY_MAX: Duration = Duration::from_secs(60);
+const RELAY_RETRY_MAX_SHIFT: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportKind {
@@ -226,7 +229,13 @@ pub struct LocalTransport {
     pending_discovery_dials: HashSet<libp2p::PeerId>,
     relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
     relay_listeners: HashMap<ListenerId, libp2p::PeerId>,
+    relay_retries: HashMap<libp2p::PeerId, RelayRetry>,
     reserved_relays: HashSet<libp2p::PeerId>,
+}
+
+struct RelayRetry {
+    attempts: u32,
+    retry_at: Option<tokio::time::Instant>,
 }
 
 impl LocalTransport {
@@ -267,6 +276,7 @@ impl LocalTransport {
             pending_discovery_dials: HashSet::new(),
             relay_endpoints: HashMap::new(),
             relay_listeners: HashMap::new(),
+            relay_retries: HashMap::new(),
             reserved_relays: HashSet::new(),
         })
     }
@@ -431,6 +441,9 @@ impl LocalTransport {
         self.relay_listeners.insert(listener, endpoint.peer_id);
         self.relay_endpoints
             .insert(endpoint.peer_id, endpoint.clone());
+        self.relay_retries
+            .entry(endpoint.peer_id)
+            .and_modify(|retry| retry.retry_at = None);
         self.network_started = true;
         Ok(endpoint.peer_id)
     }
@@ -484,7 +497,16 @@ impl LocalTransport {
             return Ok(event);
         }
         loop {
-            match self.swarm.select_next_some().await {
+            self.start_due_relay_retries();
+            let event = if let Some(deadline) = self.next_relay_retry_deadline() {
+                tokio::select! {
+                    event = self.swarm.select_next_some() => event,
+                    _ = tokio::time::sleep_until(deadline) => continue,
+                }
+            } else {
+                self.swarm.select_next_some().await
+            };
+            match event {
                 SwarmEvent::NewListenAddr {
                     listener_id,
                     address,
@@ -521,10 +543,15 @@ impl LocalTransport {
                 SwarmEvent::ConnectionClosed {
                     peer_id,
                     connection_id,
+                    num_established,
                     ..
                 } => {
                     if self.relay_endpoints.contains_key(&peer_id) {
-                        self.reserved_relays.remove(&peer_id);
+                        if num_established == 0 && self.fail_relay_peer(peer_id) {
+                            return Ok(TransportEvent::RelayUnavailable {
+                                relay_peer_id: peer_id,
+                            });
+                        }
                         continue;
                     }
                     let connection_id = LocalConnectionId(connection_id);
@@ -561,6 +588,7 @@ impl LocalTransport {
                     },
                 )) => {
                     self.reserved_relays.insert(relay_peer_id);
+                    self.relay_retries.remove(&relay_peer_id);
                     if let Some(endpoint) = self.relay_endpoints.get(&relay_peer_id) {
                         let address = endpoint
                             .address
@@ -578,15 +606,29 @@ impl LocalTransport {
                 )) => {}
                 SwarmEvent::Behaviour(BehaviourEvent::Relay(_)) => {}
                 SwarmEvent::Behaviour(BehaviourEvent::Admission(never)) => match never {},
-                SwarmEvent::ListenerClosed { listener_id, .. } => {
-                    self.listeners.remove(&listener_id);
-                    if let Some(relay_peer_id) = self.relay_listeners.remove(&listener_id) {
-                        self.reserved_relays.remove(&relay_peer_id);
+                SwarmEvent::ExpiredListenAddr { listener_id, .. } => {
+                    if let Some(relay_peer_id) = self.fail_relay_listener(listener_id, false) {
                         return Ok(TransportEvent::RelayUnavailable { relay_peer_id });
+                    }
+                }
+                SwarmEvent::ListenerClosed { listener_id, .. } => {
+                    let was_known = self.listeners.remove(&listener_id);
+                    if let Some(relay_peer_id) = self.fail_relay_listener(listener_id, true) {
+                        return Ok(TransportEvent::RelayUnavailable { relay_peer_id });
+                    }
+                    if !was_known {
+                        continue;
                     }
                     return Err(io::Error::other("network listener closed"));
                 }
-                SwarmEvent::ListenerError { .. } => {
+                SwarmEvent::ListenerError { listener_id, .. } => {
+                    let was_known = self.listeners.remove(&listener_id);
+                    if let Some(relay_peer_id) = self.fail_relay_listener(listener_id, true) {
+                        return Ok(TransportEvent::RelayUnavailable { relay_peer_id });
+                    }
+                    if !was_known {
+                        continue;
+                    }
                     return Err(io::Error::other("network listener error"));
                 }
                 SwarmEvent::IncomingConnectionError { .. } => {
@@ -609,6 +651,94 @@ impl LocalTransport {
                 _ => {}
             }
         }
+    }
+
+    fn next_relay_retry_deadline(&self) -> Option<tokio::time::Instant> {
+        self.relay_retries
+            .values()
+            .filter_map(|retry| retry.retry_at)
+            .min()
+    }
+
+    fn start_due_relay_retries(&mut self) {
+        let now = tokio::time::Instant::now();
+        let due = self
+            .relay_retries
+            .iter()
+            .filter_map(|(peer, retry)| {
+                retry
+                    .retry_at
+                    .is_some_and(|deadline| deadline <= now)
+                    .then_some(*peer)
+            })
+            .collect::<Vec<_>>();
+
+        for relay_peer_id in due {
+            if let Some(retry) = self.relay_retries.get_mut(&relay_peer_id) {
+                retry.retry_at = None;
+            }
+            let Some(endpoint) = self.relay_endpoints.get(&relay_peer_id) else {
+                self.relay_retries.remove(&relay_peer_id);
+                continue;
+            };
+            match self
+                .swarm
+                .listen_on(endpoint.address.clone().with(Protocol::P2pCircuit))
+            {
+                Ok(listener) => {
+                    self.listeners.insert(listener);
+                    self.relay_listeners.insert(listener, relay_peer_id);
+                    self.network_started = true;
+                }
+                Err(_) => self.schedule_relay_retry(relay_peer_id),
+            }
+        }
+    }
+
+    fn fail_relay_listener(
+        &mut self,
+        listener_id: ListenerId,
+        already_closed: bool,
+    ) -> Option<libp2p::PeerId> {
+        let relay_peer_id = self.relay_listeners.remove(&listener_id)?;
+        self.listeners.remove(&listener_id);
+        if !already_closed {
+            self.swarm.remove_listener(listener_id);
+        }
+        self.reserved_relays.remove(&relay_peer_id);
+        self.schedule_relay_retry(relay_peer_id);
+        Some(relay_peer_id)
+    }
+
+    fn fail_relay_peer(&mut self, relay_peer_id: libp2p::PeerId) -> bool {
+        let listeners = self
+            .relay_listeners
+            .iter()
+            .filter_map(|(listener, peer)| (*peer == relay_peer_id).then_some(*listener))
+            .collect::<Vec<_>>();
+        for listener in &listeners {
+            self.relay_listeners.remove(listener);
+            self.listeners.remove(listener);
+            self.swarm.remove_listener(*listener);
+        }
+
+        let was_active = self.reserved_relays.remove(&relay_peer_id) || !listeners.is_empty();
+        if was_active {
+            self.schedule_relay_retry(relay_peer_id);
+        }
+        was_active
+    }
+
+    fn schedule_relay_retry(&mut self, relay_peer_id: libp2p::PeerId) {
+        let retry = self
+            .relay_retries
+            .entry(relay_peer_id)
+            .or_insert(RelayRetry {
+                attempts: 0,
+                retry_at: None,
+            });
+        retry.attempts = retry.attempts.saturating_add(1);
+        retry.retry_at = Some(tokio::time::Instant::now() + relay_retry_delay(retry.attempts));
     }
 
     fn validate_socket_scope(&self, address: SocketAddr) -> io::Result<()> {
@@ -699,6 +829,13 @@ fn dial_error(error: DialError) -> io::Error {
         _ => io::ErrorKind::ConnectionAborted,
     }
     .into()
+}
+
+fn relay_retry_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(RELAY_RETRY_MAX_SHIFT);
+    RELAY_RETRY_BASE
+        .saturating_mul(1u32 << shift)
+        .min(RELAY_RETRY_MAX)
 }
 
 pub(crate) fn socket_endpoint(kind: TransportKind, addr: SocketAddr) -> io::Result<Multiaddr> {
@@ -1020,6 +1157,14 @@ mod tests {
                 .kind(),
             io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn relay_retry_delay_grows_exponentially_and_is_bounded() {
+        assert_eq!(relay_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(relay_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(relay_retry_delay(7), Duration::from_secs(60));
+        assert_eq!(relay_retry_delay(u32::MAX), RELAY_RETRY_MAX);
     }
 
     #[test]
