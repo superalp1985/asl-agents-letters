@@ -48,6 +48,14 @@ impl Permit {
         &self.request.grant_id
     }
 
+    pub fn resource_key(&self) -> &ResourceKey {
+        &self.request.resource_key
+    }
+
+    pub fn principal(&self) -> &Principal {
+        &self.request.principal
+    }
+
     pub fn grant_epoch(&self) -> u64 {
         self.grant_epoch
     }

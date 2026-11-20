@@ -181,6 +181,7 @@ pub struct AuthorizedPrompt {
     provider_id: ProviderId,
     content: String,
     permits: Vec<Permit>,
+    instruction: &'static str,
 }
 
 impl AuthorizedPrompt {
@@ -207,7 +208,18 @@ impl AuthorizedPrompt {
             provider_id,
             content,
             permits,
+            instruction: SYSTEM_INSTRUCTION,
         })
+    }
+
+    pub(crate) fn with_instruction(mut self, instruction: &'static str) -> Self {
+        self.instruction = instruction;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content(&self) -> &str {
+        &self.content
     }
 }
 
@@ -225,6 +237,10 @@ impl fmt::Debug for AuthorizedPrompt {
 pub struct ModelText(String);
 
 impl ModelText {
+    pub(crate) fn new(content: String) -> Self {
+        Self(content)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -346,7 +362,7 @@ impl ModelGateway for HttpModelGateway {
             messages: [
                 ChatMessage {
                     role: "system",
-                    content: SYSTEM_INSTRUCTION,
+                    content: prompt.instruction,
                 },
                 ChatMessage {
                     role: "user",
@@ -411,7 +427,7 @@ impl ModelGateway for HttpModelGateway {
             .into_iter()
             .next()
             .ok_or(ModelGatewayError::InvalidResponse)?;
-        Ok(ModelText(choice.message.content))
+        Ok(ModelText::new(choice.message.content))
     }
 }
 

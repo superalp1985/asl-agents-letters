@@ -1,5 +1,7 @@
 pub(crate) mod cbor;
 
+use serde::Serialize;
+
 use crate::{
     error::ErrorCode,
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
@@ -17,7 +19,8 @@ pub enum Feature {
     Profile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intent {
     FindEvidence,
     LocateResource,
@@ -27,7 +30,8 @@ pub enum Intent {
     GroupReview,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConstraintOperator {
     Equal,
     NotEqual,
@@ -39,7 +43,8 @@ pub enum ConstraintOperator {
     In,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResultShape {
     Claims,
     Resources,
@@ -92,6 +97,24 @@ impl ConceptRef {
 
     pub fn is_topic(self) -> bool {
         self.vocabulary_id == 1 && (100..=111).contains(&self.concept_id)
+    }
+
+    pub fn is_known(self) -> bool {
+        self.vocabulary_id == 1 && matches!(self.concept_id, 1..=6 | 100..=111 | 200..=209)
+    }
+
+    pub fn accepts_object(self, value: &TypedValue) -> bool {
+        if self.vocabulary_id != 1 {
+            return false;
+        }
+        match self.concept_id {
+            200 => true,
+            201 | 202 | 205 | 206 | 209 => matches!(value, TypedValue::Integer(_)),
+            203 | 204 => matches!(value, TypedValue::Concepts(_)),
+            207 => matches!(value, TypedValue::Hash(_)),
+            208 => matches!(value, TypedValue::Agent(_)),
+            _ => false,
+        }
     }
 }
 

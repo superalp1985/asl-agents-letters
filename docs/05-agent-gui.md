@@ -48,6 +48,16 @@ Idle
 
 解析失败最多修复 1 次，修复提示只附 schema 错误类型和同一获准上下文；不会把越权片段为修复再发一次。两次失败返回固定 model_invalid，不能执行已解析出来的一部分。
 
+T26 本机适配器的输出形式如下，旧 `schemas/prototype/agent-decision-json-v0.schema.json` 不被运行时接受。
+
+```json
+{"v":1,"action":"answer","claims":[{"subject":{"kind":"content"},"predicate":[1,203],"object":{"kind":"concepts","value":[[1,101]]},"evidence":1}]}
+{"v":1,"action":"decline","reason":"no_match"}
+{"v":1,"action":"request_more","terms":[[1,101]]}
+```
+
+每次响应只允许其中一个对象。`evidence` 是本次候选列表中的短序号，不是文件名、路径或线协议字段。`content` 解析为该候选的内容 ID；`constraint` 只能按序号选用已在类型化查询中的不透明值。模型不能提交任意 ID 字节或自行声明已验证。每个片段必须同时绑定同一快照的 `ReadChunk` 和 `ModelInput` 许可；入站按具体节点或群作用域重验，出站按本机任务重验。解析后的 `Claim` 仍须由 Core 在发送前复核，并通过现有 CBOR encoder 输出；本机决策 JSON 不出现在 ASL 网络中。
+
 ## 4. 结构化结果与证据
 
 防泄露发生在模型输入之前：每次请求使用按接收者筛过的独立上下文，不能与宿主会话共享记忆。结构化输出不含答案 prose；任何本地解释文本只在本机 GUI 生成，不进入网络消息。

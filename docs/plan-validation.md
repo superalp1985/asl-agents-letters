@@ -451,3 +451,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-agent -p asl-app -p asl-policy --all-targets --locked --offline` 与相同包范围的 `cargo clippy ... -- -D warnings` 通过。`model_gateway` 9 项、应用单测 165 项和 NTFS 路径边界 22 项通过；既有 30 秒重扫和两个外部网络探针按默认设置忽略。
 - 本机 mock HTTP 测试覆盖超时、HTTP 错误、响应限长、禁止跳转、未授权 provider、提示词 URL 不触发额外请求、授权撤销后拒发以及同 ID 的本机/远端模式错配。独立的 Windows DPAPI 凭据往返测试也通过。
 - 未调用真实模型服务或验证模型质量，未跑全工作区，未接入自主决策、GUI 或宿主工具。线上 CBOR 不变。
+
+### 2026-11-20 T26：本机结构化模型决策
+
+- Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-agent -p asl-types -p asl-policy --all-targets --locked --offline`、三包严格 Clippy、`cargo fmt --all -- --check` 与 `git diff --check` 通过。7 项新增决策测试、既有网关 9 项及 T03 固定线协议向量通过；已有两个外部网络探针默认忽略。
+- 决策用例覆盖三种合法动作、重复键、未知字段/词表、错误类型/证据序号、超限数组、一项无效时拒绝整个结果、入站不扩散、错误作用域、撤权/到期以及修复只发一次且不附模型原始回复。用既有 CBOR 编解码器验证类型化回答往返。
+- 未修改线上 CDDL 或依赖锁。未跑全工作区、未调用真实模型、未接入生产调度或实际发出回答。

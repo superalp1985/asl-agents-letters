@@ -202,19 +202,11 @@ fn concept_ref(value: Value) -> Result<ConceptRef, AslError> {
         vocabulary_id,
         concept_id,
     };
-    if known_concept(concept) {
+    if concept.is_known() {
         Ok(concept)
     } else {
         invalid()
     }
-}
-
-fn known_concept(concept: ConceptRef) -> bool {
-    concept.vocabulary_id == 1
-        && matches!(
-            concept.concept_id,
-            1..=6 | 100..=111 | 200..=209
-        )
 }
 
 fn is_topic(concept: ConceptRef) -> bool {
@@ -304,7 +296,7 @@ fn constraint_value(value: Value) -> Result<Constraint, AslError> {
     let operator = constraint_operator(take(&mut fields, 1)?)?;
     let value = typed_value(take(&mut fields, 2)?)?;
     finish(fields)?;
-    if !is_predicate(concept) || !predicate_accepts(concept.concept_id, &value) {
+    if !concept.accepts_object(&value) {
         return invalid();
     }
     Ok(Constraint {
@@ -312,17 +304,6 @@ fn constraint_value(value: Value) -> Result<Constraint, AslError> {
         operator,
         value,
     })
-}
-
-fn predicate_accepts(id: u32, value: &TypedValue) -> bool {
-    match id {
-        200 => true,
-        201 | 202 | 205 | 206 | 209 => matches!(value, TypedValue::Integer(_)),
-        203 | 204 => matches!(value, TypedValue::Concepts(_)),
-        207 => matches!(value, TypedValue::Hash(_)),
-        208 => matches!(value, TypedValue::Agent(_)),
-        _ => false,
-    }
 }
 
 fn constraint_value_value(value: &Constraint) -> Value {

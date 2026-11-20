@@ -1,6 +1,7 @@
 //! Bounded autonomous task state machine.
 
 mod conversation;
+pub mod decision;
 pub mod gateway;
 mod query;
 
