@@ -1,10 +1,50 @@
 pub(crate) mod cbor;
+mod group;
+
+use serde::Serialize;
 
 use crate::{
-    error::ErrorCode,
+    error::{AslError, ErrorCode},
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
 };
-pub use cbor::{decode_control, decode_frame, encode_control, encode_frame};
+pub use cbor::{
+    MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, MAX_PAIRING_FRAME_BYTES, decode_control,
+    decode_frame, encode_control, encode_frame,
+};
+pub use group::{
+    GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS, MAX_GROUP_MLS_OBJECT_BYTES,
+    MAX_GROUP_PAYLOAD_BYTES,
+};
+
+pub const MAX_PAIRING_NOTE_CHARS: usize = 120;
+pub const MAX_PAIRING_NOTE_BYTES: usize = MAX_PAIRING_NOTE_CHARS * 4;
+
+pub fn validate_pairing_note(note: &str) -> Result<(), AslError> {
+    if note.chars().count() > MAX_PAIRING_NOTE_CHARS
+        || note.len() > MAX_PAIRING_NOTE_BYTES
+        || note
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(AslError::InvalidMessage);
+    }
+
+    let last_non_whitespace = note
+        .char_indices()
+        .filter(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .next_back();
+    let sentence_endings = [
+        '.', '!', '?', '\u{037e}', '\u{0589}', '\u{061f}', '\u{06d4}', '\u{0964}', '\u{0965}',
+        '\u{1362}', '\u{3002}', '\u{ff01}', '\u{ff0e}', '\u{ff1f}',
+    ];
+    if note.char_indices().any(|(index, character)| {
+        sentence_endings.contains(&character) && Some(index) != last_non_whitespace
+    }) {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Feature {
@@ -14,7 +54,8 @@ pub enum Feature {
     Profile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intent {
     FindEvidence,
     LocateResource,
@@ -24,7 +65,8 @@ pub enum Intent {
     GroupReview,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConstraintOperator {
     Equal,
     NotEqual,
@@ -36,7 +78,8 @@ pub enum ConstraintOperator {
     In,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResultShape {
     Claims,
     Resources,
@@ -89,6 +132,24 @@ impl ConceptRef {
 
     pub fn is_topic(self) -> bool {
         self.vocabulary_id == 1 && (100..=111).contains(&self.concept_id)
+    }
+
+    pub fn is_known(self) -> bool {
+        self.vocabulary_id == 1 && matches!(self.concept_id, 1..=6 | 100..=111 | 200..=209)
+    }
+
+    pub fn accepts_object(self, value: &TypedValue) -> bool {
+        if self.vocabulary_id != 1 {
+            return false;
+        }
+        match self.concept_id {
+            200 => true,
+            201 | 202 | 205 | 206 | 209 => matches!(value, TypedValue::Integer(_)),
+            203 | 204 => matches!(value, TypedValue::Concepts(_)),
+            207 => matches!(value, TypedValue::Hash(_)),
+            208 => matches!(value, TypedValue::Agent(_)),
+            _ => false,
+        }
     }
 }
 
@@ -220,8 +281,18 @@ pub struct IdentityProofRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountProof {
+    pub nonce: u64,
+    pub balance: [u8; 32],
+    pub storage_root: [u8; 32],
+    pub code_hash: [u8; 32],
+    pub nodes: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageProof {
-    pub slot: u64,
+    pub slot: [u8; 32],
+    pub value: [u8; 32],
     pub nodes: Vec<Vec<u8>>,
 }
 
@@ -232,12 +303,9 @@ pub struct IdentityProof {
     pub finalized_height: u64,
     pub block_hash: Hash32,
     pub state_root: Hash32,
-    pub account_proof: Vec<Vec<u8>>,
+    pub account: AccountProof,
     pub storage_proofs: Vec<StorageProof>,
-    pub controller_address: [u8; 20],
-    pub state_commitment: Hash32,
-    pub sequence: u64,
-    pub revoked: bool,
+    pub signed_directory: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -246,7 +314,8 @@ pub struct PairingInvite {
     pub inviter: AgentId,
     pub target: AgentId,
     pub expires_at_ms: u64,
-    pub token: Vec<u8>,
+    pub nonce: Hash32,
+    pub note: String,
     pub signature: Signature65,
 }
 
@@ -256,7 +325,8 @@ pub struct PairingExchange {
     pub agent_id: AgentId,
     pub peer_id: PeerId,
     pub attempt: u8,
-    pub payload: Vec<u8>,
+    pub accepted: bool,
+    pub signature: Signature65,
     pub transcript_hash: Hash32,
 }
 

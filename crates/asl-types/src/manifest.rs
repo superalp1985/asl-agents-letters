@@ -5,7 +5,7 @@ pub const CHUNK_SIZE: u32 = 1_048_576;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 const MAX_CHUNK_COUNT: u32 = 65_536;
 const HASH_LEN: usize = 32;
-const MAX_MANIFEST_LEN: usize = HEADER_LEN + MAX_CHUNK_COUNT as usize * HASH_LEN;
+pub const MAX_MANIFEST_LEN: usize = HEADER_LEN + MAX_CHUNK_COUNT as usize * HASH_LEN;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Manifest {

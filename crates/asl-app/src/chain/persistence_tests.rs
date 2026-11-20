@@ -1,7 +1,8 @@
 use super::*;
 use crate::chain::test_support::{
     BOOTSTRAP_TIME, FINALITY, FINALITY_NOW, TestChainDatabase, UPDATES, bootstrapped,
-    consensus_config, proof_fixture, proof_fixture_for_agent, registry_values, synced,
+    consensus_config, proof_fixture, proof_fixture_for_agent, proof_fixtures_for_agents,
+    registry_values, synced,
 };
 
 pub(super) fn config() -> DurableResolverConfigV1 {
@@ -24,6 +25,81 @@ fn synthetic(
     let resolver =
         DurableIdentityResolver::create(database.open(), config(), client, BOOTSTRAP_TIME).unwrap();
     (resolver, proof)
+}
+
+#[test]
+fn local_proof_survives_capacity_one_peer_cache_but_not_its_lease() {
+    let database = TestChainDatabase::new();
+    let local = AgentId([15; 32]);
+    let remote = AgentId([28; 32]);
+    let (deployment, finalized, proofs) = proof_fixtures_for_agents(
+        &[
+            (local, registry_values(9, 1, 1)),
+            (remote, registry_values(3, 1, 1)),
+        ],
+        8,
+    );
+    let mut settings = config();
+    settings.deployment = deployment;
+    settings.cache_capacity = 1;
+    let max_age = settings.max_cache_age_secs;
+    let mut durable = DurableIdentityResolver::create(
+        database.open(),
+        settings,
+        bootstrapped().with_test_execution(finalized),
+        BOOTSTRAP_TIME,
+    )
+    .unwrap();
+    durable
+        .accept_proof(local, &proofs[0], BOOTSTRAP_TIME)
+        .unwrap();
+    assert!(
+        durable
+            .retain_local_identity(local, Some([9; 20]), BOOTSTRAP_TIME)
+            .unwrap()
+    );
+    durable
+        .accept_proof(remote, &proofs[1], BOOTSTRAP_TIME + 1)
+        .unwrap();
+    assert_eq!(durable.bundle.proofs[0].agent_id, remote);
+    assert!(matches!(
+        durable.resolver.resolve(local, BOOTSTRAP_TIME + 1),
+        IdentityResolution::Limited(LimitedReason::Unknown)
+    ));
+    assert!(durable.local_identity_is_current(BOOTSTRAP_TIME + 1));
+    assert!(matches!(
+        durable.resolve(local, BOOTSTRAP_TIME + 1),
+        IdentityResolution::Verified(_)
+    ));
+    assert!(
+        durable
+            .accept_local_refresh_proof(local, [9; 20], &proofs[0], BOOTSTRAP_TIME + 1)
+            .unwrap()
+    );
+    assert_eq!(durable.bundle.proofs[0].agent_id, remote);
+    assert!(matches!(
+        durable.resolve(remote, BOOTSTRAP_TIME + 1),
+        IdentityResolution::Verified(_)
+    ));
+    let request = IdentityProofRequest {
+        agent_id: local,
+        request_id: asl_types::ids::Id128([1; 16]),
+        checkpoint_hash: asl_types::ids::Hash32(proofs[0].block_hash),
+    };
+    assert_eq!(
+        durable
+            .cached_identity_proof(&request, BOOTSTRAP_TIME + 1)
+            .unwrap(),
+        Some(proofs[0].clone())
+    );
+    let expired = BOOTSTRAP_TIME + max_age + 1;
+    assert!(!durable.local_identity_is_current(expired));
+    assert!(
+        durable
+            .cached_identity_proof(&request, expired)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -60,6 +136,29 @@ fn finalized_consensus_roundtrips_and_can_resume_from_stale_finality() {
         restored.light_client().finalized(FINALITY_NOW).unwrap(),
         expected
     );
+}
+
+#[test]
+fn refreshed_light_client_is_committed_without_dropping_identity_observations() {
+    let database = TestChainDatabase::new();
+    let (mut durable, proof) = synthetic(&database, 1, 1);
+    durable
+        .accept_proof(proof.agent_id, &proof, BOOTSTRAP_TIME)
+        .unwrap();
+
+    durable.update_light_client(synced(), FINALITY_NOW).unwrap();
+    let finalized = durable.light_client().finalized(FINALITY_NOW).unwrap();
+    assert_eq!(finalized, synced().finalized(FINALITY_NOW).unwrap());
+    assert_eq!(durable.bundle.observations.len(), 1);
+
+    drop(durable);
+    let restored =
+        DurableIdentityResolver::restore(database.open(), config(), FINALITY_NOW).unwrap();
+    assert_eq!(
+        restored.light_client().finalized(FINALITY_NOW).unwrap(),
+        finalized
+    );
+    assert_eq!(restored.bundle.observations.len(), 1);
 }
 
 use serde_json::Value;

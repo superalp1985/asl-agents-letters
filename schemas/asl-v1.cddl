@@ -8,6 +8,8 @@ control-frame = hello / query / answer / offer / fetch-request /
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
+; Authenticated plaintext inside an MLS application message, not an outer frame.
+group-application = query / answer / offer
 
 id128 = bstr .size 16
 hash32 = bstr .size 32
@@ -168,18 +170,26 @@ identity-proof = {
   4: uint,
   5: hash32,
   6: hash32,
-  7: [0*32 bstr .size (1..2048)],
-  8: [0*8 storage-proof],
-  9: bstr .size 20,
-  10: hash32,
-  11: uint,
-  12: uint .le 1
+  7: account-proof,
+  8: [storage-proof, storage-proof, storage-proof],
+  9: bstr .size (1..8192)
+}
+
+account-proof = {
+  0: uint,
+  1: hash32,
+  2: hash32,
+  3: hash32,
+  4: proof-nodes
 }
 
 storage-proof = {
-  0: uint,
-  1: [0*32 bstr .size (1..2048)]
+  0: hash32,
+  1: hash32,
+  2: proof-nodes
 }
+
+proof-nodes = [0*32 bstr .size (1..2048)]
 
 pairing-invite = {
   0: 1,
@@ -188,8 +198,9 @@ pairing-invite = {
   3: agent-id,
   4: agent-id,
   5: time-ms,
-  6: bstr .size (16..256),
-  7: signature65
+  6: hash32,
+  7: signature65,
+  8: tstr .size (0..480)
 }
 
 pairing-exchange = {
@@ -198,9 +209,10 @@ pairing-exchange = {
   2: id128,
   3: agent-id,
   4: peer-id,
-  5: 1..5,
-  6: bstr .size (1..4096),
-  7: hash32
+  5: 1,
+  6: signature65,
+  7: hash32,
+  8: bool
 }
 
 group-envelope = {
@@ -212,6 +224,23 @@ group-envelope = {
   5: group-operation,
   6: bstr .size (1..65536)
 }
+
+; Second-pass validation of the exact CBOR item inside key 6 for group operation 1.
+; Key 6 remains bstr in the outer decoder.
+; MLS objects are complete TLS-encoded MLSMessage values, never agent text.
+group-membership = group-invite / group-key-package / group-welcome /
+                   group-commit / group-sync-request / group-sync-commit /
+                   group-at-head / group-sync-unavailable / group-receipt
+group-mls-object = bstr .size (1..65408)
+group-invite = [1, 0, agent-id, peer-id, time-ms]
+group-key-package = [1, 1, id128, group-mls-object]
+group-welcome = [1, 2, id128, hash32, group-mls-object]
+group-commit = [1, 3, group-mls-object]
+group-sync-request = [1, 4, hash32]
+group-sync-commit = [1, 5, group-mls-object]
+group-at-head = [1, 6, hash32]
+group-sync-unavailable = [1, 7]
+group-receipt = [1, 8]
 
 ; Numeric limits, enum assignments, cardinality, vocabulary ownership,
 ; and cross-field rules are normative in docs/03-protocol.md.

@@ -1,8 +1,11 @@
-$ErrorActionPreference = "Stop"
+param([string]$Root = $env:ASL_DEV_ROOT)
 
-$root = "E:\ASL"
-if (-not (Test-Path -LiteralPath "E:\")) {
-    throw "E: drive is unavailable; ASL will not move caches to another drive."
+if ($Root -notmatch '^[A-Za-z]:[\\/]') {
+    throw "Set ASL_DEV_ROOT or pass -Root with an absolute local drive path."
+}
+$Root = [IO.Path]::GetFullPath($Root)
+if (-not (Test-Path -LiteralPath ([IO.Path]::GetPathRoot($Root)) -PathType Container)) {
+    throw "The configured ASL development drive is unavailable."
 }
 
 $directories = @(
@@ -15,7 +18,7 @@ $directories = @(
 )
 
 foreach ($directory in $directories) {
-    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
 }
 
 $env:ASL_HOME = "$root\data"

@@ -2,30 +2,32 @@ pub(crate) mod snapshot;
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::mem::size_of;
+use std::mem::{offset_of, size_of};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, Prefix};
+use std::ptr;
 use std::sync::Arc;
 
 use asl_types::error::AslError;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_REPARSE_POINT, FILE_STANDARD_LINK_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0,
+    FILE_STANDARD_LINK_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
     FileStandardLinkInformation, NTCREATEFILE_CREATE_DISPOSITION, NtCreateFile,
-    NtQueryInformationFile,
+    NtQueryInformationFile, NtSetInformationFile,
 };
 use windows::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, RtlNtStatusToDosError, UNICODE_STRING};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    CreateFileW, DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_NAME_NORMALIZED,
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_STANDARD_INFO,
-    FILE_TRAVERSE, FILE_TYPE_DISK, FileAttributeTagInfo, FileIdInfo, FileStandardInfo,
-    GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, QueryDosDeviceW,
-    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
+    FILE_TRAVERSE, FILE_TYPE_DISK, FILE_WRITE_DATA, FileAttributeTagInfo, FileIdInfo,
+    FileStandardInfo, GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetFileType, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING,
+    QueryDosDeviceW, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -37,6 +39,12 @@ pub(crate) struct PinnedDirectory {
     pins: Vec<Arc<File>>,
     identity: FileIdentity,
     name: Vec<u16>,
+}
+
+impl PinnedDirectory {
+    pub(super) fn identity(&self) -> &FileIdentity {
+        &self.identity
+    }
 }
 
 pub(super) struct ExecutablePin {
@@ -112,6 +120,123 @@ impl SourceRoot {
         &self.directory.identity
     }
 
+    pub(crate) fn write_pins(&self) -> Vec<Arc<File>> {
+        self.directory
+            .pins
+            .iter()
+            .chain(self.protected.pins.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn create_new_file(&self, component: &str) -> Result<File, AslError> {
+        self.open_write_file(component, FILE_CREATE)
+    }
+
+    pub(crate) fn open_existing_write_file(&self, component: &str) -> Result<File, AslError> {
+        self.open_write_file(component, FILE_OPEN)
+    }
+
+    fn open_write_file(
+        &self,
+        component: &str,
+        disposition: NTCREATEFILE_CREATE_DISPOSITION,
+    ) -> Result<File, AslError> {
+        let parent = self.directory.pins.last().ok_or(AslError::NotFound)?;
+        let file = relative_handle(
+            parent,
+            component,
+            Entry::File,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            disposition,
+        )?;
+        let information = inspect(&file, false)?;
+        if information.identity.volume_serial != self.directory.identity.volume_serial {
+            return Err(AslError::NotFound);
+        }
+        check_long_name(&file, &self.directory.name, component)?;
+        Ok(file)
+    }
+
+    pub(crate) fn file_identity(&self, file: &File) -> Result<FileIdentity, AslError> {
+        let information = inspect(file, false)?;
+        if information.identity.volume_serial != self.directory.identity.volume_serial {
+            return Err(AslError::NotFound);
+        }
+        Ok(information.identity)
+    }
+
+    pub(crate) fn rename_file(
+        &self,
+        file: &File,
+        expected_root: &FileIdentity,
+        component: &str,
+    ) -> Result<(), AslError> {
+        if expected_root != &self.directory.identity {
+            return Err(AslError::PolicyDenied);
+        }
+        let names = validated_relative(Path::new(component))?;
+        if names.len() != 1 || names[0] != component {
+            return Err(AslError::InvalidStorageRoot);
+        }
+        let mut encoded: Vec<u16> = component.encode_utf16().collect();
+        let name_bytes = encoded
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(AslError::InvalidStorageRoot)?;
+        let name_offset = offset_of!(FILE_RENAME_INFORMATION, FileName);
+        let file_name_bytes =
+            usize::try_from(name_bytes).map_err(|_| AslError::InvalidStorageRoot)?;
+        let buffer_bytes = size_of::<FILE_RENAME_INFORMATION>()
+            .checked_add(file_name_bytes)
+            .ok_or(AslError::InvalidStorageRoot)?;
+        let words = buffer_bytes.div_ceil(size_of::<usize>());
+        let mut buffer = vec![0usize; words];
+        let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        unsafe {
+            ptr::write(
+                information,
+                FILE_RENAME_INFORMATION {
+                    Anonymous: FILE_RENAME_INFORMATION_0 {
+                        ReplaceIfExists: false,
+                    },
+                    RootDirectory: HANDLE::default(),
+                    FileNameLength: name_bytes,
+                    FileName: [0],
+                },
+            );
+            ptr::copy_nonoverlapping(
+                encoded.as_mut_ptr().cast::<u8>(),
+                information.cast::<u8>().add(name_offset),
+                name_bytes as usize,
+            );
+        }
+        let mut status_block = IO_STATUS_BLOCK::default();
+        let status = unsafe {
+            NtSetInformationFile(
+                raw(file),
+                &mut status_block,
+                information.cast(),
+                u32::try_from(buffer_bytes).map_err(|_| AslError::InvalidStorageRoot)?,
+                FileRenameInformation,
+            )
+        };
+        if status.is_err() {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(status) } as i32
+            )
+            .into());
+        }
+        let information = inspect(file, false)?;
+        if information.identity.volume_serial != self.directory.identity.volume_serial {
+            return Err(AslError::NotFound);
+        }
+        check_long_name(file, &self.directory.name, component)?;
+        Ok(())
+    }
+
     pub(crate) fn directory_watch(&self) -> io::Result<super::reconcile_watch::DirectoryWatch> {
         super::reconcile_watch::DirectoryWatch::open(&self.directory.name)
     }
@@ -176,7 +301,7 @@ impl Read for SourceFile {
     }
 }
 
-fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
+pub(super) fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
     if !path.is_absolute() {
         return Err(AslError::InvalidStorageRoot);
     }
@@ -349,6 +474,10 @@ fn inspect(file: &File, directory: bool) -> Result<Information, AslError> {
             Entry::File
         },
     )
+}
+
+pub(crate) fn file_identity(file: &File) -> Result<FileIdentity, AslError> {
+    Ok(inspect(file, false)?.identity)
 }
 
 fn inspect_entry(file: &File, entry: Entry) -> Result<Information, AslError> {

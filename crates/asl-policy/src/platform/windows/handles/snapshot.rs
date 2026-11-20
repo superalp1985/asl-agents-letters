@@ -12,6 +12,7 @@ use asl_types::error::AslError;
 use asl_types::manifest::CHUNK_SIZE;
 use rand::{TryRng, rngs::SysRng};
 use windows::Wdk::Storage::FileSystem::{FILE_CREATE, FILE_OPEN, FILE_OPEN_IF};
+use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows::Win32::Storage::FileSystem::{
     DELETE, FILE_DISPOSITION_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_MODE,
     FILE_SHARE_READ, FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfo, SYNCHRONIZE,
@@ -19,8 +20,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 use super::{
-    Entry, PinnedDirectory, check_long_name, inspect, inspect_entry, pin_directory, raw,
-    relative_handle,
+    Entry, FileIdentity, PinnedDirectory, check_long_name, inspect, inspect_entry, pin_directory,
+    raw, relative_handle,
 };
 
 impl PinnedDirectory {
@@ -69,6 +70,27 @@ pub(crate) fn pin_state(home: &Path) -> Result<PinnedDirectory, AslError> {
     pin_directory(home)?.child("state", false)
 }
 
+pub(crate) fn open_download_marker(state: &PinnedDirectory) -> Result<File, AslError> {
+    const NAME: &str = "download-worker.lock";
+    // The marker persists. Read-data access makes the zero-share handle exclusive.
+    let file = match relative_handle(
+        state.leaf(),
+        NAME,
+        Entry::File,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_MODE(0),
+        FILE_OPEN_IF,
+    ) {
+        Err(AslError::Io(e)) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32) => {
+            return Err(AslError::InvalidPolicyState);
+        }
+        result => result?,
+    };
+    state.check_file(&file, NAME)?;
+    super::check_single_link(&file)?;
+    Ok(file)
+}
+
 struct ObjectNames {
     shard: String,
     blob: String,
@@ -92,6 +114,125 @@ pub(crate) struct ObjectFiles {
     _incoming: PinnedDirectory,
     snapshots: PinnedDirectory,
     manifests: PinnedDirectory,
+}
+
+pub(crate) struct SnapshotReader {
+    blob: File,
+    manifest: File,
+    blob_identity: FileIdentity,
+    manifest_identity: FileIdentity,
+    blob_len: u64,
+    manifest_len: u64,
+    _pins: Vec<Arc<File>>,
+}
+
+impl SnapshotReader {
+    pub(crate) fn open(home: &Path, id: [u8; 32]) -> Result<Self, AslError> {
+        let home = pin_directory(home)?;
+        let names = ObjectNames::new(id);
+        let snapshots = home.child("snapshots", false)?;
+        let snapshot_shard = snapshots.child(&names.shard, false)?;
+        let manifests = home.child("manifests", false)?;
+        let manifest_shard = manifests.child(&names.shard, false)?;
+        let blob = relative_handle(
+            snapshot_shard.leaf(),
+            &names.blob,
+            Entry::File,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+        )?;
+        let manifest = relative_handle(
+            manifest_shard.leaf(),
+            &names.manifest,
+            Entry::File,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+        )?;
+        snapshot_shard.check_file(&blob, &names.blob)?;
+        manifest_shard.check_file(&manifest, &names.manifest)?;
+        super::check_single_link(&blob)?;
+        super::check_single_link(&manifest)?;
+        let blob_info = inspect(&blob, false)?;
+        let manifest_info = inspect(&manifest, false)?;
+        let blob_len = u64::try_from(blob_info.standard.EndOfFile)
+            .map_err(|_| AslError::InvalidPolicyState)?;
+        let manifest_len = u64::try_from(manifest_info.standard.EndOfFile)
+            .map_err(|_| AslError::InvalidPolicyState)?;
+        let pins = home
+            .pins
+            .iter()
+            .chain(snapshots.pins.iter())
+            .chain(snapshot_shard.pins.iter())
+            .chain(manifests.pins.iter())
+            .chain(manifest_shard.pins.iter())
+            .cloned()
+            .collect();
+        Ok(Self {
+            blob,
+            manifest,
+            blob_identity: blob_info.identity,
+            manifest_identity: manifest_info.identity,
+            blob_len,
+            manifest_len,
+            _pins: pins,
+        })
+    }
+
+    pub(crate) fn read_manifest(&mut self) -> Result<Vec<u8>, AslError> {
+        use asl_types::manifest::MAX_MANIFEST_LEN;
+
+        self.check_current(&self.manifest, &self.manifest_identity, self.manifest_len)?;
+        self.manifest.rewind()?;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(self.manifest_len)
+                .unwrap_or(MAX_MANIFEST_LEN)
+                .min(MAX_MANIFEST_LEN),
+        );
+        (&mut self.manifest)
+            .take((MAX_MANIFEST_LEN + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        self.check_current(&self.manifest, &self.manifest_identity, self.manifest_len)?;
+        if bytes.len() > MAX_MANIFEST_LEN || bytes.len() as u64 != self.manifest_len {
+            return Err(AslError::InvalidPolicyState);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn file_size(&self) -> u64 {
+        self.blob_len
+    }
+
+    pub(crate) fn read_range(&mut self, offset: u64, length: u32) -> Result<Vec<u8>, AslError> {
+        let end = offset
+            .checked_add(u64::from(length))
+            .ok_or(AslError::NotFound)?;
+        if end > self.blob_len {
+            return Err(AslError::NotFound);
+        }
+        self.check_current(&self.blob, &self.blob_identity, self.blob_len)?;
+        self.blob.seek(io::SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; usize::try_from(length).map_err(|_| AslError::NotFound)?];
+        self.blob.read_exact(&mut bytes)?;
+        self.check_current(&self.blob, &self.blob_identity, self.blob_len)?;
+        Ok(bytes)
+    }
+
+    fn check_current(
+        &self,
+        file: &File,
+        identity: &FileIdentity,
+        length: u64,
+    ) -> Result<(), AslError> {
+        let information = inspect(file, false)?;
+        if &information.identity != identity
+            || u64::try_from(information.standard.EndOfFile).ok() != Some(length)
+        {
+            return Err(AslError::InvalidPolicyState);
+        }
+        Ok(())
+    }
 }
 
 impl ObjectFiles {
@@ -236,7 +377,7 @@ impl Drop for Object {
     }
 }
 
-fn mark_delete(file: &File) -> Result<(), AslError> {
+pub(crate) fn mark_delete(file: &File) -> Result<(), AslError> {
     super::check_single_link(file)?;
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
     unsafe {

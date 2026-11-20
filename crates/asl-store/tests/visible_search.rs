@@ -4,7 +4,10 @@ use asl_policy::{
     AccessOperation, Audience, AuthenticatedDevice, GrantPolicy, ModelPolicy, PolicyEngine,
     PolicyRevision, PolicyService, PolicySnapshot, ResourceOrigin, ResourcePolicy,
 };
-use asl_store::{Store, open_store, search::LocalIndexText};
+use asl_store::{
+    Store, open_store,
+    search::{LocalIndexText, direct::DirectRequester},
+};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -230,6 +233,158 @@ fn seed_snapshot(db: &Connection, id: u8, size: i64) {
                 state,created_at_ms) VALUES (?1,?1,?2,1,?3,?4,'ready',0) ON CONFLICT(content_id) DO NOTHING",
         params![content, size, format!("snapshots/{}/{content}.blob", &content[..2]),
             format!("manifests/{}/{content}.mnf", &content[..2])]).unwrap();
+}
+
+#[test]
+fn durable_direct_search_requires_live_audience_at_disclosure() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new(&[PUBLIC, PDF], true);
+    fixture
+        .db
+        .execute_batch(
+            "INSERT INTO chain_state_cache VALUES
+            (1,zeroblob(20),zeroblob(32),0,zeroblob(32),zeroblob(32),zeroblob(32),x'',0);
+         INSERT INTO identity_registry_states SELECT
+            agent_id,1,zeroblob(20),zeroblob(32),1,'active',0,zeroblob(32),0 FROM agents;",
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<4096)
+         INSERT INTO resources(row_id,resource_key,content_id,grant_id,origin,title,summary,
+            evidence_status,created_at_ms,updated_at_ms,active)
+         SELECT -seq.i,printf('%032x',seq.i+100),r.content_id,r.grant_id,'local','','',
+            'source_backed',0,0,0 FROM seq CROSS JOIN resources r WHERE r.row_id=1",
+            [],
+        )
+        .unwrap();
+    let hidden_grant = hex::encode([0xdd; 16]);
+    fixture
+        .db
+        .execute(
+            "INSERT INTO agents(agent_id,identity_state) VALUES (?1,'verified')",
+            [agent_text(43)],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO grants(grant_id,root_path,volume_id,root_file_id,extensions_json,
+            audience,model_policy,max_snapshot_bytes,status,created_at_ms)
+         VALUES (?1,?2,'0000000000000001',?1,'[\"rs\"]','peers','never',4096,'active',0)",
+            params![hidden_grant, fixture._temp.path().to_str().unwrap()],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO grant_agents(grant_id,agent_id) VALUES (?1,?2)",
+            params![hidden_grant, agent_text(43)],
+        )
+        .unwrap();
+    let content = hex::encode(hash(PUBLIC.content).0);
+    fixture
+        .db
+        .execute(
+            "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<4096)
+         INSERT INTO resources(row_id,resource_key,content_id,grant_id,source_relative,
+            source_grant_epoch,origin,title,summary,evidence_status,created_at_ms,updated_at_ms)
+         SELECT 1000+seq.i,printf('%032x',seq.i+10000),?1,?2,'hidden.rs',1,
+            'local','','','source_backed',0,0 FROM seq",
+            params![content, hidden_grant],
+        )
+        .unwrap();
+    fixture.db.execute(
+        "INSERT INTO resource_fts(rowid,resource_key,title_tokens,summary_tokens,body_tokens,tag_tokens)
+         SELECT row_id,resource_key,'hidden','hidden','hidden','v1c101'
+         FROM resources WHERE row_id BETWEEN 1001 AND 5096",
+        [],
+    ).unwrap();
+    let until = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let requester = |id| DirectRequester {
+        agent: agent(id),
+        peer: peer(id),
+        session_expires_at_ms: until,
+        registry_sequence: 1,
+        directory_commitment: [0; 32],
+        controller: [0; 20],
+    };
+    let stranger = requester(STRANGER);
+    let (snapshot, keys) = fixture.store.direct_search_snapshot(&stranger).unwrap();
+    assert_keys(keys, &[PUBLIC.id]);
+    assert!(snapshot.contacts.is_empty());
+
+    let contact = requester(CONTACT);
+    let (snapshot, keys) = fixture.store.direct_search_snapshot(&contact).unwrap();
+    let revision = snapshot.revision;
+    let engine = PolicyEngine::new(snapshot, 60_000).unwrap();
+    let policy = engine.for_peer(contact.peer.clone());
+    let hits = fixture
+        .store
+        .peer_search(&policy, contact.agent)
+        .search_with_metadata_permits(&keys, &[PRIVATE], 1)
+        .unwrap();
+    let (hit, permit) = &hits[0];
+    assert_eq!(hit.content_id, hash(PDF.content));
+    assert_eq!(permit.file_size(), PDF.body.len() as u64);
+    assert!(
+        fixture
+            .store
+            .with_current_direct_authority(&contact, revision, Some(permit), None, || Ok(()))
+            .is_ok()
+    );
+    assert!(
+        fixture
+            .store
+            .with_current_direct_authority::<()>(
+                &stranger,
+                revision,
+                Some(permit),
+                None,
+                || panic!("wrong device")
+            )
+            .is_err()
+    );
+    fixture
+        .db
+        .execute(
+            "DELETE FROM authorized_contacts WHERE agent_id=?1",
+            [agent_text(CONTACT)],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.store.with_current_direct_authority(
+            &contact,
+            revision,
+            Some(permit),
+            None,
+            || panic!("revoked contact")
+        ),
+        Err::<(), _>(AslError::NotFound)
+    ));
+    fixture
+        .db
+        .execute(
+            "UPDATE identity_registry_states SET sequence=2 WHERE agent_id=?1",
+            [agent_text(STRANGER)],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.store.direct_search_snapshot(&stranger),
+        Err(AslError::NotFound)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .with_current_direct_authority(&stranger, revision, None, None, || Ok(())),
+        Err(AslError::NotFound)
+    ));
 }
 
 fn assert_keys(mut actual: Vec<ResourceKey>, expected: &[u8]) {
@@ -540,4 +695,111 @@ fn replacing_an_index_is_atomic_and_bound_to_content() {
     let hits = search.search_local_text(&keys, "needle", LIMIT).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].local_title, "replacement");
+}
+
+#[test]
+fn public_derived_records_load_their_sources_for_direct_search() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut fixture = Fixture::new(&[PUBLIC], false);
+    fixture
+        .db
+        .execute_batch(
+            "INSERT INTO chain_state_cache VALUES
+            (1,zeroblob(20),zeroblob(32),0,zeroblob(32),zeroblob(32),zeroblob(32),x'',0);
+         INSERT INTO identity_registry_states SELECT
+            agent_id,1,zeroblob(20),zeroblob(32),1,'active',0,zeroblob(32),0 FROM agents;",
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "UPDATE grants SET allow_derived_disclosure=1 WHERE grant_id=?1",
+            [hex::encode(grant(PUBLIC.id).0.0)],
+        )
+        .unwrap();
+
+    let derived_id = 5;
+    let derived_key = key(derived_id);
+    let derived_grant = grant(derived_id);
+    seed_snapshot(&fixture.db, 55, 128);
+    fixture
+        .db
+        .execute(
+            "INSERT INTO grants(
+                grant_id,root_path,volume_id,root_file_id,extensions_json,audience,
+                model_policy,max_snapshot_bytes,status,created_at_ms,allow_derived_disclosure
+             ) VALUES (?1,?2,'0000000000000001',?1,'[\"json\"]','public',
+                       'never',4096,'active',0,1)",
+            params![
+                hex::encode(derived_grant.0.0),
+                fixture._temp.path().to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO resources(
+                resource_key,content_id,grant_id,source_relative,source_grant_epoch,
+                origin,title,summary,tags_json,label_json,evidence_status,created_at_ms,updated_at_ms
+             ) VALUES (?1,?2,?3,'derived.json',1,'derived','','','[]',
+                       '{\"kind\":\"public\",\"disclosure_allowed\":true}',
+                       'derived_unverified',0,0)",
+            params![
+                hex::encode(derived_key.0.0),
+                hex::encode(hash(55).0),
+                hex::encode(derived_grant.0.0)
+            ],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO derivation_sources(derived_resource_key,source_resource_key)
+             VALUES (?1,?2)",
+            params![
+                hex::encode(derived_key.0.0),
+                hex::encode(key(PUBLIC.id).0.0)
+            ],
+        )
+        .unwrap();
+    fixture
+        .store
+        .index_local_text(
+            &derived_key,
+            hash(55),
+            LocalIndexText {
+                title: "Derived Rust knowledge",
+                summary: "Source-backed record",
+                body: "A derivedmarker record",
+                concepts: &[RUST],
+            },
+        )
+        .unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let requester = DirectRequester {
+        agent: agent(STRANGER),
+        peer: peer(STRANGER),
+        session_expires_at_ms: now + 60_000,
+        registry_sequence: 1,
+        directory_commitment: [0; 32],
+        controller: [0; 20],
+    };
+    let (snapshot, keys) = fixture.store.direct_search_snapshot(&requester).unwrap();
+    assert_keys(keys.clone(), &[PUBLIC.id, derived_id]);
+    assert!(snapshot.resources.contains_key(&key(PUBLIC.id)));
+
+    let engine = PolicyEngine::new(snapshot, 60_000).unwrap();
+    let policy = engine.for_peer(requester.peer.clone());
+    let hits = fixture
+        .store
+        .peer_search(&policy, requester.agent)
+        .search_with_metadata_permits(&keys, &[RUST], LIMIT)
+        .unwrap();
+    assert!(hits.iter().any(|(hit, _)| hit.resource_key == derived_key));
 }

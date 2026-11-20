@@ -3,14 +3,16 @@ use std::{collections::HashMap, sync::RwLock};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    task::{GrantId, GroupId, ResourceKey},
+    task::{GrantId, GroupId, ProviderId, ResourceKey},
 };
 use rand::{TryRng, rngs::SysRng};
 
 use crate::{
     audience::{MAX_TIME_MS, Scope},
     labels::{Evaluation, evaluate},
-    types::{AccessOperation, AccessRequest, PolicyRevision, PolicySnapshot, ResourcePolicy},
+    types::{
+        AccessOperation, AccessRequest, PolicyRevision, PolicySnapshot, Principal, ResourcePolicy,
+    },
 };
 
 pub trait PolicyService {
@@ -34,6 +36,7 @@ pub struct Permit {
     dependencies: HashMap<ResourceKey, ResourcePolicy>,
     requester_agent_id: Option<AgentId>,
     group_binding: Option<(GroupId, u64)>,
+    model_provider_local: Option<bool>,
 }
 
 impl Permit {
@@ -43,6 +46,14 @@ impl Permit {
 
     pub fn grant_id(&self) -> &GrantId {
         &self.request.grant_id
+    }
+
+    pub fn resource_key(&self) -> &ResourceKey {
+        &self.request.resource_key
+    }
+
+    pub fn principal(&self) -> &Principal {
+        &self.request.principal
     }
 
     pub fn grant_epoch(&self) -> u64 {
@@ -65,8 +76,19 @@ impl Permit {
         self.content_id
     }
 
+    pub fn file_size(&self) -> u64 {
+        self.dependencies[&self.request.resource_key].file_size
+    }
+
     pub fn operation(&self) -> AccessOperation {
         self.request.operation
+    }
+
+    pub fn model_provider(&self) -> Option<(&ProviderId, bool)> {
+        let Principal::ModelProvider(provider) = &self.request.principal else {
+            return None;
+        };
+        self.model_provider_local.map(|local| (provider, local))
     }
 
     pub fn expires_at_ms(&self) -> u64 {
@@ -191,6 +213,7 @@ impl PolicyEngine {
             dependencies: evaluation.resources,
             requester_agent_id: evaluation.requester,
             group_binding: evaluation.group_binding,
+            model_provider_local: model_provider_local(&snapshot, &request.principal),
         })
     }
 
@@ -213,10 +236,21 @@ impl PolicyEngine {
         if resources != permit.dependencies
             || requester != permit.requester_agent_id
             || group_binding != permit.group_binding
+            || model_provider_local(&snapshot, &permit.request.principal)
+                != permit.model_provider_local
         {
             return Err(AslError::NotFound);
         }
         Ok(())
+    }
+}
+
+fn model_provider_local(snapshot: &PolicySnapshot, principal: &Principal) -> Option<bool> {
+    match principal {
+        Principal::ModelProvider(provider) => {
+            snapshot.providers.get(provider).map(|policy| policy.local)
+        }
+        _ => None,
     }
 }
 

@@ -1,0 +1,314 @@
+use std::{
+    fs::{self, File},
+    io::Read,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+};
+
+use asl_net::address_policy::AddressPolicy;
+use asl_net::relay::{MAX_RELAY_ENDPOINT_BYTES, relay_endpoint_config};
+use asl_types::error::AslError;
+use serde::{Deserialize, Serialize};
+
+const MAX_NETWORK_SETTINGS_BYTES: u64 = 16_384;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAddressScopeV1 {
+    LoopbackOnly,
+    LanOnly,
+    InternetOnly,
+    Hybrid,
+    RelayOnly,
+}
+
+impl From<NetworkAddressScopeV1> for AddressPolicy {
+    fn from(scope: NetworkAddressScopeV1) -> Self {
+        match scope {
+            NetworkAddressScopeV1::LoopbackOnly => Self::LoopbackOnly,
+            NetworkAddressScopeV1::LanOnly => Self::LanOnly,
+            NetworkAddressScopeV1::InternetOnly => Self::InternetOnly,
+            NetworkAddressScopeV1::Hybrid => Self::Hybrid,
+            NetworkAddressScopeV1::RelayOnly => Self::RelayOnly,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSettingsV1 {
+    pub version: u16,
+    pub address_scope: NetworkAddressScopeV1,
+    pub listen_on_interfaces: bool,
+    pub tcp_port: u16,
+    pub quic_port: u16,
+    #[serde(default)]
+    pub relay_addresses: Vec<String>,
+    #[serde(default)]
+    pub loopback_groups: bool,
+}
+
+impl Default for NetworkSettingsV1 {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            address_scope: NetworkAddressScopeV1::LoopbackOnly,
+            listen_on_interfaces: false,
+            tcp_port: 0,
+            quic_port: 0,
+            relay_addresses: Vec::new(),
+            loopback_groups: false,
+        }
+    }
+}
+
+impl NetworkSettingsV1 {
+    pub fn load(path: &Path) -> Result<Self, AslError> {
+        let Some(bytes) = read_optional_file(path)? else {
+            return Ok(Self::default());
+        };
+        let settings: Self =
+            serde_json::from_slice(&bytes).map_err(|_| AslError::InvalidIdentity)?;
+        if settings.version != 1 {
+            return Err(AslError::InvalidIdentity);
+        }
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn address_policy(&self) -> AddressPolicy {
+        self.address_scope.into()
+    }
+
+    pub fn listener_address(&self, port: u16) -> SocketAddr {
+        let ip = match self.address_scope {
+            NetworkAddressScopeV1::LoopbackOnly => Ipv4Addr::LOCALHOST,
+            NetworkAddressScopeV1::LanOnly
+            | NetworkAddressScopeV1::InternetOnly
+            | NetworkAddressScopeV1::Hybrid
+            | NetworkAddressScopeV1::RelayOnly => Ipv4Addr::UNSPECIFIED,
+        };
+        SocketAddr::new(IpAddr::V4(ip), port)
+    }
+
+    pub fn validate(&self) -> Result<(), AslError> {
+        const MAX_RELAY_ADDRESSES: usize = 8;
+        if self.relay_addresses.len() > MAX_RELAY_ADDRESSES
+            || self
+                .relay_addresses
+                .iter()
+                .any(|address| address.len() > MAX_RELAY_ENDPOINT_BYTES)
+            || (self.address_scope == NetworkAddressScopeV1::RelayOnly
+                && (self.listen_on_interfaces || self.relay_addresses.is_empty()))
+            || (self.loopback_groups
+                && (self.address_scope != NetworkAddressScopeV1::LoopbackOnly
+                    || !self.relay_addresses.is_empty()))
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut unique = std::collections::HashSet::new();
+        for address in &self.relay_addresses {
+            let parsed = relay_endpoint_config(address).map_err(|_| AslError::InvalidIdentity)?;
+            if !unique.insert(parsed) {
+                return Err(AslError::InvalidIdentity);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, AslError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_NETWORK_SETTINGS_BYTES {
+        return Err(AslError::InvalidIdentity);
+    }
+    let file = File::open(path)?;
+    let mut reader = file.take(MAX_NETWORK_SETTINGS_BYTES.saturating_add(1));
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_NETWORK_SETTINGS_BYTES {
+        return Err(AslError::InvalidIdentity);
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let base = std::env::temp_dir().join("asl-test-network-settings");
+            let root = base.join(format!(
+                "settings-{}-{}",
+                std::process::id(),
+                NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let Some(name) = self.0.file_name().and_then(|name| name.to_str()) else {
+                return;
+            };
+            let base = self
+                .0
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok());
+            let root = self.0.canonicalize().ok();
+            if name.starts_with("settings-")
+                && base
+                    .as_ref()
+                    .zip(root.as_ref())
+                    .is_some_and(|(base, root)| {
+                        root.starts_with(base) && root.parent() == Some(base.as_path())
+                    })
+            {
+                let _ = fs::remove_dir_all(root.unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn missing_settings_keep_loopback_and_listening_disabled() {
+        let directory = TestDirectory::new();
+        let settings = NetworkSettingsV1::load(&directory.0.join("settings.json")).unwrap();
+        assert_eq!(settings, NetworkSettingsV1::default());
+        assert_eq!(settings.address_policy(), AddressPolicy::LoopbackOnly);
+        assert!(!settings.loopback_groups);
+    }
+
+    #[test]
+    fn settings_load_versioned_scope_and_listener_choices() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        let settings = NetworkSettingsV1 {
+            version: 1,
+            address_scope: NetworkAddressScopeV1::LanOnly,
+            listen_on_interfaces: true,
+            tcp_port: 0,
+            quic_port: 40_000,
+            relay_addresses: vec![],
+            loopback_groups: false,
+        };
+        fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(NetworkSettingsV1::load(&path).unwrap(), settings);
+        assert_eq!(settings.address_policy(), AddressPolicy::LanOnly);
+    }
+
+    #[test]
+    fn settings_require_explicit_loopback_group_opt_in() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        let mut value = serde_json::to_value(NetworkSettingsV1::default()).unwrap();
+        value.as_object_mut().unwrap().remove("loopback_groups");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!NetworkSettingsV1::load(&path).unwrap().loopback_groups);
+
+        value["loopback_groups"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(NetworkSettingsV1::load(&path).unwrap().loopback_groups);
+
+        value["loopback_groups"] = serde_json::json!("true");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(NetworkSettingsV1::load(&path).is_err());
+    }
+
+    #[test]
+    fn settings_reject_group_opt_in_with_non_loopback_scope_or_relay() {
+        let mut settings = NetworkSettingsV1 {
+            loopback_groups: true,
+            ..NetworkSettingsV1::default()
+        };
+        for scope in [
+            NetworkAddressScopeV1::LanOnly,
+            NetworkAddressScopeV1::InternetOnly,
+            NetworkAddressScopeV1::Hybrid,
+        ] {
+            settings.address_scope = scope;
+            assert!(settings.validate().is_err());
+        }
+
+        let relay_peer_id = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        settings.relay_addresses = vec![format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}")];
+        for scope in [
+            NetworkAddressScopeV1::LoopbackOnly,
+            NetworkAddressScopeV1::RelayOnly,
+        ] {
+            settings.address_scope = scope;
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn listener_address_is_loopback_or_policy_scoped_interface_binding() {
+        let mut settings = NetworkSettingsV1::default();
+        assert_eq!(
+            settings.listener_address(4_001),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4_001)
+        );
+
+        settings.address_scope = NetworkAddressScopeV1::InternetOnly;
+        assert_eq!(
+            settings.listener_address(4_001),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4_001)
+        );
+    }
+
+    #[test]
+    fn settings_reject_unknown_fields_wrong_versions_and_oversized_files() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        let mut value = serde_json::to_value(NetworkSettingsV1::default()).unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(NetworkSettingsV1::load(&path).is_err());
+
+        let mut value = serde_json::to_value(NetworkSettingsV1::default()).unwrap();
+        value["version"] = serde_json::json!(2);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(NetworkSettingsV1::load(&path).is_err());
+
+        fs::write(&path, vec![b' '; MAX_NETWORK_SETTINGS_BYTES as usize + 1]).unwrap();
+        assert!(NetworkSettingsV1::load(&path).is_err());
+    }
+
+    #[test]
+    fn relay_only_requires_configured_relays_and_disables_interface_listening() {
+        let relay_peer_id = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut settings = NetworkSettingsV1 {
+            address_scope: NetworkAddressScopeV1::RelayOnly,
+            relay_addresses: vec![format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_peer_id}")],
+            ..NetworkSettingsV1::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        settings.listen_on_interfaces = true;
+        assert!(settings.validate().is_err());
+
+        settings.listen_on_interfaces = false;
+        settings.relay_addresses.clear();
+        assert!(settings.validate().is_err());
+    }
+}

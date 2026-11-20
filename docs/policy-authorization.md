@@ -30,6 +30,8 @@
 
 每次重新验证都会重算当前授权。全局 revision 变化触发重判；无关变化不会单独使合法许可失效。联系人移除、设备失效、源资源停用、内容更换、任一来源版本改变或许可到期都会阻止继续使用。期限还受来源保留期、链身份和设备证书期限限制。
 
+T20 已在授权层补充内存 lease：lease 默认最多 60 秒，只能由有效的 `ReadChunk` Permit 签发，绑定认证 Peer、content ID、grant epoch、policy revision 和群成员 epoch。每次 manifest/chunk 使用前必须重新验证 Permit；进程重启后 lease 表为空，旧 lease 不可恢复。该切片只提供授权栅栏和结构化 `fetch_grant` 生成/校验，尚未替代 Core 的真实文件读取、manifest/chunk 服务、连接级认证或 SQLite 审计。
+
 不存在与未获准的资源统一返回 `NotFound`，避免借错误差异枚举本机资料。
 
 ## 集成限制

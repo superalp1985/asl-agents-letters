@@ -6,19 +6,23 @@ use asl_store::{
         MAX_CHAIN_OBSERVATIONS, MAX_CHAIN_PROOF_BYTES, MAX_CHAIN_SNAPSHOT_BYTES, ObservationStatus,
     },
 };
-use asl_types::ids::AgentId;
+use asl_types::{
+    ids::AgentId,
+    protocol::{IdentityProof as WireIdentityProof, IdentityProofRequest},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     ChainError, ConsensusConfigV1, EthereumIdentityResolver, EthereumLightClient,
     EthereumProofVerifier, FinalizedExecution, IdentityProofV1, IdentityProofVerifier,
     IdentityResolution, IdentityResolver, LimitedReason, RegistryDeploymentV1, RegistryStatus,
-    VerifiedIdentity,
+    VerifiedIdentity, identity_proof_from_wire,
 };
 
 const SNAPSHOT_DOMAIN: &str = "ASL-LOCAL-CHAIN-1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableResolverConfigV1 {
     pub consensus: ConsensusConfigV1,
     pub deployment: RegistryDeploymentV1,
@@ -85,15 +89,35 @@ pub struct DurableIdentityResolver {
     resolver: EthereumIdentityResolver,
     bundle: ChainBundle,
     storage_healthy: bool,
+    local: Option<LocalIdentity>,
+}
+
+struct LocalIdentity {
+    verified: Box<VerifiedIdentity>,
+    proof: Option<SavedProof>,
 }
 
 impl DurableIdentityResolver {
+    pub fn validate_config(config: &DurableResolverConfigV1) -> Result<(), ChainError> {
+        config.consensus.validate()?;
+        config.deployment.validate()?;
+        if config.consensus.chain_id != config.deployment.chain_id
+            || config.max_cache_age_secs == 0
+            || config.max_cache_age_secs > config.consensus.max_finality_age_secs
+            || !(1..=128).contains(&config.cache_capacity)
+        {
+            return Err(ChainError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+
     pub fn create(
         store: Store,
         config: DurableResolverConfigV1,
         light_client: EthereumLightClient,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        Self::validate_config(&config)?;
         if light_client.config() != &config.consensus
             || store
                 .load_chain_bundle(config.consensus.chain_id)
@@ -132,6 +156,7 @@ impl DurableIdentityResolver {
             resolver: resolver.clone(),
             bundle: bundle.clone(),
             storage_healthy: true,
+            local: None,
         };
         durable.commit(resolver, bundle, now_secs)?;
         Ok(durable)
@@ -142,6 +167,7 @@ impl DurableIdentityResolver {
         config: DurableResolverConfigV1,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        Self::validate_config(&config)?;
         let (bundle, saved) = authenticated_snapshot(&store, &config, now_secs)?;
         let client = EthereumLightClient::from_local_state(
             config.consensus.clone(),
@@ -180,6 +206,7 @@ impl DurableIdentityResolver {
             resolver,
             bundle,
             storage_healthy: true,
+            local: None,
         })
     }
 
@@ -232,6 +259,7 @@ impl DurableIdentityResolver {
             resolver: candidate.clone(),
             bundle: previous,
             storage_healthy: true,
+            local: None,
         };
         durable.commit(candidate, bundle, now_secs)?;
         Ok(durable)
@@ -243,6 +271,88 @@ impl DurableIdentityResolver {
 
     pub fn deployment(&self) -> RegistryDeploymentV1 {
         self.config.deployment
+    }
+
+    pub(crate) fn retain_local_identity(
+        &mut self,
+        agent: AgentId,
+        controller: Option<[u8; 20]>,
+        now_secs: u64,
+    ) -> Result<bool, ChainError> {
+        self.local = None;
+        let IdentityResolution::Verified(verified) = self.resolver.resolve(agent, now_secs) else {
+            return Ok(false);
+        };
+        if verified.state().status != RegistryStatus::Active
+            || controller.is_some_and(|expected| expected != verified.state().controller)
+            || !self.retained_identity_is_current(&verified, now_secs)
+        {
+            return Ok(false);
+        }
+        let proof = self
+            .bundle
+            .proofs
+            .iter()
+            .find(|row| row.agent_id == agent)
+            .map(|row| decode(&row.proof_cbor))
+            .transpose()?;
+        self.local = Some(LocalIdentity { verified, proof });
+        Ok(true)
+    }
+
+    pub(crate) fn clear_local_identity(&mut self) {
+        self.local = None;
+    }
+
+    pub(crate) fn local_identity_is_current(&self, now_secs: u64) -> bool {
+        self.local
+            .as_ref()
+            .is_some_and(|local| self.retained_identity_is_current(&local.verified, now_secs))
+    }
+
+    /// Recheck a retained local proof without depending on peer LRU entries.
+    fn retained_identity_is_current(&self, identity: &VerifiedIdentity, now_secs: u64) -> bool {
+        self.ensure_storage().is_ok()
+            && identity.deployment() == self.config.deployment
+            && now_secs
+                .checked_sub(identity.finalized().timestamp_secs())
+                .is_some_and(|age| age <= self.config.max_cache_age_secs)
+            && self.light_client().finalized(now_secs).is_ok()
+            && check_observation(&self.bundle, identity).is_ok()
+    }
+
+    pub fn update_light_client(
+        &mut self,
+        light_client: EthereumLightClient,
+        now_secs: u64,
+    ) -> Result<(), ChainError> {
+        self.ensure_storage()?;
+        if light_client.config() != &self.config.consensus {
+            return Err(ChainError::InvalidConfiguration);
+        }
+        let finalized = light_client.finalized(now_secs)?;
+        let previous = self
+            .resolver
+            .light_client()
+            .observed_execution()
+            .ok_or(ChainError::InvalidLocalState)?;
+        if finalized.chain_id() != previous.chain_id()
+            || finalized.block_number() < previous.block_number()
+            || finalized.beacon_slot() < previous.beacon_slot()
+            || finalized.timestamp_secs() < previous.timestamp_secs()
+        {
+            return Err(ChainError::Rollback);
+        }
+        if finalized.block_number() == previous.block_number()
+            && (finalized.block_hash() != previous.block_hash()
+                || finalized.state_root() != previous.state_root())
+        {
+            return Err(ChainError::ConflictingFinality);
+        }
+
+        let mut candidate = self.resolver.clone();
+        *candidate.light_client_mut() = light_client;
+        self.commit(candidate, self.bundle.clone(), now_secs)
     }
 
     pub fn apply_update_json(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
@@ -271,24 +381,63 @@ impl DurableIdentityResolver {
         let identity = self
             .resolver
             .verify_fresh_proof(expected_agent, proof, now_secs)?;
-        check_observation(&self.bundle, &identity)?;
+        self.commit_verified_proof(&identity, proof, now_secs, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn accept_local_refresh_proof(
+        &mut self,
+        expected_agent: AgentId,
+        controller: [u8; 20],
+        proof: &IdentityProofV1,
+        now_secs: u64,
+    ) -> Result<bool, ChainError> {
+        self.ensure_storage()?;
+        let identity = self
+            .resolver
+            .verify_fresh_proof(expected_agent, proof, now_secs)?;
+        let proof = self.commit_verified_proof(&identity, proof, now_secs, false)?;
+        let active = identity.state().status == RegistryStatus::Active
+            && identity.state().controller == controller;
+        self.local = active.then(|| LocalIdentity {
+            verified: Box::new(identity),
+            proof,
+        });
+        Ok(active)
+    }
+
+    fn commit_verified_proof(
+        &mut self,
+        identity: &VerifiedIdentity,
+        proof: &IdentityProofV1,
+        now_secs: u64,
+        cache_peer: bool,
+    ) -> Result<Option<SavedProof>, ChainError> {
+        let expected_agent = identity.agent_id();
+        check_observation(&self.bundle, identity)?;
         let mut candidate = self.resolver.clone();
-        candidate.cache_verified(identity.clone(), now_secs)?;
+        if cache_peer {
+            candidate.cache_verified(identity.clone(), now_secs)?;
+        }
         if identity.state().status == RegistryStatus::Unregistered {
             // Negative results expire in memory. Persisting arbitrary absent
             // AgentIds would create permanent parent rows for a transient cache.
             self.resolver = candidate;
-            return Ok(());
+            return Ok(None);
         }
         let mut bundle = self.bundle.clone();
         bundle.proofs.retain(|row| {
             row.expires_at_ms >= now_secs.saturating_mul(1000) && row.agent_id != expected_agent
         });
-        let encoded = encode(&SavedProof {
+        let saved = SavedProof {
             finalized: SavedExecution::capture(identity.finalized()),
             proof: proof.clone(),
-        })?;
-        if encoded.len() <= MAX_CHAIN_PROOF_BYTES {
+        };
+        let encoded = encode(&saved)?;
+        let can_serve = encoded.len() <= MAX_CHAIN_PROOF_BYTES;
+        // Renewal updates the durable observation but does not displace any
+        // peer from the ordinary proof cache, in memory or on disk.
+        if can_serve && (cache_peer || bundle.proofs.len() < self.config.cache_capacity) {
             if bundle.proofs.len() >= self.config.cache_capacity {
                 let index = bundle
                     .proofs
@@ -343,7 +492,59 @@ impl DurableIdentityResolver {
                 bundle.observations.push(observation);
             }
         }
-        self.commit(candidate, bundle, now_secs)
+        self.commit(candidate, bundle, now_secs)?;
+        Ok((!cache_peer && can_serve).then_some(saved))
+    }
+
+    pub(crate) fn accept_wire_identity_proof(
+        &mut self,
+        request: &IdentityProofRequest,
+        proof: &WireIdentityProof,
+        now_secs: u64,
+    ) -> Result<(), ChainError> {
+        let finalized = self.resolver.light_client().finalized(now_secs)?;
+        if request.checkpoint_hash.0 != finalized.block_hash() {
+            return Err(ChainError::WrongContext);
+        }
+        let proof = identity_proof_from_wire(request, proof, self.config.deployment)?;
+        self.accept_proof(request.agent_id, &proof, now_secs)
+    }
+
+    pub(crate) fn cached_identity_proof(
+        &self,
+        request: &IdentityProofRequest,
+        now_secs: u64,
+    ) -> Result<Option<IdentityProofV1>, ChainError> {
+        self.ensure_storage()?;
+        let finalized = self.light_client().finalized(now_secs)?;
+        if request.checkpoint_hash.0 != finalized.block_hash() {
+            return Ok(None);
+        }
+        if let Some(local) = &self.local
+            && local.verified.agent_id() == request.agent_id
+        {
+            return Ok(local
+                .proof
+                .as_ref()
+                .filter(|saved| {
+                    saved.proof.block_hash == finalized.block_hash()
+                        && self.retained_identity_is_current(&local.verified, now_secs)
+                })
+                .map(|saved| saved.proof.clone()));
+        }
+        let now_ms = millis(now_secs)?;
+        let Some(row) = self.bundle.proofs.iter().find(|row| {
+            row.agent_id == request.agent_id
+                && row.finalized_height == finalized.block_number()
+                && row.expires_at_ms >= now_ms
+        }) else {
+            return Ok(None);
+        };
+        let saved: SavedProof = decode(&row.proof_cbor)?;
+        if saved.proof.block_hash != finalized.block_hash() {
+            return Ok(None);
+        }
+        Ok(Some(saved.proof))
     }
 
     fn update_consensus(
@@ -441,6 +642,15 @@ impl IdentityResolver for DurableIdentityResolver {
         if !self.storage_healthy {
             return IdentityResolution::Limited(LimitedReason::ChainUnavailable);
         }
+        if let Some(local) = &self.local
+            && local.verified.agent_id() == agent
+        {
+            return if self.retained_identity_is_current(&local.verified, now_secs) {
+                IdentityResolution::Verified(local.verified.clone())
+            } else {
+                IdentityResolution::Limited(LimitedReason::ChainUnavailable)
+            };
+        }
         if let Some(row) = self
             .bundle
             .proofs
@@ -509,13 +719,13 @@ fn check_saved_execution(
 }
 
 fn check_observation(bundle: &ChainBundle, identity: &VerifiedIdentity) -> Result<(), ChainError> {
-    let Some(row) = bundle
+    let Ok(index) = bundle
         .observations
-        .iter()
-        .find(|row| row.agent_id == identity.agent_id())
+        .binary_search_by_key(&identity.agent_id().0, |row| row.agent_id.0)
     else {
         return Ok(());
     };
+    let row = &bundle.observations[index];
     let state = identity.state();
     if identity.finalized().block_number() < row.finalized_height
         || state.sequence < row.sequence

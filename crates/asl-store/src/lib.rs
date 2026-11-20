@@ -8,13 +8,31 @@ use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub mod chain;
+pub mod conversation;
+pub mod evidence;
+pub mod group_state;
+pub mod paired_contacts;
 pub mod resources;
 pub mod search;
+mod transfer_peers;
+pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 15;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
+const SCHEMA_V4: &str = include_str!("../../../specs/schema-v4.sql");
+const SCHEMA_V5: &str = include_str!("../../../specs/schema-v5.sql");
+const SCHEMA_V6: &str = include_str!("../../../specs/schema-v6.sql");
+const SCHEMA_V7: &str = include_str!("../../../specs/schema-v7.sql");
+const SCHEMA_V8: &str = include_str!("../../../specs/schema-v8.sql");
+const SCHEMA_V9: &str = include_str!("../../../specs/schema-v9.sql");
+const SCHEMA_V10: &str = include_str!("../../../specs/schema-v10.sql");
+const SCHEMA_V11: &str = include_str!("../../../specs/schema-v11.sql");
+const SCHEMA_V12: &str = include_str!("../../../specs/schema-v12.sql");
+const SCHEMA_V13: &str = include_str!("../../../specs/schema-v13.sql");
+const SCHEMA_V14: &str = include_str!("../../../specs/schema-v14.sql");
+const SCHEMA_V15: &str = include_str!("../../../specs/schema-v15.sql");
 
 pub struct Store {
     connection: Connection,
@@ -86,6 +104,42 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 3 {
             apply_migration_in_transaction(&transaction, SCHEMA_V3, 3, now)?;
+        }
+        if version < 4 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V4, 4, now)?;
+        }
+        if version < 5 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V5, 5, now)?;
+        }
+        if version < 6 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V6, 6, now)?;
+        }
+        if version < 7 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V7, 7, now)?;
+        }
+        if version < 8 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V8, 8, now)?;
+        }
+        if version < 9 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V9, 9, now)?;
+        }
+        if version < 10 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V10, 10, now)?;
+        }
+        if version < 11 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V11, 11, now)?;
+        }
+        if version < 12 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V12, 12, now)?;
+        }
+        if version < 13 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V13, 13, now)?;
+        }
+        if version < 14 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V14, 14, now)?;
+        }
+        if version < 15 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V15, 15, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
@@ -271,12 +325,12 @@ mod tests {
 
         {
             let store = open_store(database.path()).unwrap();
-            assert_eq!(store.schema_version(), 3);
+            assert_eq!(store.schema_version(), 15);
             assert_eq!(store.policy_revision().unwrap(), 1);
         }
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 15);
         assert_eq!(store.policy_revision().unwrap(), 1);
 
         let migration_count: i64 = store
@@ -285,13 +339,73 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 15);
 
         let integrity: String = store
             .connection
             .pragma_query_value(None, "integrity_check", |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn upgrades_v4_with_conversation_budget_and_pairing_storage() {
+        let database = TestDatabase::new();
+        let mut connection = Connection::open(database.path()).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for (migration, version) in [
+            (SCHEMA_V1, 1),
+            (SCHEMA_V2, 2),
+            (SCHEMA_V3, 3),
+            (SCHEMA_V4, 4),
+        ] {
+            apply_migration_in_transaction(&transaction, migration, version, 0).unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let store = open_store(database.path()).unwrap();
+        assert_eq!(store.schema_version(), 15);
+        let conversations_exist: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type='table' AND name='direct_inbound_conversations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let paired_contacts_exist: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type='table' AND name='paired_contacts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let invite_receipts_exist: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type='table' AND name='pairing_invite_receipts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let prompt_log_exists: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type='table' AND name='pairing_prompt_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conversations_exist, 1);
+        assert_eq!(paired_contacts_exist, 1);
+        assert_eq!(invite_receipts_exist, 1);
+        assert_eq!(prompt_log_exists, 1);
     }
 
     #[test]
@@ -327,7 +441,7 @@ mod tests {
         store.set_setting(key, value, 42).unwrap();
 
         assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 15);
     }
 
     #[test]
@@ -340,9 +454,14 @@ mod tests {
                     version INTEGER PRIMARY KEY,
                     applied_at_ms INTEGER NOT NULL
                  );
-                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (4, 10);
                  CREATE TABLE preserved(value INTEGER);
                  INSERT INTO preserved(value) VALUES (7);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?1)",
+                [SCHEMA_VERSION + 1],
             )
             .unwrap();
         drop(connection);
@@ -431,6 +550,6 @@ mod tests {
             upgraded.get_setting("keep").unwrap().as_deref(),
             Some("true")
         );
-        assert_eq!(upgraded.schema_version(), 3);
+        assert_eq!(upgraded.schema_version(), 15);
     }
 }

@@ -4,7 +4,7 @@ use asl_types::{
     error::ErrorCode,
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
-        Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
+        AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
         DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
         IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer, PairingExchange,
         PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus, StorageProof,
@@ -143,22 +143,29 @@ pub fn sample_frames() -> Vec<WireFrame> {
             finalized_height: 123,
             block_hash: hash,
             state_root: Hash32([9; 32]),
-            account_proof: vec![vec![1, 2, 3]],
-            storage_proofs: vec![StorageProof {
-                slot: 5,
-                nodes: vec![vec![4, 5, 6]],
-            }],
-            controller_address: [10; 20],
-            state_commitment: Hash32([11; 32]),
-            sequence: 4,
-            revoked: false,
+            account: AccountProof {
+                nonce: 1,
+                balance: [10; 32],
+                storage_root: [11; 32],
+                code_hash: [12; 32],
+                nodes: vec![vec![1, 2, 3]],
+            },
+            storage_proofs: (0_u8..3)
+                .map(|slot| StorageProof {
+                    slot: [slot + 5; 32],
+                    value: [slot + 8; 32],
+                    nodes: vec![vec![4, 5, 6]],
+                })
+                .collect(),
+            signed_directory: vec![13; 256],
         }),
         WireFrame::PairingInvite(PairingInvite {
             invite_id: id,
             inviter: agent,
             target: AgentId([12; 32]),
             expires_at_ms: 200,
-            token: vec![13; 16],
+            nonce: Hash32([13; 32]),
+            note: "Pair.".into(),
             signature: Signature65([14; 65]),
         }),
         WireFrame::PairingExchange(PairingExchange {
@@ -166,7 +173,8 @@ pub fn sample_frames() -> Vec<WireFrame> {
             agent_id: agent,
             peer_id: peer,
             attempt: 1,
-            payload: vec![15; 64],
+            accepted: true,
+            signature: Signature65([15; 65]),
             transcript_hash: hash,
         }),
         WireFrame::GroupEnvelope(GroupEnvelope {

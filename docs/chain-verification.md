@@ -60,8 +60,9 @@ The mapping root `2`, its three-slot layout, interface version and protocol proo
 limits are format constants, not deployment addresses. Proofs are capped before
 RLP/MPT work: 32 nodes per path, 2 KiB per node, at most eight slot paths and a
 256 KiB decoded-payload budget including reserved framing space. Registry v1
-requires exactly its three distinct slot paths. The future identity stream
-codec must independently enforce its original encoded-frame limit.
+requires exactly its three distinct slot paths. The identity-proof 1.1 codec
+also bounds the encoded response before allocation and requires the wire proof
+to contain those exact-width slot keys and values plus all account inputs.
 
 Registry values are decoded from verified storage, not accepted as claimed
 controller/sequence/status fields. Zero values require exclusion proofs.
@@ -133,9 +134,11 @@ Gloas execution headers are independently RLP-hashed before exposing a root.
 Bootstrap does not pretend a stale finalized checkpoint is fresh; the durable
 adapter can retain it while fetching verified updates.
 
-These are callable adapters, not an enabled background service. Supervisor
-scheduling, host-wide request/CPU budgets and Windows process limits remain later
-integration work.
+These are bounded adapters. Supervisor startup now loads explicit local chain
+trust configuration, restores or bootstraps the durable resolver, and performs
+the configured finality/proof acquisition needed for local identity admission.
+Periodic post-start synchronization, host-wide request/CPU budgets and Windows
+process limits remain later integration work.
 
 ## Durable Recovery
 
@@ -279,9 +282,10 @@ memory every 25 ms observed a maximum of 8,986,624 bytes. This is a short debug
 test process measurement, not an OS peak-memory guarantee, enforced resource
 limit, production synchronization profile or 72-hour runtime test.
 
-License checking passed with four existing unused-allowance warnings. CDDL
-checking covers grammar and one fixed ACK vector, not the future identity-proof
-stream codec. No Foundry tests were rerun in this slice; T06a's earlier contract
+License checking passed with four existing unused-allowance warnings. The
+current CDDL corpus covers all fixed frame and record vectors, including the
+identity-proof response; it does not claim end-to-end identity-stream admission.
+No Foundry tests were rerun in this slice; T06a's earlier contract
 results remain separately recorded. No independent security audit, real RPC
 compatibility run, public deployment or complete product acceptance is claimed.
 

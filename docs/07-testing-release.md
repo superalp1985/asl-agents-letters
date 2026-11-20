@@ -13,10 +13,23 @@
 | 纯授权核心 | T07 已实现；36 项对应测试通过 | 内存策略判定及来源交集，独立工程复核无阻断发现；不包含持久撤权、文件读取或发送栅栏 |
 | Windows 源文件句柄 | T08 已实现并完成本任务系统验收；本机与用户云机均报告 22 项通过 | 云机先前完整日志覆盖真实 symlink/8.3 别名，盘符修正后用户反馈 22 通过、0 失败、1.27 秒；新反馈仅有结果摘要。不是 AppContainer 或完整产品验收，详见 `windows-source-handles.md` |
 | Windows AppContainer/Job Object | T09 实现与真实负向探针已完成首轮；任务验收部分完成 | 本机真实测试覆盖读文件/Worker 联网与子进程拒绝、ACL/继承句柄、资源限制、清理、Net 外网 TCP 连接和多播 membership；公网 TCP 只证连接握手，外部 UDP echo、libp2p QUIC 与 mDNS query/response 未验收。执行文件 ACL DACL 更新有真实跨进程 mutex 串行化测试。最后一次独立复核发现的并发问题已修；不是独立安全审计 |
-| Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入、MCP stdout 集成及 T14 认证 peer 事件尚未验收 |
+| Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入和完整公网互通仍待验收 |
+| 默认后台收件与续传 | T23 工作线程已接入，验证见[实施计划](06-implementation-plan.md) | 真实认证 TCP 回环从 Fetch 到 NTFS 发布，链准入为夹具；续传用真实 NTFS/SQLite 和模拟网络事件。未验收生产跨进程下载全链路、公网重连或 GUI |
+| Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
-| 真实 P2P 网络、群组与完整 GUI | 尚未实现或验收 | 需按后续任务执行真实系统测试 |
+| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
+| T27 Agent 查询 | 入站授权直答、出站联系人直询和公开 DHT provider 查找已接入 | 只接受结构化任务，回复关联原查询并复核身份。MCP 已接入；持久任务历史、GUI、离线投递、MLS 群及公网互通仍未验收 |
+| T30 本机 MCP | 四个工具、Core 启动授权、加密会话和收件授权已接入 | 真实 stdio 子进程到真实 Core 覆盖离线查询和会话隔离；另用实际 MCP 消息处理、认证 TCP 回环、链准入夹具验证 Offer、批准与 NTFS 发布。不是公网或生产跨进程下载全链路。命令与分项结果见[实施计划](06-implementation-plan.md#t30--本机-stdio-mcp) |
+| 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
+
+2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
+
+- `cargo test -p asl-app --lib --locked --offline direct_outbound::tests -- --test-threads=1`：3 项通过，覆盖仅询问本地授权联系人、结构化响应关联、公开 scope 拒绝及错误 root 丢弃。
+- `cargo test -p asl-agent --lib --locked --offline query::tests -- --test-threads=1`：6 项通过，覆盖联系人优先、scope 限制、provider 上限、超时、重放去重及终结状态释放。
+- `cargo check -p asl-app --tests --offline`：通过；`cargo clippy -p asl-app -p asl-agent -p asl-store --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 与 `git diff --check`：通过。
+
+本轮未运行全工作区测试、实际链/RPC、公网 DHT、跨节点互通、GUI 或完整资源传输；Cargo 报告 `proc-macro-error2 v2.0.1` 的未来 Rust 兼容性提示。
 
 2026-11-17 T06a 合约验收：
 
@@ -36,6 +49,25 @@
 - Rust workspace 测试本轮合计 31 项通过；T06a 合约 14 项 Foundry 测试单独统计。
 
 以上结果只覆盖当前工作区已有 Rust 代码与测试、identity registry 合约固定测试、CDDL 语法及一个固定帧向量。registry 尚未部署或独立审计，完整多帧互操作、轻客户端/状态证明、Windows AppContainer、真实公网网络或完整产品安全验证尚未完成；这些结果不能作为完整 1.0 发布验收。
+
+2026-11-19 T14 设备身份启动交付验证（Windows，Rust 1.100.0；Cargo、Rustup、target、临时文件和测试夹具均位于 E 盘）：
+
+- `cargo test --workspace --all-targets --locked -- --test-threads=1`：通过；包含身份创建/损坏拒绝、NetReady PeerId 匹配及真实 AppContainer Supervisor 启动；5 项条件性/子进程入口测试按设计 ignored。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo build --workspace --release --locked`：通过。
+- 默认并行的 `cargo test --workspace --all-targets --locked` 连续两次在 `chain::http::tests::http_historical_sync_persists_every_verified_step_and_restores_offline` 的恢复步骤返回 `InvalidLocalState`；该测试单独运行通过，`asl-app` 单测串行运行通过，全工作区串行运行通过。并行敏感性尚未定位或修复，不能把默认并行测试记为通过。
+
+本轮只验证受保护设备密钥经私有管道交给 Net、Net 解码后计算的 PeerId 与本地身份精确一致，以及这些失败场景；没有验证 Net 使用该密钥建立 libp2p 连接、Core/Net 网络身份闸门、公网监听或完整 T14。
+
+2026-11-19 T14 Net/Core 运行时接线验证（Windows，Rust 1.100.0；Cargo、Rustup、target、临时目录和测试夹具均在 E 盘）：
+
+- `cargo test --workspace --all-targets --locked -- --test-threads=1`：通过。`asl-app` 133 项单元测试通过；Net driver 双向控制请求/响应 handle 映射、IPC 角色/长度边界和 Windows 条件性子进程用例均在本轮范围内。其他 workspace all-targets 通过；需外部目标、子进程入口或生产计时器的用例按设计 ignored。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo build --workspace --release --locked`：通过。
+
+验证限于本机 workspace 与 loopback transport；新增 Windows AppContainer 命令用例验证非 loopback 监听按策略拒绝并返回关联操作 ID。没有验证自动 Core 身份闸门、公网监听/拨号、DHT、mDNS、中继或完整 T14。Cargo 另报告 `proc-macro-error2 v2.0.1` 存在未来 Rust 兼容性提示；不影响本轮命令结果。
 
 ## 2. 阻断发布的反例
 
@@ -96,21 +128,16 @@
 
 执行模型验收按 T39：实际调用目标模型写指定任务、独立编译测试并记录修正。运行模型验收至少 100 组固定输入，包含正确引用、无证据、注入、结构对象错误、超时和非法引用。非法输出执行率必须为 0；有效回答率如实报告，不编造模型能力。线上语义 wire 不包含自由文本字段。
 
-## 6. 构建与 E 盘环境
+## 6. 本机开发环境
 
-开发环境由 `scripts/dev-env.ps1` 设置当前进程环境：
+开发脚本要求指定本地磁盘目录，并为当前 PowerShell 进程设置 `ASL_HOME`、Cargo、rustup 和临时文件路径。下面提示输入本机实际开发根目录；不会修改机器级设置或自动切换磁盘。
 
 ```powershell
-$env:ASL_HOME = 'E:\ASL\data'
-$env:CARGO_HOME = 'E:\ASL\dev-cache\cargo'
-$env:RUSTUP_HOME = 'E:\ASL\dev-cache\rustup'
-$env:CARGO_TARGET_DIR = 'E:\ASL\dev-cache\target'
-$env:PATH = 'E:\ASL\dev-cache\cargo\bin;' + $env:PATH
-$env:TEMP = 'E:\ASL\work\tmp'
-$env:TMP = 'E:\ASL\work\tmp'
+$devRoot = Read-Host 'Enter the local ASL development root'
+. .\scripts\dev-env.ps1 -Root $devRoot
 ```
 
-不得使用 setx 改机器全局设置，不挪动用户既有工具链。使用 E 盘工具链前先核对目标目录与磁盘空间。OS 自身的少量沙箱/字体/图形缓存不属于应用可完全控制的范围。
+不得使用 setx 改机器全局设置，不挪动用户既有工具链。选用的本地磁盘必须有足够空间；不假设机器存在某个盘符，也不自动改写到其他磁盘。OS 自身的少量沙箱/字体/图形缓存不属于应用可完全控制的范围。
 
 最终检查：
 
@@ -126,7 +153,7 @@ fuzz 工具、SBOM 工具及其版本在 T02 锁定；记录实际工具版本�
 
 ## 7. Linux 自托管入口
 
-发布 `asl-infra` x86_64 Linux 包、`specs/infra.example.toml` 对应配置和 systemd unit。非 root 用户运行，TCP/UDP 端口默认为 4001，身份持久化，配置/密钥目录只对服务用户可读。
+发布 `asl-infra` x86_64 Linux 包、`specs/infra.example.toml` 对应配置和 systemd unit。非 root 用户运行，TCP/UDP 端口默认为 4001，身份持久化，配置/密钥目录只对服务用户可读。通配监听需显式填写真实 `external_addresses`；示例使用的文档网段不能直接部署。
 
 运营者配置 reservation、circuit、流量与存储上限，属于基础设施保护而非产品收费。中继看到连接元数据和流量大小，不能承诺它完全不知谁与谁通信。
 

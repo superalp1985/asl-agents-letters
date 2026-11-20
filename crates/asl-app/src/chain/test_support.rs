@@ -119,19 +119,40 @@ pub fn proof_fixture_for_agent(
     deployment_variant: u8,
     agent: AgentId,
 ) -> (RegistryDeploymentV1, FinalizedExecution, IdentityProofV1) {
+    let (deployment, finalized, mut proofs) =
+        proof_fixtures_for_agents(&[(agent, values)], deployment_variant);
+    (deployment, finalized, proofs.pop().unwrap())
+}
+
+fn registry_targets(agent: AgentId) -> ([[u8; 32]; 3], [Nibbles; 3]) {
+    let slots = registry_slots(agent);
+    let targets = slots.map(|slot| Nibbles::unpack(keccak256(slot)));
+    (slots, targets)
+}
+
+pub fn proof_fixtures_for_agents(
+    agents: &[(AgentId, [[u8; 32]; 3])],
+    deployment_variant: u8,
+) -> (
+    RegistryDeploymentV1,
+    FinalizedExecution,
+    Vec<IdentityProofV1>,
+) {
     let deployment = RegistryDeploymentV1 {
         version: 1,
         chain_id: 1,
         address: [deployment_variant; 20],
         runtime_code_hash: [deployment_variant; 32],
     };
-    let slots = registry_slots(agent);
-    let targets = slots.map(|slot| Nibbles::unpack(keccak256(slot)));
-    let retainer = ProofRetainer::from_iter(targets);
+    let retainer = ProofRetainer::from_iter(
+        agents
+            .iter()
+            .flat_map(|(agent, _)| registry_targets(*agent).1),
+    );
     let mut storage = HashBuilder::default().with_proof_retainer(retainer);
-    let mut entries: Vec<_> = targets
-        .into_iter()
-        .zip(values)
+    let mut entries: Vec<_> = agents
+        .iter()
+        .flat_map(|(agent, values)| registry_targets(*agent).1.into_iter().zip(*values))
         .filter(|(_, value)| *value != [0; 32])
         .collect();
     entries.sort_by_key(|(key, _)| *key);
@@ -160,39 +181,46 @@ pub fn proof_fixture_for_agent(
         state_root: state_root.0,
         timestamp_secs: BOOTSTRAP_TIME,
     };
-    let proof = IdentityProofV1 {
-        version: 1,
-        agent_id: agent,
-        chain_id: deployment.chain_id,
-        registry_address: deployment.address,
-        block_number: finalized.block_number,
-        block_hash: finalized.block_hash,
-        state_root: finalized.state_root,
-        account: AccountProofV1 {
-            nonce: 1,
-            balance: [0; 32],
-            storage_root: storage_root.0,
-            code_hash: deployment.runtime_code_hash,
-            nodes: account_nodes
-                .matching_nodes_sorted(&account_key)
-                .into_iter()
-                .map(|(_, node)| node.to_vec())
-                .collect(),
-        },
-        storage: slots
+    let account = AccountProofV1 {
+        nonce: 1,
+        balance: [0; 32],
+        storage_root: storage_root.0,
+        code_hash: deployment.runtime_code_hash,
+        nodes: account_nodes
+            .matching_nodes_sorted(&account_key)
             .into_iter()
-            .zip(targets)
-            .zip(values)
-            .map(|((slot, target), value)| StorageProofV1 {
-                slot,
-                value,
-                nodes: storage_nodes
-                    .matching_nodes_sorted(&target)
-                    .into_iter()
-                    .map(|(_, node)| node.to_vec())
-                    .collect(),
-            })
+            .map(|(_, node)| node.to_vec())
             .collect(),
     };
-    (deployment, finalized, proof)
+    let proofs = agents
+        .iter()
+        .map(|(agent, values)| {
+            let (slots, targets) = registry_targets(*agent);
+            IdentityProofV1 {
+                version: 1,
+                agent_id: *agent,
+                chain_id: deployment.chain_id,
+                registry_address: deployment.address,
+                block_number: finalized.block_number,
+                block_hash: finalized.block_hash,
+                state_root: finalized.state_root,
+                account: account.clone(),
+                storage: slots
+                    .into_iter()
+                    .zip(targets)
+                    .zip(*values)
+                    .map(|((slot, target), value)| StorageProofV1 {
+                        slot,
+                        value,
+                        nodes: storage_nodes
+                            .matching_nodes_sorted(&target)
+                            .into_iter()
+                            .map(|(_, node)| node.to_vec())
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    (deployment, finalized, proofs)
 }

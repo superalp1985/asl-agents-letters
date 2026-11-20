@@ -13,19 +13,22 @@ use serde_json::{Value, json, value::RawValue};
 
 use super::{
     AccountProofV1, ChainError, ConsensusConfigV1, DurableIdentityResolver, EthereumLightClient,
-    FinalizedExecution, IdentityProofV1, RegistryDeploymentV1, StorageProofV1, registry_slots,
+    EthereumProofVerifier, FinalizedExecution, IdentityProofV1, IdentityProofVerifier,
+    RegistryDeploymentV1, StorageProofV1, registry_slots,
 };
 
 const MAX_BEACON_BYTES: usize = 256 * 1024;
 const MAX_RPC_BYTES: usize = 768 * 1024;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainEndpointV1 {
     pub url: String,
     pub allow_loopback_http: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainHttpConfigV1 {
     pub version: u16,
     pub beacon_endpoints: Vec<ChainEndpointV1>,
@@ -57,6 +60,49 @@ struct Budget {
 struct RequestClock {
     started: Instant,
     now_secs: u64,
+}
+
+trait SyncTarget {
+    fn light_client(&self) -> &EthereumLightClient;
+    fn apply_update(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError>;
+    fn apply_finality(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError>;
+    fn supply_execution(&mut self, rlp: &[u8], now_secs: u64) -> Result<(), ChainError>;
+}
+
+impl SyncTarget for EthereumLightClient {
+    fn light_client(&self) -> &EthereumLightClient {
+        self
+    }
+
+    fn apply_update(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.apply_update_json(bytes, now_secs)
+    }
+
+    fn apply_finality(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.apply_finality_json(bytes, now_secs)
+    }
+
+    fn supply_execution(&mut self, rlp: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.supply_execution_header(rlp, now_secs)
+    }
+}
+
+impl SyncTarget for DurableIdentityResolver {
+    fn light_client(&self) -> &EthereumLightClient {
+        DurableIdentityResolver::light_client(self)
+    }
+
+    fn apply_update(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.apply_update_json(bytes, now_secs)
+    }
+
+    fn apply_finality(&mut self, bytes: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.apply_finality_json(bytes, now_secs)
+    }
+
+    fn supply_execution(&mut self, rlp: &[u8], now_secs: u64) -> Result<(), ChainError> {
+        self.supply_execution_header(rlp, now_secs)
+    }
 }
 
 impl RequestClock {
@@ -173,15 +219,51 @@ impl ChainHttpClient {
         })
     }
 
+    pub async fn synchronize_light_client(
+        &self,
+        light_client: &mut EthereumLightClient,
+        now_secs: u64,
+    ) -> Result<ChainSyncReport, ChainError> {
+        let clock = RequestClock::new(now_secs);
+        let mut budget = Budget {
+            remaining: self.max_requests,
+        };
+        let updates = self.sync_target(light_client, &clock, &mut budget).await?;
+        Ok(ChainSyncReport {
+            committee_updates: updates,
+            requests_used: self.max_requests - budget.remaining,
+            finalized: light_client.finalized(clock.now()?)?,
+        })
+    }
+
     pub async fn fetch_identity(
         &self,
         resolver: &mut DurableIdentityResolver,
         agent: AgentId,
         now_secs: u64,
     ) -> Result<(), ChainError> {
-        let clock = RequestClock::new(now_secs);
-        let finalized = resolver.light_client().finalized(now_secs)?;
-        let deployment = resolver.deployment();
+        let proof = self
+            .fetch_identity_proof(
+                resolver.light_client(),
+                agent,
+                resolver.deployment(),
+                now_secs,
+            )
+            .await?;
+        resolver.accept_proof(agent, &proof, now_secs)
+    }
+
+    pub async fn fetch_identity_proof(
+        &self,
+        light_client: &EthereumLightClient,
+        agent: AgentId,
+        deployment: RegistryDeploymentV1,
+        now_secs: u64,
+    ) -> Result<IdentityProofV1, ChainError> {
+        let finalized = light_client.finalized(now_secs)?;
+        if light_client.chain_id() != deployment.chain_id {
+            return Err(ChainError::InvalidConfiguration);
+        }
         let params = json!([
             Address::from(deployment.address),
             registry_slots(agent).map(B256::from),
@@ -197,11 +279,12 @@ impl ChainHttpClient {
                     .rpc(endpoint, "eth_getProof", &params, &mut budget)
                     .await?;
                 let proof = identity_proof(response, agent, deployment, &finalized)?;
-                resolver.accept_proof(agent, &proof, clock.now()?)
+                EthereumProofVerifier::new(deployment)?.verify(&finalized, agent, &proof)?;
+                Ok::<_, ChainError>(proof)
             }
             .await;
             match result {
-                Ok(()) => return Ok(()),
+                Ok(proof) => return Ok(proof),
                 Err(error) if local_failure(error) => return Err(error),
                 Err(error) => last_error = error,
             }
@@ -237,9 +320,9 @@ impl ChainHttpClient {
         Err(last_error)
     }
 
-    async fn sync_target(
+    async fn sync_target<T: SyncTarget>(
         &self,
-        target: &mut DurableIdentityResolver,
+        target: &mut T,
         clock: &RequestClock,
         budget: &mut Budget,
     ) -> Result<u8, ChainError> {
@@ -269,7 +352,7 @@ impl ChainHttpClient {
                     if entries.len() != 1 {
                         return Err(ChainError::InvalidRpcResponse);
                     }
-                    target.apply_update_json(entries[0].get().as_bytes(), clock.now()?)
+                    target.apply_update(entries[0].get().as_bytes(), clock.now()?)
                 }
                 .await;
                 match result {
@@ -294,7 +377,7 @@ impl ChainHttpClient {
                 let bytes = self
                     .read(self.client.get(url), MAX_BEACON_BYTES, budget)
                     .await?;
-                target.apply_finality_json(&bytes, clock.now()?)
+                target.apply_finality(&bytes, clock.now()?)
             }
             .await;
             match result {
@@ -319,7 +402,7 @@ impl ChainHttpClient {
                         .rpc(endpoint, "eth_getBlockByHash", &params, budget)
                         .await?;
                     let rlp = alloy_rlp::encode(header.into_consensus());
-                    target.supply_execution_header(&rlp, clock.now()?)
+                    target.supply_execution(&rlp, clock.now()?)
                 }
                 .await;
                 match result {

@@ -1,6 +1,6 @@
 # 一手资料、Fable 5.2 咨询与最终裁决
 
-日期：2026-11-17。资料优先官方仓库、规范、注册表和系统文档。公开项目描述不是安全审计或实际性能证据。
+日期：2026-11-20。资料优先官方仓库、规范、注册表和系统文档。公开项目描述不是安全审计或实际性能证据。
 
 ## 1. 实际咨询
 
@@ -33,16 +33,23 @@
 | 大文件只能直连 | 不采纳；可经运营者允许的中继，限额耗尽时恢复或失败 |
 | 贡献按块数/字节计 | 不采纳；只按本机任务实际使用的去重有效帮助 |
 | “可彻底防刷号” | 不承诺；统一总额度与有限探索只能限制收益 |
-| 固定写 E:\ASL | 默认 E，但支持 ASL_HOME；不可用就停止，不能回落 C |
+| 固定写开发或数据路径 | `ASL_HOME` 与开发根目录显式配置；路径不可用就停止，不回退到其他磁盘 |
 | “弱模型一定完成” | 不承诺；通过固定契约与实际模型任务验收证明具体能力 |
 | 长期身份与传输设备身份 | 采用身份根密钥 + 独立设备密钥/证书；联系人固定 AgentId，PeerId 标识当前设备 |
 | 区块链全局登记 | 1.0 必须上公共链；Ethereum Mainnet + 极小不可升级 registry 为当前推荐基线，DHT 只作可替换的多值地址发现层。轻客户端、storage proof、费用测量和部署地址完成前不声称可运行 |
 | 持久数字短码 | 采用 AgentId 派生短码用于 DHT 定位；允许碰撞/漏查，候选必须另行核验 |
 | 首次配对 | 采用 PAKE/签名邀请，短时效、尝试限额、一次性使用；不自创密码协议 |
+| 配对提示洪泛 | 参考 OWASP 对 push prompt bombing 的限频实践，按已验证 AgentId 限额并叠加本机全局时段预算和并发待处理上限；不只按 IP 限流 |
 | 公网 IP 隐私 | 明示直连 IP 与元数据暴露，提供仅中继模式；relay 仍可观察连接关系元数据 |
 | 身份迁移 | 加密包迁移身份根密钥与用户选择的 ASL 数据；新设备重签证书，目录授权重做，MLS 作为新叶子加入 |
 | README 视觉 | 中文完整在上、英文完整在下；真实截图、身份/配对图解、独立图标和 Q 版女孩吉祥物，完整登记资产来源 |
 | 分身与 Sybil | 合法分身允许存在，不追求一人一 Agent；保护个人电脑依靠机器级硬资源总闸、分层来源额度和本机授权 |
+
+## 3.5 T18a PAKE 依赖裁决
+
+2026-11-20 核对 Rust PAKE 候选时，现有资料尚不能同时证明具体 crate 版本、目标 RFC 线协议一致性、独立审计覆盖范围、维护状态与 Rust 1.100 兼容性。没有为了推进而把未知项视作通过，也没有把候选项目判定为存在漏洞。
+
+T18a 因此先使用项目已经具备的公共链身份根验证：针对单一 AgentId 的短期邀请由邀请方根密钥签名；目标确认由目标根密钥签名，并把双方 AgentId、当前设备 PeerId、随机邀请 nonce 和期限纳入 transcript。nonce 为 256-bit 随机值，不承担低熵密码认证。短码只作发现，联系人创建仍需本机批准。六位/十二位口令 PAKE 保持未实现，待依赖、规范符合度、审计范围、许可和 MSRV 均有证据后再决定是否加入。
 
 ## 3. 身份与信任边界的明确裁决
 
@@ -124,3 +131,5 @@ Rust 复用边界：Alloy 可评估用于 EVM 类型、交易和 typed-data 编�
 - [libp2p Kademlia DHT specification](https://github.com/libp2p/specs/tree/master/kad-dht)
 - [Helios light client](https://github.com/a16z/helios)
 - [Alloy Rust Ethereum toolkit](https://github.com/alloy-rs/alloy)
+- [OWASP Multifactor Authentication Cheat Sheet — MFA Fatigue](https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html)
+- [NIST SP 800-63B-4 — Rate Limiting](https://pages.nist.gov/800-63-4/sp800-63b.html)

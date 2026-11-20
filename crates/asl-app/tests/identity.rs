@@ -165,6 +165,71 @@ fn missing_or_corrupt_protected_identity_is_not_replaced() {
     assert!(AgentIdentity::load_protected(&path).is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn device_identity_is_created_once_and_reloaded() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("device-key.dpapi");
+
+    let first = DeviceIdentity::load_or_create_protected(&path).unwrap();
+    let peer_id = first.peer_id();
+    assert!(path.is_file());
+
+    let second = DeviceIdentity::load_or_create_protected(&path).unwrap();
+    assert_eq!(second.peer_id(), peer_id);
+}
+
+#[cfg(windows)]
+#[test]
+fn agent_root_identity_is_created_once_and_reloaded() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("agent-root.dpapi");
+
+    let first = AgentIdentity::load_or_create_protected(&path).unwrap();
+    let agent_id = first.agent_id();
+    let controller = first.controller_address();
+    assert!(path.is_file());
+
+    let second = AgentIdentity::load_or_create_protected(&path).unwrap();
+    assert_eq!(second.agent_id(), agent_id);
+    assert_eq!(second.controller_address(), controller);
+}
+
+#[cfg(windows)]
+#[test]
+fn corrupt_device_identity_is_not_replaced() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("device-key.dpapi");
+    DeviceIdentity::generate()
+        .unwrap()
+        .save_protected_new(&path)
+        .unwrap();
+    let mut ciphertext = fs::read(&path).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    fs::write(&path, &ciphertext).unwrap();
+
+    assert!(DeviceIdentity::load_or_create_protected(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), ciphertext);
+}
+
+#[cfg(windows)]
+#[test]
+fn corrupt_agent_root_identity_is_not_replaced() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("agent-root.dpapi");
+    AgentIdentity::generate()
+        .unwrap()
+        .save_protected_new(&path)
+        .unwrap();
+    let mut ciphertext = fs::read(&path).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    fs::write(&path, ciphertext).unwrap();
+    let damaged = fs::read(&path).unwrap();
+
+    assert!(AgentIdentity::load_or_create_protected(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), damaged);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn protected_identity_storage_is_unavailable_outside_windows() {

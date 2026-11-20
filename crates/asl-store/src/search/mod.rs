@@ -1,4 +1,5 @@
 //! Local index and scoped queries. A candidate key is never a read capability.
+pub mod direct;
 mod index;
 mod page;
 mod scope;
@@ -17,7 +18,7 @@ use asl_types::{
     protocol::ConceptRef,
     task::ResourceKey,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Store, current_time_ms, database_error};
 use scope::Selection;
@@ -104,6 +105,17 @@ impl ResourceSearch<'_> {
         concepts: &[ConceptRef],
         limit: u32,
     ) -> Result<Vec<SearchHit>, AslError> {
+        self.search_with_metadata_permits(keys, concepts, limit)
+            .map(strip_permits)
+    }
+
+    /// Core-local: binds every result to its scoped and revalidated metadata permit.
+    pub fn search_with_metadata_permits(
+        &self,
+        keys: &[ResourceKey],
+        concepts: &[ConceptRef],
+        limit: u32,
+    ) -> Result<Vec<(SearchHit, Permit)>, AslError> {
         self.search(keys, terms::concept_query(concepts)?, limit, true)
     }
 
@@ -115,24 +127,15 @@ impl ResourceSearch<'_> {
         limit: u32,
     ) -> Result<Vec<SearchHit>, AslError> {
         self.search(keys, terms::text_query(text)?, limit, false)
+            .map(strip_permits)
     }
 
     fn identity_revision(&self) -> Result<u64, AslError> {
-        // Durable tombstones can veto an old device scope, never create one.
-        let agent = crate::chain::agent_text(self.agent);
-        let peer = bs58::encode(
-            self.policy
-                .device_peer_id()
-                .ok_or(AslError::NotFound)?
-                .as_bytes(),
+        identity_revision(
+            &self.store.connection,
+            self.agent,
+            self.policy.device_peer_id().ok_or(AslError::NotFound)?,
         )
-        .into_string();
-        let revision: i64=self.store.connection.query_row("SELECT revision FROM policy_state WHERE singleton=1
-            AND NOT EXISTS(SELECT 1 FROM identity_registry_states WHERE agent_id=?1 AND status='revoked')
-            AND NOT EXISTS(SELECT 1 FROM device_identities WHERE peer_id=?2 AND
-                (agent_id<>?1 OR revoked_at_ms IS NOT NULL OR certificate_expires_ms<=?3))",params![agent,peer,current_time_ms()],|r|r.get(0))
-            .optional().map_err(database_error)?.ok_or(AslError::NotFound)?;
-        u64::try_from(revision).map_err(|_| AslError::InvalidDatabase)
     }
 
     fn check_revision(&self, revision: u64) -> Result<(), AslError> {
@@ -148,7 +151,7 @@ impl ResourceSearch<'_> {
         expr: Option<String>,
         limit: u32,
         concepts: bool,
-    ) -> Result<Vec<SearchHit>, AslError> {
+    ) -> Result<Vec<(SearchHit, Permit)>, AslError> {
         if limit > MAX_HITS || keys.len() > MAX_KEYS {
             return Err(AslError::QuotaExceeded);
         }
@@ -237,10 +240,31 @@ impl ResourceSearch<'_> {
                     .revalidate(&search, now)
                     .and_then(|()| self.policy.revalidate(&metadata, now))
                     .map_err(|_| AslError::PolicyVersionConflict)?;
-                Ok(hit)
+                Ok((hit, metadata))
             })
             .collect()
     }
+}
+
+fn strip_permits(hits: Vec<(SearchHit, Permit)>) -> Vec<SearchHit> {
+    hits.into_iter().map(|(hit, _)| hit).collect()
+}
+
+fn identity_revision(
+    db: &Connection,
+    agent: AgentId,
+    peer: &asl_types::ids::PeerId,
+) -> Result<u64, AslError> {
+    // Durable tombstones can veto an old device scope, never create one.
+    let agent = crate::chain::agent_text(agent);
+    let peer = bs58::encode(peer.as_bytes()).into_string();
+    let revision: i64 = db.query_row("SELECT revision FROM policy_state WHERE singleton=1
+        AND NOT EXISTS(SELECT 1 FROM identity_registry_states WHERE agent_id=?1 AND status='revoked')
+        AND NOT EXISTS(SELECT 1 FROM device_identities WHERE peer_id=?2 AND
+            (agent_id<>?1 OR revoked_at_ms IS NOT NULL OR certificate_expires_ms<=?3))",
+        params![agent,peer,current_time_ms()],|r|r.get(0))
+        .optional().map_err(database_error)?.ok_or(AslError::NotFound)?;
+    u64::try_from(revision).map_err(|_| AslError::InvalidDatabase)
 }
 
 impl ResourceRepository for ResourceSearch<'_> {

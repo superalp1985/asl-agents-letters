@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+asl-types = { path = "../asl-types" }
+blake3.workspace = true
+if-addrs = "=0.15.0"
+libp2p = { version = "=0.57.1", default-features = false, features = ["ed25519", "kad", "macros", "mdns", "noise", "quic", "relay", "request-response", "tcp", "tokio", "yamux"] }
+rand.workspace = true
+tokio.workspace = true
+
 [dev-dependencies]
 libp2p.workspace = true
-tokio.workspace = true

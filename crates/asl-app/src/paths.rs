@@ -9,6 +9,7 @@ pub struct AppPaths {
     dos_root: PathBuf,
     state: PathBuf,
     identity: PathBuf,
+    provider_credentials: PathBuf,
     snapshots: PathBuf,
     incoming: PathBuf,
     logs: PathBuf,
@@ -40,6 +41,7 @@ impl AppPaths {
 
         let state = create_child(&root, "state")?;
         let identity = create_child(&root, "identity")?;
+        let provider_credentials = create_child(&root, "credentials")?;
         let snapshots = create_child(&root, "snapshots")?;
         let incoming = create_child(&root, "incoming")?;
         let logs = create_child(&root, "logs")?;
@@ -49,6 +51,7 @@ impl AppPaths {
             dos_root,
             state,
             identity,
+            provider_credentials,
             snapshots,
             incoming,
             logs,
@@ -69,6 +72,34 @@ impl AppPaths {
 
     pub fn identity(&self) -> &Path {
         &self.identity
+    }
+
+    pub fn device_key(&self) -> PathBuf {
+        self.identity.join("device-key.dpapi")
+    }
+
+    pub fn agent_root_key(&self) -> PathBuf {
+        self.identity.join("agent-root.dpapi")
+    }
+
+    pub fn signed_device_directory(&self) -> PathBuf {
+        self.identity.join("device-directory.cbor")
+    }
+
+    pub fn network_identity_configuration(&self) -> PathBuf {
+        self.state.join("network-identity-v1.json")
+    }
+
+    pub fn network_settings_configuration(&self) -> PathBuf {
+        self.state.join("network-settings-v1.json")
+    }
+
+    pub fn model_provider_configuration(&self) -> PathBuf {
+        self.state.join("model-providers-v1.json")
+    }
+
+    pub fn provider_credentials(&self) -> &Path {
+        &self.provider_credentials
     }
 
     pub fn snapshots(&self) -> &Path {
