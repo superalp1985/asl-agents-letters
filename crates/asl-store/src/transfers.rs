@@ -239,23 +239,26 @@ impl DownloadBroker {
         tx.commit().map_err(database_error)?;
 
         let materialized = (|| {
+            let check_materialization = |tx: &Transaction<'_>| {
+                ensure_active_write_grant(tx, &grant, &root, &expected_root, epoch)?;
+                let still_held: bool = tx.query_row(
+                    "SELECT state='held' AND expires_at_ms>?2 FROM reservations WHERE reservation_id=?1",
+                    params![reservation, current_time_ms()], |row| row.get(0)
+                ).map_err(database_error)?;
+                if !still_held || !consent::may_materialize(tx, approval_deadline)? {
+                    return Err(AslError::PolicyDenied);
+                }
+                Ok(())
+            };
             let tx = self
                 .store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
-            ensure_active_write_grant(&tx, &grant, &root, &expected_root, epoch)?;
-            let still_held: bool = tx.query_row(
-                "SELECT state='held' AND expires_at_ms>?2 FROM reservations WHERE reservation_id=?1",
-                params![reservation, current_time_ms()], |row| row.get(0)
-            ).map_err(database_error)?;
+            check_materialization(&tx)?;
             let write_grant = restore_write_grant(Path::new(&root), &self.home, &expected_root)?;
-            if !still_held || !consent::may_materialize(&tx, approval_deadline)? {
-                return Err(AslError::PolicyDenied);
-            }
             let mut part = write_grant.create_new(&part_relative)?;
             part.set_len(manifest.file_size)?;
-            part.sync_all()?;
             let identity = part.identity()?;
             let saved = tx
                 .execute(
@@ -268,7 +271,23 @@ impl DownloadBroker {
                 return Err(AslError::InvalidDatabase);
             }
             tx.commit().map_err(database_error)?;
+            // Journal the exact file before releasing the writer; an
+            // interruption during the flush can only clean up that file.
             part.retain();
+            let initialized = (|| {
+                part.sync_all()?;
+                let tx = self
+                    .store
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(database_error)?;
+                check_materialization(&tx)?;
+                tx.commit().map_err(database_error)
+            })();
+            if let Err(error) = initialized {
+                part.remove()?;
+                return Err(error);
+            }
             Ok(())
         })();
         if let Err(error) = materialized {
@@ -387,6 +406,9 @@ impl DownloadBroker {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         ensure_active_transfer(&tx, &row)?;
+        if row.expires_at_ms <= current_time_ms() {
+            return Err(AslError::ExpiredMessage);
+        }
         let peer = peer_text(peer_id);
         let assigned: bool = tx
             .query_row(
@@ -432,6 +454,9 @@ impl DownloadBroker {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         ensure_active_transfer(&tx, &row)?;
+        if row.expires_at_ms <= current_time_ms() {
+            return Err(AslError::ExpiredMessage);
+        }
         let changed = tx
             .execute(
                 "UPDATE transfer_chunks SET state='durable',verified_at_ms=?4
@@ -833,6 +858,9 @@ impl DownloadBroker {
         if is_part {
             grant.rename_new(&mut output, &final_relative)?;
         }
+        // Keep rename, its flush, and authorization serialized. The Core's
+        // interactive authority gate treats SQLite contention as a retryable
+        // conflict rather than stopping the network loop.
         output.sync_all()?;
         let now = current_time_ms();
         tx.execute(

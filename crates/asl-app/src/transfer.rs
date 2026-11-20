@@ -1210,6 +1210,20 @@ pub(crate) mod tests {
             content_id: content,
         };
         let mut service = TransferService::open(&database_path).unwrap();
+        let blocked = service
+            .prepare_fetch(requester.clone(), &fetch, now_ms)
+            .unwrap();
+        let mut database = Connection::open(&database_path).unwrap();
+        let writer = database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(matches!(
+            service.finish_fetch(blocked, now_ms, |_, _| panic!(
+                "must not disclose during contention"
+            )),
+            Err(AslError::PolicyVersionConflict)
+        ));
+        writer.rollback().unwrap();
         let prepared = service
             .prepare_fetch(requester.clone(), &fetch, now_ms)
             .unwrap();

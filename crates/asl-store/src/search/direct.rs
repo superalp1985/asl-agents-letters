@@ -10,7 +10,9 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
     task::{GrantId, ResourceKey},
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use super::{
     MAX_KEYS, identity_revision,
@@ -128,7 +130,12 @@ impl Store {
         enqueue: impl FnOnce() -> Result<T, AslError>,
     ) -> Result<T, AslError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+            .map_err(|error| match error.sqlite_error_code() {
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => {
+                    AslError::PolicyVersionConflict
+                }
+                _ => database_error(error),
+            })?;
         if direct_revision(&tx, requester)? != expected_revision {
             return Err(AslError::PolicyVersionConflict);
         }
