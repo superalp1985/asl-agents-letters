@@ -87,7 +87,10 @@ fn local_cli_can_review_and_decide_while_the_download_broker_stays_open() {
         sources: vec![],
     };
     for (action, decision) in [("deny", false), ("approve", true)] {
-        let DownloadStart::Pending(id) = broker.request_download(&request).unwrap() else {
+        let DownloadStart::Pending {
+            approval_id: id, ..
+        } = broker.request_download(&request).unwrap()
+        else {
             panic!("expected a pending local prompt");
         };
         let rows = cli(&["list"]);

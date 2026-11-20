@@ -10,6 +10,7 @@ use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     manifest::{Manifest, encode_manifest},
+    task::TransferId,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -422,8 +423,15 @@ fn recovery_does_not_remove_a_replaced_part_file() {
 }
 
 fn pending_id(broker: &mut DownloadBroker, request: &DownloadRequest) -> Id128 {
+    pending_ids(broker, request).0
+}
+
+fn pending_ids(broker: &mut DownloadBroker, request: &DownloadRequest) -> (Id128, TransferId) {
     match broker.request_download(request).unwrap() {
-        DownloadStart::Pending(id) => id,
+        DownloadStart::Pending {
+            approval_id,
+            transfer_id,
+        } => (approval_id, transfer_id),
         DownloadStart::Started(_) => panic!("download started without local approval"),
     }
 }
@@ -460,11 +468,11 @@ fn ask_deduplicates_pending_requests_and_does_not_start_after_denial() {
         broker.begin_download(&request),
         Err(AslError::PolicyDenied)
     ));
-    let id = pending_id(&mut broker, &request);
+    let (id, transfer_id) = pending_ids(&mut broker, &request);
     drop(broker);
 
     let mut broker = f.open();
-    assert_eq!(pending_id(&mut broker, &request), id);
+    assert_eq!(pending_ids(&mut broker, &request), (id, transfer_id));
     let consents: i64 = f
         .db()
         .query_row("SELECT count(*) FROM transfer_consents", [], |r| r.get(0))
@@ -493,7 +501,7 @@ fn approved_download_can_start_only_once_even_after_release_and_reopen() {
     let f = Fixture::new();
     let request = f.valid_request(b"download");
     let mut broker = f.open_with_mode(DownloadMode::Ask);
-    let id = pending_id(&mut broker, &request);
+    let (id, transfer_id) = pending_ids(&mut broker, &request);
     broker.decide_download(id, true).unwrap();
     let mut wrong_id = id;
     wrong_id.0[0] ^= 1;
@@ -504,6 +512,7 @@ fn approved_download_can_start_only_once_even_after_release_and_reopen() {
     f.assert_no_download();
 
     let info = broker.begin_approved_download(&request, id).unwrap();
+    assert_eq!(info.transfer_id, transfer_id);
     assert!(info.part_path.is_file());
     assert_eq!(f.download_counts(), (1, 1, 1));
     broker.release(info.transfer_id).unwrap();

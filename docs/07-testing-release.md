@@ -13,13 +13,14 @@
 | 纯授权核心 | T07 已实现；36 项对应测试通过 | 内存策略判定及来源交集，独立工程复核无阻断发现；不包含持久撤权、文件读取或发送栅栏 |
 | Windows 源文件句柄 | T08 已实现并完成本任务系统验收；本机与用户云机均报告 22 项通过 | 云机先前完整日志覆盖真实 symlink/8.3 别名，盘符修正后用户反馈 22 通过、0 失败、1.27 秒；新反馈仅有结果摘要。不是 AppContainer 或完整产品验收，详见 `windows-source-handles.md` |
 | Windows AppContainer/Job Object | T09 实现与真实负向探针已完成首轮；任务验收部分完成 | 本机真实测试覆盖读文件/Worker 联网与子进程拒绝、ACL/继承句柄、资源限制、清理、Net 外网 TCP 连接和多播 membership；公网 TCP 只证连接握手，外部 UDP echo、libp2p QUIC 与 mDNS query/response 未验收。执行文件 ACL DACL 更新有真实跨进程 mutex 串行化测试。最后一次独立复核发现的并发问题已修；不是独立安全审计 |
-| Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入、MCP stdout 集成及 T14 认证 peer 事件尚未验收 |
-| 默认后台收件与续传 | T23 工作线程已接入，验证见[实施计划](06-implementation-plan.md) | 真实认证 TCP 回环从 Fetch 到 NTFS 发布，链准入为夹具；续传用真实 NTFS/SQLite 和模拟网络事件。未验收生产跨进程全链路、公网重连、MCP 或 GUI |
+| Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入和完整公网互通仍待验收 |
+| 默认后台收件与续传 | T23 工作线程已接入，验证见[实施计划](06-implementation-plan.md) | 真实认证 TCP 回环从 Fetch 到 NTFS 发布，链准入为夹具；续传用真实 NTFS/SQLite 和模拟网络事件。未验收生产跨进程下载全链路、公网重连或 GUI |
 | Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
 | T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
-| T27 Agent 查询 | 入站授权直答已接入；出站在线联系人直询切片已接入 | 出站仅接受结构化 ContactsOnly 任务，目标限本地授权且已完成身份准入的在线联系人；Query/Answer/Offer/Error 走已有关联 request-response 与身份复核。GUI/MCP 任务生产者、持久任务历史、公开 DHT 查找/拨号、离线投递、MLS 群及公网互通未完成 |
+| T27 Agent 查询 | 入站授权直答、出站联系人直询和公开 DHT provider 查找已接入 | 只接受结构化任务，回复关联原查询并复核身份。MCP 已接入；持久任务历史、GUI、离线投递、MLS 群及公网互通仍未验收 |
+| T30 本机 MCP | 四个工具、Core 启动授权、加密会话和收件授权已接入 | 真实 stdio 子进程到真实 Core 覆盖离线查询和会话隔离；另用实际 MCP 消息处理、认证 TCP 回环、链准入夹具验证 Offer、批准与 NTFS 发布。不是公网或生产跨进程下载全链路。命令与分项结果见[实施计划](06-implementation-plan.md#t30--本机-stdio-mcp) |
 | 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：

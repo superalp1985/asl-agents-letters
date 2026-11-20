@@ -230,9 +230,15 @@ impl DownloadBroker {
 
         let binding = ConsentBinding::new(&grant, epoch, &content, &filename, bytes, &sources)?;
         let (transfer_id, approval_deadline) = match binding.admit(&tx, intent, now)? {
-            Admission::Pending(id) => {
+            Admission::Pending {
+                approval_id,
+                transfer_id,
+            } => {
                 tx.commit().map_err(database_error)?;
-                return Ok(DownloadStart::Pending(id));
+                return Ok(DownloadStart::Pending {
+                    approval_id,
+                    transfer_id,
+                });
             }
             Admission::Ready { transfer, deadline } => (transfer, deadline),
         };
@@ -685,6 +691,24 @@ impl DownloadBroker {
         peer: &PeerId,
     ) -> Result<bool, AslError> {
         self.store.has_registered_transfer_peer(agent, peer)
+    }
+
+    pub fn ensure_active_inbox(&self, id: Id128) -> Result<(), AslError> {
+        let active: bool = self
+            .store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM write_grants
+                 WHERE write_grant_id=?1 AND kind='inbox' AND status='active')",
+                [hex::encode(id.0)],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if active {
+            Ok(())
+        } else {
+            Err(AslError::PolicyDenied)
+        }
     }
 
     /// Recheck the persisted progress deadline before releasing an idle task.

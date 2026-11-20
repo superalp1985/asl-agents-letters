@@ -241,7 +241,11 @@ fn inline_requires_local_selection_and_can_refresh_after_approval() {
         panic!("expected Fetch");
     };
     h.manifest(request.clone());
-    let DownloadEvent::AwaitingApproval(approval) = h.event(&selection) else {
+    let DownloadEvent::AwaitingApproval {
+        approval_id,
+        transfer_id,
+    } = h.event(&selection)
+    else {
         panic!("expected approval");
     };
     assert_eq!(fs::read_dir(&inbox.folder).unwrap().count(), 0);
@@ -249,7 +253,7 @@ fn inline_requires_local_selection_and_can_refresh_after_approval() {
     assert_eq!(decisions_record[0].sources.len(), 2);
     assert!(decisions_record[0].sources.contains(&standby.peer_id));
     h.reconnect();
-    decisions.decide_download(approval, true).unwrap();
+    decisions.decide_download(approval_id, true).unwrap();
     let WorkerRequest::Fetch {
         request: renewed, ..
     } = h.request()
@@ -259,7 +263,10 @@ fn inline_requires_local_selection_and_can_refresh_after_approval() {
     assert_ne!(request.message_id, renewed.message_id);
     assert_eq!(request.root_task_id, renewed.root_task_id);
     h.manifest(renewed);
-    assert!(matches!(h.event(&selection), DownloadEvent::Started(_)));
+    let DownloadEvent::Started(info) = h.event(&selection) else {
+        panic!("expected approved download to start");
+    };
+    assert_eq!(info.transfer_id, transfer_id);
     let WorkerRequest::Bulk { request, .. } = h.request() else {
         panic!("expected Inline");
     };
@@ -313,6 +320,23 @@ fn chunk_worker_reconnects_without_requesting_already_durable_blocks() {
         panic!("expected publish");
     };
     assert_eq!(fs::read(info.destination_path).unwrap(), bytes);
+}
+
+#[test]
+fn revoked_inbox_never_sends_initial_fetch() {
+    let inbox = Inbox::new(b"local fixture");
+    drop(inbox.local);
+    asl_store::resources::SnapshotBroker::open(&inbox.home)
+        .unwrap()
+        .revoke_inbox_directory(inbox.grant)
+        .unwrap();
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h.fetch(inbox.grant, None);
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::PolicyDenied)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
 }
 
 #[test]

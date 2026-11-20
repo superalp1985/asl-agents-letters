@@ -286,7 +286,10 @@ fn approval_binds_the_whole_source_set_before_scheduling() {
         .local
         .set_download_mode(super::super::DownloadMode::Ask)
         .unwrap();
-    let DownloadStart::Pending(consent) = inbox
+    let DownloadStart::Pending {
+        approval_id: consent,
+        ..
+    } = inbox
         .local
         .request_download_from(&[&inbox.event, &other], inbox.grant, "item.bin")
         .unwrap()

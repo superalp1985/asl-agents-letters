@@ -1,28 +1,38 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{cell::Cell, collections::HashMap, fs, path::Path};
 
+use alloy_primitives::hex;
 use asl_net::{
     codec::{BulkOperation, BulkStatus},
     transport::{LocalTransport, TransportEvent, TransportKind},
 };
 use asl_policy::Audience;
-use asl_store::{resources::SnapshotBroker, search::direct::DirectRequester};
+use asl_store::{
+    Store,
+    resources::SnapshotBroker,
+    search::{LocalIndexText, direct::DirectRequester},
+    transfers::{DownloadBroker, DownloadMode},
+};
 use asl_types::{
     manifest::{CHUNK_SIZE, Manifest, content_id, decode_manifest, encode_manifest},
-    protocol::WireFrame,
+    protocol::{ConceptRef, WireFrame},
 };
 use rusqlite::params;
-use tokio::time::{interval, timeout};
+use serde_json::json;
+use tokio::time::{interval, sleep, timeout};
 
 use super::*;
 use crate::{
     FetchManifestDetails, MatchedBulkResponse, VerifiedFetchManifest,
+    direct_inbound::{self, DirectInbound},
+    direct_outbound::{DirectOutbound, outgoing_query_channel},
     identity::{AgentIdentity, DeviceIdentity},
     libraries::LocalLibraries,
+    mcp::test_host::Host,
     transfer::{TransferService, tests::Fixture},
 };
 
 #[tokio::test]
-async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
+async fn mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox() {
     let fixture = Fixture::new();
     let home = fixture.path().join("receiver");
     let inbox = fixture.path().join("inbox");
@@ -53,10 +63,25 @@ async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
     let grant = libraries
         .authorize_directory(&library, &["md".into()], &Audience::Public, size)
         .unwrap();
-    libraries
+    let resource = libraries
         .import_source(&grant, Path::new("source.md"))
         .unwrap();
     let provider_db = paths.state().join("asl.sqlite3");
+    direct_inbound::configure(&provider_db, "answer").unwrap();
+    asl_store::open_store(&provider_db)
+        .unwrap()
+        .index_local_text(
+            &resource,
+            content,
+            LocalIndexText {
+                title: "Loopback",
+                summary: "",
+                body: "Rust",
+                concepts: &[ConceptRef::RUST],
+            },
+        )
+        .unwrap();
+    let mut inbound = DirectInbound::open(&provider_db).unwrap();
     let mut provider = TransferService::open(&provider_db).unwrap();
 
     let receiver_device = DeviceIdentity::generate().unwrap();
@@ -125,35 +150,63 @@ async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
         agent_id: admitted.agent,
         peer_id: admitted.peer,
     };
+    rusqlite::Connection::open(&receiver_db)
+        .unwrap()
+        .execute(
+            "INSERT INTO authorized_contacts(agent_id,authorized_at_ms,authorization_revision)
+             VALUES (?1,1,1)",
+            [bs58::encode(source.agent_id.0).into_string()],
+        )
+        .unwrap();
+    let mut decisions = asl_store::open_store(&receiver_db).unwrap();
+    decisions.set_download_mode(DownloadMode::Ask).unwrap();
     let connection_id = [1; 16]; // Core's handle for `client` in this fixture.
     let (port, runtime) = download_channel();
-    let mut bridge = DownloadBridge::spawn(home, runtime).unwrap();
-    let ticket = port
-        .submit(DownloadJob::Fetch(DownloadSelection {
-            content_id: content,
-            inbox_grant,
-            filename: "received.bin".into(),
-            sources: vec![source.clone()],
-        }))
-        .unwrap();
+    let mut bridge = DownloadBridge::spawn(home.clone(), runtime).unwrap();
+    let (queries, query_runtime) = outgoing_query_channel();
+    let mut outbound = DirectOutbound::open(&receiver_db, query_runtime).unwrap();
+    let mut host = timeout(
+        handshake,
+        Host::connect(home.clone(), inbox_grant, queries, port),
+    )
+    .await
+    .unwrap();
+    let filename = format!("asl-{}.bin", hex::encode(content.0));
+    let destination = inbox.join(&filename);
+    let approved = Cell::new(false);
 
     let mut tick = interval(Duration::from_millis(5));
+    let mut query = None;
     let mut fetch = None;
     let mut granted = None;
     let mut bulk = HashMap::new();
-    let mut started = None;
-    let info = timeout(Duration::from_secs(20), async {
+    let drive_network = async {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    bridge.poll(unix_time_ms().unwrap(), |outbound| {
-                        match outbound {
+                    let now = unix_time_ms().unwrap();
+                    outbound.poll(
+                        &[(source.agent_id, connection_id, source.peer_id.clone())],
+                        &[],
+                        now,
+                        |connection, request_id, frame| {
+                            assert_eq!(connection, connection_id);
+                            let token = dialer.send_control_request(&client, frame)?;
+                            assert!(query.replace((token, request_id)).is_none());
+                            Ok(())
+                        },
+                        |_, _| panic!("contacts-only query must not use the DHT"),
+                        |_, _, _, _| panic!("the admitted contact is already connected"),
+                    ).unwrap();
+                    bridge.poll(now, |request| {
+                        match request {
                             WorkerRequest::Fetch { source: selected, request } => {
                                 assert_eq!(selected, source);
                                 let token = dialer.send_control_request(&client, WireFrame::FetchRequest(request.clone()))?;
                                 assert!(fetch.replace((token, request)).is_none());
                             }
                             WorkerRequest::Bulk { connection_id: selected, source: device, request } => {
+                                assert!(approved.get(), "chunk requested before local approval");
                                 assert_eq!(selected, connection_id);
                                 assert_eq!(device, source);
                                 assert_eq!(request.operation, BulkOperation::Chunk);
@@ -163,16 +216,18 @@ async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
                         }
                         Ok(Some(connection_id))
                     });
-                    match ticket.try_recv().unwrap() {
-                        Some(DownloadEvent::Started(info)) => started = Some(info.transfer_id),
-                        Some(DownloadEvent::Completed(info)) => break info,
-                        Some(other) => panic!("unexpected download event: {other:?}"),
-                        None => {}
-                    }
                 }
                 event = listener.next_event() => {
                     let now = unix_time_ms().unwrap();
                     match event.unwrap() {
+                        TransportEvent::ControlRequest { connection, request: frame @ WireFrame::Query(_), response } => {
+                            assert_eq!(connection, server);
+                            let prepared = inbound.prepare(requester.clone(), frame, now).unwrap().unwrap();
+                            inbound.enqueue(prepared, |frame, _| {
+                                assert!(matches!(frame, WireFrame::Offer(_)));
+                                Ok(listener.send_control_response(&server, &response, frame)?)
+                            }).unwrap();
+                        }
                         TransportEvent::ControlRequest { connection, request: WireFrame::FetchRequest(request), response } => {
                             assert_eq!(connection, server);
                             assert_eq!(request.content_id, content);
@@ -192,6 +247,14 @@ async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
                     }
                 }
                 event = dialer.next_event() => match event.unwrap() {
+                    TransportEvent::ControlResponse { connection, request, response: response @ WireFrame::Offer(_) } => {
+                        assert_eq!(connection, client);
+                        let (token, request_id) = query.take().unwrap();
+                        assert_eq!(request, token);
+                        outbound.handle_event(&AdmittedNetworkEvent::ControlResponse {
+                            connection_id, agent_id: source.agent_id, request_id, response,
+                        }, unix_time_ms().unwrap()).unwrap();
+                    }
                     TransportEvent::ControlResponse { connection, request, response: WireFrame::FetchGrant(grant) } => {
                         assert_eq!(connection, client);
                         let (token, original) = fetch.take().unwrap();
@@ -247,21 +310,107 @@ async fn tcp_fetch_grant_manifest_and_chunks_publish_to_authorized_inbox() {
                 }
             }
         }
-    }).await.expect("TCP download timed out");
-    assert_eq!(started, Some(info.transfer_id));
+    };
+    let transfer_id = timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            biased;
+            id = approve_and_download(&mut host, &mut decisions, &destination, content, size, &approved) => id,
+            () = drive_network => unreachable!(),
+        }
+    })
+    .await
+    .expect("MCP/TCP download timed out");
+    timeout(handshake, host.close()).await.unwrap();
+    drop(bridge);
+    let info = DownloadBroker::open(&home)
+        .unwrap()
+        .info(&transfer_id)
+        .unwrap();
     assert_eq!(info.content_id, content);
     assert_eq!(
         (info.file_size, info.durable_bytes, info.chunk_count),
         (size, size, 2)
     );
     assert_eq!(info.state, "complete");
-    let destination = inbox.join("received.bin");
     assert_eq!(
         info.destination_path.canonicalize().unwrap(),
         destination.canonicalize().unwrap()
     );
     assert_eq!(fs::read(destination).unwrap(), bytes);
     assert!(!info.part_path.exists());
+}
+
+async fn approve_and_download(
+    host: &mut Host,
+    decisions: &mut Store,
+    destination: &Path,
+    content: Hash32,
+    size: u64,
+    approved: &Cell<bool>,
+) -> TransferId {
+    let topic = ConceptRef::RUST;
+    let query = host
+        .call(
+            "asl_query",
+            json!({
+                "query": {"intent":"locate_resource","result_shape":"resources"},
+                "terms": [[topic.vocabulary_id, topic.concept_id]],
+                "audience": "contacts_only",
+                "deadline_ms": 10000
+            }),
+        )
+        .await;
+    let task = query["task_id"].as_str().expect("query ID");
+    let result = loop {
+        let result = host.call("asl_result", json!({"task_id":task})).await;
+        if result["status"] == "complete" {
+            break result;
+        }
+        assert_eq!(result["error_code"], "busy", "{result}");
+        sleep(Duration::from_millis(20)).await;
+    };
+    let offers = result["offers"].as_array().unwrap();
+    assert_eq!(offers.len(), 1);
+    let offer = &offers[0];
+    assert_eq!(offer["content_id"], hex::encode(content.0));
+    assert_eq!(offer["file_size"], size);
+    let selection = json!({"task_id": task, "offer_id": offer["offer_id"]});
+    let pending = loop {
+        let pending = host.call("asl_fetch", selection.clone()).await;
+        if pending["status"] == "awaiting_approval" {
+            break pending;
+        }
+        assert_eq!(pending["error_code"], "timeout", "{pending}");
+    };
+    let id = pending["transfer_id"]
+        .as_str()
+        .expect("reserved transfer ID");
+    assert_eq!(host.call("asl_fetch", selection).await, pending);
+    let prompts = decisions.download_consents().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].content_id, content);
+    assert_eq!(prompts[0].file_size, size);
+    assert_eq!(prompts[0].destination_path, destination);
+    assert!(!prompts[0].approved);
+    assert_eq!(
+        fs::read_dir(destination.parent().unwrap()).unwrap().count(),
+        0
+    );
+    decisions
+        .decide_download(prompts[0].approval_id, true)
+        .unwrap();
+    approved.set(true);
+    loop {
+        let status = host.call("asl_result", json!({"task_id":task})).await;
+        let download = &status["downloads"][0];
+        assert_eq!(download["transfer_id"], id, "{status}");
+        match download["status"].as_str() {
+            Some("completed") => break,
+            Some("awaiting_approval" | "started") => sleep(Duration::from_millis(25)).await,
+            _ => panic!("unexpected transfer status: {status}"),
+        }
+    }
+    TransferId(Id128(hex::decode(id).unwrap().try_into().unwrap()))
 }
 
 fn admit_fixture(db: &Path, root: &AgentIdentity, peer: PeerId, now: u64) -> DirectRequester {

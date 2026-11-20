@@ -103,14 +103,21 @@ T26 本机适配器的输出形式如下，旧 `schemas/prototype/agent-decision
 
 Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派生管道名，不用固定端口、工作目录或默认盘符。管道仅接受本机连接，独占绑定，一个连接断开后再接受下一个。客户端核对管道所有者，并以匿名模拟级别打开，避免服务端借用客户端身份。这里的匿名是 Windows IPC 设置，与 ASL 的链身份无关。
 
-同用户连接和所有者核对不证明对端是哪一个程序，也不替代宿主会话授权。Core 不能仅凭连接成功就接单；接入时必须先取得独立、可撤销的本机授权，设置握手和 I/O 时限，再按会话隔离任务和 Offer。权限拒绝不回退到 TCP，也不从当前目录猜测另一个数据根。
+同用户连接和所有者核对不证明对端是哪一个程序。MCP 默认关闭；由可信用户或安装配置启动 Core 并单独授权。Core 与获准宿主持有随机 32 字节密钥，通过 Noise PSK 握手建立有时限的加密 IPC。握手与首请求分别限时；空闲连接会释放。任务和 Offer 只在当前连接可见，断开重连不继承。权限拒绝不回退到 TCP，也不从当前目录猜测另一个数据根。
+
+本机配置：
+
+- Core 使用绝对路径 `ASL_HOME`，设置 `ASL_MCP_KEY`（64 位十六进制随机密钥）和 `ASL_MCP_SCOPE`（`contacts_only` 或 `public`）。密钥不要写入仓库、日志、命令历史或全局环境变量。
+- 宿主用同一数据根启动 `asl.exe mcp --home <绝对路径>`，仅向该进程提供相同的 `ASL_MCP_KEY`。只授予查询时，不配置收件授权。宿主的环境变量不能改变 Core 的范围。
+- 为下载单独运行 `asl-core --downloads authorize-inbox <绝对目录> <字节额度>`。将返回的 `inbox_grant_id` 设为 Core 的 `ASL_MCP_INBOX_GRANT`。原有 `automatic`／`ask` 模式和额度照常生效。`asl-core --downloads revoke-inbox <id>` 可单独撤销收件权限，不用停 Core。
+- 撤销宿主接入时停止 Core，移除 MCP 配置或轮换密钥后重新启动；暂不支持热撤销。只把同账户进程隔离视为限制环境中无该密钥的调用方，不承诺隔离能读同账户进程内存、启动配置或能以该账户重启、控制 Core 的程序。
 
 固定四个工具：
 
 - `asl_query`：query、terms、audience、deadline_ms → task_id。audience 只能收窄人类既有网络授权。
-- `asl_task_status`：task_id → 状态、受限摘要、可用资源引用。
-- `asl_fetch`：task_id、offer_id → transfer_id；不得接受任意 URL 或保存路径。
-- `asl_result`：task_id → 最终答案、来源与已接收的应用内资源 ID。
+- `asl_task_status`：task_id → 状态、当前有效的 Offer 及下载状态。
+- `asl_fetch`：task_id、offer_id → 本地 transfer_id 与状态；不得接受任意 URL 或保存路径。询问模式返回 `awaiting_approval`，由本机用户确认。等待超时可用相同参数查询原下载提交，不会重复创建。
+- `asl_result`：task_id → 最终结构化答案、来源、有效 Offer 和传输引用。收件完成不等于已导入知识库；当前不返回应用内资源 ID。
 
 不提供 read_any_file、execute、change_grant、set_trust、fetch_url 等工具。没有授权时返回 policy_denied，而不是自行弹窗获取无限权限。
 

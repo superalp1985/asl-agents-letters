@@ -8,6 +8,8 @@ pub mod identity;
 pub mod infrastructure;
 pub mod ipc;
 pub mod libraries;
+#[cfg(windows)]
+pub mod mcp;
 pub mod network;
 pub mod network_identity;
 pub mod network_settings;

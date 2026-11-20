@@ -33,6 +33,11 @@ tokio.workspace = true
 toml_edit = { version = "=0.25.19", default-features = false, features = ["parse", "serde"] }
 pdf-extract = "=0.12.1"
 
+[target.'cfg(windows)'.dependencies]
+rmcp.workspace = true
+snow = "=0.10.0"
+tokio = { workspace = true, features = ["net", "io-util"] }
+
 [dev-dependencies]
 eframe.workspace = true
 rmcp.workspace = true

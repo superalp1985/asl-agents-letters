@@ -344,6 +344,12 @@ impl Supervisor {
 
     pub fn run(self) -> Result<(), AslError> {
         let (port, runtime) = outgoing_query_channel();
+        #[cfg(windows)]
+        if let Some(grant) = crate::mcp::HostGrant::from_environment()? {
+            let (download_port, downloads) = download_channel();
+            let _mcp = crate::mcp::McpWorker::spawn(self.home.clone(), grant, port, download_port)?;
+            return self.run_with_local_downloads(runtime, downloads);
+        }
         drop(port);
         self.run_with_outgoing_queries(runtime)
     }

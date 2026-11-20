@@ -16,7 +16,10 @@ pub enum DownloadMode {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum DownloadStart {
-    Pending(Id128),
+    Pending {
+        approval_id: Id128,
+        transfer_id: TransferId,
+    },
     Started(DownloadInfo),
 }
 
@@ -24,7 +27,7 @@ impl DownloadStart {
     pub(super) fn started(self) -> Result<DownloadInfo, AslError> {
         match self {
             Self::Started(info) => Ok(info),
-            Self::Pending(_) => Err(AslError::PolicyDenied),
+            Self::Pending { .. } => Err(AslError::PolicyDenied),
         }
     }
 }
@@ -173,7 +176,10 @@ pub(super) enum StartIntent {
 }
 
 pub(super) enum Admission {
-    Pending(Id128),
+    Pending {
+        approval_id: Id128,
+        transfer_id: TransferId,
+    },
     Ready {
         transfer: TransferId,
         deadline: Option<i64>,
@@ -257,7 +263,10 @@ impl<'a> ConsentBinding<'a> {
                     })
                 }
                 StartIntent::MayPrompt if matches!(state.as_str(), "pending" | "approved") => {
-                    Ok(Admission::Pending(id))
+                    Ok(Admission::Pending {
+                        approval_id: id,
+                        transfer_id: parse_transfer(&transfer)?,
+                    })
                 }
                 _ => Err(AslError::PolicyDenied),
             };
@@ -314,7 +323,10 @@ impl<'a> ConsentBinding<'a> {
             ],
         )
         .map_err(database_error)?;
-        Ok(Admission::Pending(id))
+        Ok(Admission::Pending {
+            approval_id: id,
+            transfer_id: transfer,
+        })
     }
 }
 

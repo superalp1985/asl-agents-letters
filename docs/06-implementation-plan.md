@@ -675,8 +675,13 @@ T30 Windows 私有 IPC 切片（2026-11-20）：Policy 层新增基于现有 Tok
 
 T30 IPC 集中验证（Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo +1.100.0 test -p asl-policy --all-targets --locked --offline -- --test-threads=1` 通过 117 项，2 项外网沙箱探针按原设定忽略。新增测试覆盖真实跨进程请求/回复、连续接入、重复绑定拒绝、不同根隔离、忙碌、接入前断开及缺失根。`asl-policy` 全目标严格 Clippy、格式检查和 `git diff --check` 通过。独立源码复核未发现本切片的发布阻断项；Core 接入仍须实现宿主授权和握手/I/O 时限。没有进行跨账户、远端 Windows 客户端或 MCP 端到端验收。
 
+T30 Core/stdio 接入（2026-11-20）：`asl.exe mcp --home <绝对路径>` 开放固定四工具，默认无宿主授权。可信 Core 启动配置明确授权查询范围和可选 inbox grant；复用 Noise PSK 认证并保护本机命名管道记录。每次连接最多保留 16 个任务，任务与 Offer 句柄不跨连接。下载按当前 Offer 和本机收件授权提交，文件名由本机生成；询问状态返回 SQLite 预先分配的传输 ID，同一 Offer 重试不会重新排队。下载结果是传输引用，不宣称导入知识库。配置、撤销方式和同账户信任边界见 [Agent 与界面规范](05-agent-gui.md#7-stdio-mcp-接入)。
+
+T30 接入集中验证（Windows x64、Rust 1.100.0、E 盘缓存、离线）：`asl-app` 库测试 222 项通过；替换后的 MCP 文件回环用例另跑 1 项通过。`mcp_contract` 3 项通过，包含真实 stdio 子进程至真实 Core、未授权/错密钥、未知工具、会话隔离和本机收件授权/撤销。`local_libraries` 4 项通过、1 项保留忽略；`asl-store` 的 `transfer_resume` 20 项通过。两 crate 全目标严格 Clippy 通过；库回环用例使用实际 MCP 换行 JSON 处理、Windows 加密管道以及经过认证的 TCP，请求由实际检索端生成 Offer，批准前不下载数据块或写文件，批准后两块校验并发布至 NTFS。回环使用链准入夹具和进程内传输驱动；未验收真实 stdio 子进程至独立 sandbox Net 的完整文件流程、生产链、公网或 GUI。
+
 ```text
 cargo test -p asl-app --test mcp_contract
+cargo test -p asl-app --lib mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox
 ```
 
 ### T31 — OpenMLS 群房间与加密投递

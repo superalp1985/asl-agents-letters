@@ -174,6 +174,7 @@ impl ActiveJob {
             if *deadline <= now {
                 return Err(AslError::ExpiredMessage);
             }
+            local.broker.ensure_active_inbox(*grant)?;
             if let Some(approval) = approval
                 && now >= approval.next_poll
             {
@@ -225,16 +226,22 @@ impl ActiveJob {
             ) {
                 Err(AslError::ExpiredMessage) => return Ok(None),
                 Ok(DownloadStart::Started(info)) => info,
-                Ok(DownloadStart::Pending(id)) => {
+                Ok(DownloadStart::Pending {
+                    approval_id,
+                    transfer_id,
+                }) => {
                     *approval = Some(Approval {
-                        id,
+                        id: approval_id,
                         approved: false,
                         next_poll: now,
                     });
                     // The persisted consent window starts when it is
                     // created, not when manifest discovery began.
                     *deadline = now.saturating_add(DOWNLOAD_IDLE_MS as u64);
-                    let _ = self.events.try_send(DownloadEvent::AwaitingApproval(id));
+                    let _ = self.events.try_send(DownloadEvent::AwaitingApproval {
+                        approval_id,
+                        transfer_id,
+                    });
                     return Ok(None);
                 }
                 Err(error) => return Err(error),

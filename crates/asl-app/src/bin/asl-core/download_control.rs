@@ -3,7 +3,7 @@ use std::{env, ffi::OsString, path::PathBuf};
 use alloy_primitives::hex;
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
-use asl_store::{Store, open_store, transfers::DownloadMode};
+use asl_store::{Store, open_store, resources::SnapshotBroker, transfers::DownloadMode};
 use asl_types::{error::AslError, ids::Id128};
 use serde_json::{Value, json};
 
@@ -25,14 +25,10 @@ impl Command {
             ["mode"] => Ok(Self::Mode),
             ["mode", "ask"] => Ok(Self::SetMode(DownloadMode::Ask)),
             ["mode", "automatic"] => Ok(Self::SetMode(DownloadMode::Automatic)),
-            [action @ ("approve" | "deny"), id] if id.len() == 32 => {
-                let mut bytes = [0; 16];
-                hex::decode_to_slice(id, &mut bytes).map_err(|_| AslError::InvalidMessage)?;
-                Ok(Self::Decide {
-                    id: Id128(bytes),
-                    approve: *action == "approve",
-                })
-            }
+            [action @ ("approve" | "deny"), id] if id.len() == 32 => Ok(Self::Decide {
+                id: parse_id(id)?,
+                approve: *action == "approve",
+            }),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -81,13 +77,48 @@ impl Command {
 }
 
 pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
-    let command = Command::parse(args)?;
     let root = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
-    let paths = AppPaths::open(&root)?;
-    let _pin = PinnedHome::open(&root)?;
-    let mut store = open_store(&paths.state().join("asl.sqlite3"))?;
-    println!("{}", command.apply(&mut store)?);
+    let data = match args {
+        [command, directory, bytes] if command == "authorize-inbox" => {
+            let limit = bytes
+                .to_str()
+                .and_then(|text| text.parse::<u64>().ok())
+                .filter(|limit| *limit > 0)
+                .ok_or(AslError::InvalidMessage)?;
+            let directory = PathBuf::from(directory);
+            if !directory.is_absolute() {
+                return Err(AslError::InvalidStorageRoot);
+            }
+            AppPaths::open(&root)?;
+            let mut broker = SnapshotBroker::open(&root)?;
+            let id = broker.authorize_inbox_directory(&directory, limit)?;
+            json!({"inbox_grant_id": hex::encode(id.0)})
+        }
+        [command, id] if command == "revoke-inbox" => {
+            let id = parse_id(id.to_str().ok_or(AslError::InvalidMessage)?)?;
+            AppPaths::open(&root)?;
+            SnapshotBroker::open(&root)?.revoke_inbox_directory(id)?;
+            json!({"inbox_grant_id": hex::encode(id.0), "state": "revoked"})
+        }
+        _ => apply_local_command(Command::parse(args)?, &root)?,
+    };
+    println!("{data}");
     Ok(())
+}
+
+fn parse_id(text: &str) -> Result<Id128, AslError> {
+    let mut bytes = [0; 16];
+    if text.len() != 32 || hex::decode_to_slice(text, &mut bytes).is_err() {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(Id128(bytes))
+}
+
+fn apply_local_command(command: Command, root: &std::path::Path) -> Result<Value, AslError> {
+    let paths = AppPaths::open(root)?;
+    let _pin = PinnedHome::open(root)?;
+    let mut store = open_store(&paths.state().join("asl.sqlite3"))?;
+    command.apply(&mut store)
 }
 
 #[cfg(test)]

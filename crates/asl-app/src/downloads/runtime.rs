@@ -60,7 +60,10 @@ pub enum DownloadJob {
 
 #[derive(Debug)]
 pub enum DownloadEvent {
-    AwaitingApproval(Id128),
+    AwaitingApproval {
+        approval_id: Id128,
+        transfer_id: TransferId,
+    },
     Started(DownloadInfo),
     Completed(DownloadInfo),
     Failed(AslError),
