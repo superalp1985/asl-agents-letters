@@ -558,3 +558,8 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘：锁定、离线、串行全目标测试最终覆盖五包。最后一次修正 Core 的后续同步时钟后重跑 `asl-app` 全目标，275 项通过、1 项按既有标记忽略；未再修改的 `asl-groups`、`asl-net`、`asl-store`、`asl-types` 在同一轮验证共 258 项通过、2 项按既有标记忽略。五包全目标严格 Clippy、Rust 格式与 Git 空白检查通过。
 - Core 夹具验证创建者移除、非创建者拒绝、已撤销目标不阻塞保留成员的补齐、已被移除设备不能从更新后的节点拉取提交。重入须新的本机审批；保存后的房间 ID 不变，真实 OpenMLS 两端的 exporter 一致，重复 Welcome 不推进。SQLite 用例覆盖旧 Welcome 作废、过期批准与写入失败回滚、旧快照版本拒绝、重开后状态一致、旧同步记录清除。独立复核后，事务提交前复核当前证据和请求期限。
 - 房间始终保持 `needs_sync`。Core 群测试使用合成链证明、真实 OpenMLS/DPAPI/SQLite 和注入的 Net 事件；不是跨正式进程的群组收发验收，未开启公网、LAN、中继、GUI 审批、群应用投递或文件权限。未修改 P2P CBOR、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：结构化群应用的 MLS 封装
+
+- Windows x64 / E 盘：`cargo test -p asl-groups --all-targets --locked --offline -- --test-threads=1`，12 项通过、0 失败。该包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 真实 OpenMLS 夹具验证成员能获取结构化明文、不匹配的本机签名密钥和对端叶子被拒、改外层 ID 无法绕过密文重放检查、自由文本拒绝，以及移除后不能读取新消息。另验证即使底层保留了旧 epoch 的解密密钥，ASL 也拒绝原样的旧 epoch 帧。未接线 Core 收发、授权或公网，也未修改 CBOR 格式、SQLite schema 或依赖锁。
