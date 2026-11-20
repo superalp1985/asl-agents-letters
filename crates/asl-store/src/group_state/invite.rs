@@ -452,12 +452,12 @@ impl Store {
         })
     }
 
-    pub fn prune_mls_invites(&mut self, now_ms: u64) -> Result<(), AslError> {
+    pub fn prune_mls_expired(&mut self, now_ms: u64) -> Result<(), AslError> {
         let tx = immediate(&mut self.connection)?;
         let now = sql_number(now_ms)?;
         prune(&tx, now)?;
         super::outgoing::prune(&tx, now)?;
-        super::sync_log::prune_expired(&tx, now)?;
+        super::transition::prune_expired_events(&tx, now)?;
         tx.commit().map_err(database_error)
     }
 }

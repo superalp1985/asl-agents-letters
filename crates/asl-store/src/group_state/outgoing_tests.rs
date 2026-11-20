@@ -388,10 +388,10 @@ fn failed_welcome_write_rolls_back_commit_and_can_be_retried() {
         .unwrap();
     assert!(store.mls_sync_step(WIRE, 0, NOW).unwrap().is_none());
     store
-        .prune_mls_invites(NOW + MLS_SYNC_RETENTION_MS)
+        .prune_mls_expired(NOW + MLS_SYNC_RETENTION_MS)
         .unwrap();
     assert_eq!(sync_count(&store), 0);
-    assert_eq!(commit_count(&store), 1);
+    assert_eq!(commit_count(&store), 0);
 }
 
 #[test]
@@ -471,7 +471,7 @@ fn removed_member_cannot_fetch_an_earlier_welcome_even_after_reentry() {
             .unwrap()
             .is_none()
     );
-    store.prune_mls_invites(EXPIRES).unwrap();
+    store.prune_mls_expired(EXPIRES).unwrap();
     assert_eq!(
         store
             .connection
@@ -661,6 +661,34 @@ fn sync_lookup_keeps_only_the_latest_256_base_epochs() {
 }
 
 #[test]
+fn cleanup_removes_expired_ciphertext_in_batches_and_preserves_the_live_head() {
+    let (f, mut store, mut version) = Fixture::new();
+    let members = std::slice::from_ref(&f.creator);
+    let tx = store.connection.transaction().unwrap();
+    for epoch in 0_u64..258 {
+        let created = if epoch == 257 { NOW + 1 } else { NOW };
+        version = commit_candidate(
+            &tx,
+            f.sync_change(version, members, &epoch.to_be_bytes()),
+            None,
+            created as i64,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let cutoff = NOW + MLS_SYNC_RETENTION_MS;
+    store.prune_mls_expired(cutoff).unwrap();
+    assert_eq!(commit_count(&store), 2);
+    store.prune_mls_expired(cutoff).unwrap();
+    assert_eq!(commit_count(&store), 1);
+    assert_eq!(sync_count(&store), 1);
+    let head = store.mls_sync_step(WIRE, 257, cutoff).unwrap().unwrap();
+    assert_eq!(head.version, version);
+    assert_eq!(head.expires_at_ms, cutoff + 1);
+    assert!(store.mls_sync_step(WIRE, 256, cutoff).unwrap().is_none());
+}
+
+#[test]
 fn expired_invite_does_not_unconsume_a_key_package() {
     let (f, mut store, base) = Fixture::new();
     let first = f.invite();
@@ -719,7 +747,7 @@ fn expired_invite_does_not_unconsume_a_key_package() {
         Some(MlsInviteResponse::Pending)
     );
     store
-        .prune_mls_invites(reused.package_expires_at_ms)
+        .prune_mls_expired(reused.package_expires_at_ms)
         .unwrap();
     let count: u32 = store
         .connection

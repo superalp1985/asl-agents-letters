@@ -11,6 +11,8 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::{MAX_SEALED_ROOM_BYTES, MLS_SYNC_RETENTION_MS, MlsEpochBindings, sql_number, sync_log};
 use crate::{Store, current_time_ms, database_error};
 
+const EXPIRY_PRUNE_BATCH: i64 = 256;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoomVersion {
     pub revision: u64,
@@ -236,6 +238,19 @@ pub(super) fn commit_candidate(
         mls_epoch: update.mls_epoch,
         ..expected
     })
+}
+
+pub(super) fn prune_expired_events(tx: &Transaction<'_>, now: i64) -> Result<(), AslError> {
+    // The foreign key removes the matching sync rows with the ciphertext.
+    tx.execute(
+        "DELETE FROM group_events WHERE event_id IN (
+            SELECT event_id FROM group_events WHERE expires_at_ms<=?1
+            ORDER BY expires_at_ms LIMIT ?2
+         )",
+        params![now, EXPIRY_PRUNE_BATCH],
+    )
+    .map_err(database_error)?;
+    Ok(())
 }
 
 pub(super) fn peer_text(peer: &PeerId) -> String {

@@ -11,7 +11,6 @@ use crate::{Store, database_error};
 
 pub const MLS_SYNC_MAX_STEPS: u64 = 256;
 const SYNC_WINDOW: i64 = MLS_SYNC_MAX_STEPS as i64;
-const EXPIRY_PRUNE_BATCH: i64 = 256;
 // A byte needs fewer than two Base58 digits even at maximum width.
 const MAX_SIGNER_TEXT_BYTES: usize = 2 * PeerId::MAX_BYTES;
 pub const MLS_SYNC_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
@@ -212,20 +211,6 @@ pub(super) fn trim_room(tx: &Transaction<'_>, room: &str, head: i64) -> Result<(
     tx.execute(
         "DELETE FROM mls_sync_log WHERE room_id=?1 AND base_epoch<?2",
         params![room, head.saturating_sub(SYNC_WINDOW)],
-    )
-    .map_err(database_error)?;
-    Ok(())
-}
-
-pub(super) fn prune_expired(tx: &Transaction<'_>, now: i64) -> Result<(), AslError> {
-    // This only removes sync associations; group events keep their
-    // existing lifetime and duplicate detection behavior.
-    tx.execute(
-        "DELETE FROM mls_sync_log WHERE event_id IN (
-            SELECT event_id FROM mls_sync_log WHERE expires_at_ms<=?1
-            ORDER BY expires_at_ms,event_id LIMIT ?2
-         )",
-        params![now, EXPIRY_PRUNE_BATCH],
     )
     .map_err(database_error)?;
     Ok(())

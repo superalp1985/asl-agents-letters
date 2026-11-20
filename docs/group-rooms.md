@@ -20,7 +20,7 @@ Windows 本机适配复用 OpenMLS 的内存存储与现有 DPAPI，密封快照
 
 MLS 1.0 使用 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。Core 带独立随机 MLS 签名密钥，严禁把传输私钥作为 MLS 签名密钥使用。ASL BasicCredential 内容为 `signature65 || canonical_device_certificate_cbor`；根签名的预映像是 `ASL-MLS-LEAF-v1\0 || wire_group_id[32] || mls_signing_public_key[32] || canonical_device_certificate_cbor`。检查群 ID、公钥编码和当前 ASL 证书。通过已有链解析器核对活动身份根、已验证设备目录和证书有效期；直接来源还须匹配当前认证连接中精确的 Hello 证书。同 Agent 的其他设备、过期/被替换证书和其他房间均不可复用该叶子。签名绑定只证明身份根授权该公钥；MLS 自身仍须验证该叶子或消息的签名和密钥持有关系，链证据的新鲜度沿用现有解析器规则。
 
-SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、成员授权 epoch 和全局权限版本，一起提交候选快照、成员投影和群事件。应用消息用群 ID、认证发送设备和 MLS 明文的消息 ID 去重，不信任外层消息 ID；提交事件用群 ID、基础 epoch 和已验证 MLS 数据去重。更新 ratchet 不增加成员授权 epoch，候选成员变化也不会使本机房间从 `needs_sync` 切为 `active`；后续只有实际授权成员或可用状态变化才推进成员授权 epoch 及全局权限版本。事件写入 7 天期限，定时清理待接入。生产 Core 仍需在提交之前重新核对本机权限与链证据，提交失败时丢弃候选，成功后才允许交付明文或排队发送。
+SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、成员授权 epoch 和全局权限版本，一起提交候选快照、成员投影和群事件。应用消息用群 ID、认证发送设备和 MLS 明文的消息 ID 去重，不信任外层消息 ID；提交事件用群 ID、基础 epoch 和已验证 MLS 数据去重。更新 ratchet 不增加成员授权 epoch，候选成员变化也不会使本机房间从 `needs_sync` 切为 `active`；后续只有实际授权成员或可用状态变化才推进成员授权 epoch 及全局权限版本。事件写入 7 天期限，启用回环群组的 Core 在启动时和之后每 30 秒分批清理到期密文及关联同步记录。清理不改变 MLS 快照、成员投影或同步预算，也不承诺擦除磁盘和备份中的旧副本。生产 Core 仍需在提交之前重新核对本机权限与链证据，提交失败时丢弃候选，成功后才允许交付明文或排队发送。
 
 ## 待实现：生产权限与投递
 

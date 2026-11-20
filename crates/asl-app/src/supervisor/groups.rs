@@ -70,7 +70,7 @@ pub(super) struct LoopbackGroups {
 impl LoopbackGroups {
     pub(super) fn open(path: &Path, now_ms: u64) -> Result<Self, AslError> {
         let mut store = open_mls_runtime_store(path)?;
-        store.prune_mls_invites(now_ms)?;
+        store.prune_mls_expired(now_ms)?;
         Ok(Self {
             store,
             next_prune: Instant::now() + PRUNE_INTERVAL,
@@ -157,7 +157,7 @@ impl Supervisor {
             let now = Instant::now();
             if now >= groups.next_prune {
                 groups.next_prune = now + PRUNE_INTERVAL;
-                groups.cleanup_failed = groups.store.prune_mls_invites(unix_time_ms()?).is_err();
+                groups.cleanup_failed = groups.store.prune_mls_expired(unix_time_ms()?).is_err();
             }
             if self.network_admission_status == NetworkAdmissionStatus::Active
                 && !groups.cleanup_failed
