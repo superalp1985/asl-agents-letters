@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use asl_groups::{
+    GroupApplication, encrypt_application,
     local_state::{RoomBinding, RoomProvider, restore, restore_with_history},
     membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
@@ -12,7 +13,8 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use crate::chain::test_support::proof_fixtures_for_agents;
 use crate::profile::{
-    MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, group_credential::issue_group_credential,
+    MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome,
+    group_credential::issue_group_credential,
 };
 
 use super::*;
@@ -392,6 +394,23 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     let (_, _, history) = restore_with_history(&binding, &reopened).unwrap();
     assert_eq!(history.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
 
+    let other_connection = [11; 16];
+    admit(
+        &mut first,
+        other_connection,
+        &certs[2],
+        proofs[2].clone(),
+        &signed[2],
+    );
+    let old_application = exercise_application_candidate(
+        (&mut creator, &mut creator_store, &certs[0].peer_id),
+        (&mut first, &mut first_store, &first_db),
+        wire_id,
+        [connection, other_connection],
+        &no_imports,
+        probe_now,
+    );
+
     assert!(matches!(
         first.remove_local_mls_member(
             &mut first_store,
@@ -484,6 +503,45 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
         .unwrap()
         .unwrap();
     assert!(!room.members.contains(&certs[2].peer_id));
+    let now = probe_now();
+    assert!(matches!(
+        first.commit_mls_application_receive(
+            &mut first_store,
+            MlsApplicationReceive {
+                connection_id: connection,
+                expected: room.version,
+                packet: &old_application,
+                deadline_ms: now + 1_000,
+            },
+            &no_imports,
+            now
+        ),
+        Err(AslError::InvalidMessage)
+    ));
+    let mut removed_source_packet = old_application;
+    removed_source_packet.epoch = room.version.mls_epoch;
+    assert!(matches!(
+        first.commit_mls_application_receive(
+            &mut first_store,
+            MlsApplicationReceive {
+                connection_id: other_connection,
+                expected: room.version,
+                packet: &removed_source_packet,
+                deadline_ms: now + 1_000,
+            },
+            &no_imports,
+            probe_now()
+        ),
+        Err(AslError::PolicyDenied)
+    ));
+    assert_eq!(
+        first_store
+            .mls_room_snapshot(wire_id)
+            .unwrap()
+            .unwrap()
+            .version,
+        room.version
+    );
     let removed_connection = [2; 16];
     admit(
         &mut creator,
@@ -525,6 +583,230 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
         ),
         Err(AslError::PolicyDenied)
     ));
+}
+
+fn exercise_application_candidate(
+    (sender, send_store, sender_device): (&mut CoreAdmission, &mut asl_store::Store, &PeerId),
+    (receiver, receive_store, receive_db): (
+        &mut CoreAdmission,
+        &mut asl_store::Store,
+        &TestChainDatabase,
+    ),
+    wire_id: Hash32,
+    [connection, other_connection]: [[u8; 16]; 2],
+    directories: &HashMap<AgentId, Vec<u8>>,
+    now: impl Fn() -> u64,
+) -> GroupPacket {
+    let sample = include_str!("../../../../../../schemas/vectors/query-v1.hex")
+        .split_ascii_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect::<Vec<_>>();
+    let GroupApplication::Query(mut query) = GroupApplication::decode(&sample).unwrap() else {
+        panic!("expected a structured query");
+    };
+    query.created_at_ms = now();
+    query.expires_at_ms = query.created_at_ms + 5_000;
+    let deadline = query.created_at_ms + 3_000;
+    let message = GroupApplication::Query(query.clone());
+    let current = |store: &asl_store::Store| store.mls_room_snapshot(wire_id).unwrap().unwrap();
+    let old_send = current(send_store).version;
+    let old_receive = current(receive_store);
+    let packet = sender
+        .commit_mls_application_send(
+            send_store,
+            wire_id,
+            old_send,
+            message.clone(),
+            directories,
+            now(),
+        )
+        .unwrap();
+    let saved = current(send_store);
+    assert_eq!(saved.version.revision, old_send.revision + 1);
+    assert_eq!(saved.version.mls_epoch, old_send.mls_epoch);
+    assert!(matches!(
+        sender.commit_mls_application_send(
+            send_store,
+            wire_id,
+            old_send,
+            message.clone(),
+            directories,
+            now()
+        ),
+        Err(AslError::PolicyVersionConflict)
+    ));
+
+    let mut receive = |packet: &GroupPacket,
+                       connection_id,
+                       expected,
+                       deadline_ms,
+                       store: &mut asl_store::Store| {
+        receiver.commit_mls_application_receive(
+            store,
+            MlsApplicationReceive {
+                connection_id,
+                expected,
+                packet,
+                deadline_ms,
+            },
+            directories,
+            now(),
+        )
+    };
+    assert!(matches!(
+        receive(
+            &packet,
+            connection,
+            old_receive.version,
+            now(),
+            receive_store
+        ),
+        Err(AslError::ExpiredMessage)
+    ));
+    assert!(matches!(
+        receive(
+            &packet,
+            other_connection,
+            old_receive.version,
+            deadline,
+            receive_store
+        ),
+        Err(AslError::PolicyDenied)
+    ));
+
+    let sql = rusqlite::Connection::open(&receive_db.path).unwrap();
+    let journal_count = || {
+        sql.query_row(
+            "SELECT COUNT(*) FROM group_events WHERE kind='application'",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap()
+    };
+    sql.execute_batch(
+        "CREATE TRIGGER reject_application_snapshot BEFORE UPDATE ON mls_room_states
+         BEGIN SELECT RAISE(ABORT, 'test transaction failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        receive(
+            &packet,
+            connection,
+            old_receive.version,
+            deadline,
+            receive_store
+        )
+        .is_err()
+    );
+    let saved_receive = current(receive_store);
+    assert_eq!(saved_receive.version, old_receive.version);
+    assert_eq!(saved_receive.sealed_snapshot, old_receive.sealed_snapshot);
+    assert_eq!(journal_count(), 0);
+    sql.execute_batch("DROP TRIGGER reject_application_snapshot")
+        .unwrap();
+
+    assert_eq!(
+        receive(
+            &packet,
+            connection,
+            old_receive.version,
+            deadline,
+            receive_store
+        )
+        .unwrap(),
+        message
+    );
+    let committed = current(&receive_db.open());
+    assert_eq!(committed.version.revision, old_receive.version.revision + 1);
+    assert_eq!(
+        committed.version.policy_revision,
+        old_receive.version.policy_revision
+    );
+    assert_eq!(journal_count(), 1);
+    let mut retagged = packet.clone();
+    retagged.message_id.0[0] ^= 0x80;
+    assert!(
+        receive(
+            &retagged,
+            connection,
+            committed.version,
+            deadline,
+            receive_store
+        )
+        .is_err()
+    );
+
+    // An independently re-encrypted copy with a new outer ID must also be
+    // deduplicated by the authenticated application ID, not the net request.
+    let binding = RoomBinding {
+        local_id: &saved.local_id,
+        wire_id,
+        device: sender_device,
+    };
+    let (provider, mut group, _) = restore_with_history(&binding, &saved).unwrap();
+    let signer = SignatureKeyPair::read(
+        provider.storage(),
+        group.own_leaf_node().unwrap().signature_key().as_slice(),
+        GROUP_CIPHERSUITE.signature_algorithm(),
+    )
+    .unwrap();
+    let mut future = query.clone();
+    future.created_at_ms = deadline;
+    let future_packet = encrypt_application(
+        &mut group,
+        &provider,
+        &signer,
+        retagged.message_id,
+        GroupApplication::Query(future),
+    )
+    .unwrap();
+    assert!(matches!(
+        receive(
+            &future_packet,
+            connection,
+            committed.version,
+            deadline,
+            receive_store
+        ),
+        Err(AslError::ExpiredMessage)
+    ));
+    let dupe =
+        encrypt_application(&mut group, &provider, &signer, retagged.message_id, message).unwrap();
+    assert!(matches!(
+        receive(
+            &dupe,
+            connection,
+            committed.version,
+            deadline,
+            receive_store
+        ),
+        Err(AslError::PolicyVersionConflict)
+    ));
+    query.message_id.0[0] ^= 0x80;
+    let next = GroupApplication::Query(query);
+    let new_packet = sender
+        .commit_mls_application_send(
+            send_store,
+            wire_id,
+            saved.version,
+            next.clone(),
+            directories,
+            now(),
+        )
+        .unwrap();
+    assert_eq!(
+        receive(
+            &new_packet,
+            connection,
+            committed.version,
+            deadline,
+            receive_store
+        )
+        .unwrap(),
+        next
+    );
+    assert_eq!(journal_count(), 2);
+    packet
 }
 
 #[test]

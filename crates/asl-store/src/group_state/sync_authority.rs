@@ -246,7 +246,7 @@ impl Store {
     }
 }
 
-fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslError> {
+pub(super) fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslError> {
     if members.len() > MAX_GROUP_MEMBERS {
         return Err(AslError::QuotaExceeded);
     }
@@ -260,7 +260,7 @@ fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslErro
     Ok(ids)
 }
 
-fn room_version(
+pub(super) fn room_version(
     connection: &Connection,
     wire_id: Hash32,
     creator: &PeerId,

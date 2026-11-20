@@ -1,6 +1,7 @@
 //! Core boundary for attested MLS rooms. None of these operations activates
 //! a room, enables a transport or grants access to files.
 
+mod application;
 mod directories;
 mod incoming;
 mod network;
@@ -8,6 +9,7 @@ mod outgoing;
 mod removal;
 mod sync;
 
+pub use application::MlsApplicationReceive;
 pub(super) use directories::GroupDirectoryCache;
 pub(super) use network::MlsJoinAttempts;
 pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};
@@ -301,25 +303,27 @@ impl VerifiedRoster {
         &self,
         resolver: &mut dyn IdentityResolver,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<u64, AslError> {
+        let mut expires_at = u64::MAX;
         for (&agent, directory) in &self.directories {
             let record = &directory.signed().record;
             let RecordPayload::DeviceDirectory(devices) = &record.payload else {
                 return Err(AslError::InvalidIdentity);
             };
-            if now_ms >= record.expires_at_ms
-                || devices
-                    .devices
-                    .iter()
-                    .any(|cert| now_ms >= cert.expires_at_ms)
-            {
+            expires_at = devices
+                .devices
+                .iter()
+                .fold(expires_at.min(record.expires_at_ms), |deadline, cert| {
+                    deadline.min(cert.expires_at_ms)
+                });
+            if now_ms >= expires_at {
                 return Err(AslError::ExpiredMessage);
             }
             if resolve_active(agent, now_ms, resolver)? != directory.registry_state {
                 return Err(AslError::InvalidIdentity);
             }
         }
-        Ok(())
+        Ok(expires_at)
     }
 }
 

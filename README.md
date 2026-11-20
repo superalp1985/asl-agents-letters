@@ -60,7 +60,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows Core/Net 的回环群子流默认关闭；本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备。现有成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。重新入群需要原创建者的新邀请与本机重新审批，保留本机房间 ID，不复用旧密钥状态。同步和重入都不会激活 `needs_sync` 房间或授予文件权限。公网群组、GUI 审批和群应用投递尚未开放。[启用方法与验证范围](docs/group-rooms.md)
+**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows Core/Net 的回环群子流默认关闭；本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备。现有成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。重新入群需要原创建者的新邀请与本机重新审批，保留本机房间 ID，不复用旧密钥状态。Core 已能在同一 SQLite 事务中保存群消息密文及加解密状态，但尚未接入网络投递。房间仍为 `needs_sync`，不会授予文件权限；公网群组和 GUI 审批尚未开放。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -167,7 +167,7 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Loopback-only group networking in Windows Core and Net is off by default. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and removal of a specified device by the creator. Existing members can catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. Rejoining requires a fresh invitation from the original creator and new local approval. It keeps the local room ID without reusing old MLS key state. Catch-up and rejoin do not activate rooms in `needs_sync` or grant file access. Public-network groups, GUI approval, and group application delivery are not available. [Setup and test scope](docs/group-rooms.md)
+**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Loopback-only group networking in Windows Core and Net is off by default. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and removal of a specified device by the creator. Existing members can catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. Rejoining requires a fresh invitation from the original creator and new local approval. It keeps the local room ID without reusing old MLS key state. Core can save group application ciphertext and its ratchet state in one SQLite transaction, but network delivery is not wired up. Rooms remain in `needs_sync` and grant no file access. Public-network groups and GUI approval are not available. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 

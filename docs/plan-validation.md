@@ -563,3 +563,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 
 - Windows x64 / E 盘：`cargo test -p asl-groups --all-targets --locked --offline -- --test-threads=1`，12 项通过、0 失败。该包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
 - 真实 OpenMLS 夹具验证成员能获取结构化明文、不匹配的本机签名密钥和对端叶子被拒、改外层 ID 无法绕过密文重放检查、自由文本拒绝，以及移除后不能读取新消息。另验证即使底层保留了旧 epoch 的解密密钥，ASL 也拒绝原样的旧 epoch 帧。未接线 Core 收发、授权或公网，也未修改 CBOR 格式、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：Core 群应用本机事务
+
+- Windows x64 / E 盘：`asl-app`、`asl-groups`、`asl-store`、`asl-types`、`asl-net` 五包锁定离线全目标测试，533 项通过、0 失败、3 项按已有标记忽略，不重复计入由测试启动的子进程。相同五包全目标严格 Clippy 与 Rust 格式检查通过。
+- 三节点 Core 夹具使用真实 OpenMLS、DPAPI、SQLite 和合成链证明。覆盖定向验证的设备错配、已移除设备、旧 epoch、过期请求、未来时间戳、旧版本、改外层 ID 的重放，以及同内层 ID 的重新加密重放。注入 SQLite 快照写入失败，确认事件与 ratchet 都回滚，原合法消息随后仍可提交。独立复核后补齐最终时点的证书、会话和链新鲜度检查。
+- 未更改 P2P CBOR、SQLite schema 或依赖锁。未接入生产群应用收发，未验收跨正式进程群应用、真实链 RPC 或公网；仍不激活房间或授予文件权限。

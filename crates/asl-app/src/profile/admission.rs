@@ -25,7 +25,9 @@ use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 #[cfg(windows)]
 mod group_rooms;
 #[cfg(windows)]
-pub use group_rooms::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom};
+pub use group_rooms::{
+    MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom,
+};
 
 pub(crate) const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
