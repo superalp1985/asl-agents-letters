@@ -41,6 +41,12 @@ pub(crate) struct PinnedDirectory {
     name: Vec<u16>,
 }
 
+impl PinnedDirectory {
+    pub(super) fn identity(&self) -> &FileIdentity {
+        &self.identity
+    }
+}
+
 pub(super) struct ExecutablePin {
     pub(super) file: File,
     pub(super) identity: FileIdentity,
@@ -295,7 +301,7 @@ impl Read for SourceFile {
     }
 }
 
-fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
+pub(super) fn pin_directory(path: &Path) -> Result<PinnedDirectory, AslError> {
     if !path.is_absolute() {
         return Err(AslError::InvalidStorageRoot);
     }

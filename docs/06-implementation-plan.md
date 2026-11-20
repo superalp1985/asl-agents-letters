@@ -671,6 +671,10 @@ T29 集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离�
 
 T30 查询任务交接切片（2026-11-20）：同进程受信任调用方可通过 `OutgoingQueryPort::submit_scoped` 提交结构化查询并取得独立的有界事件流。启动、已关联回复和终态只送达该任务的提交方，不进入原来的共享事件流。两类提交入口分别限制待处理数，共享事件阻塞不再拖住私有任务；未开放网络时，新私有提交返回离线或超时，已发起的私有任务仍会到期。原有网络授权规则不变。Windows `direct_outbound::tests` 6 项及 `asl-app` 全目标严格 Clippy 通过。尚未开放 stdio、宿主授权会话、私有 IPC 或 `asl_fetch`；不能据此宣称 MCP 已可使用。
 
+T30 Windows 私有 IPC 切片（2026-11-20）：Policy 层新增基于现有 Tokio 及 NTFS 句柄校验的命名管道。端点由用户 SID 和数据根文件标识确定；服务端固定显式 ACL、拒绝远程客户端、独占绑定，保持同一管道实例接受下一条连接。客户端使用最小权限打开、限制服务端模拟并核对已打开管道的所有者。该模块未接入 Core 启动路径；尚无宿主授权会话、工具分派、真实 stdio 或下载接入。
+
+T30 IPC 集中验证（Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo +1.100.0 test -p asl-policy --all-targets --locked --offline -- --test-threads=1` 通过 117 项，2 项外网沙箱探针按原设定忽略。新增测试覆盖真实跨进程请求/回复、连续接入、重复绑定拒绝、不同根隔离、忙碌、接入前断开及缺失根。`asl-policy` 全目标严格 Clippy、格式检查和 `git diff --check` 通过。独立源码复核未发现本切片的发布阻断项；Core 接入仍须实现宿主授权和握手/I/O 时限。没有进行跨账户、远端 Windows 客户端或 MCP 端到端验收。
+
 ```text
 cargo test -p asl-app --test mcp_contract
 ```

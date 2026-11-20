@@ -101,6 +101,10 @@ T26 本机适配器的输出形式如下，旧 `schemas/prototype/agent-decision
 
 使用 rmcp，宿主启动 `asl.exe mcp --home $env:ASL_HOME`，通过同用户私有 IPC 找到 core。标准输出只写 MCP 协议，诊断到 stderr 且脱敏。
 
+Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派生管道名，不用固定端口、工作目录或默认盘符。管道仅接受本机连接，独占绑定，一个连接断开后再接受下一个。客户端核对管道所有者，并以匿名模拟级别打开，避免服务端借用客户端身份。这里的匿名是 Windows IPC 设置，与 ASL 的链身份无关。
+
+同用户连接和所有者核对不证明对端是哪一个程序，也不替代宿主会话授权。Core 不能仅凭连接成功就接单；接入时必须先取得独立、可撤销的本机授权，设置握手和 I/O 时限，再按会话隔离任务和 Offer。权限拒绝不回退到 TCP，也不从当前目录猜测另一个数据根。
+
 固定四个工具：
 
 - `asl_query`：query、terms、audience、deadline_ms → task_id。audience 只能收窄人类既有网络授权。

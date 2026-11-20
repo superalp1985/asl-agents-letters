@@ -19,6 +19,8 @@ pub use paths::{
     AuthorizedFile, AuthorizedWriteFile, FileIdentity, SourceGrant, SourceRules, WriteGrant,
     open_authorized_source,
 };
+#[cfg(windows)]
+pub use platform::windows::local_ipc::{LocalPipeConnection, LocalPipeServer, connect_local_pipe};
 pub use platform::{protect_secret, unprotect_secret, validate_storage_root};
 pub use service::{Permit, PolicyEngine, PolicyService, ScopedPolicy};
 pub use types::*;

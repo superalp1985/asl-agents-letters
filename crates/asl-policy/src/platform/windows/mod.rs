@@ -3,6 +3,7 @@ mod dpapi;
 mod executable_acl;
 pub(crate) mod handles;
 mod job;
+pub(crate) mod local_ipc;
 pub(crate) mod reconcile_watch;
 mod volume;
 
