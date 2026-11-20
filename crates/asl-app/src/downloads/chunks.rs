@@ -140,6 +140,16 @@ impl LocalDownloads {
             .attach_source(&mut self.broker, event)
     }
 
+    pub(super) fn chunk_source(&self, peer: &PeerId, now: u64) -> Option<bool> {
+        let download = self.chunks.as_ref()?;
+        download.allowed.contains(peer).then(|| {
+            download
+                .leases
+                .get(peer)
+                .is_some_and(|lease| lease.usable && lease.expires_at_ms > now)
+        })
+    }
+
     /// Submit requests through the admitted Core sender. `false` means local
     /// backpressure: the unqueued assignments are released for the next poll.
     /// Returns completed info once. Polling may perform disk I/O.

@@ -1,9 +1,28 @@
-use asl_types::{error::AslError, protocol::DeviceCertificate};
-use rusqlite::{TransactionBehavior, params};
+use std::io;
+
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, PeerId},
+    protocol::DeviceCertificate,
+};
+use rusqlite::{ErrorCode, TransactionBehavior, params};
 
 use crate::{Store, chain::agent_text, database_error, search::direct::DirectRequester};
 
 impl Store {
+    pub(crate) fn has_registered_transfer_peer(
+        &self,
+        agent: AgentId,
+        peer: &PeerId,
+    ) -> Result<bool, AslError> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM peers p JOIN device_identities d USING(peer_id,agent_id)
+             WHERE p.peer_id=?1 AND p.agent_id=?2 AND d.revoked_at_ms IS NULL)",
+            params![bs58::encode(peer.as_bytes()).into_string(), agent_text(agent)],
+            |row| row.get(0),
+        ).map_err(database_error)
+    }
+
     /// Core supplies the revalidated session, its signed certificate, and the Ed25519
     /// key recovered from its transport PeerId. A manifest cannot replace a device.
     pub fn register_transfer_peer(
@@ -34,7 +53,7 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+            .map_err(registration_error)?;
         let current: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM identity_registry_states r JOIN agents a USING(agent_id)
              WHERE r.agent_id=?1 AND r.chain_id=?2 AND r.status='active' AND r.sequence=?3
@@ -43,7 +62,7 @@ impl Store {
             params![agent, integer(chain_id)?, integer(source.registry_sequence)?,
                 &source.controller, &source.directory_commitment],
             |r| r.get(0),
-        ).map_err(database_error)?;
+        ).map_err(registration_error)?;
         if !current {
             return Err(AslError::InvalidIdentity);
         }
@@ -56,7 +75,7 @@ impl Store {
              VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING",
             params![peer, agent, key, cbor, serial, expires, now],
         )
-        .map_err(database_error)?;
+        .map_err(registration_error)?;
         let matched = tx.execute(
             "INSERT INTO peers(peer_id,agent_id,last_seen_ms)
              SELECT peer_id,agent_id,?7 FROM device_identities
@@ -65,10 +84,20 @@ impl Store {
              ON CONFLICT(peer_id) DO UPDATE SET last_seen_ms=max(peers.last_seen_ms,excluded.last_seen_ms)
              WHERE peers.agent_id=excluded.agent_id",
             params![peer, agent, key, cbor, serial, expires, now],
-        ).map_err(database_error)?;
+        ).map_err(registration_error)?;
         if matched != 1 {
             return Err(AslError::InvalidDeviceCertificate);
         }
-        tx.commit().map_err(database_error)
+        tx.commit().map_err(registration_error)
     }
+}
+
+fn registration_error(error: rusqlite::Error) -> AslError {
+    if error
+        .sqlite_error_code()
+        .is_some_and(|code| matches!(code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
+    {
+        return io::Error::from(io::ErrorKind::WouldBlock).into();
+    }
+    database_error(error)
 }

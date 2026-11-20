@@ -12,6 +12,7 @@ use asl_types::error::AslError;
 use asl_types::manifest::CHUNK_SIZE;
 use rand::{TryRng, rngs::SysRng};
 use windows::Wdk::Storage::FileSystem::{FILE_CREATE, FILE_OPEN, FILE_OPEN_IF};
+use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows::Win32::Storage::FileSystem::{
     DELETE, FILE_DISPOSITION_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_MODE,
     FILE_SHARE_READ, FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfo, SYNCHRONIZE,
@@ -67,6 +68,27 @@ impl PinnedDirectory {
 
 pub(crate) fn pin_state(home: &Path) -> Result<PinnedDirectory, AslError> {
     pin_directory(home)?.child("state", false)
+}
+
+pub(crate) fn open_download_marker(state: &PinnedDirectory) -> Result<File, AslError> {
+    const NAME: &str = "download-worker.lock";
+    // The marker persists. Read-data access makes the zero-share handle exclusive.
+    let file = match relative_handle(
+        state.leaf(),
+        NAME,
+        Entry::File,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_MODE(0),
+        FILE_OPEN_IF,
+    ) {
+        Err(AslError::Io(e)) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32) => {
+            return Err(AslError::InvalidPolicyState);
+        }
+        result => result?,
+    };
+    state.check_file(&file, NAME)?;
+    super::check_single_link(&file)?;
+    Ok(file)
 }
 
 struct ObjectNames {

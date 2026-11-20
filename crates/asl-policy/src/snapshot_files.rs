@@ -15,7 +15,7 @@ use crate::platform::windows::handles::{PinnedDirectory, snapshot};
 #[must_use = "keep the directory pins for the lifetime of the database connection"]
 pub struct PinnedHome {
     #[cfg(windows)]
-    _state: PinnedDirectory,
+    state: PinnedDirectory,
     #[cfg(not(windows))]
     _unavailable: std::convert::Infallible,
 }
@@ -25,7 +25,37 @@ impl PinnedHome {
         #[cfg(windows)]
         {
             Ok(Self {
-                _state: snapshot::pin_state(home)?,
+                state: snapshot::pin_state(home)?,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = home;
+            Err(AslError::PlatformUnavailable)
+        }
+    }
+}
+
+/// Exclusive, cross-process ownership of the download broker for one home.
+#[must_use = "hold the owner until the download database connection is closed"]
+pub struct DownloadOwner {
+    #[cfg(windows)]
+    _marker: std::fs::File,
+    _home: PinnedHome,
+}
+
+impl DownloadOwner {
+    /// Pin the home and acquire its download marker before opening SQLite.
+    /// A sharing conflict returns `InvalidPolicyState`; dropping this guard
+    /// releases ownership without removing the marker.
+    pub fn acquire(home: &Path) -> Result<Self, AslError> {
+        #[cfg(windows)]
+        {
+            let home = PinnedHome::open(home)?;
+            let marker = snapshot::open_download_marker(&home.state)?;
+            Ok(Self {
+                _marker: marker,
+                _home: home,
             })
         }
         #[cfg(not(windows))]

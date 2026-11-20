@@ -550,17 +550,23 @@ T23 下载来源登记（2026-11-20）：本机发起的 Fetch 收到相符清�
 
 T23 大文件接收协调器（2026-11-20）：`LocalDownloads` 在本机授权任务上连接现有多来源调度器、已准入 Bulk 请求和 SQLite 持久化。一个任务最多 4 个预选来源、每来源 2 个并发块；询问模式批准绑定整个来源集合。超时、断连、出队失败或坏块会回收未完成分配，旧请求 ID 不为新分配记账；当前来源不可用时暂停该会话，仍可使用其他已获准来源。重启跳过已复验的 durable 块，只接受原来源重新提供的已验证 lease；该 lease 不写盘。完整性禁用跨恢复保留，无进度到期释放收件预留，复用 Store 的整文件校验和不覆盖发布。
 
-运行入口 `Supervisor::run_with_download_driver` 提供已准入事件、定时轮询和可感知背压的发送接口，不改变默认 `asl-core` 的行为，也不自动接受 Offer。仍待接入默认 Core 下载工作线程及 Agent 调用入口，并验收两节点从 Fetch 到落盘全程及公网重连；本轮不宣称完成 T20–T24 整体联调。
+初版运行入口 `Supervisor::run_with_download_driver` 提供已准入事件、定时轮询和可感知背压的发送接口；当时未改变默认 `asl-core`，也未自动接受 Offer。
 
 Windows x64 / Rust 1.100.0 / E 盘缓存 / `--locked --offline` 定向验收：`asl-app` 下载 13、`network_ipc` 8；`asl-store` 库 46、`transfer_resume` 19；`asl-transfer` 库 10，共 96 项通过。下载用例使用真实 NTFS 和 SQLite、模拟受准入的收发事件；另有 `asl-net --test driver_requests` 1 项真实双节点 TCP/QUIC 回环，验证控制、身份和 Bulk 关联，不传输完整文件。上述三个变更包的全目标严格 Clippy 与格式检查通过；未运行全 workspace、GUI 或公网联调。
 
 独立复核后的补强：轮询按批清理过期任务，即使任务已暂停或未进入调度；凭本机 Fetch 发起顺序识别新会话，不按 lease 到期时间排序；Core/Net 容量不足只退回未发送的块；已撤销的请求保留网络占位至响应、失败、断连或传输超时，期间不写盘、不提前补发。追加 Windows 定向验证：下载 16、传输/请求关联 7、`transfer_resume` 19，共 42 项通过；`asl-app`、`asl-store` 全目标严格 Clippy 与格式检查通过。未改 wire 格式。
 
+T23 默认下载工作线程（2026-11-20）：默认 Core 启动一个独立磁盘工作线程；每个下载 broker 在打开 SQLite 和恢复之前，通过固定的 `state` 目录句柄独占此数据根的下载标记。受信任的同进程调用方通过 `download_channel` 提交本机选择的内容 ID、收件授权、文件名和来源，或用任务编号及既有来源恢复。队列有上限，一次运行一个任务，不根据 Offer、信任分数或联系人自动发起。已登记的离线备用设备仍绑定在原授权范围内，但不阻止已就绪来源开始；从未登记的设备须先通过准入和匹配清单登记。Core 只在设备和 Agent 均匹配的准入连接上发请求。工作线程负责收件审批、写入、同步和整文件校验；同步期间不占用 SQLite 写事务，标记 durable 前重验授权。清单来源登记的短暂数据库争用按本机背压处理。断线后，仅向重新准入的原选定来源申请新 lease，不持久化凭证，不自动拨号或增加来源。
+
+集中验证（Windows x64，Rust 1.100.0，E 盘缓存，`--locked --offline`）：`asl-app` 库 204 项、`network_ipc` 8 项、`asl-store` 库 46 项、`transfer_resume` 20 项，共 278 项通过。`asl-app`、`asl-store`、`asl-policy` 全目标严格 Clippy 通过。模拟准入事件覆盖审批、离线备用来源、重连、重启后只拉缺块和禁止换来源。另有 1 项包含在 204 项中，使用两端真实 Ed25519 TCP 回环、生产 FetchGrant/manifest/块编解码、真实授权资源服务和 NTFS 发布；链准入是夹具，未覆盖生产 Core/Net 子进程的完整链路或公网续传。
+
+默认 `asl-core` 只启动工作线程、恢复并清理下载状态，不提供外部提交渠道。MCP/GUI 未接入；未完成公网穿透、自动拨号或多机实测。独立复核留下两点待补：Net 实际发送时间与本机队列时间分开记账，避免 IPC 堵塞时过早回收网络占位；为与目标 content ID 一致但结构无效的清单持久化单独冷却，不能因其他来源发来错 hash 就冷却有效内容。目前已有整文件 hash 失败冷却，但不能视为清单冷却已完成。
+
 ### T24 — Inline、PDF 与头像 helper
 
 直连小文件接收接口（2026-11-20）：本机 handler 可把**已经获准并开始**的下载任务及其已验证来源传给 `LocalDownloads::prepare_inline`，得到走原有准入通道的一次请求与只在内存中的接收凭据。`InlineDownload::receive` 按原请求、AgentId、PeerId、连接及有效期接收匹配的响应；不匹配的响应不消费凭据，匹配响应只能处理一次。复用 Store 的块校验、同步、整文件校验和不覆盖重命名。空文件不制造虚拟块；超过 32 KiB 必须使用分块路径，不回退到 inline。无独立种子文件，不根据 Offer 自动落盘。
 
-Windows x64 定向验收：`cargo +1.100.0 test -p asl-app --lib downloads:: --locked --offline -- --test-threads=1` 通过 8 项，其中 3 项新增覆盖 0 / 32 KiB、错连接或 lease 后仍能接收正确响应、重放、损坏、过期、撤权和超限；`asl-app` 全目标严格 Clippy 通过。本轮使用本机真实 SQLite、NTFS 和已登记证书的测试夹具；未跑两台机器或公网联调。默认后台尚未接入此 handler，不能视为大文件调度或公网下载验收。
+Windows x64 首轮定向验收：`cargo +1.100.0 test -p asl-app --lib downloads:: --locked --offline -- --test-threads=1` 通过 8 项，其中 3 项新增覆盖 0 / 32 KiB、错连接或 lease 后仍能接收正确响应、重放、损坏、过期、撤权和超限；`asl-app` 全目标严格 Clippy 通过。首轮使用本机真实 SQLite、NTFS 和已登记证书的测试夹具；未跑两台机器或公网联调。小文件收件随后接入 T23 默认下载工作线程。
 
 依赖 T23、T09。创建 transfer inline、app helper roles、受限头像重编码。
 

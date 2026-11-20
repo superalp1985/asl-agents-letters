@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::evidence::{TrustDimension, TrustOutcome};
-use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::PinnedHome};
+use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::DownloadOwner};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
@@ -75,17 +75,17 @@ pub struct RecoveryReport {
 pub struct DownloadBroker {
     store: Store,
     home: PathBuf,
-    _pin: PinnedHome,
+    _owner: DownloadOwner,
 }
 
 impl DownloadBroker {
     pub fn open(home: &Path) -> Result<Self, AslError> {
-        let pin = PinnedHome::open(home)?;
+        let owner = DownloadOwner::acquire(home)?;
         let store = open_store(&home.join("state").join("asl.sqlite3"))?;
         let mut broker = Self {
             store,
             home: home.to_owned(),
-            _pin: pin,
+            _owner: owner,
         };
         broker.recover_downloads(current_time_ms())?;
         Ok(broker)
@@ -422,7 +422,16 @@ impl DownloadBroker {
         }
         file.seek(SeekFrom::Start(chunk.offset))?;
         file.write_all(bytes)?;
+        // Flush without holding the shared SQLite writer. An interrupted or
+        // revoked transfer still has only an assigned block, never a durable one.
+        tx.commit().map_err(database_error)?;
         file.sync_all()?;
+        let tx = self
+            .store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        ensure_active_transfer(&tx, &row)?;
         let changed = tx
             .execute(
                 "UPDATE transfer_chunks SET state='durable',verified_at_ms=?4
@@ -604,6 +613,14 @@ impl DownloadBroker {
             sources,
             expires_at_ms: row.expires_at_ms,
         })
+    }
+
+    pub fn source_is_registered(
+        &self,
+        agent: asl_types::ids::AgentId,
+        peer: &PeerId,
+    ) -> Result<bool, AslError> {
+        self.store.has_registered_transfer_peer(agent, peer)
     }
 
     /// Recheck the persisted progress deadline before releasing an idle task.

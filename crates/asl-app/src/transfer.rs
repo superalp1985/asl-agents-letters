@@ -161,19 +161,17 @@ impl BulkResponseTracker {
         peer_id: &PeerId,
         request_id: [u8; 16],
         now_ms: u64,
-    ) -> bool {
+    ) -> Option<PendingBulkRequest> {
         self.expire(now_ms);
-        let Some(pending) = self.pending.get(&request_id) else {
-            return false;
-        };
+        let pending = self.pending.get(&request_id)?;
         if pending.connection_id != connection_id
             || pending.agent_id != agent_id
             || &pending.peer_id != peer_id
             || pending.request.request_id.0 != request_id
         {
-            return false;
+            return None;
         }
-        self.pending.remove(&request_id).is_some()
+        self.pending.remove(&request_id)
     }
 
     fn disconnect(&mut self, connection_id: [u8; 16]) {
@@ -353,9 +351,11 @@ impl TransferService {
         peer_id: &PeerId,
         request_id: [u8; 16],
         now_ms: u64,
-    ) {
+    ) -> Option<Id128> {
         self.bulk_responses
-            .fail(connection_id, agent_id, peer_id, request_id, now_ms);
+            .fail(connection_id, agent_id, peer_id, request_id, now_ms)?
+            .manifest
+            .map(|manifest| manifest.fetch_request_id)
     }
 
     pub(crate) fn prepare_fetch(
@@ -1039,27 +1039,39 @@ mod bulk_response_tests {
             .register([4; 16], &requester, request.clone(), None, 1_000)
             .unwrap();
 
-        assert!(!tracker.fail(
-            [44; 16],
-            requester.agent,
-            &requester.peer,
-            request.request_id.0,
-            1_100
-        ));
-        assert!(tracker.fail(
-            [4; 16],
-            requester.agent,
-            &requester.peer,
-            request.request_id.0,
-            1_100
-        ));
-        assert!(!tracker.fail(
-            [4; 16],
-            requester.agent,
-            &requester.peer,
-            request.request_id.0,
-            1_200
-        ));
+        assert!(
+            tracker
+                .fail(
+                    [44; 16],
+                    requester.agent,
+                    &requester.peer,
+                    request.request_id.0,
+                    1_100
+                )
+                .is_none()
+        );
+        assert!(
+            tracker
+                .fail(
+                    [4; 16],
+                    requester.agent,
+                    &requester.peer,
+                    request.request_id.0,
+                    1_100
+                )
+                .is_some()
+        );
+        assert!(
+            tracker
+                .fail(
+                    [4; 16],
+                    requester.agent,
+                    &requester.peer,
+                    request.request_id.0,
+                    1_200
+                )
+                .is_none()
+        );
 
         tracker
             .register([4; 16], &requester, make_request(15), None, 1_000)

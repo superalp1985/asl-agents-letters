@@ -73,6 +73,32 @@ impl LocalDownloads {
 }
 
 impl InlineDownload {
+    pub(super) fn failed_by(&self, event: &crate::profile::AdmittedNetworkEvent) -> bool {
+        use crate::{ipc::NetworkProtocol, profile::AdmittedNetworkEvent};
+        match event {
+            AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
+                *connection_id == self.connection
+            }
+            AdmittedNetworkEvent::RequestFailed {
+                connection_id,
+                agent_id,
+                peer_id,
+                request_id,
+                protocol: NetworkProtocol::Bulk,
+                ..
+            } => {
+                *connection_id == self.connection
+                    && *agent_id == self.agent
+                    && *peer_id == self.peer
+                    && self
+                        .expected
+                        .as_ref()
+                        .is_some_and(|request| request.request_id.0 == *request_id)
+            }
+            _ => false,
+        }
+    }
+
     /// Unrelated responses leave this ticket intact. A matching response is
     /// consumed once even when the server declines or integrity checks fail.
     pub fn receive(

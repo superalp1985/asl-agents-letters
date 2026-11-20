@@ -21,7 +21,13 @@ use crate::{VerifiedFetchManifest, paths::AppPaths, supervisor::unix_time_ms};
 
 mod chunks;
 mod inline;
+mod runtime;
 pub use inline::InlineDownload;
+pub(crate) use runtime::{DownloadBridge, WorkerRequest};
+pub use runtime::{
+    DownloadEvent, DownloadJob, DownloadPort, DownloadRuntime, DownloadSelection, DownloadSource,
+    DownloadTicket, download_channel,
+};
 
 pub enum DownloadDriverEvent<'a> {
     Network(&'a crate::profile::AdmittedNetworkEvent),
@@ -112,6 +118,28 @@ impl LocalDownloads {
     ) -> Result<DownloadInfo, AslError> {
         self.broker
             .begin_approved_download(&download_request(sources, inbox_grant, filename)?, id)
+    }
+
+    fn request_selected_download(
+        &mut self,
+        manifest: &VerifiedFetchManifest,
+        sources: &[DownloadSource],
+        inbox_grant: Id128,
+        filename: &str,
+        approval: Option<Id128>,
+    ) -> Result<DownloadStart, AslError> {
+        let mut request = download_request(&[manifest], inbox_grant, filename)?;
+        request.sources = sources
+            .iter()
+            .map(|source| source.peer_id.clone())
+            .collect();
+        match approval {
+            Some(id) => self
+                .broker
+                .begin_approved_download(&request, id)
+                .map(DownloadStart::Started),
+            None => self.broker.request_download(&request),
+        }
     }
 }
 

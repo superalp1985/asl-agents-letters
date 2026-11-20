@@ -64,7 +64,7 @@ struct PendingFetch {
 
 pub(super) struct PendingManifest {
     generation: u64,
-    fetch_request_id: Id128,
+    pub(super) fetch_request_id: Id128,
     root_task_id: Id128,
     file_size: u64,
     pub(super) lease_expires_at_ms: u64,
@@ -112,11 +112,11 @@ impl IncomingFetchTracker {
     ) -> Result<(), AslError> {
         self.expire(now_ms);
         let expires_at_ms = request_deadline(requester, now_ms);
-        if expires_at_ms <= now_ms
-            || self.pending.len() >= MAX_PENDING_FETCHES
-            || self.pending.contains_key(&request_id)
-        {
+        if expires_at_ms <= now_ms || self.pending.contains_key(&request_id) {
             return Err(AslError::PolicyDenied);
+        }
+        if self.pending.len() >= MAX_PENDING_FETCHES {
+            return Err(AslError::QuotaExceeded);
         }
         self.generation = self
             .generation

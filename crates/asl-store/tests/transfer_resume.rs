@@ -104,6 +104,30 @@ impl Fixture {
 }
 
 #[test]
+fn a_second_download_broker_cannot_recover_while_the_owner_is_live() {
+    let f = Fixture::new();
+    let bytes = b"assigned to the live broker";
+    let mut broker = f.open_with_mode(DownloadMode::Automatic);
+    let info = broker.begin_download(&f.valid_request(bytes)).unwrap();
+    broker
+        .assign_chunk(info.transfer_id.clone(), &f.peer, 0)
+        .unwrap();
+
+    assert!(matches!(
+        DownloadBroker::open(&f.home),
+        Err(AslError::InvalidPolicyState)
+    ));
+    broker
+        .write_chunk(info.transfer_id.clone(), &f.peer, 0, bytes)
+        .unwrap();
+    drop(broker);
+
+    assert!(f.home.join("state/download-worker.lock").is_file());
+    let reopened = f.open();
+    assert_eq!(reopened.info(&info.transfer_id).unwrap().state, "complete");
+}
+
+#[test]
 fn durable_chunks_survive_reopen_and_finish_after_missing_chunks_arrive() {
     let f = Fixture::new();
     let mut bytes = vec![7; 1_048_579];
@@ -233,6 +257,7 @@ fn full_hash_mismatch_releases_and_cools_the_transfer() {
         broker.complete(info.transfer_id).unwrap_err(),
         AslError::InvalidMessage
     ));
+    drop(broker);
     let mut retry = f.open_with_mode(DownloadMode::Automatic);
     assert!(matches!(
         retry.begin_download(&request),

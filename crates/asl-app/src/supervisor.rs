@@ -33,7 +33,10 @@ use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::direct_inbound::{self, DirectInbound};
 use crate::direct_outbound::DirectOutbound;
 use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
-use crate::downloads::{DownloadDriverEvent, DownloadEnqueue};
+use crate::downloads::{
+    DownloadBridge, DownloadDriverEvent, DownloadEnqueue, DownloadRuntime, WorkerRequest,
+    download_channel,
+};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
@@ -70,6 +73,7 @@ pub struct Supervisor {
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
     chain_refresh: Option<ChainRefreshWorker>,
+    home: PathBuf,
     state_database: PathBuf,
     pub(crate) pending_pairing_prompts: pairing::PendingPairingPrompts,
 }
@@ -111,6 +115,7 @@ impl Supervisor {
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
+            home: paths.dos_root().to_owned(),
             state_database: paths.state().join("asl.sqlite3"),
             pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
         };
@@ -344,7 +349,27 @@ impl Supervisor {
     }
 
     pub fn run_with_outgoing_queries(self, runtime: OutgoingQueryRuntime) -> Result<(), AslError> {
-        self.run_with_download_driver(runtime, |_, _| Ok(()))
+        let (_, downloads) = download_channel();
+        self.run_with_local_downloads(runtime, downloads)
+    }
+
+    pub fn run_with_local_downloads(
+        self,
+        queries: OutgoingQueryRuntime,
+        downloads: DownloadRuntime,
+    ) -> Result<(), AslError> {
+        let mut bridge = DownloadBridge::spawn(self.home.clone(), downloads)?;
+        self.run_with_transfer_handler(queries, move |supervisor, transfer, event| {
+            match event {
+                DownloadDriverEvent::Network(event) => bridge.forward(event),
+                DownloadDriverEvent::Tick => {
+                    bridge.poll(unix_time_ms()?, |request| {
+                        supervisor.send_download_request(transfer, request)
+                    });
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Core-local download integration point. The driver chooses what to fetch
@@ -353,7 +378,30 @@ impl Supervisor {
     pub fn run_with_download_driver(
         self,
         runtime: OutgoingQueryRuntime,
-        driver: impl FnMut(DownloadDriverEvent<'_>, &mut DownloadEnqueue<'_>) -> Result<(), AslError>,
+        mut driver: impl FnMut(
+            DownloadDriverEvent<'_>,
+            &mut DownloadEnqueue<'_>,
+        ) -> Result<(), AslError>,
+    ) -> Result<(), AslError> {
+        self.run_with_transfer_handler(runtime, |supervisor, transfer, event| {
+            driver(event, &mut |command| {
+                supervisor.try_send_admitted_network_command_with_transfer(
+                    transfer,
+                    command,
+                    unix_time_ms()?,
+                )
+            })
+        })
+    }
+
+    fn run_with_transfer_handler(
+        self,
+        runtime: OutgoingQueryRuntime,
+        driver: impl FnMut(
+            &mut Self,
+            &mut TransferService,
+            DownloadDriverEvent<'_>,
+        ) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         let mut inbound = DirectInbound::open(&self.state_database)?;
         let transfer = std::cell::RefCell::new(TransferService::open(&self.state_database)?);
@@ -381,13 +429,11 @@ impl Supervisor {
                         return Ok(());
                     };
                     outbound.borrow_mut().handle_event(&event, now_ms)?;
-                    driver.borrow_mut()(DownloadDriverEvent::Network(&event), &mut |command| {
-                        supervisor.try_send_admitted_network_command_with_transfer(
-                            &mut transfer,
-                            command,
-                            unix_time_ms()?,
-                        )
-                    })
+                    driver.borrow_mut()(
+                        supervisor,
+                        &mut transfer,
+                        DownloadDriverEvent::Network(&event),
+                    )
                 }
             },
             |observation| match observation {
@@ -402,15 +448,62 @@ impl Supervisor {
             |supervisor| {
                 supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
                 let mut transfer = transfer.borrow_mut();
-                driver.borrow_mut()(DownloadDriverEvent::Tick, &mut |command| {
-                    supervisor.try_send_admitted_network_command_with_transfer(
-                        &mut transfer,
-                        command,
-                        unix_time_ms()?,
-                    )
-                })
+                driver.borrow_mut()(supervisor, &mut transfer, DownloadDriverEvent::Tick)
             },
         )
+    }
+
+    fn send_download_request(
+        &mut self,
+        transfer: &mut TransferService,
+        request: WorkerRequest,
+    ) -> Result<Option<[u8; 16]>, AslError> {
+        let now = unix_time_ms()?;
+        let (connection_id, command) = match request {
+            WorkerRequest::Fetch { source, request } => {
+                let (_, connection_id, _) = self
+                    .admission
+                    .as_ref()
+                    .filter(|_| self.network_admission_status == NetworkAdmissionStatus::Active)
+                    .ok_or(AslError::NotFound)?
+                    .admitted_connections(now)
+                    .into_iter()
+                    .find(|(agent, _, peer)| *agent == source.agent_id && *peer == source.peer_id)
+                    .ok_or(AslError::NotFound)?;
+                (
+                    connection_id,
+                    NetworkCommand::SendControl {
+                        connection_id,
+                        request_id: request.message_id.0,
+                        request: WireFrame::FetchRequest(request),
+                    },
+                )
+            }
+            WorkerRequest::Bulk {
+                source,
+                connection_id,
+                request,
+            } => {
+                let (agent, peer) = self
+                    .admission
+                    .as_mut()
+                    .filter(|_| self.network_admission_status == NetworkAdmissionStatus::Active)
+                    .ok_or(AslError::InvalidIdentity)?
+                    .admitted_peer_identity(connection_id, now)?;
+                if (agent, peer) != (source.agent_id, source.peer_id) {
+                    return Err(AslError::InvalidIdentity);
+                }
+                (
+                    connection_id,
+                    NetworkCommand::SendBulk {
+                        connection_id,
+                        request,
+                    },
+                )
+            }
+        };
+        self.try_send_admitted_network_command_with_transfer(transfer, command, now)
+            .map(|sent| sent.then_some(connection_id))
     }
 
     fn handle_fetch_request(
@@ -616,20 +709,27 @@ impl Supervisor {
                 let requester = admission
                     .direct_requester(connection_id, agent_id)
                     .ok_or(AslError::InvalidIdentity)?;
-                transfers.expect_fetch_response(
+                let frame = WireFrame::FetchRequest(fetch.clone());
+                let command = admission.authorize_control_command(
+                    connection_id,
+                    request_id,
+                    frame,
+                    now_ms,
+                )?;
+                match transfers.expect_fetch_response(
                     connection_id,
                     &requester,
                     request_id,
                     &fetch,
                     now_ms,
-                )?;
-                let sent = NetworkCommand::SendControl {
-                    connection_id,
-                    request_id,
-                    request: WireFrame::FetchRequest(fetch),
+                ) {
+                    Ok(()) => {}
+                    Err(AslError::QuotaExceeded) => return Ok(false),
+                    Err(error) => return Err(error),
                 }
-                .into_ipc()
-                .and_then(|message| self.net.try_send(&message));
+                let sent = command
+                    .into_ipc()
+                    .and_then(|message| self.net.try_send(&message));
                 if !matches!(sent, Ok(true)) {
                     transfers.fail_control_request(
                         connection_id,
@@ -706,18 +806,36 @@ impl Supervisor {
                 let Some(requester) = admission.direct_requester(connection_id, agent_id) else {
                     return Ok(None);
                 };
-                let Ok(Some((bulk_id, command))) = transfers.prepare_manifest_request(
+                let manifest = transfers.prepare_manifest_request(
                     admission,
                     connection_id,
                     &requester,
                     request_id,
                     &grant,
                     now_ms,
-                ) else {
-                    return Ok(None);
+                );
+                let (bulk_id, command) = match manifest {
+                    Ok(Some(request)) => request,
+                    Err(AslError::QuotaExceeded) => {
+                        return Ok(Some(fetch_failure(
+                            connection_id,
+                            requester.peer,
+                            agent_id,
+                            request_id,
+                            NetworkErrorCode::Capacity,
+                        )));
+                    }
+                    _ => return Ok(None),
                 };
                 if !enqueue(command)? {
                     transfers.cancel_bulk_request(bulk_id.0);
+                    return Ok(Some(fetch_failure(
+                        connection_id,
+                        requester.peer,
+                        agent_id,
+                        request_id,
+                        NetworkErrorCode::Capacity,
+                    )));
                 }
                 Ok(None)
             }
@@ -769,6 +887,17 @@ impl Supervisor {
                                 | AslError::ExpiredMessage
                                 | AslError::InvalidMessage,
                             ) => Ok(None),
+                            Err(AslError::Io(error))
+                                if error.kind() == std::io::ErrorKind::WouldBlock =>
+                            {
+                                Ok(Some(fetch_failure(
+                                    connection_id,
+                                    peer_id,
+                                    agent_id,
+                                    manifest.fetch_request_id.0,
+                                    NetworkErrorCode::Capacity,
+                                )))
+                            }
                             Err(error) => Err(error),
                         }
                     }
@@ -786,7 +915,21 @@ impl Supervisor {
                 protocol: NetworkProtocol::Bulk,
                 code,
             } => {
-                transfers.fail_bulk_request(connection_id, agent_id, &peer_id, request_id, now_ms);
+                if let Some(fetch_id) = transfers.fail_bulk_request(
+                    connection_id,
+                    agent_id,
+                    &peer_id,
+                    request_id,
+                    now_ms,
+                ) {
+                    return Ok(Some(fetch_failure(
+                        connection_id,
+                        peer_id,
+                        agent_id,
+                        fetch_id.0,
+                        code,
+                    )));
+                }
                 Ok(Some(AdmittedNetworkEvent::RequestFailed {
                     connection_id,
                     agent_id,
@@ -1071,6 +1214,23 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+}
+
+fn fetch_failure(
+    connection_id: [u8; 16],
+    peer_id: PeerId,
+    agent_id: AgentId,
+    request_id: [u8; 16],
+    code: NetworkErrorCode,
+) -> AdmittedNetworkEvent {
+    AdmittedNetworkEvent::RequestFailed {
+        connection_id,
+        peer_id,
+        agent_id,
+        request_id,
+        protocol: NetworkProtocol::Control,
+        code,
     }
 }
 
