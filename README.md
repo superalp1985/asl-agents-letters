@@ -60,7 +60,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 叶子凭据绑定 ASL 链身份和设备证书。SQLite v14 支持在发方一次提交新增成员、MLS 快照、提交日志和同一份待发 Welcome；重启后只能为原设备的同一请求取回 Welcome，不能重复加人。收方须先经本机同意才保存一次性 KeyPackage。房间仍为 `needs_sync`，生产群子流、Core 群权限对账、同步和群文件授权未开放。[实现与验证范围](docs/group-rooms.md)
+**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 叶子凭据绑定 ASL 链身份和设备证书。Core 已支持本机建群、校验获批邀请的 Welcome，以及重启后的只读对账。SQLite v14 提供发方 Add 与待发 Welcome 的原子存储；同一请求重试只取回原回复，不重复加人。房间仍为 `needs_sync`；发方 Core 接线、GUI 审批、群网络、同步及群文件授权尚未开放。[实现与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -167,7 +167,7 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS leaf credentials bind ASL chain identities to device certificates. SQLite v14 saves the added member, MLS snapshot, commit log and exact pending Welcome in one sender-side transaction. After restart, the store can retrieve that reply only for the original device and request; a retry cannot add the member again. On the receiving side, local consent is required before storing a single-use KeyPackage. Rooms remain in `needs_sync`; the production group substream, Core authorization reconciliation, synchronization and group file grants are not enabled. [Implementation and test scope](docs/group-rooms.md)
+**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS leaf credentials bind ASL chain identities to device certificates. Core can create a local room, validate the Welcome for an approved invite, and check stored state after a restart without activating the room. SQLite v14 provides atomic sender-side storage for an Add and its exact pending Welcome, so replaying the same request does not add the member twice. Rooms remain in `needs_sync`; sender-side Core integration, GUI approval, group networking, synchronization, and group file grants are not enabled. [Implementation and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 

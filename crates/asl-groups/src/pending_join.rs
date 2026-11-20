@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use zeroize::Zeroizing;
 
-use crate::membership::{GROUP_CIPHERSUITE, read_key_package};
+use crate::membership::{GROUP_CIPHERSUITE, read_key_package, room_leaf_capabilities};
 
 const FORMAT: &str = "ASL-MLS-PENDING-JOIN-v1";
 
@@ -92,6 +92,7 @@ pub fn prepare(
 ) -> Result<PreparedJoin, AslError> {
     let provider = OpenMlsRustCrypto::default();
     let bundle = KeyPackage::builder()
+        .leaf_node_capabilities(room_leaf_capabilities())
         .build(GROUP_CIPHERSUITE, &provider, signer, credential)
         .map_err(|_| AslError::InvalidPolicyState)?;
     let reference = bundle

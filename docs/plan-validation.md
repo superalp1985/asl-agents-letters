@@ -488,3 +488,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-store -p asl-groups --all-targets --locked --offline -- --test-threads=1` 共 123 项通过、0 失败、1 项子进程入口按标记忽略。相同两包全目标严格 Clippy 通过。
 - 独立复核后，KeyPackage 的消费标记不再随邀请 TTL 删除，提交日志使用冻结的内层尺寸上限。SQLite 验证 v13→v14 保留现有房间、存储失败全部回滚、重启后匹配原设备和原请求、移除后即使重入也不返回旧密文、过期邀请不能释放仍有效的包。
 - Windows 集成测试使用真实 OpenMLS、DPAPI 和 SQLite，验证发方 Add/Welcome 同事务落盘后重开、恢复密封状态和收方入群。链/设备准入行与 MLS 身份是测试夹具，未运行生产 Core、链 RPC、群网络、GUI 或全工作区测试。线上协议与依赖锁未改。
+
+### 2026-11-20 T31：Core 建群、入群与对账
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-store --all-targets --locked --offline -- --test-threads=1`：384 项通过、0 失败、2 项按已有标记忽略。相同三包全目标严格 Clippy、`cargo fmt --all -- --check` 与 `git diff --check` 通过。已有 `proc-macro-error2 2.0.1` 的未来兼容提示。
+- 真实 OpenMLS、DPAPI 与 SQLite 用例验证本机建群需要登记、MLS 有效但缺少创建者承诺的 Welcome 不消耗审批、有效 Welcome 单次入群、重开后只读对账、目录回退和撤销拒绝。SQLite 另验证审批提交时链状态不符不会消耗审批或留下房间，成员投影损坏时拒绝对账。
+- 独立静态复核后要求 `RequiredCapabilities` 明确声明创建者扩展，并提供同一设备的目录续期接口。实际发外部请求的绑定、续期调度与发方 Core 仍待接入。未验收公网、GUI、真实链 RPC、同步或群权限启用；使用合成链证明。外层 CBOR、SQLite schema 和依赖锁未修改。

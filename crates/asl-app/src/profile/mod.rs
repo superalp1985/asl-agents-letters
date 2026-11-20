@@ -20,6 +20,8 @@ use crate::{
 };
 
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
+#[cfg(windows)]
+pub use admission::{ApprovedMlsWelcome, ReconciledMlsRoom};
 pub use history::RecordHistory;
 pub use proof_response::serve_local_identity_proof;
 pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};

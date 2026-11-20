@@ -7,7 +7,10 @@ use asl_types::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::{MAX_SEALED_ROOM_BYTES, PendingMlsRoom, RoomVersion, insert_mls_room, sql_number};
+use super::{
+    MAX_SEALED_ROOM_BYTES, MlsMemberEvidence, PendingMlsRoom, RoomVersion, insert_mls_room,
+    recovery::require_member, sql_number,
+};
 use crate::{Store, database_error};
 
 pub(super) const INVITE_TTL_MS: u64 = 5 * 60 * 1_000;
@@ -38,7 +41,8 @@ pub struct MlsJoinedRoom<'a> {
     pub invite: &'a MlsIncomingInvite,
     pub key: MlsJoinKey,
     pub room: PendingMlsRoom<'a>,
-    pub members: &'a [PeerId],
+    pub members: &'a [MlsMemberEvidence],
+    pub chain_id: u64,
     pub expected_policy_revision: u64,
 }
 
@@ -266,19 +270,25 @@ impl Store {
         now_ms: u64,
     ) -> Result<RoomVersion, AslError> {
         let invite = join.invite;
+        let roster = join.members;
         if join.room.wire_id != invite.wire_id
             || join.room.creator != &invite.inviter_device
             || invite.base_epoch.checked_add(1) != Some(join.room.mls_epoch)
-            || join.members.len() > MAX_GROUP_MEMBERS
-            || !join.members.contains(&invite.recipient_device)
-            || !join.members.contains(&invite.inviter_device)
-            || join
-                .members
+            || roster.len() > MAX_GROUP_MEMBERS
+            || !roster.iter().any(|member| {
+                member.certificate.peer_id == invite.recipient_device
+                    && member.certificate.agent_id == invite.recipient
+            })
+            || !roster.iter().any(|member| {
+                member.certificate.peer_id == invite.inviter_device
+                    && member.certificate.agent_id == invite.inviter
+            })
+            || roster
                 .iter()
-                .map(PeerId::as_bytes)
+                .map(|member| member.certificate.peer_id.as_bytes())
                 .collect::<BTreeSet<_>>()
                 .len()
-                != join.members.len()
+                != roster.len()
         {
             return Err(AslError::InvalidPolicyState);
         }
@@ -294,6 +304,9 @@ impl Store {
             || !matches_invite(&tx, invite, now_ms)?
         {
             return Err(AslError::PolicyVersionConflict);
+        }
+        for member in roster {
+            require_member(&tx, member, join.chain_id, now_ms)?;
         }
         let consumed = tx
             .execute(
@@ -325,9 +338,10 @@ impl Store {
                  VALUES (?1,?2,?3,'active',?4)",
                 )
                 .map_err(database_error)?;
-            for member in join.members {
-                let peer = bs58::encode(member.as_bytes()).into_string();
-                let role = if member == &invite.inviter_device {
+            for member in roster {
+                let device = &member.certificate.peer_id;
+                let peer = bs58::encode(device.as_bytes()).into_string();
+                let role = if device == &invite.inviter_device {
                     "creator"
                 } else {
                     "member"

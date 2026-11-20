@@ -22,6 +22,11 @@ use crate::{
 
 use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 
+#[cfg(windows)]
+mod group_rooms;
+#[cfg(windows)]
+pub use group_rooms::{ApprovedMlsWelcome, ReconciledMlsRoom};
+
 const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
 const MAX_DHT_RECORD_OWNERS: usize = 10_000;

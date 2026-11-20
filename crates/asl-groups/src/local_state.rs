@@ -11,7 +11,7 @@ use asl_types::{
     task::GroupId,
 };
 use openmls::prelude::{GroupId as MlsGroupId, MlsGroup, OpenMlsProvider};
-use openmls_rust_crypto::OpenMlsRustCrypto;
+pub use openmls_rust_crypto::OpenMlsRustCrypto as RoomProvider;
 use serde::{Deserialize, Serialize};
 use serde_bytes::{ByteBuf, Bytes};
 use zeroize::Zeroizing;
@@ -41,7 +41,7 @@ pub fn seal(
     binding: &RoomBinding<'_>,
     revision: u64,
     group: &MlsGroup,
-    provider: &OpenMlsRustCrypto,
+    provider: &RoomProvider,
 ) -> Result<Vec<u8>, AslError> {
     if revision == 0 || group.group_id().as_slice() != binding.wire_id.as_bytes() {
         return Err(AslError::InvalidPolicyState);
@@ -90,7 +90,7 @@ pub fn seal(
 pub fn restore(
     binding: &RoomBinding<'_>,
     row: &MlsRoomSnapshot,
-) -> Result<(OpenMlsRustCrypto, MlsGroup), AslError> {
+) -> Result<(RoomProvider, MlsGroup), AslError> {
     if binding.local_id != &row.local_id
         || row.version.revision == 0
         || row.sealed_snapshot.len() > MAX_SEALED_ROOM_BYTES
@@ -122,7 +122,7 @@ pub fn restore(
     if records.len() != count {
         return Err(AslError::InvalidDatabase);
     }
-    let provider = OpenMlsRustCrypto::default();
+    let provider = RoomProvider::default();
     *provider
         .storage()
         .values

@@ -69,19 +69,36 @@ pub fn verify_group_leaf(
     resolver: &mut dyn IdentityResolver,
     now_ms: u64,
 ) -> Result<DeviceCertificate, AslError> {
-    let (signature, body) = credential_parts(leaf)?;
-    let certificate = DeviceCertificate::from_canonical_cbor(body)?;
+    let certificate = leaf_certificate(leaf)?;
     let verified = verify_record(signed_directory, certificate.agent_id, now_ms, resolver)?;
+    verify_directory_leaf(wire_room, leaf, &certificate, &verified)?;
+    history.observe(&verified)?;
+    Ok(certificate)
+}
+
+pub(super) fn leaf_certificate(leaf: &CredentialWithKey) -> Result<DeviceCertificate, AslError> {
+    let (_, body) = credential_parts(leaf)?;
+    DeviceCertificate::from_canonical_cbor(body)
+}
+
+pub(super) fn verify_directory_leaf(
+    wire_room: Hash32,
+    leaf: &CredentialWithKey,
+    certificate: &DeviceCertificate,
+    verified: &super::VerifiedRecord,
+) -> Result<(), AslError> {
     let RecordPayload::DeviceDirectory(directory) = &verified.signed().record.payload else {
         return Err(AslError::InvalidDeviceCertificate);
     };
-    if !directory.devices.contains(&certificate) {
+    if !directory.devices.contains(certificate) {
         return Err(AslError::InvalidDeviceCertificate);
     }
-    let transcript = signing_bytes(wire_room, leaf.signature_key.as_slice(), &certificate, body)?;
-    verify_root_signature(&transcript, signature, verified.registry_state.controller)?;
-    history.observe(&verified)?;
-    Ok(certificate)
+    verify_binding(
+        wire_room,
+        leaf,
+        certificate,
+        verified.registry_state.controller,
+    )
 }
 
 pub(super) fn verify_binding(

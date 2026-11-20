@@ -1,6 +1,11 @@
 //! Decode MLS objects without granting ASL room membership. Use a disposable
 //! provider for candidate processing until identity, policy and storage agree.
 
+mod origin;
+pub use origin::RoomOrigin;
+#[cfg(windows)]
+pub(crate) use origin::room_leaf_capabilities;
+
 use asl_types::{
     error::AslError,
     ids::Hash32,

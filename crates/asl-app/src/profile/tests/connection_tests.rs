@@ -19,6 +19,9 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 #[cfg(windows)]
+mod group_rooms;
+
+#[cfg(windows)]
 fn durable_directory_resolver(
     root: &AgentIdentity,
     directory: &DeviceDirectory,

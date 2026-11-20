@@ -19,6 +19,7 @@ struct ObservedRecord {
 
 /// One owner's bounded, in-memory observations. The DHT/store adapter must
 /// retain these watermarks durably rather than clearing them on record expiry.
+#[derive(Clone)]
 pub struct RecordHistory {
     agent_id: AgentId,
     records: HashMap<RecordKind, ObservedRecord>,
@@ -106,6 +107,11 @@ impl RecordHistory {
             },
         );
         Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn check(&self, verified: &VerifiedRecord) -> Result<(), AslError> {
+        self.clone().observe(verified)
     }
 
     pub(super) fn matches_directory(&self, agent: AgentId, hash: blake3::Hash) -> bool {

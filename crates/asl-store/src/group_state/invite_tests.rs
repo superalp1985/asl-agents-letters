@@ -4,7 +4,10 @@ use asl_types::{
     task::GroupId,
 };
 
-use super::{MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom, PendingMlsRoom, tests};
+use super::{
+    MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom, MlsMemberEvidence, PendingMlsRoom,
+    recovery_tests::register_evidence, tests,
+};
 
 #[test]
 fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transaction() {
@@ -16,8 +19,8 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
     let unknown = tests::test_peer(3);
     let other_inviter = tests::test_peer(4);
     let recipient_agent = AgentId([2; 32]);
-    tests::register_peer(&store, &inviter, 1);
-    tests::register_agent_peer(&store, recipient_agent, &recipient, 1);
+    let inviter_evidence = register_evidence(&store, AgentId([1; 32]), &inviter, 105_000);
+    let recipient_evidence = register_evidence(&store, recipient_agent, &recipient, 105_000);
     tests::register_agent_peer(&store, AgentId([4; 32]), &other_inviter, 1);
     let invite = MlsIncomingInvite {
         id: Id128([7; 16]),
@@ -46,9 +49,23 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
             sealed_snapshot: b"opaque room state",
         },
         members,
+        chain_id: 1,
         expected_policy_revision: revision,
     };
-    let members = [inviter.clone(), recipient.clone()];
+    let mut obsolete = register_evidence(&store, AgentId([3; 32]), &unknown, 105_000);
+    obsolete.registry_sequence += 1;
+    let bad_roster = [
+        MlsMemberEvidence {
+            certificate: inviter_evidence.certificate.clone(),
+            ..inviter_evidence
+        },
+        MlsMemberEvidence {
+            certificate: recipient_evidence.certificate.clone(),
+            ..recipient_evidence
+        },
+        obsolete,
+    ];
+    let members = [inviter_evidence, recipient_evidence];
 
     assert!(store.receive_mls_invite(&invite, 100_000).unwrap());
     assert!(!store.receive_mls_invite(&invite, 100_000).unwrap());
@@ -136,12 +153,10 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
         store.finish_mls_join(join(&members, key, 2), 100_003),
         Err(AslError::PolicyVersionConflict)
     ));
-    let bad_roster = [inviter.clone(), recipient.clone(), unknown.clone()];
-    assert!(
-        store
-            .finish_mls_join(join(&bad_roster, key, 1), 100_004)
-            .is_err()
-    );
+    assert!(matches!(
+        store.finish_mls_join(join(&bad_roster, key, 1), 100_004),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
     assert!(store.mls_room_snapshot(invite.wire_id).unwrap().is_none());
     assert!(
         store

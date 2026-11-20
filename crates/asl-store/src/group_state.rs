@@ -7,10 +7,14 @@ mod invite_tests;
 mod outgoing;
 #[cfg(test)]
 mod outgoing_tests;
+mod recovery;
+#[cfg(test)]
+mod recovery_tests;
 mod transition;
 
 pub use invite::{MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
+pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
 use asl_types::{
@@ -18,7 +22,7 @@ use asl_types::{
     ids::{Hash32, Id128, PeerId},
     task::GroupId,
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{Store, current_time_ms, database_error};
 
@@ -51,44 +55,111 @@ impl Store {
         tx.commit().map_err(database_error)
     }
 
+    /// Create a local epoch-zero room and its creator projection together.
+    /// The sealed snapshot starts at revision one, and the room stays paused.
+    pub fn create_mls_room(
+        &mut self,
+        room: PendingMlsRoom<'_>,
+        creator: &MlsMemberEvidence,
+        chain_id: u64,
+        expected_policy_revision: u64,
+        now_ms: u64,
+    ) -> Result<RoomVersion, AslError> {
+        if room.mls_epoch != 0 || room.creator != &creator.certificate.peer_id {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let expected = sql_number(expected_policy_revision)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let revision: i64 = tx
+            .query_row(
+                "SELECT revision FROM policy_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if revision != expected {
+            return Err(AslError::PolicyVersionConflict);
+        }
+
+        recovery::require_member(&tx, creator, chain_id, now_ms)?;
+        let now = sql_number(now_ms)?;
+        insert_mls_room(&tx, &room, now)?;
+        tx.execute(
+            "INSERT INTO group_members(group_id,peer_id,role,state,joined_at_ms)
+             VALUES (?1,?2,'creator','active',?3)",
+            params![
+                hex::encode(room.local_id.0.as_bytes()),
+                transition::peer_text(room.creator),
+                now,
+            ],
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
+        Ok(RoomVersion {
+            revision: 1,
+            mls_epoch: 0,
+            membership_epoch: 1,
+            policy_revision: expected_policy_revision,
+        })
+    }
+
     /// This is only a storage lookup. Core must authenticate the sealed
     /// contents and reconcile the membership projection before use.
     pub fn mls_room_snapshot(&self, wire_id: Hash32) -> Result<Option<MlsRoomSnapshot>, AslError> {
-        self.connection
-            .query_row(
-                "SELECT s.local_group_id,s.sealed_snapshot,s.revision,g.mls_epoch,g.membership_epoch,p.revision
-                 FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
-                 CROSS JOIN policy_state p WHERE s.wire_group_id=?1 AND p.singleton=1",
-                [wire_id.as_bytes().as_slice()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(database_error)?
-            .map(|(id, sealed_snapshot, revision, epoch, membership, policy)| {
+        Ok(read_mls_room_snapshot(&self.connection, wire_id, false)?.map(|(snapshot, _)| snapshot))
+    }
+}
+
+fn read_mls_room_snapshot(
+    connection: &Connection,
+    wire_id: Hash32,
+    paused_only: bool,
+) -> Result<Option<(MlsRoomSnapshot, String)>, AslError> {
+    connection
+        .query_row(
+            "SELECT s.local_group_id,s.sealed_snapshot,s.revision,g.mls_epoch,g.membership_epoch,
+                    p.revision,g.creator_peer_id
+             FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+             CROSS JOIN policy_state p WHERE s.wire_group_id=?1 AND p.singleton=1
+               AND (NOT ?2 OR g.state='needs_sync')",
+            params![wire_id.as_bytes(), paused_only],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .map(
+            |(id, sealed_snapshot, revision, epoch, membership, policy, creator)| {
                 let mut bytes = [0; 16];
                 hex::decode_to_slice(id, &mut bytes).map_err(|_| AslError::InvalidDatabase)?;
-                Ok(MlsRoomSnapshot {
-                    local_id: GroupId(Id128(bytes)),
-                    sealed_snapshot,
-                    version: RoomVersion {
-                        revision: unsigned(revision)?,
-                        mls_epoch: unsigned(epoch)?,
-                        membership_epoch: unsigned(membership)?,
-                        policy_revision: unsigned(policy)?,
+                Ok((
+                    MlsRoomSnapshot {
+                        local_id: GroupId(Id128(bytes)),
+                        sealed_snapshot,
+                        version: RoomVersion {
+                            revision: unsigned(revision)?,
+                            mls_epoch: unsigned(epoch)?,
+                            membership_epoch: unsigned(membership)?,
+                            policy_revision: unsigned(policy)?,
+                        },
                     },
-                })
-            })
-            .transpose()
-    }
+                    creator,
+                ))
+            },
+        )
+        .transpose()
 }
 
 fn insert_mls_room(
