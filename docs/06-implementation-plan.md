@@ -540,9 +540,15 @@ T24 集中验证（2026-11-19，Windows x64，Rust 1.100.0，Cargo 缓存/产物
 
 验收 mock endpoint 的超时、错误、超大响应、重定向、授权外provider；远端文本中的 URL 不产生 HTTP；本地模型必须单独获准。无真实收费服务也能用 mock 跑测试。
 
+provider 配置文件为 `state/model-providers-v1.json`，每项包含 `id`、`endpoint`、`model`、`mode`、`enabled_by_user` 和 `request_timeout_ms`；不含凭据。ID 限小写字母、数字、连字符与下划线。远端 endpoint 仅 HTTPS，本地 endpoint 仅使用明确登记的 IPv4/IPv6 loopback 字面地址；缺失注册表时保持空 provider 集。凭据以 `provider-<provider-id>.dpapi` 单独存放；远端调用必须有 key，本地端点可无 key。Core 持有网关并逐次重验与 provider ID 和本地/远端模式绑定的 `ModelInput` permit；调用失败不会降级为其他 provider。
+
 ```text
 cargo test -p asl-agent --test model_gateway
 ```
+
+T25 实施切片（2026-11-20）：新增 `asl-agent::gateway` 注册表、固定 HTTP client 和有界 OpenAI-compatible JSON 请求/响应；禁用代理、重定向、自动重试及压缩，拒绝远端 HTTP 和非 loopback 本地 endpoint。`AuthorizedPrompt` 绑定 provider 并携带 1–4 个同 provider 的 ModelInput permit；每次发请求前重验。`asl-app::Supervisor` 持有网关，`DpapiProviderCredentialSource` 按 provider ID 保存/读取独立密文，Core 可调用、本地网络子进程不接触凭据。此切片没有实现 T26 的结构化决策解析、提示词来源组装或 GUI provider 设置界面；真实远端服务未调用。
+
+T25 集中验证（2026-11-20）：Windows x64、Rust 1.100.0、E 盘构建环境，`asl-agent`、`asl-app`、`asl-policy` 三包的全部目标测试与严格 Clippy 通过；`model_gateway` 9 项通过。既有环境依赖测试仍按默认设置忽略。详见 `docs/plan-validation.md`，未运行全工作区或调用真实模型。
 
 ### T26 — 严格结构化模型决策
 

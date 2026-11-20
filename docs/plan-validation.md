@@ -445,3 +445,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - `cargo test -p asl-app --all-targets --locked --offline`：164 项单测通过；所有集成目标通过，包括 `hostile_documents` 3 项、`home_paths` 5 项、`identity` 8 项、`network_ipc` 7 项、`supervisor_ipc` 2 项及其余目标。既有 30 秒定时重扫测试 1 项按环境要求忽略。Windows AppContainer Supervisor 用例实际调用 Extractor 验证有效 PDF、拒绝无效 PDF并重编码头像。
 - `cargo clippy -p asl-app -p asl-transfer --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过。新增 `image-webp`、`lopdf`、`pdf-extract` 等依赖已锁定；Cargo 仍提示既有 `proc-macro-error2 2.0.1` 存在未来 Rust 兼容性问题。
 - 没有运行 workspace 全量测试、GUI、端到端网络文件传输、LAN/公网互通或正式发布打包；本结果只覆盖 T24 本机功能切片，不表示 T20–T24 的完整传输链路已验收。
+
+### 2026-11-20 T25：固定模型网关
+
+- Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-agent -p asl-app -p asl-policy --all-targets --locked --offline` 与相同包范围的 `cargo clippy ... -- -D warnings` 通过。`model_gateway` 9 项、应用单测 165 项和 NTFS 路径边界 22 项通过；既有 30 秒重扫和两个外部网络探针按默认设置忽略。
+- 本机 mock HTTP 测试覆盖超时、HTTP 错误、响应限长、禁止跳转、未授权 provider、提示词 URL 不触发额外请求、授权撤销后拒发以及同 ID 的本机/远端模式错配。独立的 Windows DPAPI 凭据往返测试也通过。
+- 未调用真实模型服务或验证模型质量，未跑全工作区，未接入自主决策、GUI 或宿主工具。线上 CBOR 不变。

@@ -3,17 +3,28 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asl_agent::gateway::{
+    AuthorizedPrompt, HttpModelGateway, ModelGateway, ModelGatewayError, ModelText,
+    ProviderRegistryV1,
+};
 use asl_net::transport::TransportKind;
-use asl_policy::sandbox::{
-    BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
+use asl_policy::{
+    PolicyService,
+    sandbox::{
+        BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
+    },
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
+    task::ProviderId,
 };
 use rand::{TryRng, rngs::SysRng};
 
@@ -32,6 +43,7 @@ use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::network_settings::NetworkSettingsV1;
 use crate::paths::AppPaths;
 use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
+use crate::providers::DpapiProviderCredentialSource;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,6 +57,7 @@ pub struct Supervisor {
     device_peer_id: PeerId,
     libraries: LocalLibraries,
     launcher: SandboxLauncher,
+    model_gateway: HttpModelGateway,
     net: NetRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
@@ -64,6 +77,13 @@ impl Supervisor {
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
         let network_settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let providers = ProviderRegistryV1::load(&paths.model_provider_configuration())
+            .map_err(|_| AslError::InvalidIdentity)?;
+        let model_credentials = Arc::new(DpapiProviderCredentialSource::new(
+            paths.provider_credentials().to_path_buf(),
+        ));
+        let model_gateway = HttpModelGateway::new(providers, model_credentials)
+            .map_err(|_| AslError::InvalidIdentity)?;
         let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
         let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
         let device_peer_id = device_identity.peer_id();
@@ -76,6 +96,7 @@ impl Supervisor {
             device_peer_id,
             libraries,
             launcher,
+            model_gateway,
             net,
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
@@ -136,6 +157,18 @@ impl Supervisor {
 
     pub fn agent_id(&self) -> AgentId {
         self.agent_identity.agent_id()
+    }
+
+    pub async fn complete_model(
+        &self,
+        provider_id: &ProviderId,
+        prompt: AuthorizedPrompt,
+        policy: &(dyn PolicyService + Sync),
+        now_ms: u64,
+    ) -> Result<ModelText, ModelGatewayError> {
+        self.model_gateway
+            .complete(provider_id, prompt, policy, now_ms)
+            .await
     }
 
     pub fn network_admission_status(&self) -> NetworkAdmissionStatus {

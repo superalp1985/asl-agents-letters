@@ -10,4 +10,5 @@ pub mod network_identity;
 pub mod network_settings;
 pub mod paths;
 pub mod profile;
+pub mod providers;
 pub mod supervisor;

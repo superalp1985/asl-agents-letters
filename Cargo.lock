@@ -917,9 +917,15 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 name = "asl-agent"
 version = "0.1.0"
 dependencies = [
+ "asl-policy",
  "asl-types",
  "libp2p-identity",
  "rand 0.10.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -931,6 +937,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-eth",
  "alloy-trie",
+ "asl-agent",
  "asl-net",
  "asl-policy",
  "asl-store",

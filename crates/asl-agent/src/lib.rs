@@ -1,6 +1,7 @@
 //! Bounded autonomous task state machine.
 
 mod conversation;
+pub mod gateway;
 mod query;
 
 pub use conversation::{

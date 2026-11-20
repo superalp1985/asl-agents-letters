@@ -37,6 +37,14 @@ fn creates_storage_layout_on_ntfs() {
     assert!(paths.root().starts_with(base.canonicalize().unwrap()));
     assert_eq!(paths.state(), paths.root().join("state"));
     assert_eq!(paths.identity(), paths.root().join("identity"));
+    assert_eq!(
+        paths.provider_credentials(),
+        paths.root().join("credentials")
+    );
+    assert_eq!(
+        paths.model_provider_configuration(),
+        paths.state().join("model-providers-v1.json")
+    );
     assert_eq!(paths.snapshots(), paths.root().join("snapshots"));
     assert_eq!(paths.incoming(), paths.root().join("incoming"));
     assert_eq!(paths.logs(), paths.root().join("logs"));

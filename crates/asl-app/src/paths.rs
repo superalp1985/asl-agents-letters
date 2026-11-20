@@ -9,6 +9,7 @@ pub struct AppPaths {
     dos_root: PathBuf,
     state: PathBuf,
     identity: PathBuf,
+    provider_credentials: PathBuf,
     snapshots: PathBuf,
     incoming: PathBuf,
     logs: PathBuf,
@@ -40,6 +41,7 @@ impl AppPaths {
 
         let state = create_child(&root, "state")?;
         let identity = create_child(&root, "identity")?;
+        let provider_credentials = create_child(&root, "credentials")?;
         let snapshots = create_child(&root, "snapshots")?;
         let incoming = create_child(&root, "incoming")?;
         let logs = create_child(&root, "logs")?;
@@ -49,6 +51,7 @@ impl AppPaths {
             dos_root,
             state,
             identity,
+            provider_credentials,
             snapshots,
             incoming,
             logs,
@@ -89,6 +92,14 @@ impl AppPaths {
 
     pub fn network_settings_configuration(&self) -> PathBuf {
         self.state.join("network-settings-v1.json")
+    }
+
+    pub fn model_provider_configuration(&self) -> PathBuf {
+        self.state.join("model-providers-v1.json")
+    }
+
+    pub fn provider_credentials(&self) -> &Path {
+        &self.provider_credentials
     }
 
     pub fn snapshots(&self) -> &Path {

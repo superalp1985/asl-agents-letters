@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asl-agent = { path = "../asl-agent" }
 asl-policy = { path = "../asl-policy" }
 asl-net = { path = "../asl-net" }
 asl-types = { path = "../asl-types" }
