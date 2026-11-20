@@ -7,7 +7,7 @@ use asl_net::codec::{BulkRequest, BulkResponse};
 use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Id128, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{Hello, IdentityProof, PairingExchange, PairingInvite, WireFrame},
     record::{RecordKind, RecordPayload, decode_record},
 };
@@ -996,6 +996,41 @@ impl CoreAdmission {
         Ok((agent_id, peer_id))
     }
 
+    /// Authenticates a group leaf against the exact certificate from this
+    /// connection's verified hello. This does not establish room membership.
+    pub fn verify_admitted_group_leaf(
+        &mut self,
+        connection_id: [u8; 16],
+        wire_room: Hash32,
+        leaf: &openmls::prelude::CredentialWithKey,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let agent = self.require_agent(connection_id, now_ms)?;
+        let peer = self
+            .peers
+            .get(&connection_id)
+            .ok_or(AslError::InvalidIdentity)?;
+        let hello = peer
+            .remote_hello
+            .as_ref()
+            .ok_or(AslError::InvalidDeviceCertificate)?;
+        let (registry, _) = peer
+            .session
+            .admission_facts()
+            .ok_or(AslError::InvalidIdentity)?;
+        if hello.device_certificate.agent_id != agent
+            || &hello.device_certificate.peer_id != peer.session.peer_id()
+        {
+            return Err(AslError::InvalidDeviceCertificate);
+        }
+        super::group_credential::verify_binding(
+            wire_room,
+            leaf,
+            &hello.device_certificate,
+            registry.controller,
+        )
+    }
+
     pub(crate) fn register_manifest_source(
         &mut self,
         store: &mut asl_store::Store,
@@ -1114,7 +1149,7 @@ impl CoreAdmission {
     }
 }
 
-fn transport_ed25519_key(peer: &PeerId) -> Result<[u8; 32], AslError> {
+pub(super) fn transport_ed25519_key(peer: &PeerId) -> Result<[u8; 32], AslError> {
     let invalid = || AslError::InvalidDeviceCertificate;
     let transport = libp2p_identity::PeerId::from_bytes(peer.as_bytes()).map_err(|_| invalid())?;
     if transport.as_ref().code() != 0 {

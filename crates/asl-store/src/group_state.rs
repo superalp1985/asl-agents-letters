@@ -1,5 +1,9 @@
-//! Local storage for a room while its MLS state is being established. A saved
-//! snapshot is not a membership assertion or a file grant.
+//! Durable MLS state and member projection. A saved room does not authorize
+//! access until Core reconciles it with live chain and policy state.
+
+mod transition;
+
+pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
 use asl_types::{
     error::AslError,
@@ -17,13 +21,14 @@ pub struct PendingMlsRoom<'a> {
     pub wire_id: Hash32,
     pub creator: &'a PeerId,
     pub local_name: &'a str,
+    pub mls_epoch: u64,
     pub sealed_snapshot: &'a [u8],
 }
 
 pub struct MlsRoomSnapshot {
     pub local_id: GroupId,
     pub sealed_snapshot: Vec<u8>,
-    pub revision: u64,
+    pub version: RoomVersion,
 }
 
 impl Store {
@@ -45,9 +50,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         tx.execute(
-            "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,state,created_at_ms,updated_at_ms)
-             VALUES (?1,?2,?3,'needs_sync',?4,?4)",
-            params![local_id, creator, room.local_name, now],
+            "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,mls_epoch,state,created_at_ms,updated_at_ms)
+             VALUES (?1,?2,?3,?4,'needs_sync',?5,?5)",
+            params![local_id, creator, room.local_name, sql_number(room.mls_epoch)?, now],
         )
         .map_err(database_error)?;
         tx.execute(
@@ -64,30 +69,47 @@ impl Store {
     pub fn mls_room_snapshot(&self, wire_id: Hash32) -> Result<Option<MlsRoomSnapshot>, AslError> {
         self.connection
             .query_row(
-                "SELECT local_group_id,sealed_snapshot,revision FROM mls_room_states
-                 WHERE wire_group_id=?1",
+                "SELECT s.local_group_id,s.sealed_snapshot,s.revision,g.mls_epoch,g.membership_epoch,p.revision
+                 FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+                 CROSS JOIN policy_state p WHERE s.wire_group_id=?1 AND p.singleton=1",
                 [wire_id.as_bytes().as_slice()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
             .optional()
             .map_err(database_error)?
-            .map(|(id, sealed_snapshot, revision)| {
+            .map(|(id, sealed_snapshot, revision, epoch, membership, policy)| {
                 let mut bytes = [0; 16];
                 hex::decode_to_slice(id, &mut bytes).map_err(|_| AslError::InvalidDatabase)?;
                 Ok(MlsRoomSnapshot {
                     local_id: GroupId(Id128(bytes)),
                     sealed_snapshot,
-                    revision: u64::try_from(revision).map_err(|_| AslError::InvalidDatabase)?,
+                    version: RoomVersion {
+                        revision: unsigned(revision)?,
+                        mls_epoch: unsigned(epoch)?,
+                        membership_epoch: unsigned(membership)?,
+                        policy_revision: unsigned(policy)?,
+                    },
                 })
             })
             .transpose()
     }
+}
+
+fn sql_number(value: u64) -> Result<i64, AslError> {
+    i64::try_from(value).map_err(|_| AslError::InvalidPolicyState)
+}
+
+fn unsigned(value: i64) -> Result<u64, AslError> {
+    u64::try_from(value).map_err(|_| AslError::InvalidDatabase)
 }
 
 #[cfg(test)]
@@ -95,25 +117,27 @@ mod tests {
     use super::*;
     use asl_types::ids::AgentId;
 
-    #[test]
-    fn room_mapping_reopens_without_granting_membership_or_rebinding_ids() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("rooms.sqlite3");
-        let mut store = crate::open_store(&path).unwrap();
+    fn test_peer(seed: u8) -> PeerId {
+        let key = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
+        PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap()
+    }
+
+    fn register_peer(store: &Store, peer: &PeerId, serial: i64) {
         let agent = AgentId([1; 32]);
         let agent_text = bs58::encode(agent.0).into_string();
-        let key = libp2p_identity::Keypair::ed25519_from_bytes([2; 32]).unwrap();
-        let peer = PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap();
         let peer_text = bs58::encode(peer.as_bytes()).into_string();
         store
             .connection
-            .execute("INSERT INTO agents(agent_id) VALUES (?1)", [&agent_text])
+            .execute(
+                "INSERT OR IGNORE INTO agents(agent_id) VALUES (?1)",
+                [&agent_text],
+            )
             .unwrap();
         store
             .connection
             .execute(
-                "INSERT INTO device_identities VALUES (?1,?2,printf('%064x',0),X'',1,1,NULL,0)",
-                params![peer_text, agent_text],
+                "INSERT INTO device_identities VALUES (?1,?2,printf('%064x',0),X'',?3,1,NULL,0)",
+                params![peer_text, agent_text, serial],
             )
             .unwrap();
         store
@@ -123,6 +147,15 @@ mod tests {
                 params![peer_text, agent_text],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn room_mapping_reopens_without_granting_membership_or_rebinding_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rooms.sqlite3");
+        let mut store = crate::open_store(&path).unwrap();
+        let peer = test_peer(2);
+        register_peer(&store, &peer, 1);
         let first = GroupId(Id128([3; 16]));
         let second = GroupId(Id128([4; 16]));
         let wire_a = Hash32([3; 32]);
@@ -134,6 +167,7 @@ mod tests {
                 wire_id,
                 creator: &peer,
                 local_name: "Local label",
+                mls_epoch: 0,
                 sealed_snapshot: b"test opaque snapshot",
             })
         };
@@ -148,7 +182,7 @@ mod tests {
         for (id, wire) in [(first, wire_a), (second, wire_b)] {
             let entry = store.mls_room_snapshot(wire).unwrap().unwrap();
             assert_eq!(entry.local_id, id);
-            assert_eq!(entry.revision, 1);
+            assert_eq!(entry.version.revision, 1);
             assert_eq!(entry.sealed_snapshot, b"test opaque snapshot");
         }
         let count = |sql| {
@@ -163,5 +197,135 @@ mod tests {
         );
         assert_eq!(count("SELECT COUNT(*) FROM group_members"), 0);
         assert_eq!(store.policy_revision().unwrap(), 1);
+    }
+
+    #[test]
+    fn paused_room_commits_snapshot_roster_and_authenticated_replay_keys_together() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rooms.sqlite3");
+        let mut store = crate::open_store(&path).unwrap();
+        let creator = test_peer(1);
+        let member = test_peer(2);
+        let unknown = test_peer(3);
+        register_peer(&store, &creator, 1);
+        register_peer(&store, &member, 2);
+        let local_id = GroupId(Id128([4; 16]));
+        let wire_id = Hash32([9; 32]);
+        store
+            .stage_mls_room(PendingMlsRoom {
+                local_id: &local_id,
+                wire_id,
+                creator: &creator,
+                local_name: "Paused",
+                mls_epoch: 4,
+                sealed_snapshot: b"sealed initial",
+            })
+            .unwrap();
+        let base = store.mls_room_snapshot(wire_id).unwrap().unwrap().version;
+        let members = [creator.clone(), member.clone()];
+        let update = |expected, mls_epoch, members, sealed_snapshot, event| MlsRoomUpdate {
+            local_id: &local_id,
+            wire_id,
+            expected,
+            mls_epoch,
+            sealed_snapshot,
+            members,
+            event,
+        };
+        let initial = store
+            .commit_mls_room_candidate(update(base, 4, &members, b"projected", None))
+            .unwrap();
+        let id = Id128([2; 16]);
+        let event = |kind, ciphertext| {
+            Some(MlsJournalEntry {
+                sender: &creator,
+                kind,
+                ciphertext,
+            })
+        };
+        let application = store
+            .commit_mls_room_candidate(update(
+                initial,
+                4,
+                &members,
+                b"new ratchet",
+                event(MlsJournalKind::Application(id), b"ciphertext"),
+            ))
+            .unwrap();
+        assert_eq!(application.revision, initial.revision + 1);
+        assert_eq!(application.mls_epoch, initial.mls_epoch);
+        assert!(matches!(
+            store.commit_mls_room_candidate(update(
+                application,
+                4,
+                &members,
+                b"replay",
+                event(
+                    MlsJournalKind::Application(id),
+                    b"fresh ciphertext for the same inner ID"
+                ),
+            )),
+            Err(AslError::PolicyVersionConflict)
+        ));
+        let bogus = [creator.clone(), unknown];
+        let remaining = [creator.clone()];
+        let commit = || event(MlsJournalKind::Commit, b"commit ciphertext");
+        assert!(
+            store
+                .commit_mls_room_candidate(update(
+                    application,
+                    5,
+                    &bogus,
+                    b"invalid roster",
+                    commit(),
+                ))
+                .is_err(),
+            "missing peer foreign key must unwind the journal and roster changes"
+        );
+        let unmodified = store.mls_room_snapshot(wire_id).unwrap().unwrap();
+        assert_eq!(unmodified.version, application);
+        assert_eq!(unmodified.sealed_snapshot, b"new ratchet");
+        let next = store
+            .commit_mls_room_candidate(update(application, 5, &remaining, b"new epoch", commit()))
+            .unwrap();
+        assert!(matches!(
+            store
+                .commit_mls_room_candidate(update(application, 5, &remaining, b"stale", commit(),)),
+            Err(AslError::PolicyVersionConflict)
+        ));
+        drop(store);
+
+        let store = crate::open_store(&path).unwrap();
+        let room = store.mls_room_snapshot(wire_id).unwrap().unwrap();
+        assert_eq!(
+            room.version,
+            RoomVersion {
+                revision: 4,
+                mls_epoch: 5,
+                membership_epoch: 1,
+                policy_revision: 1
+            }
+        );
+        assert_eq!(room.version, next);
+        assert_eq!(room.sealed_snapshot, b"new epoch");
+        let count = |sql| {
+            store
+                .connection
+                .query_row(sql, [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM group_events"), 2);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM group_members WHERE state='active'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM group_members WHERE state='removed'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM asl_groups WHERE state='active'"),
+            0
+        );
     }
 }

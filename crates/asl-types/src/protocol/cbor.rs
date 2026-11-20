@@ -392,6 +392,11 @@ pub(crate) fn device_certificate_value(value: &DeviceCertificate) -> Value {
 }
 
 impl DeviceCertificate {
+    /// Decode the canonical signed certificate, without verifying its signature.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, AslError> {
+        device_certificate(decode_canonical(bytes)?)
+    }
+
     /// The signed certificate object as nested in a v1 hello or device directory.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, AslError> {
         let value = device_certificate_value(self);

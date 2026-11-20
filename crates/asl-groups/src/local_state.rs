@@ -92,7 +92,7 @@ pub fn restore(
     row: &MlsRoomSnapshot,
 ) -> Result<(OpenMlsRustCrypto, MlsGroup), AslError> {
     if binding.local_id != &row.local_id
-        || row.revision == 0
+        || row.version.revision == 0
         || row.sealed_snapshot.len() > MAX_SEALED_ROOM_BYTES
     {
         return Err(AslError::InvalidDatabase);
@@ -108,7 +108,8 @@ pub fn restore(
         || snapshot.room != row.local_id
         || snapshot.wire != binding.wire_id
         || snapshot.device.as_ref() != binding.device.as_bytes()
-        || snapshot.revision != row.revision
+        || snapshot.revision != row.version.revision
+        || snapshot.epoch != row.version.mls_epoch
     {
         return Err(AslError::InvalidDatabase);
     }

@@ -509,6 +509,17 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     let remote_device = DeviceIdentity::generate().unwrap();
     let local_cert = certificate(&local_root, &local_device.peer_id(), 1);
     let remote_cert = certificate(&local_root, &remote_device.peer_id(), 2);
+    let room = Hash32([72; 32]);
+    let (_, remote_leaf) = super::super::group_credential::issue_group_credential(
+        &local_root,
+        room,
+        &remote_cert,
+        NOW,
+    )
+    .unwrap();
+    let (_, different_device_leaf) =
+        super::super::group_credential::issue_group_credential(&local_root, room, &local_cert, NOW)
+            .unwrap();
     let local_directory = directory(
         &local_root,
         7,
@@ -722,6 +733,11 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     assert!(queued.events.is_empty());
     assert!(
         admission
+            .verify_admitted_group_leaf(connection_id, room, &remote_leaf, NOW)
+            .is_err()
+    );
+    assert!(
+        admission
             .authorize_control_command(
                 connection_id,
                 [102; 16],
@@ -736,6 +752,15 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
     );
     std::thread::sleep(Duration::from_millis(510));
     let admitted = admission.poll(NOW);
+    admission
+        .verify_admitted_group_leaf(connection_id, room, &remote_leaf, NOW)
+        .unwrap();
+    assert!(
+        admission
+            .verify_admitted_group_leaf(connection_id, room, &different_device_leaf, NOW)
+            .is_err(),
+        "a sibling device's leaf is not valid for this authenticated connection"
+    );
     assert_eq!(
         admitted.events,
         vec![AdmittedNetworkEvent::PeerAdmitted {

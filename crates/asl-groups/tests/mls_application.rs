@@ -119,7 +119,7 @@ fn roundtrip_state(
     group: &MlsGroup,
 ) -> (OpenMlsRustCrypto, MlsGroup) {
     use asl_groups::local_state::{RoomBinding, restore, seal};
-    use asl_store::group_state::MlsRoomSnapshot;
+    use asl_store::group_state::{MlsRoomSnapshot, RoomVersion};
     use asl_types::{
         ids::{Hash32, Id128, PeerId},
         task::GroupId,
@@ -138,10 +138,18 @@ fn roundtrip_state(
     let mut row = MlsRoomSnapshot {
         local_id: local.clone(),
         sealed_snapshot: sealed,
-        revision: 2,
+        version: RoomVersion {
+            revision: 2,
+            mls_epoch: group.epoch().as_u64(),
+            membership_epoch: 1,
+            policy_revision: 1,
+        },
     };
     assert!(restore(&binding, &row).is_err(), "wrong persisted revision");
-    row.revision = 1;
+    row.version.revision = 1;
+    row.version.mls_epoch += 1;
+    assert!(restore(&binding, &row).is_err(), "wrong persisted epoch");
+    row.version.mls_epoch -= 1;
     let wrong_binding = RoomBinding {
         wire_id: Hash32([9; 32]),
         ..binding

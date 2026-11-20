@@ -1,4 +1,5 @@
 mod admission;
+pub mod group_credential;
 mod history;
 mod proof_response;
 mod publisher;

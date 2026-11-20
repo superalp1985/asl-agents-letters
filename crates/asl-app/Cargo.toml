@@ -32,6 +32,9 @@ reqwest.workspace = true
 tokio.workspace = true
 toml_edit = { version = "=0.25.19", default-features = false, features = ["parse", "serde"] }
 pdf-extract = "=0.12.1"
+openmls.workspace = true
+openmls_basic_credential = "=0.6.0"
+curve25519-dalek = { version = "=4.1.3", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 rmcp.workspace = true
@@ -43,3 +46,4 @@ eframe.workspace = true
 rmcp.workspace = true
 rusqlite.workspace = true
 bs58.workspace = true
+openmls_rust_crypto = "=0.6.0"

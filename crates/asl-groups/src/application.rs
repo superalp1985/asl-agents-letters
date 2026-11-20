@@ -1,5 +1,6 @@
 use asl_types::{
     error::AslError,
+    ids::Id128,
     protocol::{Answer, Offer, Query, WireFrame, decode_control, encode_control},
 };
 
@@ -12,6 +13,14 @@ pub enum GroupApplication {
 }
 
 impl GroupApplication {
+    pub fn message_id(&self) -> Id128 {
+        match self {
+            Self::Query(query) => query.message_id,
+            Self::Answer(answer) => answer.message_id,
+            Self::Offer(offer) => offer.message_id,
+        }
+    }
+
     pub fn decode(plaintext: &[u8]) -> Result<Self, AslError> {
         match decode_control(plaintext)? {
             WireFrame::Query(query) => Ok(Self::Query(query)),

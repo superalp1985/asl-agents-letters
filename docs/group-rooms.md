@@ -14,10 +14,21 @@ SQLite v12 已支持在同一事务创建 `needs_sync` 房间与 MLS 状态记�
 
 Windows 本机适配复用 OpenMLS 的内存存储与现有 DPAPI，密封快照绑定本机房间 ID、完整线上 ID、当前设备、版本与 MLS epoch。恢复会检查绑定和 OpenMLS 组状态；快照不属于身份迁移包。SQLite 持久化与 DPAPI 恢复各有定向测试，真实 OpenMLS 夹具用恢复后的接收方处理应用消息及移除提交。Core 尚未调用这些接口，也没有恢复或激活群权限。
 
+## 已实现：MLS 身份与候选事务
+
+MLS 1.0 使用 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。Core 带独立随机 MLS 签名密钥，严禁把传输私钥作为 MLS 签名密钥使用。ASL BasicCredential 内容为 `signature65 || canonical_device_certificate_cbor`；根签名的预映像是 `ASL-MLS-LEAF-v1\0 || wire_group_id[32] || mls_signing_public_key[32] || canonical_device_certificate_cbor`。检查群 ID、公钥编码和当前 ASL 证书。通过已有链解析器核对活动身份根、已验证设备目录和证书有效期；直接来源还须匹配当前认证连接中精确的 Hello 证书。同 Agent 的其他设备、过期/被替换证书和其他房间均不可复用该叶子。签名绑定只证明身份根授权该公钥；MLS 自身仍须验证该叶子或消息的签名和密钥持有关系，链证据的新鲜度沿用现有解析器规则。
+
+SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、成员授权 epoch 和全局权限版本，一起提交候选快照、成员投影和群事件。应用消息用群 ID、认证发送设备和 MLS 明文的消息 ID 去重，不信任外层消息 ID；提交事件用群 ID、基础 epoch 和已验证 MLS 数据去重。更新 ratchet 不增加成员授权 epoch，候选成员变化也不会使本机房间从 `needs_sync` 切为 `active`；后续只有实际授权成员或可用状态变化才推进成员授权 epoch 及全局权限版本。事件写入 7 天期限，定时清理待接入。生产 Core 仍需在提交之前重新核对本机权限与链证据，提交失败时丢弃候选，成功后才允许交付明文或排队发送。
+
 ## 待实现：生产权限与投递
 
 - OpenMLS 内部显式使用同一 32 字节，而不是使用库的默认 ID。仅在本机创建房间或收到已批准并验证的 Welcome 后建立映射；发现未知线上 ID 不构成授权。
-- 使用独立 MLS 签名密钥，不能复用交给 Net 的传输私钥。MLS 签名公钥必须有受当前链状态约束的 AgentId、PeerId、设备证书绑定；加入、同步和应用消息都要核对相应证书与成员状态。实时分发仅面向当前获准接收的设备。移除与迁移不会复制旧 ratchet，也不会将群成员升级为联系人。
-- `membership_epoch` 只随授权成员变化前进，独立于 MLS `mls_epoch`。从提交后的 MLS 叶子投影 SQL 成员；权限、撤销、重放状态与新 ratchet 一起在同一 `asl.sqlite3` 事务提交。先处理本机与 MLS 双方校验，持久提交后才可发布成员视图、交付明文或发送新密文。事务失败时丢弃本次变更后的内存群状态并重载；重启发现投影不一致时暂停群权限并显示 `needs_sync`。
-- 上游 `openmls_sqlite_storage` 0.3.0 的 `rusqlite` 0.37 与本项目锁定的 0.43 各自链接 SQLite，不能直接同时接入。当前只复用内存 provider 与本机密封；后续须把其候选快照与成员投影作为同一个事务提交，不能把单独的快照恢复视为业务提交完成。
-- 线上的 membership 操作需先约定定向邀请、单次 KeyPackage、Welcome 和 commit catch-up 的精确类型及关联条件，再部署 request-response 行为。不得把编解码成功当成已加入房间，也不得向未知节点发树、成员或事件。
+- 从 OpenMLS 验证后的 KeyPackage、Welcome 树、Add/Update/Commit 叶子取出公钥和证书，核对当前链状态。重启先关闭群权限，核对密封快照、SQL 成员投影、当前设备和链证据后才重新启用。过期、撤销和换设备需要 MLS 叶子更新或移除；不得仅删 SQL 成员行却继续用旧 MLS epoch 发信。移除与迁移不会复制旧 ratchet，也不会将群成员升级为联系人。
+- 上游 `openmls_sqlite_storage` 0.3.0 的 `rusqlite` 0.37 与本项目锁定的 0.43 各自链接 SQLite，不能直接同时接入。继续使用每房间独立的内存 provider，并将密封后的候选状态与成员投影用同一个 SQLite 事务提交。
+
+### 定向入群与有限同步：接线约束
+
+- 邀请只发往经认证且明确指定的 `AgentId`、`PeerId`。记录关联的群 ID、随机邀请 ID、当前基础 epoch、签发方和短期有效期。本机接受前不生成或发送 KeyPackage；邀请本身不带成员表、加入密钥或自由文本，不授予资源访问。
+- 一次性 KeyPackage 与已接受的邀请和指定设备绑定；创建者验证 OpenMLS 签名、版本、套件、链身份和邀请状态。只在持久提交新增成员后，向目标设备发送对应的 Welcome。接收方先验证精确邀请、包引用、MLS 组 ID、树和成员资格；成功提交后消费邀请及包引用。连接重试不能扩大授权或重复消费。
+- 同步只向仍获准的成员提供连续提交，最多 256 个 epoch，每次有界。起点由本机持久状态决定，并核对回复节点、请求 ID、群 ID 和连续 epoch。单个成员变更使用内联提议，不依赖未缓存的外部提议。超预算、日志缺失或分支冲突时停用投递并保留 `needs_sync`，不能跳过提交或退回旧 epoch。
+- 上述是接线约束，不是已发布线上格式。上线前须冻结 membership 内部类型、边界和相关性检查，明确邀请控制数据与 MLS 二进制负载的封装边界；保持现有 `group-envelope` 外层字段不变。不得把编解码成功当作入群，所有群数据都不发布到 DHT。

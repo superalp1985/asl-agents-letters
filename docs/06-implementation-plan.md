@@ -696,6 +696,8 @@ T31 初始编解码切片（2026-11-20）：新增独立群子流 codec，复用
 
 T31 本机状态切片（2026-11-20）：SQLite v12 增加唯一线 ID 映射和密封状态字段；暂存事务不写群成员、不启用旧授权。Windows DPAPI 适配绑定本机/线上群 ID、当前设备、快照版本与 MLS epoch。Windows x64 定向验证：`asl-store` 库 47 项、`index_retention` 7 项、`asl-groups` 2 项、`asl-net` 子流 codec 6 项通过，相关 crate 全目标严格 Clippy 与 CDDL 固定向量验证通过。群 MLS 状态和 SQLite 测试分开执行；生产 Core 事务、链身份 credential、邀请、同步与网络仍待接入，不关闭 T31。
 
+T31 身份及原子持久化切片（2026-11-20）：MLS 公钥绑定完整线上群 ID、当前链身份及精确设备证书；直连额外核对认证连接的 Hello。独立签名复核后加入严格公钥编码检查、签名预映像固定向量和独立证书到期断言。SQLite 同事务提交候选快照、成员投影和去重事件；验证重放、迟到的写入及外键失败回滚。Windows x64、Rust 1.100.0 锁定离线验证：`asl-app` 的 profile 51 项、`asl-groups` 2 项、`asl-store` 111 项通过（另有一个子进程入口按测试标记忽略）；涉及四 crate 全目标严格 Clippy 通过。身份用链证据夹具，SQLite 与 OpenMLS 恢复分别验证。房间仍为 `needs_sync`，未开启生产群网络、首次授权和重启激活；定向邀请、Welcome 与同步接线约束见 [群组接线记录](group-rooms.md)。
+
 ### T32 — 群策略、浏览/回答与传输确认
 
 依赖 T07、T20、T27、T31。创建确定性策略与 Agent 群事件适配。添加 `browse_enabled`、`answer_enabled`；回答关闭时保留群消息浏览但模型调用/回答数为零。群回复不能触发新回复；按 group/message ID 去重并沿用单轮预算。

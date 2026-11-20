@@ -267,6 +267,7 @@ fn accept_directory(
 }
 
 mod connection_tests;
+mod group_credential_tests;
 
 fn high_s(mut signature: Signature65) -> Signature65 {
     let order = U256::from_be_slice(&[
