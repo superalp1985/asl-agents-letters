@@ -1,6 +1,8 @@
 //! Local Core boundary for attested MLS rooms. None of these operations
 //! activates a room, opens the group substream or grants access to files.
 
+mod outgoing;
+
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use asl_groups::{
@@ -279,7 +281,43 @@ struct RoomEvidence<'a> {
     now_ms: u64,
 }
 
+struct LocalRoomCandidate {
+    local_id: GroupId,
+    version: RoomVersion,
+    provider: RoomProvider,
+    group: MlsGroup,
+    signer: SignatureKeyPair,
+    roster: VerifiedRoster,
+}
+
 impl RoomEvidence<'_> {
+    fn verify_directory(&mut self, agent: AgentId) -> Result<VerifiedRecord, AslError> {
+        let bytes = if agent == self.local.agent_id {
+            self.local_directory
+        } else {
+            self.directories
+                .get(&agent)
+                .ok_or(AslError::InvalidIdentity)?
+        };
+        let record = verify_record(bytes, agent, self.now_ms, self.resolver)?;
+        check_directory_histories(self.histories, self.peers, agent, &record)?;
+        Ok(record)
+    }
+
+    fn verify_target(
+        &mut self,
+        certificate: DeviceCertificate,
+    ) -> Result<MlsMemberEvidence, AslError> {
+        let record = self.verify_directory(certificate.agent_id)?;
+        let RecordPayload::DeviceDirectory(directory) = &record.signed().record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if !directory.devices.contains(&certificate) {
+            return Err(AslError::InvalidDeviceCertificate);
+        }
+        Ok(member_evidence(certificate, &record))
+    }
+
     fn verify_roster(
         &mut self,
         origin: &RoomOrigin,
@@ -304,18 +342,7 @@ impl RoomEvidence<'_> {
             }
             let directory = match verified.entry(cert.agent_id) {
                 Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let bytes = if cert.agent_id == self.local.agent_id {
-                        self.local_directory
-                    } else {
-                        self.directories
-                            .get(&cert.agent_id)
-                            .ok_or(AslError::InvalidIdentity)?
-                    };
-                    let record = verify_record(bytes, cert.agent_id, self.now_ms, self.resolver)?;
-                    check_directory_histories(self.histories, self.peers, cert.agent_id, &record)?;
-                    entry.insert(record)
-                }
+                Entry::Vacant(entry) => entry.insert(self.verify_directory(cert.agent_id)?),
             };
             verify_directory_leaf(origin.wire_id(), &leaf, &cert, directory)?;
             if origin.matches_creator(&cert) {
@@ -324,12 +351,7 @@ impl RoomEvidence<'_> {
             if member.index == own_index {
                 local_signature_key = Some(member.signature_key);
             }
-            roster.push(MlsMemberEvidence {
-                certificate: cert,
-                registry_sequence: directory.registry_state.sequence,
-                controller: directory.registry_state.controller,
-                directory_commitment: Hash32(directory.registry_state.state_commitment),
-            });
+            roster.push(member_evidence(cert, directory));
         }
         let (creator, creator_index) = creator.ok_or(AslError::PolicyDenied)?;
         Ok(VerifiedRoster {
@@ -346,6 +368,27 @@ impl RoomEvidence<'_> {
         wire_id: Hash32,
         chain_id: u64,
     ) -> Result<Option<ReconciledMlsRoom>, AslError> {
+        let Some(candidate) = self.load_candidate(store, wire_id)? else {
+            return Ok(None);
+        };
+        let mut members = Vec::with_capacity(candidate.roster.members.len());
+        for member in candidate.roster.members {
+            store.require_mls_member(&member, chain_id, self.now_ms)?;
+            members.push(member.certificate.peer_id);
+        }
+        Ok(Some(ReconciledMlsRoom {
+            local_id: candidate.local_id,
+            version: candidate.version,
+            creator: candidate.roster.creator,
+            members,
+        }))
+    }
+
+    fn load_candidate(
+        &mut self,
+        store: &Store,
+        wire_id: Hash32,
+    ) -> Result<Option<LocalRoomCandidate>, AslError> {
         let Some(saved) = store.mls_room_for_reconciliation(wire_id)? else {
             return Ok(None);
         };
@@ -358,6 +401,7 @@ impl RoomEvidence<'_> {
         if !group.is_active()
             || group.ciphersuite() != GROUP_CIPHERSUITE
             || group.pending_commit().is_some()
+            || group.pending_proposals().next().is_some()
         {
             return Err(AslError::InvalidPolicyState);
         }
@@ -372,26 +416,30 @@ impl RoomEvidence<'_> {
         {
             return Err(AslError::InvalidDatabase);
         }
-        let mut members = Vec::with_capacity(roster.members.len());
-        for member in roster.members {
-            store.require_mls_member(&member, chain_id, self.now_ms)?;
-            members.push(member.certificate.peer_id);
-        }
-        if SignatureKeyPair::read(
+        let signer = SignatureKeyPair::read(
             provider.storage(),
             &roster.local_signature_key,
             GROUP_CIPHERSUITE.signature_algorithm(),
         )
-        .is_none_or(|signer| signer.public() != roster.local_signature_key)
-        {
-            return Err(AslError::InvalidDatabase);
-        }
-        Ok(Some(ReconciledMlsRoom {
+        .filter(|signer| signer.public() == roster.local_signature_key)
+        .ok_or(AslError::InvalidDatabase)?;
+        Ok(Some(LocalRoomCandidate {
             local_id: saved.snapshot.local_id,
             version: saved.snapshot.version,
-            creator: roster.creator,
-            members,
+            provider,
+            group,
+            signer,
+            roster,
         }))
+    }
+}
+
+fn member_evidence(certificate: DeviceCertificate, record: &VerifiedRecord) -> MlsMemberEvidence {
+    MlsMemberEvidence {
+        certificate,
+        registry_sequence: record.registry_state.sequence,
+        controller: record.registry_state.controller,
+        directory_commitment: Hash32(record.registry_state.state_commitment),
     }
 }
 

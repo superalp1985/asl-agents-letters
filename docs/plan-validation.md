@@ -494,3 +494,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-store --all-targets --locked --offline -- --test-threads=1`：384 项通过、0 失败、2 项按已有标记忽略。相同三包全目标严格 Clippy、`cargo fmt --all -- --check` 与 `git diff --check` 通过。已有 `proc-macro-error2 2.0.1` 的未来兼容提示。
 - 真实 OpenMLS、DPAPI 与 SQLite 用例验证本机建群需要登记、MLS 有效但缺少创建者承诺的 Welcome 不消耗审批、有效 Welcome 单次入群、重开后只读对账、目录回退和撤销拒绝。SQLite 另验证审批提交时链状态不符不会消耗审批或留下房间，成员投影损坏时拒绝对账。
 - 独立静态复核后要求 `RequiredCapabilities` 明确声明创建者扩展，并提供同一设备的目录续期接口。实际发外部请求的绑定、续期调度与发方 Core 仍待接入。未验收公网、GUI、真实链 RPC、同步或群权限启用；使用合成链证明。外层 CBOR、SQLite schema 和依赖锁未修改。
+
+### 2026-11-20 T31：Core 定向邀请、Add 和 Welcome 重试
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-store --all-targets --locked --offline -- --test-threads=1`：384 项通过、0 失败、2 项按已有标记忽略。相同三包全目标严格 Clippy、Rust 格式及 Git 空白检查通过。
+- 双 Core 本机用例验证：未准入连接不能请求发出邀请；持久链序号错配时拒绝创建邀请、提交 Add 和重发 Welcome，且不推进 MLS epoch；成功后 SQLite 重开可取回字节完全相同的回复，改请求 ID 不可取回，发收双方的 MLS exporter 对同一 epoch 一致。
+- 使用真实 OpenMLS、DPAPI、SQLite 与合成链证明；未开通生产群子流，未验收真实链 RPC、GUI 审批、公网群投递或同步。未修改 SQLite schema、外层 CBOR 或依赖锁。房间仍为 `needs_sync`。

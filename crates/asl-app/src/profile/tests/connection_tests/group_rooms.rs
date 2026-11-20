@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use asl_groups::{
     local_state::{RoomBinding, RoomProvider, restore},
-    membership::{GROUP_CIPHERSUITE, read_key_package},
+    membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
 };
 use asl_store::{Store, group_state::MlsIncomingInvite, search::direct::DirectRequester};
@@ -17,7 +17,7 @@ use crate::profile::{
 use super::*;
 
 #[test]
-fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
+fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     let root = AgentIdentity::generate().unwrap();
     let creator_cert = certificate(&root, &DeviceIdentity::generate().unwrap().peer_id(), 1);
     let local_cert = certificate(&root, &DeviceIdentity::generate().unwrap().peer_id(), 2);
@@ -28,7 +28,7 @@ fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
         vec![],
     );
     let signed = signed_directory(&root, &dir, 1);
-    let (creator_db, resolver, _) = durable_directory_resolver(&root, &dir);
+    let (creator_db, resolver, creator_proof) = durable_directory_resolver(&root, &dir);
     let mut creator = CoreAdmission::for_local_identity(
         &root,
         creator_cert.peer_id.clone(),
@@ -68,21 +68,6 @@ fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
     assert_eq!(reconciled.version, version);
     assert_eq!(reconciled.creator, creator_cert.peer_id);
     assert_eq!(reconciled.members, vec![creator_cert.peer_id.clone()]);
-    let snapshot = creator_store.mls_room_snapshot(wire_id).unwrap().unwrap();
-    let binding = RoomBinding {
-        local_id: &creator_local_id,
-        wire_id,
-        device: &creator_cert.peer_id,
-    };
-    let (provider, mut creator_room) = restore(&binding, &snapshot).unwrap();
-    let pubkey = creator_room.members().next().unwrap().signature_key;
-    let creator_signer = SignatureKeyPair::read(
-        provider.storage(),
-        &pubkey,
-        GROUP_CIPHERSUITE.signature_algorithm(),
-    )
-    .unwrap();
-
     let (local_db, resolver, proof) = durable_directory_resolver(&root, &dir);
     let mut recipient = CoreAdmission::for_local_identity(
         &root,
@@ -95,51 +80,71 @@ fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
     let mut store = local_db.open();
     register_devices(&mut store, &root, &dir);
     let connection_id = [4; 16];
-    recipient.handle_event(
-        NetworkEvent::TransportConnected {
-            connection_id,
-            peer_id: creator_cert.peer_id.clone(),
-        },
-        NOW,
+    assert!(
+        creator
+            .issue_targeted_mls_invite(
+                &mut creator_store,
+                connection_id,
+                wire_id,
+                NOW + 60_000,
+                &dirs,
+                NOW,
+            )
+            .is_err()
     );
-    let batch = recipient.handle_event(
-        NetworkEvent::UnverifiedControlRequest {
-            connection_id,
-            response_id: [5; 16],
-            request: WireFrame::Hello(hello(&creator_cert)),
-        },
-        NOW,
+    admit(
+        &mut creator,
+        connection_id,
+        &local_cert,
+        creator_proof,
+        &signed,
     );
-    let request = batch
-        .commands
-        .iter()
-        .find_map(|command| match command {
-            NetworkCommand::RequestIdentityProof { request, .. } => Some(request),
-            _ => None,
-        })
+    admit(&mut recipient, connection_id, &creator_cert, proof, &signed);
+    let creator_sql = rusqlite::Connection::open(&creator_db.path).unwrap();
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=8", [])
         .unwrap();
-    let proof = crate::chain::identity_proof_to_wire(request, proof, signed.clone());
-    let admitted = recipient.handle_event(
-        NetworkEvent::IdentityProofReceived {
-            connection_id,
-            proof,
-        },
-        NOW,
-    );
     assert!(matches!(
-        admitted.events.as_slice(),
-        [AdmittedNetworkEvent::PeerAdmitted { .. }]
+        creator.issue_targeted_mls_invite(
+            &mut creator_store,
+            connection_id,
+            wire_id,
+            NOW + 60_000,
+            &dirs,
+            NOW,
+        ),
+        Err(AslError::InvalidDeviceCertificate)
     ));
-
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=7", [])
+        .unwrap();
+    let invitation = creator
+        .issue_targeted_mls_invite(
+            &mut creator_store,
+            connection_id,
+            wire_id,
+            NOW + 60_000,
+            &dirs,
+            NOW,
+        )
+        .unwrap();
+    let GroupBody::Membership(GroupMembership::Invite {
+        agent,
+        device,
+        expires_at_ms,
+    }) = invitation.body
+    else {
+        panic!("expected a targeted Invite");
+    };
     let invite = MlsIncomingInvite {
-        id: Id128([6; 16]),
-        wire_id,
-        base_epoch: 0,
+        id: invitation.message_id,
+        wire_id: invitation.group_id,
+        base_epoch: invitation.epoch,
         inviter: creator_cert.agent_id,
         inviter_device: creator_cert.peer_id.clone(),
-        recipient: local_cert.agent_id,
-        recipient_device: local_cert.peer_id.clone(),
-        expires_at_ms: NOW + 60_000,
+        recipient: agent,
+        recipient_device: device,
+        expires_at_ms,
     };
     assert!(store.receive_mls_invite(&invite, NOW).unwrap());
     let (signer, credential) = issue_group_credential(&root, wire_id, &local_cert, NOW).unwrap();
@@ -196,17 +201,87 @@ fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
             .is_some()
     );
     assert!(store.mls_room_snapshot(wire_id).unwrap().is_none());
-    let valid = welcome_from(
-        &mut creator_room,
-        &provider,
-        &creator_signer,
-        &request,
-        &invite,
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=8", [])
+        .unwrap();
+    assert!(matches!(
+        creator.answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, NOW),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    assert_eq!(
+        creator_store
+            .mls_room_snapshot(wire_id)
+            .unwrap()
+            .unwrap()
+            .version
+            .mls_epoch,
+        0
     );
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=7", [])
+        .unwrap();
+    let valid = creator
+        .answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, NOW)
+        .unwrap();
+    let committed = creator_store
+        .mls_room_snapshot(wire_id)
+        .unwrap()
+        .unwrap()
+        .version;
+    assert_eq!(committed.mls_epoch, 1);
+    drop(creator_store);
+    let mut creator_store = creator_db.open();
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=8", [])
+        .unwrap();
+    assert!(matches!(
+        creator.answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, NOW),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    creator_sql
+        .execute("UPDATE identity_registry_states SET sequence=7", [])
+        .unwrap();
+    assert_eq!(
+        creator
+            .answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, NOW)
+            .unwrap(),
+        valid,
+    );
+    let mut mismatched = request.clone();
+    mismatched.message_id = Id128([3; 16]);
+    assert!(
+        creator
+            .answer_mls_key_package(&mut creator_store, connection_id, &mismatched, &dirs, NOW,)
+            .is_err()
+    );
+    let snapshot = creator_store.mls_room_snapshot(wire_id).unwrap().unwrap();
+    assert_eq!(snapshot.version, committed);
+    let (provider, creator_room) = restore(
+        &RoomBinding {
+            local_id: &creator_local_id,
+            wire_id,
+            device: &creator_cert.peer_id,
+        },
+        &snapshot,
+    )
+    .unwrap();
     let version = recipient
         .finish_approved_mls_welcome(&mut store, welcome(&valid), NOW)
         .unwrap();
     assert_eq!(version.mls_epoch, 1);
+    let (join_provider, joined_room) = restore(
+        &RoomBinding {
+            local_id: &local_id,
+            wire_id,
+            device: &local_cert.peer_id,
+        },
+        &store.mls_room_snapshot(wire_id).unwrap().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sync_epoch_binding(&creator_room, provider.crypto()).unwrap(),
+        sync_epoch_binding(&joined_room, join_provider.crypto()).unwrap(),
+    );
     assert!(
         store
             .pending_mls_join_package(&invite, NOW)
@@ -284,6 +359,50 @@ fn group_welcome_requires_a_committed_origin_and_reconciles_after_restart() {
     assert!(matches!(
         recipient.reconcile_mls_room(&store, wire_id, &dirs, NOW),
         Err(AslError::InvalidDeviceCertificate)
+    ));
+}
+
+fn admit(
+    admission: &mut CoreAdmission,
+    connection_id: [u8; 16],
+    remote: &DeviceCertificate,
+    proof: IdentityProofV1,
+    signed: &[u8],
+) {
+    admission.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id,
+            peer_id: remote.peer_id.clone(),
+        },
+        NOW,
+    );
+    let batch = admission.handle_event(
+        NetworkEvent::UnverifiedControlRequest {
+            connection_id,
+            response_id: [5; 16],
+            request: WireFrame::Hello(hello(remote)),
+        },
+        NOW,
+    );
+    let request = batch
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            NetworkCommand::RequestIdentityProof { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    let proof = crate::chain::identity_proof_to_wire(request, proof, signed.to_vec());
+    let admitted = admission.handle_event(
+        NetworkEvent::IdentityProofReceived {
+            connection_id,
+            proof,
+        },
+        NOW,
+    );
+    assert!(matches!(
+        admitted.events.as_slice(),
+        [AdmittedNetworkEvent::PeerAdmitted { .. }]
     ));
 }
 

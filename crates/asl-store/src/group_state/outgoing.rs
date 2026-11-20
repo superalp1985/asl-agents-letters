@@ -1,13 +1,16 @@
+use std::collections::BTreeSet;
+
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    protocol::{GroupBody, GroupMembership, GroupPacket},
+    protocol::{GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
-    MlsJournalKind, MlsRoomUpdate, RoomVersion,
+    MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, RoomVersion,
     invite::INVITE_TTL_MS,
+    recovery::require_member,
     sql_number,
     transition::{commit_candidate, peer_text},
 };
@@ -43,6 +46,35 @@ impl Store {
         packet: &GroupPacket,
         now_ms: u64,
     ) -> Result<(), AslError> {
+        self.issue_mls_invite_inner(creator, packet, None, now_ms)
+    }
+
+    /// Persist an Invite only while Core's room version and supplied member
+    /// evidence still match storage, including the creator and exact target.
+    pub fn issue_verified_mls_invite(
+        &mut self,
+        creator: &PeerId,
+        packet: &GroupPacket,
+        expected: RoomVersion,
+        members: &[MlsMemberEvidence],
+        chain_id: u64,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        self.issue_mls_invite_inner(
+            creator,
+            packet,
+            Some((expected, VerifiedInviteMembers { members, chain_id })),
+            now_ms,
+        )
+    }
+
+    fn issue_mls_invite_inner(
+        &mut self,
+        creator: &PeerId,
+        packet: &GroupPacket,
+        verified: Option<(RoomVersion, VerifiedInviteMembers<'_>)>,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
         packet.validate_request()?;
         let GroupBody::Membership(GroupMembership::Invite {
             agent,
@@ -62,6 +94,13 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        if let Some((expected, members)) = verified {
+            if packet.epoch != expected.mls_epoch {
+                return Err(AslError::PolicyVersionConflict);
+            }
+            require_room_version(&tx, packet.group_id, expected)?;
+            members.require(&tx, creator, (*agent, device), None, now_ms)?;
+        }
         prune(&tx, now)?;
         let inserted = tx
             .execute(
@@ -121,6 +160,42 @@ impl Store {
         }
     }
 
+    /// Re-read a committed reply and its current room/device evidence from
+    /// the same SQLite snapshot. No plaintext is recovered or room activated.
+    pub fn replay_verified_mls_welcome(
+        &self,
+        request: &MlsWelcomeRequest<'_>,
+        expected: RoomVersion,
+        members: &[MlsMemberEvidence],
+        chain_id: u64,
+        now_ms: u64,
+    ) -> Result<GroupPacket, AslError> {
+        let invite = request.invite_id()?;
+        if request.package_expires_at_ms <= now_ms {
+            return Err(AslError::ExpiredMessage);
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(database_error)?;
+        require_room_version(&tx, request.packet.group_id, expected)?;
+        VerifiedInviteMembers { members, chain_id }.require(
+            &tx,
+            request.local_creator,
+            (request.recipient, request.device),
+            None,
+            now_ms,
+        )?;
+        let Some(StoredInvite::Committed(welcome)) =
+            lookup(&tx, request, invite, sql_number(now_ms)?)?
+        else {
+            return Err(AslError::PolicyVersionConflict);
+        };
+        let reply = request.welcome(invite, welcome)?;
+        tx.commit().map_err(database_error)?;
+        Ok(reply)
+    }
+
     /// Seal the already validated Add, its journal event and the exact
     /// Welcome in one transaction. Callers must discard failed candidates.
     pub fn commit_mls_invite_welcome(
@@ -128,6 +203,37 @@ impl Store {
         request: &MlsWelcomeRequest<'_>,
         update: MlsRoomUpdate<'_>,
         welcome: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<RoomVersion, AslError> {
+        self.commit_mls_invite_welcome_inner(request, update, welcome, None, now_ms)
+    }
+
+    /// Recheck the full Core-verified Add roster against storage before
+    /// atomically saving the Commit and Welcome. The room stays paused.
+    pub fn commit_verified_mls_invite_welcome(
+        &mut self,
+        request: &MlsWelcomeRequest<'_>,
+        update: MlsRoomUpdate<'_>,
+        welcome: Vec<u8>,
+        members: &[MlsMemberEvidence],
+        chain_id: u64,
+        now_ms: u64,
+    ) -> Result<RoomVersion, AslError> {
+        self.commit_mls_invite_welcome_inner(
+            request,
+            update,
+            welcome,
+            Some(VerifiedInviteMembers { members, chain_id }),
+            now_ms,
+        )
+    }
+
+    fn commit_mls_invite_welcome_inner(
+        &mut self,
+        request: &MlsWelcomeRequest<'_>,
+        update: MlsRoomUpdate<'_>,
+        welcome: Vec<u8>,
+        verified: Option<VerifiedInviteMembers<'_>>,
         now_ms: u64,
     ) -> Result<RoomVersion, AslError> {
         let invite = request.invite_id()?;
@@ -156,6 +262,15 @@ impl Store {
         };
         if request.local_creator != event.sender {
             return Err(AslError::InvalidPolicyState);
+        }
+        if let Some(members) = verified {
+            members.require(
+                &tx,
+                request.local_creator,
+                (request.recipient, request.device),
+                Some(update.members),
+                now_ms,
+            )?;
         }
         let version = commit_candidate(&tx, update, Some(request.device), now)?;
         let consumed = tx
@@ -186,6 +301,78 @@ impl Store {
         tx.commit().map_err(database_error)?;
         Ok(version)
     }
+}
+
+struct VerifiedInviteMembers<'a> {
+    members: &'a [MlsMemberEvidence],
+    chain_id: u64,
+}
+
+impl VerifiedInviteMembers<'_> {
+    fn require(
+        &self,
+        tx: &Transaction<'_>,
+        creator: &PeerId,
+        (agent, device): (AgentId, &PeerId),
+        projection: Option<&[PeerId]>,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if self.members.len() > MAX_GROUP_MEMBERS {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let peers: BTreeSet<_> = self
+            .members
+            .iter()
+            .map(|member| member.certificate.peer_id.as_bytes())
+            .collect();
+        if peers.len() != self.members.len()
+            || !peers.contains(creator.as_bytes())
+            || !self.members.iter().any(|member| {
+                member.certificate.agent_id == agent && &member.certificate.peer_id == device
+            })
+            || projection.is_some_and(|projection| {
+                projection.len() != peers.len()
+                    || projection
+                        .iter()
+                        .map(PeerId::as_bytes)
+                        .collect::<BTreeSet<_>>()
+                        != peers
+            })
+        {
+            return Err(AslError::InvalidPolicyState);
+        }
+        for member in self.members {
+            require_member(tx, member, self.chain_id, now_ms)?;
+        }
+        Ok(())
+    }
+}
+
+fn require_room_version(
+    tx: &Transaction<'_>,
+    wire_id: Hash32,
+    expected: RoomVersion,
+) -> Result<(), AslError> {
+    let matches: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mls_room_states s
+             JOIN asl_groups g ON g.group_id=s.local_group_id CROSS JOIN policy_state p
+             WHERE s.wire_group_id=?1 AND g.state='needs_sync' AND p.singleton=1
+               AND s.revision=?2 AND g.mls_epoch=?3 AND g.membership_epoch=?4 AND p.revision=?5)",
+            params![
+                wire_id.as_bytes(),
+                sql_number(expected.revision)?,
+                sql_number(expected.mls_epoch)?,
+                sql_number(expected.membership_epoch)?,
+                sql_number(expected.policy_revision)?,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if !matches {
+        return Err(AslError::PolicyVersionConflict);
+    }
+    Ok(())
 }
 
 impl MlsWelcomeRequest<'_> {
