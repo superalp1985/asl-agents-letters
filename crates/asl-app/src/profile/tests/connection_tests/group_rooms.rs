@@ -18,7 +18,7 @@ use crate::profile::{
 use super::*;
 
 #[test]
-fn group_catch_up_follows_verified_adds_after_directory_peer_disconnects() {
+fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     let roots: [AgentIdentity; 3] = std::array::from_fn(|_| AgentIdentity::generate().unwrap());
     let certs = roots
         .each_ref()
@@ -67,7 +67,7 @@ fn group_catch_up_follows_verified_adds_after_directory_peer_disconnects() {
         (db, store, core)
     };
 
-    let (_creator_db, mut creator_store, mut creator) = node(0);
+    let (creator_db, mut creator_store, mut creator) = node(0);
     let (wire_id, _) = creator
         .create_local_mls_room(
             &mut creator_store,
@@ -391,6 +391,140 @@ fn group_catch_up_follows_verified_adds_after_directory_peer_disconnects() {
     };
     let (_, _, history) = restore_with_history(&binding, &reopened).unwrap();
     assert_eq!(history.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
+
+    assert!(matches!(
+        first.remove_local_mls_member(
+            &mut first_store,
+            wire_id,
+            &certs[2].peer_id,
+            &sync_dirs,
+            probe_now()
+        ),
+        Err(AslError::PolicyDenied)
+    ));
+    assert!(matches!(
+        creator.remove_local_mls_member(
+            &mut creator_store,
+            wire_id,
+            &certs[0].peer_id,
+            &no_imports,
+            probe_now()
+        ),
+        Err(AslError::PolicyDenied)
+    ));
+    for db in [&creator_db, &first_db] {
+        let sql = rusqlite::Connection::open(&db.path).unwrap();
+        assert_eq!(
+            sql.execute(
+                "UPDATE device_identities SET revoked_at_ms=?1 WHERE peer_id=?2",
+                rusqlite::params![
+                    probe_now() as i64,
+                    bs58::encode(certs[2].peer_id.as_bytes()).into_string()
+                ],
+            )
+            .unwrap(),
+            1
+        );
+    }
+    assert!(matches!(
+        creator.reconcile_mls_room(&creator_store, wire_id, &no_imports, probe_now()),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    let removed = creator
+        .remove_local_mls_member(
+            &mut creator_store,
+            wire_id,
+            &certs[2].peer_id,
+            &no_imports,
+            probe_now(),
+        )
+        .unwrap();
+    assert_eq!(removed.mls_epoch, 3);
+    // The earlier compatibility probe and head check used the serving budget.
+    std::thread::sleep(Duration::from_millis(510));
+    let mut outgoing = None;
+    first
+        .start_mls_sync(
+            &first_store,
+            connection,
+            wire_id,
+            &no_imports,
+            probe_now(),
+            |command| {
+                outgoing = Some(command);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let Some(NetworkCommand::SendGroup {
+        request_handle,
+        request,
+        ..
+    }) = outgoing
+    else {
+        panic!("expected a sync request for Remove");
+    };
+    let response = serve(&mut creator, &mut creator_store, request);
+    assert!(matches!(
+        deliver(&mut first, &mut first_store, request_handle, response),
+        Ok(Some(MlsNetworkOutcome::SyncAdvanced { wire_id: room, version }))
+            if room == wire_id && version.mls_epoch == 3
+                && version.policy_revision == original.policy_revision
+                && version.membership_epoch == original.membership_epoch
+    ));
+    let reopened = first_db.open().mls_room_snapshot(wire_id).unwrap().unwrap();
+    let (_, _, history) = restore_with_history(&binding, &reopened).unwrap();
+    assert_eq!(history.remaining_catchup(), MLS_SYNC_MAX_STEPS - 2);
+    assert_eq!(
+        first_store.mls_room_progress(wire_id).unwrap(),
+        Some(("needs_sync".into(), 3))
+    );
+    let room = first
+        .reconcile_mls_room(&first_store, wire_id, &no_imports, probe_now())
+        .unwrap()
+        .unwrap();
+    assert!(!room.members.contains(&certs[2].peer_id));
+    let removed_connection = [2; 16];
+    admit(
+        &mut creator,
+        removed_connection,
+        &certs[2],
+        proofs[2].clone(),
+        &signed[2],
+    );
+    let mut outgoing = None;
+    second
+        .start_mls_sync(
+            &second_store,
+            removed_connection,
+            wire_id,
+            &no_imports,
+            probe_now(),
+            |command| {
+                outgoing = Some(command);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let Some(NetworkCommand::SendGroup { request, .. }) = outgoing else {
+        panic!("expected a sync request from the removed member");
+    };
+    let now = probe_now();
+    assert!(matches!(
+        creator.handle_mls_network_event(
+            &mut creator_store,
+            NetworkEvent::UnverifiedGroupRequest {
+                connection_id: removed_connection,
+                response_id: [63; 16],
+                deadline_ms: now + 1_000,
+                request,
+            },
+            &no_imports,
+            now,
+            |_| panic!("a removed member must not receive a reply")
+        ),
+        Err(AslError::PolicyDenied)
+    ));
 }
 
 #[test]
@@ -857,6 +991,7 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         }
     };
     let never_send = |_| panic!("receiving a Welcome must not send anything");
+    let retry_started = std::time::Instant::now();
     let retry_at = NOW + 10_001;
     let first = recipient
         .send_approved_mls_join(
@@ -1005,6 +1140,155 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
             .unwrap()
             .is_none()
     );
+    // Welcome completion can advance the connection's checked time.
+    let retry_at = retry_at + retry_started.elapsed().as_millis() as u64;
+    assert!(matches!(
+        creator.issue_targeted_mls_invite(
+            &mut creator_store,
+            connection_id,
+            wire_id,
+            retry_at + 60_000,
+            &dirs,
+            retry_at,
+        ),
+        Err(AslError::PolicyDenied)
+    ));
+    creator
+        .remove_local_mls_member(
+            &mut creator_store,
+            wire_id,
+            &local_cert.peer_id,
+            &dirs,
+            retry_at,
+        )
+        .unwrap();
+    assert!(
+        creator
+            .answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, retry_at)
+            .is_err()
+    );
+    let next_invitation = creator
+        .issue_targeted_mls_invite(
+            &mut creator_store,
+            connection_id,
+            wire_id,
+            retry_at + 60_000,
+            &dirs,
+            retry_at,
+        )
+        .unwrap();
+    assert_eq!(next_invitation.epoch, 2);
+    assert!(
+        recipient
+            .receive_targeted_mls_invite(&mut store, reconnect, &next_invitation, &dirs, retry_at)
+            .unwrap()
+            .is_none()
+    );
+    // Age only the closed prompt so this fixture can exercise the next
+    // approval without advancing the short-lived chain and Hello evidence.
+    recipient_sql
+        .execute(
+            "UPDATE mls_incoming_invites SET shown_at_ms=?1,expires_at_ms=?2 WHERE invite_id=?3",
+            rusqlite::params![
+                (retry_at - 86_400_001) as i64,
+                (retry_at - 86_340_001) as i64,
+                invite.id.as_bytes()
+            ],
+        )
+        .unwrap();
+    assert!(
+        recipient
+            .send_approved_mls_join(&mut store, send(reconnect), &dirs, retry_at, never_send)
+            .is_err()
+    );
+    let rejoin = recipient
+        .receive_targeted_mls_invite(&mut store, reconnect, &next_invitation, &dirs, retry_at)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        recipient.prepare_approved_mls_join(&mut store, reconnect, &rejoin, &dirs, retry_at),
+        Err(AslError::PolicyDenied)
+    ));
+    assert!(
+        recipient
+            .approve_targeted_mls_invite(&mut store, &root, reconnect, &rejoin, &dirs, retry_at)
+            .unwrap()
+    );
+    drop(store);
+    let mut store = local_db.open();
+    let mut outgoing = None;
+    let rejoin_handle = recipient
+        .send_approved_mls_join(
+            &mut store,
+            MlsJoinSend {
+                connection_id: reconnect,
+                invite: &rejoin,
+                local_id: &GroupId(Id128([117; 16])),
+                local_name: "Must not replace the room name",
+            },
+            &dirs,
+            retry_at,
+            |command| {
+                outgoing = Some(command);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let Some(NetworkCommand::SendGroup { request, .. }) = outgoing else {
+        panic!("expected a new KeyPackage");
+    };
+    let new_welcome = creator
+        .answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, retry_at)
+        .unwrap();
+    let rejoin_response = || response(reconnect, rejoin_handle, new_welcome.clone());
+    let Some(MlsNetworkOutcome::Joined {
+        local_id: restored_id,
+        version: rejoined,
+    }) = recipient
+        .handle_mls_network_event(&mut store, rejoin_response(), &dirs, retry_at, never_send)
+        .unwrap()
+    else {
+        panic!("expected an explicitly approved rejoin");
+    };
+    assert_eq!(restored_id, local_id);
+    assert_eq!(rejoined.mls_epoch, 3);
+    assert_eq!(rejoined.revision, version.revision + 1);
+    assert_eq!(rejoined.policy_revision, version.policy_revision);
+    assert_eq!(rejoined.membership_epoch, version.membership_epoch);
+    let snapshot = store.mls_room_snapshot(wire_id).unwrap().unwrap();
+    let (new_provider, new_room, new_history) = restore_with_history(
+        &RoomBinding {
+            local_id: &local_id,
+            wire_id,
+            device: &local_cert.peer_id,
+        },
+        &snapshot,
+    )
+    .unwrap();
+    let (creator_provider, creator_head, _) = restore_with_history(
+        &RoomBinding {
+            local_id: &creator_local_id,
+            wire_id,
+            device: &creator_cert.peer_id,
+        },
+        &creator_store.mls_room_snapshot(wire_id).unwrap().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sync_epoch_binding(&new_room, new_provider.crypto()).unwrap(),
+        sync_epoch_binding(&creator_head, creator_provider.crypto()).unwrap(),
+    );
+    assert_eq!(new_history.remaining_catchup(), MLS_SYNC_MAX_STEPS);
+    assert!(
+        recipient
+            .handle_mls_network_event(&mut store, rejoin_response(), &dirs, retry_at, never_send)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.mls_room_progress(wire_id).unwrap(),
+        Some(("needs_sync".into(), 3))
+    );
     drop(store);
     drop(recipient);
 
@@ -1022,7 +1306,7 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         .reconcile_mls_room(&store, wire_id, &dirs, NOW)
         .unwrap()
         .unwrap();
-    assert_eq!(room.version, version);
+    assert_eq!(room.version, rejoined);
     assert_eq!(room.local_id, local_id);
     assert_eq!(room.creator, creator_cert.peer_id);
     assert_eq!(room.members.len(), 2);

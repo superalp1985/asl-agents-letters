@@ -5,6 +5,7 @@ mod directories;
 mod incoming;
 mod network;
 mod outgoing;
+mod removal;
 mod sync;
 
 pub(super) use directories::GroupDirectoryCache;
@@ -43,7 +44,7 @@ use crate::{
     profile::{
         RecordHistory, VerifiedRecord,
         group_credential::{issue_group_credential, leaf_certificate, verify_directory_leaf},
-        verify_record,
+        resolve_active, verify_record,
     },
 };
 
@@ -64,6 +65,7 @@ struct ApprovedMlsWelcome<'a> {
     reply: &'a GroupPacket,
     local_id: &'a GroupId,
     local_name: &'a str,
+    rejoin_base: Option<RoomVersion>,
     /// Core supplies locally collected signed device directories, not an
     /// unverified directory bundle from the Welcome or from a model.
     directories: &'a HashMap<AgentId, Vec<u8>>,
@@ -174,8 +176,9 @@ impl CoreAdmission {
         &mut self,
         store: &mut Store,
         welcome: ApprovedMlsWelcome<'_>,
-        now_ms: u64,
+        clock: &sync::SyncClock,
     ) -> Result<RoomVersion, AslError> {
+        let now_ms = clock.now_ms()?;
         let invite = welcome.invite;
         let expected_policy_revision = store.policy_revision()?;
         let (agent, peer) = self.admitted_peer_identity(welcome.connection_id, now_ms)?;
@@ -219,25 +222,42 @@ impl CoreAdmission {
             wire_id,
             device: &invite.recipient_device,
         };
-        let sealed = seal(&binding, 1, &group, &provider)?;
-        store.finish_mls_join(
-            MlsJoinedRoom {
-                invite,
-                key,
-                room: PendingMlsRoom {
-                    local_id: welcome.local_id,
-                    wire_id,
-                    creator: &roster.creator,
-                    local_name: welcome.local_name,
-                    mls_epoch: group.epoch().as_u64(),
-                    sealed_snapshot: &sealed,
-                },
-                members: &roster.members,
-                chain_id: self.resolver.deployment().chain_id,
-                expected_policy_revision,
+        let revision = match welcome.rejoin_base {
+            Some(base) => base
+                .revision
+                .checked_add(1)
+                .ok_or(AslError::QuotaExceeded)?,
+            None => 1,
+        };
+        let sealed = seal(&binding, revision, &group, &provider)?;
+        let join = MlsJoinedRoom {
+            invite,
+            key,
+            room: PendingMlsRoom {
+                local_id: welcome.local_id,
+                wire_id,
+                creator: &roster.creator,
+                local_name: welcome.local_name,
+                mls_epoch: group.epoch().as_u64(),
+                sealed_snapshot: &sealed,
             },
-            now_ms,
-        )
+            members: &roster.members,
+            chain_id: self.resolver.deployment().chain_id,
+            expected_policy_revision,
+        };
+        let current_time = || {
+            let now = clock.now_ms()?;
+            let (agent, device) = self.admitted_peer_identity(welcome.connection_id, now)?;
+            if agent != invite.inviter || device != invite.inviter_device {
+                return Err(AslError::InvalidIdentity);
+            }
+            roster.require_current_directories(&mut self.resolver, now)?;
+            clock.now_ms()
+        };
+        match welcome.rejoin_base {
+            Some(base) => store.finish_mls_rejoin(join, base, current_time),
+            None => store.finish_mls_join(join, current_time),
+        }
     }
 
     fn room_evidence<'a>(
@@ -262,7 +282,7 @@ struct VerifiedRoster {
     creator: PeerId,
     creator_index: LeafNodeIndex,
     members: Vec<MlsMemberEvidence>,
-    local_signature_key: Vec<u8>,
+    directories: HashMap<AgentId, VerifiedRecord>,
 }
 
 impl VerifiedRoster {
@@ -273,6 +293,31 @@ impl VerifiedRoster {
     ) -> Result<(), AslError> {
         if self.creator_index != welcome_sender || self.creator != invite.inviter_device {
             return Err(AslError::PolicyDenied);
+        }
+        Ok(())
+    }
+
+    fn require_current_directories(
+        &self,
+        resolver: &mut dyn IdentityResolver,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        for (&agent, directory) in &self.directories {
+            let record = &directory.signed().record;
+            let RecordPayload::DeviceDirectory(devices) = &record.payload else {
+                return Err(AslError::InvalidIdentity);
+            };
+            if now_ms >= record.expires_at_ms
+                || devices
+                    .devices
+                    .iter()
+                    .any(|cert| now_ms >= cert.expires_at_ms)
+            {
+                return Err(AslError::ExpiredMessage);
+            }
+            if resolve_active(agent, now_ms, resolver)? != directory.registry_state {
+                return Err(AslError::InvalidIdentity);
+            }
         }
         Ok(())
     }
@@ -290,13 +335,33 @@ struct RoomEvidence<'a> {
 }
 
 struct LocalRoomCandidate {
+    base: SealedRoom,
+    roster: VerifiedRoster,
+}
+
+struct SealedRoom {
     local_id: GroupId,
     version: RoomVersion,
     provider: RoomProvider,
     group: MlsGroup,
     signer: SignatureKeyPair,
-    roster: VerifiedRoster,
+    creator: PeerId,
+    creator_index: LeafNodeIndex,
+    leaves: Vec<StoredLeaf>,
     history: SyncHistory,
+}
+
+struct StoredLeaf {
+    member: Member,
+    certificate: DeviceCertificate,
+}
+
+impl std::ops::Deref for LocalRoomCandidate {
+    type Target = SealedRoom;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 impl RoomEvidence<'_> {
@@ -339,7 +404,7 @@ impl RoomEvidence<'_> {
         let mut roster = Vec::new();
         let mut peers = HashSet::new();
         let mut creator = None;
-        let mut local_signature_key = None;
+        let mut found_local = false;
         for member in members {
             if roster.len() == MAX_GROUP_MEMBERS {
                 return Err(AslError::QuotaExceeded);
@@ -360,16 +425,19 @@ impl RoomEvidence<'_> {
                 creator = Some((cert.peer_id.clone(), member.index));
             }
             if member.index == own_index {
-                local_signature_key = Some(member.signature_key);
+                found_local = true;
             }
             roster.push(member_evidence(cert, directory)?);
         }
         let (creator, creator_index) = creator.ok_or(AslError::PolicyDenied)?;
+        if !found_local {
+            return Err(AslError::InvalidIdentity);
+        }
         Ok(VerifiedRoster {
             creator,
             creator_index,
             members: roster,
-            local_signature_key: local_signature_key.ok_or(AslError::InvalidIdentity)?,
+            directories: verified,
         })
     }
 
@@ -388,8 +456,8 @@ impl RoomEvidence<'_> {
             members.push(member.certificate.peer_id);
         }
         Ok(Some(ReconciledMlsRoom {
-            local_id: candidate.local_id,
-            version: candidate.version,
+            local_id: candidate.base.local_id,
+            version: candidate.base.version,
             creator: candidate.roster.creator,
             members,
         }))
@@ -400,6 +468,30 @@ impl RoomEvidence<'_> {
         store: &Store,
         wire_id: Hash32,
     ) -> Result<Option<LocalRoomCandidate>, AslError> {
+        let Some(base) = self.load_sealed_room(store, wire_id)? else {
+            return Ok(None);
+        };
+        let roster = self.verify_current_roster(wire_id, &base)?;
+        Ok(Some(LocalRoomCandidate { base, roster }))
+    }
+
+    fn verify_current_roster(
+        &mut self,
+        wire_id: Hash32,
+        room: &SealedRoom,
+    ) -> Result<VerifiedRoster, AslError> {
+        let origin =
+            RoomOrigin::from_context(wire_id, room.group.extensions(), room.provider.crypto())?;
+        self.verify_roster(&origin, room.group.own_leaf_index(), room.group.members())
+    }
+
+    // This establishes the authenticated base tree only. In particular it
+    // does not assert that any old leaf still has a valid device certificate.
+    fn load_sealed_room(
+        &self,
+        store: &Store,
+        wire_id: Hash32,
+    ) -> Result<Option<SealedRoom>, AslError> {
         let Some(saved) = store.mls_room_for_reconciliation(wire_id)? else {
             return Ok(None);
         };
@@ -417,30 +509,54 @@ impl RoomEvidence<'_> {
             return Err(AslError::InvalidPolicyState);
         }
         let origin = RoomOrigin::from_context(wire_id, group.extensions(), provider.crypto())?;
-        let roster = self.verify_roster(&origin, group.own_leaf_index(), group.members())?;
-        if roster.creator != saved.creator
-            || roster.members.len() != saved.members.len()
-            || !roster
-                .members
-                .iter()
-                .all(|member| saved.members.contains(&member.certificate.peer_id))
-        {
+        let mut leaves = Vec::with_capacity(saved.members.len());
+        let mut peers = HashSet::new();
+        for member in group.members() {
+            let certificate = leaf_certificate(&CredentialWithKey::from(&member))?;
+            if leaves.len() == MAX_GROUP_MEMBERS
+                || !saved.members.contains(&certificate.peer_id)
+                || !peers.insert(certificate.peer_id.clone())
+            {
+                return Err(AslError::InvalidDatabase);
+            }
+            leaves.push(StoredLeaf {
+                member,
+                certificate,
+            });
+        }
+        if leaves.len() != saved.members.len() {
             return Err(AslError::InvalidDatabase);
         }
+        let creator_index = leaves
+            .iter()
+            .find(|leaf| {
+                leaf.certificate.peer_id == saved.creator
+                    && origin.matches_creator(&leaf.certificate)
+            })
+            .map(|leaf| leaf.member.index)
+            .ok_or(AslError::InvalidDatabase)?;
+        let own = leaves
+            .iter()
+            .find(|leaf| {
+                leaf.member.index == group.own_leaf_index() && &leaf.certificate == self.local
+            })
+            .ok_or(AslError::InvalidIdentity)?;
         let signer = SignatureKeyPair::read(
             provider.storage(),
-            &roster.local_signature_key,
+            &own.member.signature_key,
             GROUP_CIPHERSUITE.signature_algorithm(),
         )
-        .filter(|signer| signer.public() == roster.local_signature_key)
+        .filter(|signer| signer.public() == own.member.signature_key)
         .ok_or(AslError::InvalidDatabase)?;
-        Ok(Some(LocalRoomCandidate {
+        Ok(Some(SealedRoom {
             local_id: saved.snapshot.local_id,
             version: saved.snapshot.version,
             provider,
             group,
             signer,
-            roster,
+            creator: saved.creator,
+            creator_index,
+            leaves,
             history,
         }))
     }

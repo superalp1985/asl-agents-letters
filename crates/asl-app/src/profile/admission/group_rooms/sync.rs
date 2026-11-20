@@ -5,14 +5,14 @@ use std::{
 
 use asl_groups::{
     local_state::{RoomBinding, seal_with_history},
-    membership::{RoomOrigin, read_sync_commit, sync_epoch_binding},
+    membership::{read_sync_commit, sync_epoch_binding},
 };
 use asl_net::transport::REQUEST_TIMEOUT;
 use asl_store::{
     Store,
     group_state::{
-        MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsJournalEntry, MlsJournalKind, MlsRoomUpdate,
-        MlsSyncAddAuthority, MlsSyncReadAuthority, RoomVersion,
+        MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsJournalEntry, MlsJournalKind,
+        MlsRemoveAuthority, MlsRoomUpdate, MlsSyncAddAuthority, MlsSyncReadAuthority, RoomVersion,
     },
 };
 use asl_types::{
@@ -21,11 +21,11 @@ use asl_types::{
     protocol::{DeviceCertificate, GroupBody, GroupMembership, GroupPacket},
 };
 use openmls::prelude::{
-    CredentialWithKey, OpenMlsProvider, ProcessedMessageContent, Proposal, ProposalOrRefType,
-    Sender,
+    CredentialWithKey, LeafNode, LeafNodeIndex, OpenMlsProvider, ProcessedMessageContent, Proposal,
+    ProposalOrRefType, Sender,
 };
 
-use super::{CoreAdmission, LocalRoomCandidate, MlsNetworkOutcome};
+use super::{CoreAdmission, LocalRoomCandidate, MlsNetworkOutcome, SealedRoom};
 use crate::{
     network::NetworkCommand,
     profile::admission::{ProofVerificationBudget, fresh_id},
@@ -48,6 +48,20 @@ impl SyncClock {
             started: Instant::now(),
             expires_at_ms,
             deadline: None,
+        }
+    }
+
+    pub(super) fn response(
+        sampled_at_ms: u64,
+        started: Instant,
+        expires_at_ms: u64,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            sampled_at_ms,
+            started,
+            expires_at_ms,
+            deadline: Some(deadline),
         }
     }
 
@@ -98,6 +112,10 @@ enum SyncPhase {
 }
 
 impl MlsSyncRuntime {
+    pub(super) fn forget_room(&mut self, wire_id: Hash32) {
+        self.runs.remove(&wire_id);
+    }
+
     pub(in crate::profile::admission) fn expire(&mut self, now_ms: u64) {
         let now = Instant::now();
         self.runs.retain(|_, run| match &run.phase {
@@ -143,7 +161,7 @@ impl CoreAdmission {
             return Err(AslError::QuotaExceeded);
         }
         let (source, candidate) =
-            self.load_sync_candidate(store, connection_id, wire_id, directories, now_ms)?;
+            self.load_sync_base(store, connection_id, wire_id, directories, now_ms)?;
         if candidate.history.remaining_catchup() == 0 {
             return Err(AslError::QuotaExceeded);
         }
@@ -185,7 +203,7 @@ impl CoreAdmission {
             .remove(&wire_id)
             .ok_or(AslError::InvalidPolicyState)?;
         let (source, candidate) =
-            self.load_sync_candidate(store, run.connection_id, wire_id, directories, now_ms)?;
+            self.load_sync_base(store, run.connection_id, wire_id, directories, now_ms)?;
         if source != run.source || candidate.version != run.expected {
             return Err(AslError::PolicyVersionConflict);
         }
@@ -215,8 +233,14 @@ impl CoreAdmission {
         if !self.mls_sync.serve_budget.try_acquire(Instant::now()) {
             return Err(AslError::QuotaExceeded);
         }
-        let (requester, candidate) =
-            self.load_sync_candidate(store, connection_id, request.group_id, directories, now_ms)?;
+        let requester = self
+            .mls_target(connection_id, directories, now_ms)?
+            .certificate;
+        let candidate = self
+            .room_evidence(directories, now_ms)
+            .load_candidate(store, request.group_id)?
+            .ok_or(AslError::PolicyDenied)?;
+        candidate.base.require_source(&requester)?;
         let head = candidate.version.mls_epoch;
         let head_binding = sync_epoch_binding(&candidate.group, candidate.provider.crypto())?;
         let chain_id = self.resolver.deployment().chain_id;
@@ -314,14 +338,9 @@ impl CoreAdmission {
         else {
             return Err(AslError::InvalidPolicyState);
         };
-        let clock = SyncClock {
-            sampled_at_ms: now_ms,
-            started,
-            expires_at_ms,
-            deadline: Some(deadline),
-        };
+        let clock = SyncClock::response(now_ms, started, expires_at_ms, deadline);
         let (source, candidate) =
-            self.load_sync_candidate(store, connection_id, wire_id, directories, now_ms)?;
+            self.load_sync_base(store, connection_id, wire_id, directories, now_ms)?;
         let base = sync_epoch_binding(&candidate.group, candidate.provider.crypto())?;
         if source != run.source
             || candidate.version != run.expected
@@ -335,6 +354,13 @@ impl CoreAdmission {
         }
         match &response.body {
             GroupBody::Membership(GroupMembership::AtHead { .. }) => {
+                let roster = self
+                    .room_evidence(directories, now_ms)
+                    .verify_current_roster(wire_id, &candidate)?;
+                let candidate = LocalRoomCandidate {
+                    base: candidate,
+                    roster,
+                };
                 let chain_id = self.resolver.deployment().chain_id;
                 store.read_authorized_mls_sync_step(
                     candidate.sync_authority(wire_id, &source.peer_id, chain_id),
@@ -363,7 +389,8 @@ impl CoreAdmission {
                     ciphertext,
                     base,
                 };
-                let version = self.apply_sync_add(store, candidate, step, directories, &clock)?;
+                let version =
+                    self.apply_sync_commit(store, candidate, step, directories, &clock)?;
                 run.expected = version;
                 run.phase = SyncPhase::Ready(Instant::now() + STEP_INTERVAL);
                 self.mls_sync.runs.insert(wire_id, run);
@@ -373,120 +400,125 @@ impl CoreAdmission {
         }
     }
 
-    fn load_sync_candidate(
+    fn load_sync_base(
         &mut self,
         store: &Store,
         connection_id: [u8; 16],
         wire_id: Hash32,
         directories: &HashMap<AgentId, Vec<u8>>,
         now_ms: u64,
-    ) -> Result<(DeviceCertificate, LocalRoomCandidate), AslError> {
-        let source = self
-            .mls_target(connection_id, directories, now_ms)?
-            .certificate;
+    ) -> Result<(DeviceCertificate, SealedRoom), AslError> {
+        let source = self.mls_target(connection_id, directories, now_ms)?;
         let candidate = self
             .room_evidence(directories, now_ms)
-            .load_candidate(store, wire_id)?
+            .load_sealed_room(store, wire_id)?
             .ok_or(AslError::PolicyDenied)?;
-        if !candidate
-            .roster
-            .members
-            .iter()
-            .any(|member| member.certificate == source)
-        {
-            return Err(AslError::PolicyDenied);
-        }
-        store.read_authorized_mls_sync_step(
-            candidate.sync_authority(
-                wire_id,
-                &source.peer_id,
-                self.resolver.deployment().chain_id,
-            ),
-            None,
-            || Ok(now_ms),
-            |_| Ok(false),
-        )?;
-        Ok((source, candidate))
+        candidate.require_source(&source.certificate)?;
+        store.require_mls_member(&source, self.resolver.deployment().chain_id, now_ms)?;
+        Ok((source.certificate, candidate))
     }
 
-    fn apply_sync_add(
+    fn apply_sync_commit(
         &mut self,
         store: &mut Store,
-        mut candidate: LocalRoomCandidate,
+        mut candidate: SealedRoom,
         step: ReceivedStep<'_>,
         directories: &HashMap<AgentId, Vec<u8>>,
         clock: &SyncClock,
     ) -> Result<RoomVersion, AslError> {
         let now_ms = clock.now_ms()?;
         let wire_id = step.request.group_id;
+        let author = candidate
+            .leaves
+            .iter()
+            .find(|leaf| leaf.member.index == candidate.creator_index)
+            .ok_or(AslError::InvalidDatabase)?;
+        let directory = self
+            .room_evidence(directories, now_ms)
+            .verify_directory(author.certificate.agent_id)?;
+        super::verify_directory_leaf(
+            wire_id,
+            &CredentialWithKey::from(&author.member),
+            &author.certificate,
+            &directory,
+        )?;
+        let creator = super::member_evidence(author.certificate.clone(), &directory)?;
+        store.require_mls_member(&creator, self.resolver.deployment().chain_id, now_ms)?;
         let message = read_sync_commit(step.request, step.response)?;
         let processed = candidate
             .group
             .process_message(&candidate.provider, message)
             .map_err(|_| AslError::InvalidMessage)?;
         // The authenticated transport device may forward the commit, but
-        // only the creator in the base MLS tree can sign this Add.
-        if processed.sender() != &Sender::Member(candidate.roster.creator_index) {
+        // only the creator in the base MLS tree can sign this commit.
+        if processed.sender() != &Sender::Member(candidate.creator_index) {
             return Err(AslError::PolicyDenied);
         }
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(AslError::InvalidMessage);
         };
-        let (added, added_leaf) = {
+        let change = {
             let mut proposals = staged.queued_proposals();
             let proposal = proposals.next().ok_or(AslError::PolicyDenied)?;
-            let Proposal::Add(add) = proposal.proposal() else {
-                return Err(AslError::PolicyDenied);
-            };
             if proposals.next().is_some()
                 || proposal.proposal_or_ref_type() != ProposalOrRefType::Proposal
             {
                 return Err(AslError::PolicyDenied);
             }
-            let leaf = add.key_package().leaf_node().clone();
-            let cert = crate::profile::group_credential::leaf_certificate(&CredentialWithKey {
-                credential: leaf.credential().clone(),
-                signature_key: leaf.signature_key().clone(),
-            })?;
-            (cert, leaf)
+            match proposal.proposal() {
+                Proposal::Add(add) => {
+                    MemberChange::Add(Box::new(add.key_package().leaf_node().clone()))
+                }
+                Proposal::Remove(remove) => {
+                    let index = remove.removed();
+                    candidate.removal_target(index, step.source)?;
+                    MemberChange::Remove(index)
+                }
+                _ => return Err(AslError::PolicyDenied),
+            }
         };
         candidate
             .group
             .merge_staged_commit(&candidate.provider, *staged)
             .map_err(|_| AslError::InvalidMessage)?;
+        self.persist_member_change(
+            store,
+            candidate,
+            change,
+            CommitProgress {
+                wire_id,
+                base: step.base,
+                ciphertext: step.ciphertext,
+                from: Some((step.connection_id, step.source)),
+            },
+            directories,
+            clock,
+        )
+    }
+
+    pub(super) fn persist_member_change(
+        &mut self,
+        store: &mut Store,
+        mut candidate: SealedRoom,
+        change: MemberChange,
+        step: CommitProgress<'_>,
+        directories: &HashMap<AgentId, Vec<u8>>,
+        clock: &SyncClock,
+    ) -> Result<RoomVersion, AslError> {
+        let now_ms = clock.now_ms()?;
+        let wire_id = step.wire_id;
+        let base_epoch = candidate.version.mls_epoch;
         let epoch = candidate.group.epoch().as_u64();
-        if step.request.epoch.checked_add(1) != Some(epoch) {
+        if base_epoch.checked_add(1) != Some(epoch) {
             return Err(AslError::PolicyVersionConflict);
         }
-        let origin = RoomOrigin::from_context(
-            wire_id,
-            candidate.group.extensions(),
-            candidate.provider.crypto(),
-        )?;
-        let roster = self.room_evidence(directories, now_ms).verify_roster(
-            &origin,
-            candidate.group.own_leaf_index(),
-            candidate.group.members(),
-        )?;
-        let added_peer = &added.peer_id;
-        if roster.creator != candidate.roster.creator
-            || candidate.roster.members.iter().any(|before| {
-                &before.certificate.peer_id == added_peer
-                    || !roster
-                        .members
-                        .iter()
-                        .any(|after| before.certificate == after.certificate)
-            })
-            || roster.members.len() != candidate.roster.members.len() + 1
-            || !candidate.group.members().any(|member| {
-                member.credential == *added_leaf.credential()
-                    && member.signature_key.as_slice() == added_leaf.signature_key().as_slice()
-            })
-            || !roster
-                .members
-                .iter()
-                .any(|after| after.certificate == added)
-        {
+        let roster = self
+            .room_evidence(directories, now_ms)
+            .verify_current_roster(wire_id, &candidate)?;
+        let signer = &candidate.creator;
+        let source = step.from.map_or(signer, |(_, source)| source);
+        let projection = candidate.check_member_change(&change, source, &roster)?;
+        if roster.creator != *signer || roster.creator_index != candidate.creator_index {
             return Err(AslError::PolicyDenied);
         }
         let binding = RoomBinding {
@@ -502,18 +534,19 @@ impl CoreAdmission {
         let expiry = recorded_at_ms
             .checked_add(MLS_SYNC_RETENTION_MS)
             .ok_or(AslError::ExpiredMessage)?;
-        let signer = &candidate.roster.creator;
-        candidate.history.append_downloaded(
-            step.request.epoch,
-            bindings.digest(
-                binding.local_id,
-                wire_id,
-                binding.device,
-                (step.request.epoch, expiry),
-                signer,
-                step.ciphertext,
-            ),
-        )?;
+        let digest = bindings.digest(
+            binding.local_id,
+            wire_id,
+            binding.device,
+            (base_epoch, expiry),
+            signer,
+            step.ciphertext,
+        );
+        if step.from.is_some() {
+            candidate.history.append_downloaded(base_epoch, digest)?;
+        } else {
+            candidate.history.append(base_epoch, digest)?;
+        }
         let revision = candidate
             .version
             .revision
@@ -531,29 +564,58 @@ impl CoreAdmission {
             .iter()
             .map(|member| member.certificate.peer_id.clone())
             .collect::<Vec<_>>();
-        store.commit_verified_mls_sync_add(
-            MlsRoomUpdate {
-                local_id: &candidate.local_id,
-                wire_id,
-                expected: candidate.version,
-                mls_epoch: epoch,
-                sealed_snapshot: &snapshot,
-                members: &members,
-                event: Some(MlsJournalEntry {
-                    sender: signer,
-                    kind: MlsJournalKind::SyncCommit(bindings),
-                    ciphertext: step.ciphertext,
-                }),
-            },
-            MlsSyncAddAuthority {
-                source: step.source,
-                added: added_peer,
-                members: &roster.members,
-                chain_id: self.resolver.deployment().chain_id,
-            },
-            recorded_at_ms,
-            || self.sync_peer_is_live(step.connection_id, step.source, clock),
-        )
+        let update = MlsRoomUpdate {
+            local_id: &candidate.local_id,
+            wire_id,
+            expected: candidate.version,
+            mls_epoch: epoch,
+            sealed_snapshot: &snapshot,
+            members: &members,
+            event: Some(MlsJournalEntry {
+                sender: signer,
+                kind: MlsJournalKind::SyncCommit(bindings),
+                ciphertext: step.ciphertext,
+            }),
+        };
+        let chain_id = self.resolver.deployment().chain_id;
+        let current_time = || {
+            let now = match step.from {
+                Some((connection, peer)) => self.sync_peer_is_live(connection, peer, clock)?,
+                None => {
+                    let now = clock.now_ms()?;
+                    if !self.local_is_current(now) {
+                        return Err(AslError::InvalidIdentity);
+                    }
+                    now
+                }
+            };
+            roster.require_current_directories(&mut self.resolver, now)?;
+            Ok(now)
+        };
+        match projection {
+            MemberProjection::Added(added) => store.commit_verified_mls_sync_add(
+                update,
+                MlsSyncAddAuthority {
+                    source,
+                    added: &added,
+                    members: &roster.members,
+                    chain_id,
+                },
+                recorded_at_ms,
+                current_time,
+            ),
+            MemberProjection::Removed(removed) => store.commit_verified_mls_remove(
+                update,
+                MlsRemoveAuthority {
+                    source,
+                    removed: &removed,
+                    survivors: &roster.members,
+                    chain_id,
+                },
+                recorded_at_ms,
+                current_time,
+            ),
+        }
     }
 
     fn sync_peer_is_live(
@@ -598,8 +660,105 @@ struct ReceivedStep<'a> {
     base: Hash32,
 }
 
+pub(super) struct CommitProgress<'a> {
+    pub wire_id: Hash32,
+    pub base: Hash32,
+    pub ciphertext: &'a [u8],
+    pub from: Option<([u8; 16], &'a PeerId)>,
+}
+
+pub(super) enum MemberChange {
+    Add(Box<LeafNode>),
+    Remove(LeafNodeIndex),
+}
+
+enum MemberProjection {
+    Added(PeerId),
+    Removed(PeerId),
+}
+
+impl SealedRoom {
+    fn require_source(&self, certificate: &DeviceCertificate) -> Result<(), AslError> {
+        self.leaves
+            .iter()
+            .any(|leaf| leaf.certificate == *certificate)
+            .then_some(())
+            .ok_or(AslError::PolicyDenied)
+    }
+
+    fn check_member_change(
+        &self,
+        change: &MemberChange,
+        source: &PeerId,
+        roster: &super::VerifiedRoster,
+    ) -> Result<MemberProjection, AslError> {
+        let (projection, removed, expected_count) = match change {
+            MemberChange::Add(leaf) => {
+                let credential = CredentialWithKey {
+                    credential: leaf.credential().clone(),
+                    signature_key: leaf.signature_key().clone(),
+                };
+                let cert = super::leaf_certificate(&credential)?;
+                if self
+                    .leaves
+                    .iter()
+                    .any(|old| old.certificate.peer_id == cert.peer_id)
+                    || !self.group.members().any(|new| {
+                        new.credential == credential.credential
+                            && new.signature_key == credential.signature_key.as_slice()
+                    })
+                {
+                    return Err(AslError::PolicyDenied);
+                }
+                (
+                    MemberProjection::Added(cert.peer_id),
+                    None,
+                    self.leaves.len() + 1,
+                )
+            }
+            MemberChange::Remove(index) => {
+                let removed = self.removal_target(*index, source)?;
+                if roster
+                    .members
+                    .iter()
+                    .any(|m| &m.certificate.peer_id == removed)
+                {
+                    return Err(AslError::PolicyDenied);
+                }
+                (
+                    MemberProjection::Removed(removed.clone()),
+                    Some(*index),
+                    self.leaves.len() - 1,
+                )
+            }
+        };
+        if roster.members.len() != expected_count {
+            return Err(AslError::PolicyDenied);
+        }
+        let updated: HashMap<_, _> = self.group.members().map(|m| (m.index, m)).collect();
+        for before in &self.leaves {
+            let member = &before.member;
+            if Some(member.index) == removed {
+                if updated.contains_key(&member.index) {
+                    return Err(AslError::PolicyDenied);
+                }
+                continue;
+            }
+            let after = updated.get(&member.index).ok_or(AslError::PolicyDenied)?;
+            if member.credential != after.credential
+                || member.signature_key != after.signature_key
+                || (member.index != self.creator_index
+                    && member.encryption_key != after.encryption_key)
+            {
+                return Err(AslError::PolicyDenied);
+            }
+        }
+        Ok(projection)
+    }
+}
+
 fn send_step(
-    candidate: &LocalRoomCandidate,
+    candidate: &SealedRoom,
     wire_id: Hash32,
     connection_id: [u8; 16],
     now_ms: u64,

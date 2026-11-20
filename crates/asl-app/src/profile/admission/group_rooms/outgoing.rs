@@ -117,8 +117,9 @@ impl CoreAdmission {
         }
         let base = sync_epoch_binding(&candidate.group, candidate.provider.crypto())?;
         let (commit, welcome, _) = candidate
+            .base
             .group
-            .add_members(&candidate.provider, &candidate.signer, &[package])
+            .add_members(&candidate.base.provider, &candidate.base.signer, &[package])
             .map_err(|_| AslError::InvalidMessage)?;
         let commit_packet = GroupPacket {
             group_id: wire_id,
@@ -133,8 +134,9 @@ impl CoreAdmission {
             return Err(AslError::InvalidPolicyState);
         };
         candidate
+            .base
             .group
-            .merge_pending_commit(&candidate.provider)
+            .merge_pending_commit(&candidate.base.provider)
             .map_err(|_| AslError::InvalidMessage)?;
         let epoch = candidate.group.epoch().as_u64();
         let origin = RoomOrigin::from_context(
@@ -153,7 +155,7 @@ impl CoreAdmission {
             .map(|member| member.certificate.peer_id.clone())
             .collect();
         let binding = RoomBinding {
-            local_id: &candidate.local_id,
+            local_id: &candidate.base.local_id,
             wire_id,
             device: &candidate.roster.creator,
         };
@@ -169,7 +171,7 @@ impl CoreAdmission {
         let expiry = now_ms
             .checked_add(MLS_SYNC_RETENTION_MS)
             .ok_or(AslError::ExpiredMessage)?;
-        candidate.history.append(
+        candidate.base.history.append(
             request.epoch,
             bindings.digest(
                 binding.local_id,

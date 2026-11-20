@@ -20,6 +20,7 @@ const HELP: &str = "\
 list | peers | create | room <room-id>
 approve <invite-id> | retry <invite-id> | reject <invite-id>
 invite <room-id> <connection-id> | dial <ip:port> <base58-peer-id>
+remove <room-id> <base58-peer-id>
 Room, connection and invite IDs are hex. Dial uses TCP.
 Approve saves the decision and tries once; use retry if needed.";
 
@@ -117,21 +118,28 @@ fn parse(line: &str) -> Result<LocalGroupAction, AslError> {
             room: Hash32(fixed_hex(room)?),
             connection_id: fixed_hex(connection)?,
         },
+        ["remove", room, peer] => LocalGroupAction::Remove {
+            room: Hash32(fixed_hex(room)?),
+            peer: parse_peer(peer)?,
+        },
         ["dial", address, peer] => {
             let address: SocketAddr = address.parse().map_err(|_| AslError::InvalidMessage)?;
             if address.port() == 0 {
                 return Err(AslError::InvalidMessage);
             }
-            let peer: libp2p_identity::PeerId =
-                peer.parse().map_err(|_| AslError::InvalidMessage)?;
             LocalGroupAction::Dial {
                 address,
-                peer: PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidMessage)?,
+                peer: parse_peer(peer)?,
             }
         }
         _ => return Err(AslError::InvalidMessage),
     };
     Ok(action)
+}
+
+fn parse_peer(text: &str) -> Result<PeerId, AslError> {
+    let peer: libp2p_identity::PeerId = text.parse().map_err(|_| AslError::InvalidMessage)?;
+    PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidMessage)
 }
 
 fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], AslError> {
@@ -183,6 +191,13 @@ mod tests {
             assert!(parse(&format!("dial {invalid} {peer}")).is_err());
         }
         assert!(parse(&format!("dial {address} not-a-peer")).is_err());
+        let room = "bd".repeat(32);
+        assert!(matches!(
+            parse(&format!("remove {room} {peer}")),
+            Ok(LocalGroupAction::Remove { room: Hash32(id), peer: device })
+                if id == [0xbd; 32] && device.as_bytes() == peer.to_bytes()
+        ));
+        assert!(parse(&format!("remove {room} not-a-peer")).is_err());
     }
 
     #[test]

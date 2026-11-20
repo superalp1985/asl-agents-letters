@@ -45,6 +45,10 @@ pub enum LocalGroupAction {
         room: Hash32,
         connection_id: [u8; 16],
     },
+    Remove {
+        room: Hash32,
+        peer: PeerId,
+    },
     Dial {
         address: SocketAddr,
         peer: PeerId,
@@ -119,13 +123,14 @@ impl Supervisor {
         );
         if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
             && let Some((connection_id, wire_id)) = joined_route
+            && let Ok(sync_now_ms) = unix_time_ms()
         {
             let _ = admission.start_mls_sync(
                 &groups.store,
                 connection_id,
                 wire_id,
                 &HashMap::new(),
-                now_ms,
+                sync_now_ms,
                 |command| enqueue(net, command),
             );
         }
@@ -200,7 +205,7 @@ impl Supervisor {
                 let approved = approved(store)?
                     .iter()
                     .map(|invite| {
-                        let mut view = invite_view(invite);
+                        let mut view = invite_view(store, invite)?;
                         if let Some((_, reason)) = groups
                             .join_diagnostics
                             .iter()
@@ -208,21 +213,31 @@ impl Supervisor {
                         {
                             view["last_result"] = json!(reason);
                         }
-                        view
+                        Ok(view)
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, AslError>>()?;
+                let pending = pending(store)?
+                    .iter()
+                    .map(|invite| invite_view(store, invite))
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Ok(json!({
-                    "pending": pending(store)?.iter().map(invite_view).collect::<Vec<_>>(),
+                    "pending": pending,
                     "approved": approved
                 }));
             }
             LocalGroupAction::Room(id) => {
                 let (state, epoch) = store.mls_room_progress(id)?.ok_or(AslError::NotFound)?;
-                return Ok(json!({
+                let mut view = json!({
                     "room": hex::encode(id.0),
                     "state": state,
                     "mls_epoch": epoch
-                }));
+                });
+                if let Some(saved) = store.mls_room_for_reconciliation(id)? {
+                    view["creator"] = json!(peer_text(&saved.creator));
+                    view["stored_members"] =
+                        json!(saved.members.iter().map(peer_text).collect::<Vec<_>>());
+                }
+                return Ok(view);
             }
             LocalGroupAction::Reject(id) => {
                 let invite = select_invite(pending(store)?, id)?;
@@ -341,6 +356,16 @@ impl Supervisor {
                 )?;
                 Ok(json!({"queued": true}))
             }
+            LocalGroupAction::Remove { room, peer } => {
+                let version =
+                    admission.remove_local_mls_member(store, room, &peer, &directories, now_ms)?;
+                Ok(json!({
+                    "room": hex::encode(room.0),
+                    "removed": peer_text(&peer),
+                    "state": "needs_sync",
+                    "mls_epoch": version.mls_epoch
+                }))
+            }
             LocalGroupAction::Dial { address, peer } => {
                 if !address.ip().is_loopback() {
                     return Err(AslError::PolicyDenied);
@@ -443,14 +468,16 @@ fn peer_text(peer: &PeerId) -> String {
         .map_or_else(|_| hex::encode(peer.as_bytes()), |peer| peer.to_base58())
 }
 
-fn invite_view(invite: &MlsIncomingInvite) -> Value {
-    json!({
+fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslError> {
+    Ok(json!({
         "id": hex::encode(invite.id.0),
         "room": hex::encode(invite.wire_id.0),
         "inviter": hex::encode(invite.inviter.0),
         "device": peer_text(&invite.inviter_device),
+        "kind": if store.mls_room_progress(invite.wire_id)?.is_some() { "rejoin" } else { "join" },
+        "base_epoch": invite.base_epoch,
         "expires_at_ms": invite.expires_at_ms
-    })
+    }))
 }
 
 fn describe_join_failure(error: AslError) -> &'static str {

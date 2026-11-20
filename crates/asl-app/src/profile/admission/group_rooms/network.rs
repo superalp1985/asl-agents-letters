@@ -64,6 +64,7 @@ struct PendingJoin {
     request: GroupPacket,
     local_id: GroupId,
     local_name: String,
+    rejoin_base: Option<RoomVersion>,
     expires_at_ms: u64,
     deadline: Instant,
 }
@@ -170,6 +171,15 @@ impl CoreAdmission {
             directories,
             now_ms,
         )?;
+        // Take the old snapshot version before sending. A Welcome cannot
+        // switch a new join into a rejoin or overwrite a concurrent advance.
+        let (local_id, rejoin_base) = match store.mls_room_snapshot(send.invite.wire_id)? {
+            Some(saved) if send.invite.base_epoch > saved.version.mls_epoch => {
+                (saved.local_id, Some(saved.version))
+            }
+            Some(_) => return Err(AslError::PolicyVersionConflict),
+            None => (send.local_id.clone(), None),
+        };
         let request_handle = fresh_id()?;
         if self.mls_joins.pending.contains_key(&request_handle) {
             return Err(AslError::QuotaExceeded);
@@ -188,8 +198,9 @@ impl CoreAdmission {
                 connection_id: send.connection_id,
                 invite: send.invite.clone(),
                 request,
-                local_id: send.local_id.clone(),
+                local_id,
                 local_name: send.local_name.to_owned(),
+                rejoin_base,
                 expires_at_ms: deadline_ms,
                 deadline,
             },
@@ -208,6 +219,7 @@ impl CoreAdmission {
         now_ms: u64,
         enqueue: impl FnOnce(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<Option<MlsNetworkOutcome>, AslError> {
+        let started = Instant::now();
         self.mls_joins.expire(now_ms);
         match event {
             NetworkEvent::UnverifiedGroupRequest {
@@ -314,6 +326,8 @@ impl CoreAdmission {
                     .pending
                     .remove(&request_handle)
                     .ok_or(AslError::InvalidPolicyState)?;
+                let clock =
+                    SyncClock::response(now_ms, started, attempt.expires_at_ms, attempt.deadline);
                 let version = self.finish_approved_mls_welcome(
                     store,
                     ApprovedMlsWelcome {
@@ -322,10 +336,14 @@ impl CoreAdmission {
                         reply: &response,
                         local_id: &attempt.local_id,
                         local_name: &attempt.local_name,
+                        rejoin_base: attempt.rejoin_base,
                         directories,
                     },
-                    now_ms,
+                    &clock,
                 )?;
+                if attempt.rejoin_base.is_some() {
+                    self.mls_sync.forget_room(response.group_id);
+                }
                 Ok(Some(MlsNetworkOutcome::Joined {
                     local_id: attempt.local_id,
                     version,
