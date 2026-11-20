@@ -2,14 +2,14 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Stdin, Stdout, Write},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use asl_net::{
     codec::{BulkRequest, BulkResponse},
     transport::{
-        AuthenticatedPeer, DialFailure, LocalConnectionId, LocalTransport, RequestToken,
-        ResponseToken, TransportEvent,
+        AuthenticatedPeer, DialFailure, LocalConnectionId, LocalTransport, REQUEST_TIMEOUT,
+        RequestToken, ResponseToken, TransportEvent,
     },
 };
 use asl_transfer::scheduler::MAX_ACTIVE_PER_SOURCE;
@@ -753,9 +753,14 @@ impl NetworkBridge {
         writer: &mut FrameWriter<W>,
     ) -> Result<(), NetworkErrorCode> {
         let protocol = NetworkProtocol::Group;
-        let now_ms =
-            crate::supervisor::unix_time_ms().map_err(|_| NetworkErrorCode::InvalidCommand)?;
-        if now_ms >= deadline_ms {
+        let now = Instant::now();
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| NetworkErrorCode::InvalidCommand)?;
+        let remaining = Duration::from_millis(deadline_ms)
+            .saturating_sub(since_epoch)
+            .min(REQUEST_TIMEOUT);
+        if remaining.is_zero() {
             return self.send_request_failure(
                 connection_id,
                 request_handle,
@@ -773,7 +778,7 @@ impl NetworkBridge {
                     Err(NetworkErrorCode::Capacity)
                 } else {
                     self.transport
-                        .send_group_request(connection, request)
+                        .send_group_request(connection, request, now + remaining)
                         .map_err(|error| error_code(&error))
                 }
             }
@@ -1075,15 +1080,21 @@ impl NetworkBridge {
                 connection,
                 request,
                 response,
+                deadline,
             } => {
-                // Advertise the same lifetime, starting no later than handle registration.
-                let deadline_ms = crate::supervisor::unix_time_ms()?
-                    .checked_add(RESPONSE_HANDLE_LIFETIME_MS)
-                    .ok_or(AslError::InvalidMessage)?;
-                self.forward_request(
+                let now_ms = crate::supervisor::unix_time_ms()?;
+                let remaining_ms = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                if remaining_ms == 0 {
+                    return Ok(());
+                }
+                let deadline_ms = now_ms.saturating_add(remaining_ms as u64);
+                self.forward_request_until(
                     connection,
                     NetworkProtocol::Group,
                     response,
+                    deadline,
                     |connection_id, response_id| IpcMessage::GroupRequested {
                         connection_id,
                         response_id,
@@ -1169,11 +1180,30 @@ impl NetworkBridge {
         event: impl FnOnce([u8; 16], [u8; 16]) -> IpcMessage,
         writer: &mut FrameWriter<W>,
     ) -> Result<(), AslError> {
+        self.forward_request_until(
+            connection,
+            protocol,
+            token,
+            Instant::now() + lifetime,
+            event,
+            writer,
+        )
+    }
+
+    fn forward_request_until<W: Write>(
+        &mut self,
+        connection: AuthenticatedPeer,
+        protocol: NetworkProtocol,
+        token: ResponseToken,
+        expires_at: Instant,
+        event: impl FnOnce([u8; 16], [u8; 16]) -> IpcMessage,
+        writer: &mut FrameWriter<W>,
+    ) -> Result<(), AslError> {
         let local_id = connection.connection_id();
         let Some(&connection_id) = self.connection_handles.get(&local_id) else {
             return Ok(());
         };
-        if self.closing.contains(&connection_id) {
+        if self.closing.contains(&connection_id) || Instant::now() >= expires_at {
             return Ok(());
         }
         let response_id = fresh_handle(&self.responses)?;
@@ -1183,7 +1213,7 @@ impl NetworkBridge {
                 connection_id,
                 protocol,
                 token,
-                expires_at: Instant::now() + lifetime,
+                expires_at,
             },
         );
         writer.send(&event(connection_id, response_id))?;
@@ -1548,7 +1578,12 @@ mod tests {
         );
 
         let event = next_group_event(&mut listener, &mut dialer).await;
+        let TransportEvent::GroupRequest { deadline, .. } = &event else {
+            panic!("expected a group request");
+        };
+        let expiry = *deadline;
         let before_dispatch_ms = crate::supervisor::unix_time_ms().unwrap();
+        let before_dispatch = Instant::now();
         let IpcMessage::GroupRequested {
             connection_id: received_connection,
             response_id,
@@ -1560,12 +1595,15 @@ mod tests {
         };
         assert_eq!(received_connection, listener_id);
         assert_eq!(received_request, request);
+        let after_dispatch = Instant::now();
         let after_dispatch_ms = crate::supervisor::unix_time_ms().unwrap();
+        let remaining_ms = |now| expiry.saturating_duration_since(now).as_millis() as u64;
         assert!(
-            (before_dispatch_ms + RESPONSE_HANDLE_LIFETIME_MS
-                ..=after_dispatch_ms + RESPONSE_HANDLE_LIFETIME_MS)
+            (before_dispatch_ms + remaining_ms(after_dispatch)
+                ..=after_dispatch_ms + remaining_ms(before_dispatch))
                 .contains(&deadline_ms)
         );
+        assert_eq!(listener.responses[&response_id].expires_at, expiry);
 
         let response = GroupPacket {
             body: GroupBody::Membership(GroupMembership::AtHead {
@@ -1686,6 +1724,88 @@ mod tests {
             }
         );
         assert!(dialer.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_send_that_expires_after_queueing_does_not_reach_the_other_net() {
+        let ((mut listener, _), (mut dialer, connection_id)) =
+            connected_bridges_with(LocalTransport::new_with_loopback_groups).await;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let token = dialer
+            .transport
+            .send_group_request(
+                &dialer.connections[&connection_id],
+                group_request(),
+                deadline,
+            )
+            .unwrap();
+        // Neither swarm is polled after enqueue until the local deadline has passed.
+        tokio::time::sleep_until(deadline.into()).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = next_event_from_either(&mut listener, &mut dialer).await;
+                match event {
+                    TransportEvent::RequestFailed { request, .. } => {
+                        assert_eq!(request, token);
+                        break;
+                    }
+                    TransportEvent::GroupRequest { .. } | TransportEvent::Disconnected { .. } => {
+                        panic!("unexpected group transport event: {event:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        // Drive the same connection through a fresh request to observe any old
+        // request that might have arrived after the sender's failure event.
+        let fresh = GroupPacket {
+            message_id: Id128([85; 16]),
+            ..group_request()
+        };
+        dialer
+            .transport
+            .send_group_request(
+                &dialer.connections[&connection_id],
+                fresh.clone(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        let TransportEvent::GroupRequest { request, .. } =
+            next_group_event(&mut listener, &mut dialer).await
+        else {
+            panic!("expected a fresh group request");
+        };
+        assert_eq!(request, fresh);
+    }
+
+    #[tokio::test]
+    async fn group_request_that_expires_before_ipc_has_no_response_handle() {
+        let ((mut listener, _), (mut dialer, connection_id)) =
+            connected_bridges_with(LocalTransport::new_with_loopback_groups).await;
+        assert!(
+            command_output(
+                &mut dialer,
+                IpcMessage::SendGroup {
+                    connection_id,
+                    request_handle: [84; 16],
+                    deadline_ms: crate::supervisor::unix_time_ms().unwrap() + 5_000,
+                    request: group_request(),
+                },
+            )
+            .is_empty()
+        );
+        let mut event = next_group_event(&mut listener, &mut dialer).await;
+        let TransportEvent::GroupRequest { deadline, .. } = &mut event else {
+            panic!("expected a group request");
+        };
+        *deadline = Instant::now();
+        let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
+        listener.handle_event(event, &mut writer).unwrap();
+        assert!(writer.into_inner().is_empty());
+        assert!(listener.responses.is_empty());
     }
 
     #[tokio::test]

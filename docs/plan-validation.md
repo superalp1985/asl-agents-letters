@@ -511,3 +511,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-net -p asl-store --all-targets --locked --offline -- --test-threads=1` 共 445 项通过、0 失败、3 项按原有标记忽略；同三包全目标严格 Clippy 与 `cargo fmt --all -- --check`、`git diff --check` 通过。此前并行运行复现了已记录的链历史恢复 `InvalidLocalState` 偶发失败，最终串行中该用例通过；本轮未改链 HTTP 代码。
 - 真实 TCP 回环验证 Net 的 IPC 编解码、原连接回复句柄、过期发包拒绝、跨协议句柄拒绝、旧尝试与当前重试隔离，以及默认不开放群协议。独立的双 Core 用例用真实 OpenMLS、DPAPI 和 SQLite、合成链证据及注入的 Net 事件，验证重开数据库后按原 ID 和期限重发 Invite、过期请求不提交 Add、无实际待决发送不处理 Welcome、断开重试和单次入群。两类测试不是一条生产端到端链路。
 - 独立静态复核定位并修正了邀请入队失败不能恢复、IPC 期限缺失和 Welcome 直接提交入口。子流协商/读写延迟不受本机 IPC 期限完整覆盖，生产开放前仍须接入。未验收生产 Supervisor 群路由、外网、GUI、真实链 RPC 或群同步。房间保留 `needs_sync`，未修改 P2P CBOR、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：实际子流期限
+
+- Windows x64 / E 盘离线：`cargo test -p asl-app -p asl-net --all-targets --locked --offline -- --test-threads=1` 共 328 项通过、0 失败、2 项按既有标记忽略。相同二包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 真实 TCP 回环验证出站过期后才驱动子流时，原请求没有到达对端，同连接的后续请求仍可送达；Net 不给过期入站事件发 IPC 回复句柄，正常往返使用原期限，旧尝试不能完成新的重试。codec 单测覆盖延迟首次读帧和结束发送半边受阻；既有双 Core 测试覆盖过期 KeyPackage 不提交 Add、原 Welcome 重试及单次入群。
+- 独立静态复核后将关闭发送端纳入期限，并明确已完整进入传输层的请求不能靠本机超时撤回。未测真实子流关闭受阻时对端的投递结果，也未开启生产 Supervisor 群路由、GUI、公网或同步。未修改 P2P CBOR、SQLite schema 或依赖锁。

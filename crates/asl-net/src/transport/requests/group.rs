@@ -5,9 +5,13 @@ impl LocalTransport {
         &mut self,
         connection: &AuthenticatedPeer,
         request: GroupPacket,
+        deadline: Instant,
     ) -> io::Result<RequestToken> {
         self.require_live(connection)?;
         self.require_request_capacity()?;
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         request.validate_request().map_err(invalid_packet)?;
         let envelope = request.clone().into_envelope().map_err(invalid_packet)?;
         // Admission allows at most one established connection for this peer.
@@ -22,13 +26,13 @@ impl LocalTransport {
             return Err(io::ErrorKind::NotConnected.into());
         }
         let token = RequestToken::new(connection, self.requests.next_token()?);
-        let request_id = group.send_request(&peer, envelope);
+        let request_id = group.send_request(&peer, TimedGroupEnvelope { envelope, deadline });
         self.track_request(
             ProtocolKind::Group,
             request_id,
             connection,
             &token,
-            PendingRequestKind::Group(request),
+            PendingRequestKind::Group { request, deadline },
         );
         Ok(token)
     }
@@ -40,9 +44,15 @@ impl LocalTransport {
         response: GroupPacket,
     ) -> io::Result<()> {
         let pending = self.response_ref(connection, token, ProtocolKind::Group)?;
-        let PendingResponseKind::Group { request, .. } = &pending.kind else {
+        let PendingResponseKind::Group {
+            request, deadline, ..
+        } = &pending.kind
+        else {
             return Err(io::ErrorKind::InvalidInput.into());
         };
+        if Instant::now() >= *deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         request.match_reply(&response).map_err(invalid_packet)?;
         let envelope = response.into_envelope().map_err(invalid_packet)?;
         let pending = self.take_response(connection, token, ProtocolKind::Group)?;
@@ -60,7 +70,7 @@ impl LocalTransport {
 
     pub(in crate::transport) fn handle_group(
         &mut self,
-        event: request_response::Event<GroupEnvelope, GroupEnvelope>,
+        event: request_response::Event<TimedGroupEnvelope, GroupEnvelope>,
     ) -> Option<TransportEvent> {
         use request_response::{Event, Message};
 
@@ -75,8 +85,12 @@ impl LocalTransport {
                         channel,
                     },
             } => {
+                let TimedGroupEnvelope { envelope, deadline } = request;
+                if Instant::now() >= deadline || !channel.is_open() {
+                    return None;
+                }
                 let connection = self.authenticated_peer(peer, connection_id)?;
-                let request = GroupPacket::from_envelope(request).ok()?;
+                let request = GroupPacket::from_envelope(envelope).ok()?;
                 request.validate_request().ok()?;
                 let response = self.insert_response(
                     ProtocolKind::Group,
@@ -85,12 +99,14 @@ impl LocalTransport {
                     PendingResponseKind::Group {
                         request: request.clone(),
                         channel,
+                        deadline,
                     },
                 )?;
                 Some(TransportEvent::GroupRequest {
                     connection,
                     request,
                     response,
+                    deadline,
                 })
             }
             Event::Message {
@@ -108,7 +124,8 @@ impl LocalTransport {
                 request_id,
                 response,
                 |connection, pending, response| {
-                    if let PendingRequestKind::Group(request) = &pending.kind
+                    if let PendingRequestKind::Group { request, deadline } = &pending.kind
+                        && Instant::now() < *deadline
                         && let Ok(response) = GroupPacket::from_envelope(response)
                         && request.match_reply(&response).is_ok()
                     {

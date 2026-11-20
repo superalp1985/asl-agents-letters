@@ -24,7 +24,7 @@ pub(super) struct AslBehaviour {
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
     pub(super) pairing: request_response::Behaviour<PairingCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
-    pub(super) group: Toggle<request_response::Behaviour<GroupCodec>>,
+    pub(super) group: Toggle<request_response::Behaviour<GroupStreamCodec>>,
 }
 
 #[derive(Debug)]
@@ -38,7 +38,7 @@ pub(super) enum BehaviourEvent {
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
     Pairing(request_response::Event<PairingInvite, PairingExchange>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
-    Group(request_response::Event<GroupEnvelope, GroupEnvelope>),
+    Group(request_response::Event<TimedGroupEnvelope, GroupEnvelope>),
 }
 
 #[derive(Debug)]
@@ -94,8 +94,8 @@ impl From<request_response::Event<BulkRequest, BulkResponse>> for BehaviourEvent
     }
 }
 
-impl From<request_response::Event<GroupEnvelope, GroupEnvelope>> for BehaviourEvent {
-    fn from(value: request_response::Event<GroupEnvelope, GroupEnvelope>) -> Self {
+impl From<request_response::Event<TimedGroupEnvelope, GroupEnvelope>> for BehaviourEvent {
+    fn from(value: request_response::Event<TimedGroupEnvelope, GroupEnvelope>) -> Self {
         Self::Group(value)
     }
 }
@@ -153,7 +153,7 @@ impl AslBehaviour {
             ),
             bulk: request_response(BulkCodec, BULK_PROTOCOL),
             group: loopback_groups
-                .then(|| request_response(GroupCodec, GROUP_PROTOCOL))
+                .then(|| request_response(GroupStreamCodec::new(REQUEST_TIMEOUT), GROUP_PROTOCOL))
                 .into(),
         }
     }

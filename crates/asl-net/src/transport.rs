@@ -54,8 +54,8 @@ use rand::{TryRng, rngs::SysRng};
 
 use crate::codec::{
     BULK_PROTOCOL, BulkCodec, BulkRequest, BulkResponse, CONTROL_PROTOCOL, ControlCodec,
-    GROUP_PROTOCOL, GroupCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec, PAIRING_PROTOCOL,
-    PairingCodec,
+    GROUP_PROTOCOL, GroupStreamCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
+    PAIRING_PROTOCOL, PairingCodec, TimedGroupEnvelope,
 };
 
 const MAX_LISTENERS: usize = 16;
@@ -287,6 +287,7 @@ pub enum TransportEvent {
         connection: AuthenticatedPeer,
         request: GroupPacket,
         response: ResponseToken,
+        deadline: Instant,
     },
     GroupResponse {
         connection: AuthenticatedPeer,

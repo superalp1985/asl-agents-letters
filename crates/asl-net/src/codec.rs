@@ -12,6 +12,7 @@ mod bulk;
 mod group;
 pub use bulk::{BULK_PROTOCOL, BulkCodec, BulkOperation, BulkRequest, BulkResponse, BulkStatus};
 pub use group::{GROUP_PROTOCOL, GroupCodec};
+pub(crate) use group::{GroupStreamCodec, TimedGroupEnvelope};
 use libp2p::{
     StreamProtocol,
     futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},

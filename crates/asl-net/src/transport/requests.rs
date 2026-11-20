@@ -742,6 +742,7 @@ enum PendingResponseKind {
     Group {
         channel: ResponseChannel<GroupEnvelope>,
         request: GroupPacket,
+        deadline: Instant,
     },
 }
 
@@ -750,7 +751,10 @@ enum PendingRequestKind {
     IdentityProof(IdentityProofRequest),
     Pairing(PairingInvite),
     Bulk(BulkRequest),
-    Group(GroupPacket),
+    Group {
+        request: GroupPacket,
+        deadline: Instant,
+    },
 }
 
 struct PendingRequest {
