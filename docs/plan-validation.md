@@ -457,3 +457,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-agent -p asl-types -p asl-policy --all-targets --locked --offline`、三包严格 Clippy、`cargo fmt --all -- --check` 与 `git diff --check` 通过。7 项新增决策测试、既有网关 9 项及 T03 固定线协议向量通过；已有两个外部网络探针默认忽略。
 - 决策用例覆盖三种合法动作、重复键、未知字段/词表、错误类型/证据序号、超限数组、一项无效时拒绝整个结果、入站不扩散、错误作用域、撤权/到期以及修复只发一次且不附模型原始回复。用既有 CBOR 编解码器验证类型化回答往返。
 - 未修改线上 CDDL 或依赖锁。未跑全工作区、未调用真实模型、未接入生产调度或实际发出回答。
+
+### 2026-11-20 T27：入站调度和确定性资源回退
+
+- Windows x64 / E 盘：`cargo test -p asl-agent --all-targets --locked --offline` 共 33 项通过，含 `autonomous_state_machine` 6 项；相同包范围严格 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。
+- 新增用例覆盖浏览时无工作项、确认不启动任务、无模型权限时的类型化回答与资源 offer、去重与第四轮拒绝、同一 AgentId 多设备共享待处理名额、许可跨设备不可复用、回复取出前撤权、模式切换与过期取消。
+- 使用内存路由器和实际策略引擎测试，未使用真实模型、生产 SQLite 检索或模型片段读取、GUI、文件传输或公网；出站自动调研和 Core/Net 联调尚未验收。

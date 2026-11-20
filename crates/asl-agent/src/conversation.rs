@@ -178,7 +178,17 @@ impl Conversation {
         frame: WireFrame,
         now_ms: u64,
     ) -> Result<(), AslError> {
-        let Some((message_id, root_task_id, kind, _)) = frame_metadata(&frame) else {
+        let peer_id = self.record_outbound(task_id, &frame, now_ms)?;
+        self.queue(task_id.clone(), peer_id, frame, now_ms)
+    }
+
+    pub(crate) fn record_outbound(
+        &mut self,
+        task_id: &TaskId,
+        frame: &WireFrame,
+        now_ms: u64,
+    ) -> Result<PeerId, AslError> {
+        let Some((message_id, root_task_id, kind, _)) = frame_metadata(frame) else {
             return Err(AslError::InvalidMessage);
         };
         if let Some(root_task_id) = root_task_id.map(TaskId)
@@ -200,7 +210,15 @@ impl Conversation {
             task.peer_id.clone()
         };
         self.message_tasks.insert(message_id, task_id.clone());
-        self.queue(task_id.clone(), peer_id, frame, now_ms)
+        Ok(peer_id)
+    }
+
+    pub(crate) fn prune_expired(&mut self, now_ms: u64) {
+        self.tasks.retain(|_, task| now_ms < task.expires_at_ms);
+        self.message_tasks
+            .retain(|_, task_id| self.tasks.contains_key(task_id));
+        self.outbox
+            .retain(|_, pending| self.tasks.contains_key(&pending.task_id));
     }
 
     pub fn due_deliveries(&self, now_ms: u64) -> Vec<PendingDelivery> {

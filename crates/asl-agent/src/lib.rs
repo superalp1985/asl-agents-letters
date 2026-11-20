@@ -4,6 +4,7 @@ mod conversation;
 pub mod decision;
 pub mod gateway;
 mod query;
+pub mod runner;
 
 pub use conversation::{
     CONVERSATION_WINDOW_MS, Conversation, ConversationMessageKind, InboundDecision,

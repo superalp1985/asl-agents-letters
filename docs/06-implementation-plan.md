@@ -570,6 +570,10 @@ T26 实施切片（2026-11-20）：`asl-agent::decision` 按同一快照匹配�
 cargo test -p asl-agent --test autonomous_state_machine
 ```
 
+T27 入站切片（2026-11-20）：`asl-agent::runner::InboundRunner` 接收已通过 Core 身份准入的消息。默认关闭，浏览模式不产生回答任务；只有回答模式的有效 query 才创建本地工作。复用查询去重和会话预算，一个 AgentId 的多个设备共用一个待处理名额。模型不可用时，从当前接收者获准的本地元数据生成主题匹配结果或资源 offer，并在本机标记 `model_unavailable`；不读取文件内容、不触发传输、不发起外部查询。关停回答、断开连接或超时可令待处理工作失效；提取消息前需重验附带的资源许可。
+
+该切片未接生产 Core 的 SQLite 查询和网络发送，也未接入 T26 异步模型决策、MLS 群消息、出站自动调研或传输调度。不能以此宣称 T27 已完成端到端验收。
+
 ### T28 — 经验整理与权限继承
 
 依赖 T27、T07。创建 agent knowledge 与 derivation_sources 仓储。

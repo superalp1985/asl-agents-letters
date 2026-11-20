@@ -379,7 +379,7 @@ impl QueryRouter {
     }
 }
 
-fn fresh_id() -> Result<Id128, AslError> {
+pub(crate) fn fresh_id() -> Result<Id128, AslError> {
     let mut id = [0; 16];
     for _ in 0..8 {
         SysRng
