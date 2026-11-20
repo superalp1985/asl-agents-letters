@@ -56,7 +56,7 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
     let MlsMessageBodyIn::Welcome(welcome) = read_wire(welcome).extract() else {
         panic!("expected MLS Welcome");
     };
-    let mut joined = StagedWelcome::new_from_welcome(
+    let joined = StagedWelcome::new_from_welcome(
         &joiner,
         &MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
@@ -69,6 +69,11 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
     .unwrap();
     assert_eq!(joined.group_id(), &group_id);
     assert_eq!(joined.epoch(), room.epoch());
+
+    #[cfg(windows)]
+    let (joiner, mut joined) = roundtrip_state(&joiner, &joined);
+    #[cfg(not(windows))]
+    let mut joined = joined;
 
     let bytes: Vec<u8> = include_str!("../../../schemas/vectors/query-v1.hex")
         .split_ascii_whitespace()
@@ -106,4 +111,47 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
         .create_message(&creator, &creator_signer, &encoded)
         .unwrap();
     assert!(joined.process_message(&joiner, protocol(next)).is_err());
+}
+
+#[cfg(windows)]
+fn roundtrip_state(
+    provider: &OpenMlsRustCrypto,
+    group: &MlsGroup,
+) -> (OpenMlsRustCrypto, MlsGroup) {
+    use asl_groups::local_state::{RoomBinding, restore, seal};
+    use asl_store::group_state::MlsRoomSnapshot;
+    use asl_types::{
+        ids::{Hash32, Id128, PeerId},
+        task::GroupId,
+    };
+
+    let mut encoded_peer = vec![0x12, 0x20];
+    encoded_peer.extend_from_slice(&[4; 32]);
+    let device = PeerId::from_bytes(encoded_peer).unwrap();
+    let local = GroupId(Id128([5; 16]));
+    let binding = RoomBinding {
+        local_id: &local,
+        wire_id: Hash32(group.group_id().as_slice().try_into().unwrap()),
+        device: &device,
+    };
+    let sealed = seal(&binding, 1, group, provider).unwrap();
+    let mut row = MlsRoomSnapshot {
+        local_id: local.clone(),
+        sealed_snapshot: sealed,
+        revision: 2,
+    };
+    assert!(restore(&binding, &row).is_err(), "wrong persisted revision");
+    row.revision = 1;
+    let wrong_binding = RoomBinding {
+        wire_id: Hash32([9; 32]),
+        ..binding
+    };
+    assert!(restore(&wrong_binding, &row).is_err(), "wrong group");
+    let (provider, loaded) = restore(&binding, &row).unwrap();
+    assert!(loaded.members().eq(group.members()));
+    assert_eq!(
+        loaded.epoch_authenticator().as_slice(),
+        group.epoch_authenticator().as_slice()
+    );
+    (provider, loaded)
 }
