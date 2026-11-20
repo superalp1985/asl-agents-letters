@@ -574,7 +574,9 @@ T27 入站切片（2026-11-20）：`asl-agent::runner::InboundRunner` 接收已�
 
 T27 直连集成（2026-11-20）：`Supervisor::run()` 已将认证连接上的 query 接入 SQLite 授权检索和原请求应答通道。`asl-core --direct-inbound off|browse|answer` 写入当前 `ASL_HOME` 的本机设置；未设置时关闭，仅 `answer` 会运行检索和回复。直接检索仅考虑本机已导入且授权给该接收者的资源，每次检查最近最多 4096 条已索引候选，最多返回一个结构化匹配；`NoMatch` 始终标记为未验证，不代表完整库无结果。全局最多每 250 毫秒启动一次处理，同一 AgentId 的设备共用一秒冷却。SQLite 持久化 AgentId/root_task_id 的三轮/六条语义消息预算，以及 AgentId/message_id 的十分钟请求去重；重复、重启或换设备不能重答或重置预算。交给 Net 前重验持久链状态的目录 commitment、序号和控制器，另复核资源、当前本机开关及连接。最终授权与有限队列交接一起执行，不在 SQLite 事务内写管道；Net 检查交接期限和原连接的单次回复句柄。Offer 不含正文、路径或可直接使用的传输权限。
 
-本切片仍未实现多窗口检索或跨 Agent 的公平排队，也未接入 T26 异步模型、只浏览界面、MLS 群消息、出站自动调研或传输调度。未验证独立节点公网互通或实际链部署，不关闭 T27。
+T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPort`，只接受本地类型化 `OutgoingTask` 且限 `ContactsOnly`；队列最多 16 项、同时运行最多 8 项。Core 从本机 `authorized_contacts` 与当前已准入会话的交集中，按本地授权顺序挑选现有在线联系人；没有通过身份准入的 PeerId 不进入查询路由。发送前仍由 `CoreAdmission` 对该连接重验链身份，再通过原 Net request-response 通道发送固定 CBOR `Query`。Answer、Offer、Error 只按 request ID/AgentId/连接关联，Answer/Offer 还须匹配 root task 与有效期限；Offer 只接受资源型任务。结果经有界结构事件端口回交调用方，不自动追问、不自动拉取文件，也不调用模型。QueryRouter 终结任务后释放状态槽。
+
+出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；仅向已在线且本地列入 `authorized_contacts` 的联系人直询。公共 scope/DHT provider 查询与候选地址拨号、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
 
 ### T28 — 经验整理与权限继承
 

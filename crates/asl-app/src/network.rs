@@ -83,7 +83,7 @@ pub enum NetworkCommand {
 }
 
 impl NetworkCommand {
-    fn into_ipc(self) -> IpcMessage {
+    pub(crate) fn into_ipc(self) -> IpcMessage {
         match self {
             Self::Listen {
                 operation_id,

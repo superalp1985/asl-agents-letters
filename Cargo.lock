@@ -943,6 +943,7 @@ dependencies = [
  "asl-store",
  "asl-types",
  "blake3",
+ "bs58",
  "cbor2",
  "eframe",
  "helios-consensus-core",

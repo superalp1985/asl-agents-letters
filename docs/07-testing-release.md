@@ -18,7 +18,16 @@
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；24 项 codec、37 项签名/资料服务测试通过 | 严格 CBOR、当前链控制者签名、目录承诺、序号/撤销及本机续发；DHT、持久历史与真实投递仍待接入 |
 | T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
+| T27 Agent 查询 | 入站授权直答已接入；出站在线联系人直询切片已接入 | 出站仅接受结构化 ContactsOnly 任务，目标限本地授权且已完成身份准入的在线联系人；Query/Answer/Offer/Error 走已有关联 request-response 与身份复核。GUI/MCP 任务生产者、持久任务历史、公开 DHT 查找/拨号、离线投递、MLS 群及公网互通未完成 |
 | 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
+
+2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
+
+- `cargo test -p asl-app --lib --locked --offline direct_outbound::tests -- --test-threads=1`：3 项通过，覆盖仅询问本地授权联系人、结构化响应关联、公开 scope 拒绝及错误 root 丢弃。
+- `cargo test -p asl-agent --lib --locked --offline query::tests -- --test-threads=1`：6 项通过，覆盖联系人优先、scope 限制、provider 上限、超时、重放去重及终结状态释放。
+- `cargo check -p asl-app --tests --offline`：通过；`cargo clippy -p asl-app -p asl-agent -p asl-store --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 与 `git diff --check`：通过。
+
+本轮未运行全工作区测试、实际链/RPC、公网 DHT、跨节点互通、GUI 或完整资源传输；Cargo 报告 `proc-macro-error2 v2.0.1` 的未来 Rust 兼容性提示。
 
 2026-11-17 T06a 合约验收：
 

@@ -63,7 +63,7 @@ impl OutgoingTask {
         self
     }
 
-    fn validate(&self) -> Result<(), AslError> {
+    pub fn validate(&self) -> Result<(), AslError> {
         if self.created_at_ms > i64::MAX as u64
             || self.expires_at_ms > i64::MAX as u64
             || self.expires_at_ms < self.created_at_ms
@@ -324,6 +324,19 @@ impl QueryRouter {
         self.tasks.get(task_id).map(|task| task.status)
     }
 
+    pub fn remove_terminal_task(&mut self, task_id: &TaskId) -> bool {
+        if self
+            .tasks
+            .get(task_id)
+            .is_some_and(|task| task.status != QueryStatus::Active)
+        {
+            self.tasks.remove(task_id);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn accept_incoming(
         &mut self,
         peer_id: PeerId,
@@ -547,6 +560,16 @@ mod tests {
             .unwrap();
         assert!(router.next_actions(&task_id, 2_000).is_empty());
         assert_eq!(router.status(&task_id), Some(QueryStatus::Expired));
+    }
+
+    #[test]
+    fn terminal_tasks_can_be_removed_to_release_router_capacity() {
+        let mut router = QueryRouter::new();
+        let task_id = router.start_query(task(QueryScope::ContactsOnly)).unwrap();
+        assert_eq!(router.status(&task_id), Some(QueryStatus::Complete));
+        assert!(router.remove_terminal_task(&task_id));
+        assert_eq!(router.status(&task_id), None);
+        assert!(!router.remove_terminal_task(&task_id));
     }
 
     #[test]

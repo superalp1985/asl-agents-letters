@@ -577,12 +577,38 @@ pub(crate) fn agent_text(agent: AgentId) -> String {
     bs58::encode(agent.as_bytes()).into_string()
 }
 
+impl Store {
+    pub fn authorized_contacts(&self) -> Result<Vec<AgentId>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT a.agent_id
+                 FROM authorized_contacts c
+                 JOIN agents a ON a.agent_id=c.agent_id
+                 ORDER BY c.authorized_at_ms,a.agent_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let text = row.map_err(database_error)?;
+            decode_agent_text(&text)
+        })
+        .collect()
+    }
+}
+
 fn read_agent(row: &Row<'_>, index: usize) -> Result<AgentId, AslError> {
     let text = row
         .get_ref(index)
         .map_err(database_error)?
         .as_str()
         .map_err(|_| AslError::InvalidDatabase)?;
+    decode_agent_text(text)
+}
+
+fn decode_agent_text(text: &str) -> Result<AgentId, AslError> {
     if !(32..=44).contains(&text.len()) {
         return Err(AslError::InvalidDatabase);
     }

@@ -31,6 +31,7 @@ use rand::{TryRng, rngs::SysRng};
 use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::direct_inbound::{self, DirectInbound};
+use crate::direct_outbound::DirectOutbound;
 use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
@@ -45,6 +46,7 @@ use crate::network_settings::NetworkSettingsV1;
 use crate::paths::AppPaths;
 use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 use crate::providers::DpapiProviderCredentialSource;
+use crate::{OutgoingQueryRuntime, outgoing_query_channel};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -246,10 +248,27 @@ impl Supervisor {
     }
 
     pub fn run(self) -> Result<(), AslError> {
+        let (port, runtime) = outgoing_query_channel();
+        drop(port);
+        self.run_with_outgoing_queries(runtime)
+    }
+
+    pub fn run_with_outgoing_queries(self, runtime: OutgoingQueryRuntime) -> Result<(), AslError> {
         let mut inbound = DirectInbound::open(&self.state_database)?;
+        let outbound =
+            std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
-            |supervisor, event| supervisor.handle_direct_inbound(&mut inbound, event),
+            |supervisor, event| match event {
+                event @ AdmittedNetworkEvent::ControlRequest { .. } => {
+                    supervisor.handle_direct_inbound(&mut inbound, event)
+                }
+                event => {
+                    outbound.borrow_mut().handle_event(&event, unix_time_ms()?);
+                    Ok(())
+                }
+            },
             |_| {},
+            |supervisor| supervisor.poll_direct_outbound(&mut outbound.borrow_mut()),
         )
     }
 
@@ -327,6 +346,7 @@ impl Supervisor {
                 Ok(())
             },
             observer,
+            |_| Ok(()),
         )
     }
 
@@ -334,9 +354,11 @@ impl Supervisor {
         mut self,
         mut handler: impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
         mut observer: impl FnMut(LocalNetworkObservation),
+        mut tick: impl FnMut(&mut Self) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         let mut next_health_check = Instant::now();
         let mut next_ping = Instant::now();
+        let mut next_agent_tick = Instant::now();
         loop {
             self.process_chain_refresh()?;
             if self.network_admission_status == NetworkAdmissionStatus::Active {
@@ -349,6 +371,10 @@ impl Supervisor {
                 self.dispatch_admission_batch(batch, &mut handler)?;
             }
             let now = Instant::now();
+            if now >= next_agent_tick {
+                tick(&mut self)?;
+                next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
+            }
             if now >= next_health_check {
                 self.libraries.check_health()?;
                 next_health_check = now + HEALTH_CHECK_INTERVAL;
@@ -394,6 +420,33 @@ impl Supervisor {
             };
             self.dispatch_admission_batch(batch, &mut handler)?;
         }
+    }
+
+    fn poll_direct_outbound(&mut self, outbound: &mut DirectOutbound) -> Result<(), AslError> {
+        if self.network_admission_status != NetworkAdmissionStatus::Active {
+            return Ok(());
+        }
+        let now_ms = unix_time_ms()?;
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let connections = admission.admitted_connections(now_ms);
+        let net = &self.net;
+        outbound.poll(
+            &connections,
+            now_ms,
+            |connection_id, request_id, request| {
+                let command = admission.authorize_control_command(
+                    connection_id,
+                    request_id,
+                    request,
+                    now_ms,
+                )?;
+                if net.try_send(&command.into_ipc())? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        )
     }
 
     fn dispatch_admission_batch(

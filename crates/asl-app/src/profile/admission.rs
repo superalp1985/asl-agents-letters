@@ -901,6 +901,27 @@ impl CoreAdmission {
         })
     }
 
+    pub(crate) fn admitted_connections(&self, now_ms: u64) -> Vec<(AgentId, [u8; 16], PeerId)> {
+        let mut admitted = self
+            .peers
+            .iter()
+            .filter_map(|(connection_id, peer)| {
+                let agent_id = peer.admitted_agent?;
+                let (_, expires_at_ms) = peer.session.admission_facts()?;
+                (now_ms < expires_at_ms)
+                    .then(|| (agent_id, *connection_id, peer.session.peer_id().clone()))
+            })
+            .collect::<Vec<_>>();
+        admitted.sort_by(|left, right| {
+            left.0
+                .as_bytes()
+                .cmp(right.0.as_bytes())
+                .then_with(|| left.2.as_bytes().cmp(right.2.as_bytes()))
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        admitted
+    }
+
     fn close(&mut self, connection_id: [u8; 16], batch: &mut AdmissionBatch) {
         self.pending_proofs
             .retain(|pending| *pending != connection_id);
