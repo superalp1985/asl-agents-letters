@@ -5,7 +5,7 @@
 //!
 //! [`AdmittedNetworkEvent::FetchManifestReceived`]: crate::profile::AdmittedNetworkEvent::FetchManifestReceived
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use asl_policy::WriteGrant;
 use asl_store::transfers::{DownloadBroker, DownloadRequest};
@@ -34,6 +34,8 @@ pub type DownloadEnqueue<'a> =
 pub struct LocalDownloads {
     broker: DownloadBroker,
     chunks: Option<chunks::ChunkDownload>,
+    retired_chunks: HashMap<Id128, chunks::PendingChunk>,
+    next_idle_sweep_ms: u64,
 }
 
 impl LocalDownloads {
@@ -44,6 +46,8 @@ impl LocalDownloads {
         Ok(Self {
             broker: DownloadBroker::open(paths.dos_root())?,
             chunks: None,
+            retired_chunks: Default::default(),
+            next_idle_sweep_ms: 0,
         })
     }
 

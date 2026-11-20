@@ -15,9 +15,14 @@ use asl_types::{
 
 use super::{DownloadInfo, LocalDownloads};
 use crate::{
-    MatchedBulkResponse, VerifiedFetchManifest, ipc::NetworkProtocol, network::NetworkCommand,
-    profile::AdmittedNetworkEvent, supervisor::unix_time_ms,
+    MatchedBulkResponse, VerifiedFetchManifest,
+    ipc::{NetworkErrorCode, NetworkProtocol},
+    network::NetworkCommand,
+    profile::AdmittedNetworkEvent,
+    supervisor::unix_time_ms,
 };
+
+const IDLE_SWEEP_INTERVAL_MS: u64 = 1_000;
 
 pub(super) struct ChunkDownload {
     transfer: TransferId,
@@ -31,6 +36,7 @@ pub(super) struct ChunkDownload {
 }
 
 struct SourceLease {
+    fetch_generation: u64,
     connection: [u8; 16],
     agent: AgentId,
     lease: Hash32,
@@ -38,12 +44,55 @@ struct SourceLease {
     usable: bool,
 }
 
-struct PendingChunk {
+pub(super) struct PendingChunk {
     peer: PeerId,
     connection: [u8; 16],
     agent: AgentId,
     request: BulkRequest,
     deadline_ms: u64,
+    transport_deadline_ms: u64,
+    retired: bool,
+}
+
+impl PendingChunk {
+    fn matches_response(&self, matched: &MatchedBulkResponse) -> bool {
+        self.connection == matched.connection_id
+            && self.agent == matched.agent_id
+            && self.peer == matched.peer_id
+            && self.request == matched.request
+            && self.request.request_id == matched.response.request_id
+    }
+
+    fn matches_failure(
+        &self,
+        connection: [u8; 16],
+        agent: AgentId,
+        peer: &PeerId,
+        request: Id128,
+    ) -> bool {
+        self.connection == connection
+            && self.agent == agent
+            && &self.peer == peer
+            && self.request.request_id == request
+    }
+
+    fn acknowledged_by(&self, event: &AdmittedNetworkEvent) -> bool {
+        match event {
+            AdmittedNetworkEvent::BulkTransferResponse(response) => self.matches_response(response),
+            AdmittedNetworkEvent::RequestFailed {
+                connection_id,
+                agent_id,
+                peer_id,
+                request_id,
+                protocol: NetworkProtocol::Bulk,
+                ..
+            } => self.matches_failure(*connection_id, *agent_id, peer_id, Id128(*request_id)),
+            AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
+                self.connection == *connection_id
+            }
+            _ => false,
+        }
+    }
 }
 
 impl LocalDownloads {
@@ -106,13 +155,24 @@ impl LocalDownloads {
         now_ms: u64,
         enqueue: impl FnMut(NetworkCommand) -> Result<bool, AslError>,
     ) -> Result<Option<DownloadInfo>, AslError> {
+        if now_ms >= self.next_idle_sweep_ms {
+            self.broker.sweep_idle_downloads(broker_time(now_ms)?)?;
+            self.next_idle_sweep_ms = now_ms.saturating_add(IDLE_SWEEP_INTERVAL_MS);
+        }
         self.expire_idle_chunks(now_ms)?;
+        self.retired_chunks
+            .retain(|_, request| request.transport_deadline_ms > now_ms);
+        if !self.retired_chunks.is_empty() {
+            return Ok(None);
+        }
         let Some(download) = &mut self.chunks else {
             return Ok(None);
         };
         let result = download.poll_at(&mut self.broker, now_ms, enqueue);
         match &result {
-            Ok(Some(_)) => self.chunks = None,
+            Ok(Some(_)) => {
+                self.detach_chunks();
+            }
             Err(_) => self.pause_chunks()?,
             Ok(None) => {}
         }
@@ -131,6 +191,8 @@ impl LocalDownloads {
         now_ms: u64,
     ) -> Result<(), AslError> {
         self.expire_idle_chunks(now_ms)?;
+        self.retired_chunks
+            .retain(|_, request| !request.acknowledged_by(event));
         let Some(download) = &mut self.chunks else {
             return Ok(());
         };
@@ -142,8 +204,8 @@ impl LocalDownloads {
     }
 
     pub fn pause_chunks(&mut self) -> Result<(), AslError> {
-        if let Some(download) = self.chunks.take() {
-            self.broker.reset_chunk_assignments(&download.transfer)?;
+        if let Some(transfer) = self.detach_chunks() {
+            self.broker.reset_chunk_assignments(&transfer)?;
         }
         Ok(())
     }
@@ -153,14 +215,28 @@ impl LocalDownloads {
             return Ok(());
         };
         if now_ms >= download.idle_deadline_ms {
-            let now = i64::try_from(now_ms).map_err(|_| AslError::InvalidPolicyState)?;
-            match self.broker.expire_idle_download(&download.transfer, now)? {
+            match self
+                .broker
+                .expire_idle_download(&download.transfer, broker_time(now_ms)?)?
+            {
                 Some(deadline) => download.idle_deadline_ms = stored_deadline(deadline)?,
-                None => self.chunks = None,
+                None => {
+                    self.detach_chunks();
+                }
             }
         }
         Ok(())
     }
+
+    fn detach_chunks(&mut self) -> Option<TransferId> {
+        let download = self.chunks.take()?;
+        self.retired_chunks.extend(download.pending);
+        Some(download.transfer)
+    }
+}
+
+fn broker_time(now_ms: u64) -> Result<i64, AslError> {
+    i64::try_from(now_ms).map_err(|_| AslError::InvalidPolicyState)
 }
 
 fn stored_deadline(deadline: i64) -> Result<u64, AslError> {
@@ -186,7 +262,7 @@ impl ChunkDownload {
             if previous.lease == event.lease_id {
                 return Ok(());
             }
-            if event.expires_at_ms <= previous.expires_at_ms {
+            if event.fetch_generation <= previous.fetch_generation {
                 return Err(AslError::ExpiredMessage);
             }
             self.clear_peer(broker, &event.peer_id, FailureKind::Cancelled)?;
@@ -194,6 +270,7 @@ impl ChunkDownload {
         self.leases.insert(
             event.peer_id.clone(),
             SourceLease {
+                fetch_generation: event.fetch_generation,
                 connection: event.connection_id,
                 agent: event.agent_id,
                 lease: event.lease_id,
@@ -216,16 +293,22 @@ impl ChunkDownload {
         let timed_out: Vec<_> = self
             .pending
             .values()
-            .filter(|pending| pending.deadline_ms <= now_ms)
+            .filter(|pending| !pending.retired && pending.deadline_ms <= now_ms)
             .map(|pending| pending.peer.clone())
             .collect();
         for peer in timed_out {
             self.suspend_peer(broker, &peer, FailureKind::Timeout)?;
         }
+        self.pending
+            .retain(|_, pending| !pending.retired || pending.transport_deadline_ms > now_ms);
+        let pending = &self.pending;
         let eligible = |peer: &PeerId| {
             self.leases
                 .get(peer)
                 .is_some_and(|lease| lease.usable && lease.expires_at_ms > now_ms)
+                && !pending
+                    .values()
+                    .any(|request| request.retired && &request.peer == peer)
         };
         let mut queue_full = false;
         for assignment in self.scheduler.next_where(now_ms, eligible) {
@@ -246,6 +329,8 @@ impl ChunkDownload {
             let connection_id = source.connection;
             let agent = source.agent;
             let deadline_ms = assignment.deadline_ms.min(source.expires_at_ms);
+            let transport_deadline_ms =
+                now_ms.saturating_add(asl_net::transport::REQUEST_TIMEOUT.as_millis() as u64);
             broker.assign_chunk(self.transfer.clone(), &peer, index)?;
             match enqueue(NetworkCommand::SendBulk {
                 connection_id,
@@ -260,6 +345,8 @@ impl ChunkDownload {
                             agent,
                             request,
                             deadline_ms,
+                            transport_deadline_ms,
+                            retired: false,
                         },
                     );
                 }
@@ -300,17 +387,23 @@ impl ChunkDownload {
                 peer_id,
                 request_id,
                 protocol: NetworkProtocol::Bulk,
-                ..
-            } if self
-                .pending
-                .get(&Id128(*request_id))
-                .is_some_and(|pending| {
-                    pending.connection == *connection_id
-                        && pending.agent == *agent_id
-                        && pending.peer == *peer_id
-                }) =>
-            {
-                self.suspend_peer(broker, peer_id, FailureKind::Cancelled)
+                code,
+            } => {
+                let id = Id128(*request_id);
+                let Some(pending) = self.pending.get(&id).filter(|pending| {
+                    pending.matches_failure(*connection_id, *agent_id, peer_id, id)
+                }) else {
+                    return Ok(());
+                };
+                if !pending.retired {
+                    if *code == NetworkErrorCode::Capacity {
+                        self.unassign(broker, id, FailureKind::Cancelled)?;
+                    } else {
+                        self.suspend_peer(broker, peer_id, FailureKind::Cancelled)?;
+                    }
+                }
+                self.pending.remove(&id);
+                Ok(())
             }
             AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
                 let peer = self
@@ -321,6 +414,8 @@ impl ChunkDownload {
                 if let Some(peer) = peer {
                     self.suspend_peer(broker, &peer, FailureKind::Disconnected)?;
                 }
+                self.pending
+                    .retain(|_, pending| pending.connection != *connection_id);
                 Ok(())
             }
             _ => Ok(()),
@@ -337,19 +432,24 @@ impl ChunkDownload {
         let Some(pending) = self.pending.get(&id) else {
             return Ok(());
         };
-        if pending.connection != matched.connection_id
-            || pending.agent != matched.agent_id
-            || pending.peer != matched.peer_id
-            || pending.request != matched.request
-        {
+        if !pending.matches_response(matched) {
             return Ok(());
         }
         let peer = &matched.peer_id;
-        if pending.deadline_ms <= now_ms {
-            return self.suspend_peer(broker, peer, FailureKind::Timeout);
-        }
-        if matched.response.status != BulkStatus::Success {
-            return self.suspend_peer(broker, peer, FailureKind::Cancelled);
+        if pending.retired
+            || pending.deadline_ms <= now_ms
+            || matched.response.status != BulkStatus::Success
+        {
+            if !pending.retired {
+                let reason = if pending.deadline_ms <= now_ms {
+                    FailureKind::Timeout
+                } else {
+                    FailureKind::Cancelled
+                };
+                self.suspend_peer(broker, peer, reason)?;
+            }
+            self.pending.remove(&id);
+            return Ok(());
         }
         let index = pending.request.chunk_index;
         self.pending.remove(&id);
@@ -404,14 +504,28 @@ impl ChunkDownload {
         let requests: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, pending)| &pending.peer == peer)
-            .map(|(&id, pending)| (id, pending.request.chunk_index))
+            .filter(|(_, pending)| !pending.retired && &pending.peer == peer)
+            .map(|(&id, _)| id)
             .collect();
-        for (id, index) in requests {
-            broker.unassign_chunk(&self.transfer, peer, index)?;
-            self.scheduler.failed(peer, index, reason);
-            self.pending.remove(&id);
+        for id in requests {
+            self.unassign(broker, id, reason)?;
         }
+        Ok(())
+    }
+
+    fn unassign(
+        &mut self,
+        broker: &mut DownloadBroker,
+        id: Id128,
+        reason: FailureKind,
+    ) -> Result<(), AslError> {
+        let pending = self.pending.get_mut(&id).ok_or(AslError::NotFound)?;
+        let peer = &pending.peer;
+        let index = pending.request.chunk_index;
+        broker.unassign_chunk(&self.transfer, peer, index)?;
+        self.scheduler.failed(peer, index, reason);
+        // It cannot write anymore, but still takes a network slot until acknowledged.
+        pending.retired = true;
         Ok(())
     }
 }

@@ -6,7 +6,6 @@ use asl_types::manifest::CHUNK_SIZE;
 use super::*;
 use crate::{
     downloads::{DownloadStart, test_inbox::Inbox},
-    ipc::NetworkErrorCode,
     paths::AppPaths,
 };
 
@@ -113,6 +112,7 @@ fn two_authorized_sources_can_finish_a_file_after_three_corrupt_chunks() {
             corrupt.response.payload[0] ^= 1;
         }
         deliver(local, corrupt, now + attempt);
+        assert!(collect(local, now + attempt).0.is_empty());
         deliver(local, response(bad_requests[1], bad, &data), now + attempt);
         assert_eq!(
             local.broker.info(&info.transfer_id).unwrap().durable_bytes,
@@ -199,7 +199,7 @@ fn fresh_connection(source: &VerifiedFetchManifest) -> VerifiedFetchManifest {
     let mut fresh = source.clone();
     fresh.0.connection_id = rand::random();
     fresh.0.lease_id = Hash32(rand::random());
-    fresh.0.expires_at_ms += 1;
+    fresh.0.fetch_generation += 1;
     fresh
 }
 
@@ -240,6 +240,10 @@ fn backpressure_timeout_and_disconnect_release_assignments_without_reusing_ticke
 
     let source = fresh_connection(&inbox.event);
     local.attach_chunk_source(&source).unwrap();
+    assert!(matches!(
+        local.attach_chunk_source(&inbox.event),
+        Err(AslError::ExpiredMessage)
+    ));
     let (retried, _) = collect(local, deadline + 1);
     deliver(local, response(&sent[0], &inbox.event, &data), deadline + 1);
     assert_eq!(assigned(&inbox.home), 2);
@@ -322,4 +326,71 @@ fn an_idle_transfer_releases_its_reservation_without_reopening_the_broker() {
             .unwrap(),
         "released"
     );
+}
+
+#[test]
+fn idle_sweep_releases_a_paused_transfer_when_no_coordinator_exists() {
+    let mut inbox = Inbox::new(&vec![2; MAX_INLINE_BYTES as usize + 1]);
+    let transfer = inbox.start();
+    inbox.local.resume_chunks(&transfer).unwrap();
+    let deadline = inbox.local.chunks.as_ref().unwrap().idle_deadline_ms;
+    inbox.local.pause_chunks().unwrap();
+    assert!(inbox.folder.join("item.bin.part").exists());
+    assert!(collect(&mut inbox.local, deadline).0.is_empty());
+    assert!(!inbox.folder.join("item.bin.part").exists());
+}
+
+#[test]
+fn net_capacity_only_releases_the_unsent_request_and_keeps_its_lease() {
+    let data = vec![6; CHUNK_SIZE as usize + 1];
+    let mut inbox = Inbox::new(&data);
+    let transfer = inbox.start();
+    inbox.local.resume_chunks(&transfer).unwrap();
+    inbox.local.attach_chunk_source(&inbox.event).unwrap();
+    let now = unix_time_ms().unwrap();
+    let (requests, _) = collect(&mut inbox.local, now);
+    let unsent = response(&requests[0], &inbox.event, &data);
+    let sibling = response(&requests[1], &inbox.event, &data);
+    let capacity = AdmittedNetworkEvent::RequestFailed {
+        connection_id: unsent.connection_id,
+        agent_id: unsent.agent_id,
+        peer_id: unsent.peer_id,
+        request_id: unsent.request.request_id.0,
+        protocol: NetworkProtocol::Bulk,
+        code: NetworkErrorCode::Capacity,
+    };
+    inbox.local.handle_chunk_event_at(&capacity, now).unwrap();
+    assert_eq!(assigned(&inbox.home), 1);
+    let (retried, _) = collect(&mut inbox.local, now + 1);
+    assert_eq!(retried.len(), 1);
+    let retried = response(&retried[0], &inbox.event, &data);
+    assert_eq!(retried.request.chunk_index, unsent.request.chunk_index);
+    deliver(&mut inbox.local, sibling, now + 1);
+    deliver(&mut inbox.local, retried, now + 1);
+    assert!(collect(&mut inbox.local, now + 2).1.is_some());
+}
+
+#[test]
+fn pausing_with_outstanding_requests_does_not_immediately_reissue_them() {
+    let data = vec![1; CHUNK_SIZE as usize + 1];
+    let mut inbox = Inbox::new(&data);
+    let transfer = inbox.start();
+    inbox.local.resume_chunks(&transfer).unwrap();
+    inbox.local.attach_chunk_source(&inbox.event).unwrap();
+    let now = unix_time_ms().unwrap();
+    let (old, _) = collect(&mut inbox.local, now);
+    inbox.local.pause_chunks().unwrap();
+    assert_eq!(assigned(&inbox.home), 0);
+    inbox.local.resume_chunks(&transfer).unwrap();
+    inbox.local.attach_chunk_source(&inbox.event).unwrap();
+    assert!(collect(&mut inbox.local, now + 1).0.is_empty());
+    for command in old {
+        deliver(
+            &mut inbox.local,
+            response(&command, &inbox.event, &data),
+            now + 1,
+        );
+    }
+    assert_eq!(inbox.local.broker.info(&transfer).unwrap().durable_bytes, 0);
+    assert_eq!(collect(&mut inbox.local, now + 2).0.len(), 2);
 }

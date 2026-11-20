@@ -13,6 +13,7 @@ fn manifest_event() -> VerifiedFetchManifest {
         chunk_hashes: vec![hash],
     };
     VerifiedFetchManifest(FetchManifestDetails {
+        fetch_generation: 1,
         fetch_request_id: Id128([1; 16]),
         root_task_id: Id128([2; 16]),
         connection_id: [3; 16],

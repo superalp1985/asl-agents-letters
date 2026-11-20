@@ -29,6 +29,7 @@ impl Deref for VerifiedFetchManifest {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct FetchManifestDetails {
+    pub(crate) fetch_generation: u64,
     pub fetch_request_id: Id128,
     pub root_task_id: Id128,
     pub connection_id: [u8; 16],
@@ -53,6 +54,7 @@ impl fmt::Debug for VerifiedFetchManifest {
 }
 
 struct PendingFetch {
+    generation: u64,
     connection_id: [u8; 16],
     agent_id: AgentId,
     peer_id: PeerId,
@@ -61,6 +63,7 @@ struct PendingFetch {
 }
 
 pub(super) struct PendingManifest {
+    generation: u64,
     fetch_request_id: Id128,
     root_task_id: Id128,
     file_size: u64,
@@ -78,6 +81,7 @@ impl PendingManifest {
             return None;
         }
         Some(VerifiedFetchManifest(FetchManifestDetails {
+            fetch_generation: self.generation,
             fetch_request_id: self.fetch_request_id,
             root_task_id: self.root_task_id,
             connection_id: matched.connection_id,
@@ -94,6 +98,7 @@ impl PendingManifest {
 #[derive(Default)]
 pub(super) struct IncomingFetchTracker {
     pending: HashMap<[u8; 16], PendingFetch>,
+    generation: u64,
 }
 
 impl IncomingFetchTracker {
@@ -113,9 +118,14 @@ impl IncomingFetchTracker {
         {
             return Err(AslError::PolicyDenied);
         }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(AslError::InvalidPolicyState)?;
         self.pending.insert(
             request_id,
             PendingFetch {
+                generation: self.generation,
                 connection_id,
                 agent_id: requester.agent,
                 peer_id: requester.peer.clone(),
@@ -148,6 +158,7 @@ impl IncomingFetchTracker {
             return None;
         }
         Some(PendingManifest {
+            generation: pending.generation,
             fetch_request_id: request_id.into(),
             root_task_id: pending.request.root_task_id,
             file_size: grant.file_size,

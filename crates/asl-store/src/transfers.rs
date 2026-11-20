@@ -31,6 +31,7 @@ pub const DOWNLOAD_COOLDOWN_MS: i64 = 86_400_000;
 const DEFAULT_DOWNLOAD_QUOTA: i64 = 20 << 30;
 const DEFAULT_TASK_DOWNLOAD_QUOTA: i64 = 1 << 30;
 const DEFAULT_UNKNOWN_SOURCE_QUOTA: i64 = 512 << 20;
+const IDLE_DOWNLOAD_SWEEP_LIMIT: i64 = 8;
 
 #[derive(Clone, Debug)]
 pub struct DownloadRequest {
@@ -621,6 +622,33 @@ impl DownloadBroker {
         }
         self.release_inactive(&row, now_ms)?;
         Ok(None)
+    }
+
+    /// Reclaim a bounded batch, including paused or queued work with no live
+    /// scheduler. A held reservation is the ownership gate.
+    pub fn sweep_idle_downloads(&mut self, now_ms: i64) -> Result<(), AslError> {
+        let ids = {
+            let mut statement = self
+                .store
+                .connection
+                .prepare(
+                    "SELECT t.transfer_id FROM transfers t JOIN reservations r USING(reservation_id)
+                     WHERE r.state='held' AND t.expires_at_ms<=?1
+                     ORDER BY t.expires_at_ms,t.transfer_id LIMIT ?2",
+                )
+                .map_err(database_error)?;
+            statement
+                .query_map(params![now_ms, IDLE_DOWNLOAD_SWEEP_LIMIT], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(database_error)?
+                .map(|row| parse_transfer(&row.map_err(database_error)?))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for id in ids {
+            self.expire_idle_download(&id, now_ms)?;
+        }
+        Ok(())
     }
 
     fn release_inactive(&mut self, row: &TransferRow, now_ms: i64) -> Result<(), AslError> {

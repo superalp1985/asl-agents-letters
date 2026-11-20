@@ -554,6 +554,8 @@ T23 大文件接收协调器（2026-11-20）：`LocalDownloads` 在本机授权�
 
 Windows x64 / Rust 1.100.0 / E 盘缓存 / `--locked --offline` 定向验收：`asl-app` 下载 13、`network_ipc` 8；`asl-store` 库 46、`transfer_resume` 19；`asl-transfer` 库 10，共 96 项通过。下载用例使用真实 NTFS 和 SQLite、模拟受准入的收发事件；另有 `asl-net --test driver_requests` 1 项真实双节点 TCP/QUIC 回环，验证控制、身份和 Bulk 关联，不传输完整文件。上述三个变更包的全目标严格 Clippy 与格式检查通过；未运行全 workspace、GUI 或公网联调。
 
+独立复核后的补强：轮询按批清理过期任务，即使任务已暂停或未进入调度；凭本机 Fetch 发起顺序识别新会话，不按 lease 到期时间排序；Core/Net 容量不足只退回未发送的块；已撤销的请求保留网络占位至响应、失败、断连或传输超时，期间不写盘、不提前补发。追加 Windows 定向验证：下载 16、传输/请求关联 7、`transfer_resume` 19，共 42 项通过；`asl-app`、`asl-store` 全目标严格 Clippy 与格式检查通过。未改 wire 格式。
+
 ### T24 — Inline、PDF 与头像 helper
 
 直连小文件接收接口（2026-11-20）：本机 handler 可把**已经获准并开始**的下载任务及其已验证来源传给 `LocalDownloads::prepare_inline`，得到走原有准入通道的一次请求与只在内存中的接收凭据。`InlineDownload::receive` 按原请求、AgentId、PeerId、连接及有效期接收匹配的响应；不匹配的响应不消费凭据，匹配响应只能处理一次。复用 Store 的块校验、同步、整文件校验和不覆盖重命名。空文件不制造虚拟块；超过 32 KiB 必须使用分块路径，不回退到 inline。无独立种子文件，不根据 Offer 自动落盘。

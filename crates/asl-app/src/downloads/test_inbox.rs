@@ -100,6 +100,7 @@ impl Inbox {
         )
         .unwrap();
         VerifiedFetchManifest(FetchManifestDetails {
+            fetch_generation: 1,
             fetch_request_id: Id128(rand::random()),
             root_task_id: Id128(rand::random()),
             connection_id: rand::random(),

@@ -646,8 +646,16 @@ impl Supervisor {
             } => {
                 let request_id = request.request_id.0;
                 let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
-                let authorized =
-                    transfers.authorize_bulk_request(admission, connection_id, request, now_ms)?;
+                let authorized = match transfers.authorize_bulk_request(
+                    admission,
+                    connection_id,
+                    request,
+                    now_ms,
+                ) {
+                    Ok(command) => command,
+                    Err(AslError::QuotaExceeded) => return Ok(false),
+                    Err(error) => return Err(error),
+                };
                 let sent = authorized
                     .into_ipc()
                     .and_then(|message| self.net.try_send(&message));

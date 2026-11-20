@@ -94,11 +94,11 @@ impl BulkResponseTracker {
                 .as_ref()
                 .map_or(u64::MAX, |manifest| manifest.lease_expires_at_ms),
         );
-        if expires_at_ms <= now_ms
-            || self.pending.len() >= MAX_PENDING_BULK_REQUESTS
-            || self.pending.contains_key(&request_id)
-        {
+        if expires_at_ms <= now_ms || self.pending.contains_key(&request_id) {
             return Err(AslError::PolicyDenied);
+        }
+        if self.pending.len() >= MAX_PENDING_BULK_REQUESTS {
+            return Err(AslError::QuotaExceeded);
         }
         self.pending.insert(
             request_id,
@@ -710,7 +710,10 @@ mod bulk_response_tests {
         protocol::{FetchGrant, FetchRequest},
     };
 
-    use super::{BulkResponseTracker, IncomingFetchTracker, ReceivedBulk};
+    use super::{
+        AslError, BulkResponseTracker, IncomingFetchTracker, MAX_PENDING_BULK_REQUESTS,
+        ReceivedBulk,
+    };
 
     fn peer_id(seed: u8) -> PeerId {
         let mut bytes = vec![0, 36, 8, 1, 18, 32];
@@ -745,6 +748,26 @@ mod bulk_response_tests {
             status: BulkStatus::Success,
             payload: vec![8, 9],
         }
+    }
+
+    #[test]
+    fn bulk_tracker_reports_capacity_separately_from_a_policy_failure() {
+        let mut bulk = BulkResponseTracker::default();
+        let source = requester(1, 2);
+        let connection = [4; 16];
+        let limit = u8::try_from(MAX_PENDING_BULK_REQUESTS).unwrap();
+        for id in 1..=limit {
+            bulk.register(connection, &source, make_request(id), None, 1_000)
+                .unwrap();
+        }
+        let extra = make_request(limit + 1);
+        assert!(matches!(
+            bulk.register(connection, &source, extra.clone(), None, 1_000),
+            Err(AslError::QuotaExceeded)
+        ));
+        bulk.cancel(make_request(1).request_id.0);
+        bulk.register(connection, &source, extra, None, 1_000)
+            .unwrap();
     }
 
     fn fetch_fixture() -> (Manifest, Vec<u8>, FetchRequest, FetchGrant) {
@@ -834,6 +857,7 @@ mod bulk_response_tests {
             panic!("expected a verified manifest");
         };
         assert_eq!(verified.fetch_request_id, Id128(control_id));
+        assert_eq!(verified.fetch_generation, 1);
         assert_eq!(verified.root_task_id, fetch.root_task_id);
         assert_eq!(verified.peer_id, source.peer);
         assert_eq!(verified.content_id, fetch.content_id);
