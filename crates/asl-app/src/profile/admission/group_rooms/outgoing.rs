@@ -198,7 +198,7 @@ impl CoreAdmission {
         Ok(reply)
     }
 
-    fn mls_target(
+    pub(super) fn mls_target(
         &mut self,
         connection_id: [u8; 16],
         directories: &HashMap<AgentId, Vec<u8>>,

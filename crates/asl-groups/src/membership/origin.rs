@@ -11,6 +11,7 @@ use openmls::prelude::{
 use super::GROUP_CIPHERSUITE;
 
 const ORIGIN_EXTENSION: u16 = 0xf720;
+pub(crate) const ORIGIN_CAPABILITY: ExtensionType = ExtensionType::Unknown(ORIGIN_EXTENSION);
 const DOMAIN: &[u8] = b"ASL-MLS-ROOM-v1\0";
 const ORIGIN_VERSION: u8 = 1;
 
@@ -53,11 +54,10 @@ impl RoomOrigin {
         if origin.wire_id != wire_id {
             return Err(AslError::InvalidIdentity);
         }
-        if !extensions.required_capabilities().is_some_and(|required| {
-            required
-                .extension_types()
-                .contains(&ExtensionType::Unknown(ORIGIN_EXTENSION))
-        }) {
+        if !extensions
+            .required_capabilities()
+            .is_some_and(|required| required.extension_types().contains(&ORIGIN_CAPABILITY))
+        {
             return Err(AslError::InvalidMessage);
         }
         Ok(origin)
@@ -74,7 +74,7 @@ impl RoomOrigin {
     pub fn group_config(&self) -> Result<MlsGroupCreateConfig, AslError> {
         let extensions = Extensions::from_vec(vec![
             Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-                &[ExtensionType::Unknown(ORIGIN_EXTENSION)],
+                &[ORIGIN_CAPABILITY],
                 &[],
                 &[],
             )),
@@ -128,6 +128,6 @@ impl RoomOrigin {
 
 pub(crate) fn room_leaf_capabilities() -> Capabilities {
     Capabilities::builder()
-        .extensions(vec![ExtensionType::Unknown(ORIGIN_EXTENSION)])
+        .extensions(vec![ORIGIN_CAPABILITY])
         .build()
 }

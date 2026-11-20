@@ -1,6 +1,7 @@
 //! Local Core boundary for attested MLS rooms. None of these operations
 //! activates a room, opens the group substream or grants access to files.
 
+mod incoming;
 mod outgoing;
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};

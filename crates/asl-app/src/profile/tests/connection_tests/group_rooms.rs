@@ -128,33 +128,72 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
             NOW,
         )
         .unwrap();
-    let GroupBody::Membership(GroupMembership::Invite {
-        agent,
-        device,
-        expires_at_ms,
-    }) = invitation.body
-    else {
-        panic!("expected a targeted Invite");
+    let wrong_device = GroupPacket {
+        body: GroupBody::Membership(GroupMembership::Invite {
+            agent: local_cert.agent_id,
+            device: creator_cert.peer_id.clone(),
+            expires_at_ms: NOW + 60_000,
+        }),
+        ..invitation.clone()
     };
-    let invite = MlsIncomingInvite {
-        id: invitation.message_id,
-        wire_id: invitation.group_id,
-        base_epoch: invitation.epoch,
-        inviter: creator_cert.agent_id,
-        inviter_device: creator_cert.peer_id.clone(),
-        recipient: agent,
-        recipient_device: device,
-        expires_at_ms,
-    };
-    assert!(store.receive_mls_invite(&invite, NOW).unwrap());
-    let (signer, credential) = issue_group_credential(&root, wire_id, &local_cert, NOW).unwrap();
-    let join = pending_join::prepare(&invite, Id128([7; 16]), credential, &signer).unwrap();
+    assert!(matches!(
+        recipient.receive_targeted_mls_invite(&mut store, connection_id, &wrong_device, &dirs, NOW),
+        Err(AslError::InvalidIdentity)
+    ));
+    let invite = recipient
+        .receive_targeted_mls_invite(&mut store, connection_id, &invitation, &dirs, NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(invite.inviter_device, creator_cert.peer_id);
+    assert_eq!(invite.recipient_device, local_cert.peer_id);
     assert!(
-        store
-            .save_mls_join_package(&invite, join.key, &join.sealed_package, NOW)
+        recipient
+            .receive_targeted_mls_invite(&mut store, connection_id, &invitation, &dirs, NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        recipient.prepare_approved_mls_join(&mut store, connection_id, &invite, &dirs, NOW),
+        Err(AslError::PolicyDenied)
+    ));
+    let recipient_sql = rusqlite::Connection::open(&local_db.path).unwrap();
+    recipient_sql
+        .execute("UPDATE identity_registry_states SET sequence=8", [])
+        .unwrap();
+    assert!(matches!(
+        recipient.approve_targeted_mls_invite(
+            &mut store,
+            &root,
+            connection_id,
+            &invite,
+            &dirs,
+            NOW
+        ),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    recipient_sql
+        .execute("UPDATE identity_registry_states SET sequence=7", [])
+        .unwrap();
+    assert!(
+        recipient
+            .approve_targeted_mls_invite(&mut store, &root, connection_id, &invite, &dirs, NOW)
             .unwrap()
     );
-    let (request, _) = pending_join::restore(&invite, join.key, &join.sealed_package).unwrap();
+    let request = recipient
+        .prepare_approved_mls_join(&mut store, connection_id, &invite, &dirs, NOW)
+        .unwrap();
+    drop(store);
+    let mut store = local_db.open();
+    assert_eq!(
+        recipient
+            .prepare_approved_mls_join(&mut store, connection_id, &invite, &dirs, NOW)
+            .unwrap(),
+        request
+    );
+    let (join_key, sealed_package) = store
+        .pending_mls_join_package(&invite, NOW)
+        .unwrap()
+        .unwrap();
     let local_id = GroupId(Id128([8; 16]));
     let welcome = |reply| ApprovedMlsWelcome {
         connection_id,
@@ -187,8 +226,8 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         &request,
         &invite,
     );
-    let (_, candidate) = pending_join::restore(&invite, join.key, &join.sealed_package).unwrap();
-    asl_groups::membership::stage_welcome(&request, &invalid, join.key.package_ref, &candidate)
+    let (_, candidate) = pending_join::restore(&invite, join_key, &sealed_package).unwrap();
+    asl_groups::membership::stage_welcome(&request, &invalid, join_key.package_ref, &candidate)
         .unwrap();
     assert!(matches!(
         recipient.finish_approved_mls_welcome(&mut store, welcome(&invalid), NOW),

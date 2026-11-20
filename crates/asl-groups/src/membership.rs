@@ -4,7 +4,7 @@
 mod origin;
 pub use origin::RoomOrigin;
 #[cfg(windows)]
-pub(crate) use origin::room_leaf_capabilities;
+pub(crate) use origin::{ORIGIN_CAPABILITY, room_leaf_capabilities};
 
 use asl_types::{
     error::AslError,

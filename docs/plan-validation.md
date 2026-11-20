@@ -500,3 +500,8 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-store --all-targets --locked --offline -- --test-threads=1`：384 项通过、0 失败、2 项按已有标记忽略。相同三包全目标严格 Clippy、Rust 格式及 Git 空白检查通过。
 - 双 Core 本机用例验证：未准入连接不能请求发出邀请；持久链序号错配时拒绝创建邀请、提交 Add 和重发 Welcome，且不推进 MLS epoch；成功后 SQLite 重开可取回字节完全相同的回复，改请求 ID 不可取回，发收双方的 MLS exporter 对同一 epoch 一致。
 - 使用真实 OpenMLS、DPAPI、SQLite 与合成链证明；未开通生产群子流，未验收真实链 RPC、GUI 审批、公网群投递或同步。未修改 SQLite schema、外层 CBOR 或依赖锁。房间仍为 `needs_sync`。
+
+### 2026-11-20 T31：Core 收方审批与加入包恢复
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：三包群相关库用例 15 项与 `asl-groups --test mls_application` 3 项通过，0 失败；相同三包全目标严格 Clippy 与格式检查通过。本切片未重跑全工作区。
+- 双 Core 本机用例覆盖错设备拒收、重复邀请不再提示、未同意不能准备加入包、链状态错配不能批准、SQLite 重开后精确恢复原请求。测试用真实 OpenMLS、DPAPI 和 SQLite，链数据为合成证明。未启动 GUI、群子流或真实链 RPC。

@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use zeroize::Zeroizing;
 
-use crate::membership::{GROUP_CIPHERSUITE, read_key_package, room_leaf_capabilities};
+use crate::membership::{
+    GROUP_CIPHERSUITE, ORIGIN_CAPABILITY, read_key_package, room_leaf_capabilities,
+};
 
 const FORMAT: &str = "ASL-MLS-PENDING-JOIN-v1";
 
@@ -147,6 +149,14 @@ pub fn restore(
     let provider = OpenMlsRustCrypto::default();
     let request = snapshot.scope.request(&snapshot.bundle)?;
     let (package, reference) = read_key_package(&request, provider.crypto())?;
+    if !package
+        .leaf_node()
+        .capabilities()
+        .extensions()
+        .contains(&ORIGIN_CAPABILITY)
+    {
+        return Err(AslError::IncompatibleVersion);
+    }
     if reference != key.package_ref
         || package.leaf_node().signature_key().as_slice() != snapshot.signer.public()
     {

@@ -37,6 +37,32 @@ pub struct MlsJoinKey {
     pub package_ref: Hash32,
 }
 
+pub struct MlsInviteEndpoints<'a> {
+    pub inviter: &'a MlsMemberEvidence,
+    pub recipient: &'a MlsMemberEvidence,
+    pub chain_id: u64,
+}
+
+impl MlsInviteEndpoints<'_> {
+    fn require(
+        &self,
+        db: &Connection,
+        invite: &MlsIncomingInvite,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        for (member, agent, device) in [
+            (self.inviter, invite.inviter, &invite.inviter_device),
+            (self.recipient, invite.recipient, &invite.recipient_device),
+        ] {
+            if member.certificate.agent_id != agent || &member.certificate.peer_id != device {
+                return Err(AslError::InvalidDeviceCertificate);
+            }
+            require_member(db, member, self.chain_id, now_ms)?;
+        }
+        Ok(())
+    }
+}
+
 pub struct MlsJoinedRoom<'a> {
     pub invite: &'a MlsIncomingInvite,
     pub key: MlsJoinKey,
@@ -52,6 +78,24 @@ impl Store {
     pub fn receive_mls_invite(
         &mut self,
         invite: &MlsIncomingInvite,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        self.receive_mls_invite_inner(invite, None, now_ms)
+    }
+
+    pub fn receive_verified_mls_invite(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        endpoints: MlsInviteEndpoints<'_>,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        self.receive_mls_invite_inner(invite, Some(endpoints), now_ms)
+    }
+
+    fn receive_mls_invite_inner(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        endpoints: Option<MlsInviteEndpoints<'_>>,
         now_ms: u64,
     ) -> Result<bool, AslError> {
         if invite.id.0 == [0; 16]
@@ -72,6 +116,9 @@ impl Store {
         let agent = bs58::encode(invite.inviter.as_bytes()).into_string();
         let inviter = bs58::encode(invite.inviter_device.as_bytes()).into_string();
         let tx = immediate(&mut self.connection)?;
+        if let Some(endpoints) = endpoints {
+            endpoints.require(&tx, invite, now_ms)?;
+        }
         prune(&tx, now)?;
         let added = tx
             .execute(
@@ -117,6 +164,28 @@ impl Store {
         sealed_package: &[u8],
         now_ms: u64,
     ) -> Result<bool, AslError> {
+        self.save_mls_join_package_inner(invite, key, sealed_package, None, now_ms)
+    }
+
+    pub fn save_verified_mls_join_package(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        key: MlsJoinKey,
+        sealed_package: &[u8],
+        endpoints: MlsInviteEndpoints<'_>,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        self.save_mls_join_package_inner(invite, key, sealed_package, Some(endpoints), now_ms)
+    }
+
+    fn save_mls_join_package_inner(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        key: MlsJoinKey,
+        sealed_package: &[u8],
+        endpoints: Option<MlsInviteEndpoints<'_>>,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
         if key.request_id.0 == [0; 16]
             || key.request_id == invite.id
             || key.package_ref.0 == [0; 32]
@@ -125,6 +194,9 @@ impl Store {
             return Err(AslError::InvalidPolicyState);
         }
         let tx = immediate(&mut self.connection)?;
+        if let Some(endpoints) = endpoints {
+            endpoints.require(&tx, invite, now_ms)?;
+        }
         prune(&tx, sql_number(now_ms)?)?;
         if !matches_invite(&tx, invite, now_ms)? {
             tx.commit().map_err(database_error)?;
@@ -156,7 +228,28 @@ impl Store {
         invite: &MlsIncomingInvite,
         now_ms: u64,
     ) -> Result<Option<(MlsJoinKey, Vec<u8>)>, AslError> {
+        self.pending_mls_join_package_inner(invite, None, now_ms)
+    }
+
+    pub fn verified_mls_join_package(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        endpoints: MlsInviteEndpoints<'_>,
+        now_ms: u64,
+    ) -> Result<Option<(MlsJoinKey, Vec<u8>)>, AslError> {
+        self.pending_mls_join_package_inner(invite, Some(endpoints), now_ms)
+    }
+
+    fn pending_mls_join_package_inner(
+        &mut self,
+        invite: &MlsIncomingInvite,
+        endpoints: Option<MlsInviteEndpoints<'_>>,
+        now_ms: u64,
+    ) -> Result<Option<(MlsJoinKey, Vec<u8>)>, AslError> {
         let tx = immediate(&mut self.connection)?;
+        if let Some(endpoints) = endpoints {
+            endpoints.require(&tx, invite, now_ms)?;
+        }
         prune(&tx, sql_number(now_ms)?)?;
         if !matches_invite(&tx, invite, now_ms)? {
             tx.commit().map_err(database_error)?;

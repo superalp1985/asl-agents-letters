@@ -12,7 +12,7 @@ mod recovery;
 mod recovery_tests;
 mod transition;
 
-pub use invite::{MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom};
+pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
