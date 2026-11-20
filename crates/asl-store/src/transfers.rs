@@ -17,7 +17,7 @@ use asl_types::{
     manifest::{CHUNK_SIZE, Manifest, decode_manifest},
     task::{TaskId, TransferId},
 };
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{Store, current_time_ms, database_error, open_store};
 
@@ -32,6 +32,53 @@ const DEFAULT_DOWNLOAD_QUOTA: i64 = 20 << 30;
 const DEFAULT_TASK_DOWNLOAD_QUOTA: i64 = 1 << 30;
 const DEFAULT_UNKNOWN_SOURCE_QUOTA: i64 = 512 << 20;
 const IDLE_DOWNLOAD_SWEEP_LIMIT: i64 = 8;
+
+fn ensure_retry_allowed(
+    connection: &Connection,
+    content: &str,
+    now_ms: i64,
+) -> Result<(), AslError> {
+    let restricted = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM transfer_cooldowns
+             WHERE content_id=?1 AND retry_after_ms>?2)",
+            params![content, now_ms],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(database_error)?;
+    if restricted {
+        return Err(AslError::PolicyDenied);
+    }
+    Ok(())
+}
+
+fn record_cooldown(
+    connection: &Connection,
+    content: &str,
+    now_ms: i64,
+    reason: &str,
+) -> Result<(), AslError> {
+    connection
+        .execute(
+            "DELETE FROM transfer_cooldowns WHERE content_id IN (
+                SELECT content_id FROM transfer_cooldowns WHERE retry_after_ms<=?1
+                ORDER BY retry_after_ms LIMIT ?2
+             )",
+            params![now_ms, IDLE_DOWNLOAD_SWEEP_LIMIT],
+        )
+        .map_err(database_error)?;
+    connection
+        .execute(
+            "INSERT INTO transfer_cooldowns(content_id,retry_after_ms,reason)
+             VALUES (?1,?2,?3)
+             ON CONFLICT(content_id) DO UPDATE SET
+             retry_after_ms=excluded.retry_after_ms,reason=excluded.reason
+             WHERE excluded.retry_after_ms > transfer_cooldowns.retry_after_ms",
+            params![content, now_ms.saturating_add(DOWNLOAD_COOLDOWN_MS), reason],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct DownloadRequest {
@@ -112,6 +159,26 @@ impl DownloadBroker {
             .started()
     }
 
+    pub fn ensure_retry_allowed(&self, content_id: Hash32, now_ms: i64) -> Result<(), AslError> {
+        ensure_retry_allowed(&self.store.connection, &hex::encode(content_id.0), now_ms)
+    }
+
+    /// Called by the local download worker after correlating a reply whose
+    /// digest is correct but whose manifest is invalid for this protocol.
+    pub fn record_corrupt_manifest(
+        &mut self,
+        content_id: Hash32,
+        now_ms: i64,
+    ) -> Result<(), AslError> {
+        let tx = self
+            .store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        record_cooldown(&tx, &hex::encode(content_id.0), now_ms, "invalid_manifest")?;
+        tx.commit().map_err(database_error)
+    }
+
     fn start(
         &mut self,
         request: &DownloadRequest,
@@ -151,24 +218,12 @@ impl DownloadBroker {
             .map_err(database_error)?
             .ok_or(AslError::PolicyDenied)?;
         let expected_root = file_identity(volume.as_deref(), file_id.as_deref())?;
-        let retry_after: Option<i64> = tx
-            .query_row(
-                "SELECT retry_after_ms FROM transfer_cooldowns WHERE content_id=?1",
-                [&content],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(database_error)?;
-        if retry_after.is_some_and(|value| value > now) {
-            return Err(AslError::PolicyDenied);
-        }
-        if retry_after.is_some() {
-            tx.execute(
-                "DELETE FROM transfer_cooldowns WHERE content_id=?1",
-                [&content],
-            )
-            .map_err(database_error)?;
-        }
+        ensure_retry_allowed(&tx, &content, now)?;
+        tx.execute(
+            "DELETE FROM transfer_cooldowns WHERE content_id=?1 AND retry_after_ms<=?2",
+            params![content, now],
+        )
+        .map_err(database_error)?;
 
         check_download_limits(&tx, bytes, has_stranger_source(&tx, &sources)?)?;
         check_write_grant_quota(&tx, &grant, bytes, max_bytes)?;
@@ -880,14 +935,7 @@ impl DownloadBroker {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         ensure_active_transfer(&tx, row)?;
-        tx.execute(
-            "INSERT INTO transfer_cooldowns(content_id,retry_after_ms,reason)
-             VALUES (?1,?2,'full_hash_mismatch')
-             ON CONFLICT(content_id) DO UPDATE SET
-             retry_after_ms=excluded.retry_after_ms,reason=excluded.reason",
-            params![row.content, now.saturating_add(DOWNLOAD_COOLDOWN_MS)],
-        )
-        .map_err(database_error)?;
+        record_cooldown(&tx, &row.content, now, "full_hash_mismatch")?;
         file.remove()?;
         release_row(&tx, row, "failed", now)?;
         tx.commit().map_err(database_error)?;

@@ -4,7 +4,7 @@ use asl_types::{error::AslError, ids::PeerId, manifest::CHUNK_SIZE};
 
 const ASSIGNMENT_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_ACTIVE_SOURCES: usize = 4;
-const MAX_ACTIVE_PER_SOURCE: u8 = 2;
+pub const MAX_ACTIVE_PER_SOURCE: u8 = 2;
 const MAX_ACTIVE_REQUESTS: usize = MAX_ACTIVE_SOURCES * MAX_ACTIVE_PER_SOURCE as usize;
 const MAX_BAD_HASHES: u8 = 3;
 

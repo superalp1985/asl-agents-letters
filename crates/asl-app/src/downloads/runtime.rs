@@ -24,6 +24,7 @@ use asl_types::{
 use super::{DownloadInfo, LocalDownloads};
 use crate::{
     ipc::NetworkProtocol, paths::AppPaths, profile::AdmittedNetworkEvent, supervisor::unix_time_ms,
+    transfer::FETCH_TIMEOUT_MS,
 };
 
 mod job;
@@ -33,7 +34,6 @@ const NETWORK_EVENTS: usize = 32;
 const TRACKED_REQUESTS: usize = 16;
 const WORKER_POLL: Duration = Duration::from_millis(100);
 const BULK_TIMEOUT_MS: u64 = REQUEST_TIMEOUT.as_millis() as u64;
-const FETCH_TIMEOUT_MS: u64 = 2 * BULK_TIMEOUT_MS + 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadSource {
@@ -233,6 +233,9 @@ impl DownloadBridge {
             FetchManifestReceived(manifest) => {
                 ((manifest.fetch_request_id, true), manifest.connection_id)
             }
+            FetchManifestCorrupt(manifest) => {
+                ((manifest.fetch_request_id, true), manifest.connection_id)
+            }
             BulkTransferResponse(response) => {
                 ((response.request.request_id, false), response.connection_id)
             }
@@ -285,8 +288,8 @@ impl DownloadBridge {
 
     fn deliver(&self, event: &AdmittedNetworkEvent) {
         if let Some(ingress) = &self.ingress {
-            // When disk is stalled, the request timeout reclaims undelivered
-            // work. Never make Core wait for storage to accept a payload.
+            // The worker may expire a lost receipt, but only Net can release
+            // an actual network slot. Never block Core on disk work.
             let _ = ingress.try_send(event.clone());
         }
     }

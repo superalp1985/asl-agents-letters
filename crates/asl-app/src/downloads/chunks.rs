@@ -50,7 +50,7 @@ pub(super) struct PendingChunk {
     agent: AgentId,
     request: BulkRequest,
     deadline_ms: u64,
-    transport_deadline_ms: u64,
+    receipt_deadline_ms: u64,
     retired: bool,
 }
 
@@ -171,7 +171,7 @@ impl LocalDownloads {
         }
         self.expire_idle_chunks(now_ms)?;
         self.retired_chunks
-            .retain(|_, request| request.transport_deadline_ms > now_ms);
+            .retain(|_, request| request.receipt_deadline_ms > now_ms);
         if !self.retired_chunks.is_empty() {
             return Ok(None);
         }
@@ -310,7 +310,7 @@ impl ChunkDownload {
             self.suspend_peer(broker, &peer, FailureKind::Timeout)?;
         }
         self.pending
-            .retain(|_, pending| !pending.retired || pending.transport_deadline_ms > now_ms);
+            .retain(|_, pending| !pending.retired || pending.receipt_deadline_ms > now_ms);
         let pending = &self.pending;
         let eligible = |peer: &PeerId| {
             self.leases
@@ -339,7 +339,7 @@ impl ChunkDownload {
             let connection_id = source.connection;
             let agent = source.agent;
             let deadline_ms = assignment.deadline_ms.min(source.expires_at_ms);
-            let transport_deadline_ms =
+            let receipt_deadline_ms =
                 now_ms.saturating_add(asl_net::transport::REQUEST_TIMEOUT.as_millis() as u64);
             broker.assign_chunk(self.transfer.clone(), &peer, index)?;
             match enqueue(NetworkCommand::SendBulk {
@@ -355,7 +355,7 @@ impl ChunkDownload {
                             agent,
                             request,
                             deadline_ms,
-                            transport_deadline_ms,
+                            receipt_deadline_ms,
                             retired: false,
                         },
                     );
@@ -534,7 +534,8 @@ impl ChunkDownload {
         let index = pending.request.chunk_index;
         broker.unassign_chunk(&self.transfer, peer, index)?;
         self.scheduler.failed(peer, index, reason);
-        // It cannot write anymore, but still takes a network slot until acknowledged.
+        // Keep the local receipt until acknowledgment or cleanup; Net owns
+        // the actual network slot, independently of this scheduler.
         pending.retired = true;
         Ok(())
     }

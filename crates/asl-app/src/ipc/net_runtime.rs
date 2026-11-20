@@ -12,6 +12,7 @@ use asl_net::{
         ResponseToken, TransportEvent,
     },
 };
+use asl_transfer::scheduler::MAX_ACTIVE_PER_SOURCE;
 use asl_types::{
     error::AslError,
     ids::PeerId,
@@ -542,44 +543,53 @@ impl NetworkBridge {
         request: BulkRequest,
         writer: &mut FrameWriter<W>,
     ) -> Result<(), NetworkErrorCode> {
-        if self.closing.contains(&connection_id) {
-            return Err(NetworkErrorCode::Disconnected);
-        }
         let request_id = request.request_id.0;
-        let key = (connection_id, request_id, NetworkProtocol::Bulk);
-        if self.requests.contains_key(&key) {
-            writer
-                .send(&IpcMessage::RequestFailed {
-                    connection_id,
-                    request_id,
-                    protocol: NetworkProtocol::Bulk,
-                    code: NetworkErrorCode::InvalidCommand,
-                })
-                .map_err(|_| NetworkErrorCode::Transport)?;
-            return Ok(());
-        }
-        if self.requests.len() >= MAX_PENDING_IPC_REQUESTS {
-            writer
-                .send(&IpcMessage::RequestFailed {
-                    connection_id,
-                    request_id,
-                    protocol: NetworkProtocol::Bulk,
-                    code: NetworkErrorCode::Capacity,
-                })
-                .map_err(|_| NetworkErrorCode::Transport)?;
-            return Ok(());
-        }
-        let Some(connection) = self.connections.get(&connection_id) else {
-            writer
-                .send(&IpcMessage::RequestFailed {
-                    connection_id,
-                    request_id,
-                    protocol: NetworkProtocol::Bulk,
-                    code: NetworkErrorCode::Disconnected,
-                })
-                .map_err(|_| NetworkErrorCode::Transport)?;
-            return Ok(());
+        let protocol = NetworkProtocol::Bulk;
+        let Some(connection) = self
+            .connections
+            .get(&connection_id)
+            .filter(|_| !self.closing.contains(&connection_id))
+        else {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::Disconnected,
+                writer,
+            );
         };
+        let key = (connection_id, request_id, protocol);
+        if self.requests.contains_key(&key) {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::InvalidCommand,
+                writer,
+            );
+        }
+        if self.requests.len() >= MAX_PENDING_IPC_REQUESTS
+            || self
+                .requests
+                .keys()
+                .filter(|(handle, _, pending_protocol)| {
+                    *pending_protocol == protocol
+                        && self
+                            .connections
+                            .get(handle)
+                            .is_some_and(|pending| pending.peer_id() == connection.peer_id())
+                })
+                .count()
+                >= usize::from(MAX_ACTIVE_PER_SOURCE)
+        {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::Capacity,
+                writer,
+            );
+        }
         match self.transport.send_bulk_request(connection, request) {
             Ok(token) => {
                 self.requests.insert(
@@ -591,14 +601,15 @@ impl NetworkBridge {
                     },
                 );
             }
-            Err(error) => writer
-                .send(&IpcMessage::RequestFailed {
+            Err(error) => {
+                self.send_request_failure(
                     connection_id,
                     request_id,
-                    protocol: NetworkProtocol::Bulk,
-                    code: error_code(&error),
-                })
-                .map_err(|_| NetworkErrorCode::Transport)?,
+                    protocol,
+                    error_code(&error),
+                    writer,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1102,7 +1113,10 @@ fn error_code(error: &io::Error) -> NetworkErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asl_net::transport::TransportKind;
+    use asl_net::{
+        codec::{BulkOperation, BulkStatus},
+        transport::TransportKind,
+    };
     use asl_types::ids::{Id128, PeerId};
     use asl_types::protocol::{
         Answer, AnswerStatus, ConceptRef, Intent, Query, ResultShape, ResultStatus, WireFrame,
@@ -1134,8 +1148,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn control_round_trip_crosses_both_driver_handle_mappings() {
+    fn bridge_event(bridge: &mut NetworkBridge, event: TransportEvent) -> IpcMessage {
+        let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
+        bridge.handle_event(event, &mut writer).unwrap();
+        read_event(writer.into_inner())
+    }
+
+    async fn connected_bridges() -> ((NetworkBridge, [u8; 16]), (NetworkBridge, [u8; 16])) {
         let listener_key = Keypair::generate_ed25519();
         let listener_peer = peer_id(&listener_key);
         let mut listener = NetworkBridge::new(LocalTransport::new(listener_key).unwrap());
@@ -1167,42 +1186,27 @@ mod tests {
         })
         .await
         .unwrap();
-        let dialer_event = dialer_event.unwrap();
 
-        let mut dialer_bytes = Vec::new();
-        {
-            let mut writer = FrameWriter::new(&mut dialer_bytes, IpcRole::Net, IpcRole::Core);
-            dialer.handle_event(dialer_event, &mut writer).unwrap();
-        }
-        let dialer_connection_id = match read_event(dialer_bytes) {
-            IpcMessage::PeerAuthenticated {
-                connection_id,
-                peer_id,
-            } => {
-                assert_eq!(peer_id, listener_peer);
-                connection_id
-            }
-            event => panic!("unexpected dialer connection event: {event:?}"),
-        };
+        let connection_handle =
+            |bridge: &mut NetworkBridge, event, expected_peer| match bridge_event(bridge, event) {
+                IpcMessage::PeerAuthenticated {
+                    connection_id,
+                    peer_id,
+                } => {
+                    assert_eq!(peer_id, expected_peer);
+                    connection_id
+                }
+                event => panic!("unexpected connection event: {event:?}"),
+            };
+        let listener_id = connection_handle(&mut listener, listener_event.unwrap(), dialer_peer);
+        let dialer_id = connection_handle(&mut dialer, dialer_event.unwrap(), listener_peer);
+        ((listener, listener_id), (dialer, dialer_id))
+    }
 
-        let mut connected_bytes = Vec::new();
-        {
-            let mut writer = FrameWriter::new(&mut connected_bytes, IpcRole::Net, IpcRole::Core);
-            listener
-                .handle_event(listener_event.unwrap(), &mut writer)
-                .unwrap();
-        }
-        let connection_id = match read_event(connected_bytes) {
-            IpcMessage::PeerAuthenticated {
-                connection_id,
-                peer_id,
-            } => {
-                assert_eq!(peer_id, dialer_peer);
-                connection_id
-            }
-            event => panic!("unexpected bridge event: {event:?}"),
-        };
-
+    #[tokio::test]
+    async fn control_round_trip_crosses_both_driver_handle_mappings() {
+        let ((mut listener, connection_id), (mut dialer, dialer_connection_id)) =
+            connected_bridges().await;
         let now = crate::supervisor::unix_time_ms().unwrap();
         let request = WireFrame::Query(Query {
             message_id: Id128([61; 16]),
@@ -1332,5 +1336,137 @@ mod tests {
             }
             event => panic!("unexpected dialer response event: {event:?}"),
         }
+    }
+
+    fn command_output(bridge: &mut NetworkBridge, command: IpcMessage) -> Vec<u8> {
+        let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
+        assert!(!bridge.handle_command(command, &mut writer).unwrap());
+        writer.into_inner()
+    }
+
+    fn bulk_command(connection_id: [u8; 16], operation: BulkOperation, id: u8) -> IpcMessage {
+        IpcMessage::SendBulk {
+            connection_id,
+            request: BulkRequest {
+                operation,
+                request_id: Id128([id; 16]),
+                content_id: [id; 32].into(),
+                lease_id: [4; 32].into(),
+                chunk_index: 0,
+            },
+        }
+    }
+
+    async fn next_bulk_event(
+        listener: &mut NetworkBridge,
+        dialer: &mut NetworkBridge,
+    ) -> TransportEvent {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = next_event_from_either(listener, dialer).await;
+                match event {
+                    TransportEvent::BulkRequest { .. } | TransportEvent::BulkResponse { .. } => {
+                        break event;
+                    }
+                    TransportEvent::Disconnected { .. } | TransportEvent::RequestFailed { .. } => {
+                        panic!("unexpected bulk transport failure: {event:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn receive_bulk_request(
+        listener: &mut NetworkBridge,
+        dialer: &mut NetworkBridge,
+        listener_id: [u8; 16],
+    ) -> ([u8; 16], BulkRequest) {
+        let event = next_bulk_event(listener, dialer).await;
+        match bridge_event(listener, event) {
+            IpcMessage::BulkRequested {
+                connection_id,
+                response_id,
+                request,
+            } => {
+                assert_eq!(connection_id, listener_id);
+                (response_id, request)
+            }
+            event => panic!("unexpected bulk request event: {event:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_bulk_capacity_is_shared_and_released_on_response() {
+        let ((mut listener, listener_id), (mut dialer, connection_id)) = connected_bridges().await;
+
+        // Queue mixed operations for different content before either transport is polled.
+        for (operation, id) in [(BulkOperation::Manifest, 1), (BulkOperation::Chunk, 2)] {
+            let command = bulk_command(connection_id, operation, id);
+            assert!(command_output(&mut dialer, command).is_empty());
+        }
+        let inline = bulk_command(connection_id, BulkOperation::Inline, 3);
+        assert_eq!(
+            read_event(command_output(&mut dialer, inline.clone())),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: [3; 16],
+                protocol: NetworkProtocol::Bulk,
+                code: NetworkErrorCode::Capacity,
+            }
+        );
+
+        let (response_id, first) =
+            receive_bulk_request(&mut listener, &mut dialer, listener_id).await;
+        let (_, second) = receive_bulk_request(&mut listener, &mut dialer, listener_id).await;
+        let mut accepted = [first.request_id.0, second.request_id.0];
+        accepted.sort_unstable();
+        assert_eq!(accepted, [[1; 16], [2; 16]]);
+
+        let response = BulkResponse {
+            request_id: first.request_id,
+            status: BulkStatus::NotFound,
+            payload: Vec::new(),
+        };
+        let reply = IpcMessage::ReplyBulk {
+            connection_id: listener_id,
+            response_id,
+            response: response.clone(),
+        };
+        assert!(command_output(&mut listener, reply).is_empty());
+        let event = next_bulk_event(&mut listener, &mut dialer).await;
+        assert_eq!(
+            bridge_event(&mut dialer, event),
+            IpcMessage::BulkReceived {
+                connection_id,
+                request_id: first.request_id.0,
+                response,
+            }
+        );
+
+        assert!(command_output(&mut dialer, inline).is_empty());
+        let (_, replacement) = receive_bulk_request(&mut listener, &mut dialer, listener_id).await;
+        assert_eq!(replacement.request_id, Id128([3; 16]));
+        assert_eq!(replacement.operation, BulkOperation::Inline);
+    }
+
+    #[tokio::test]
+    async fn closing_connection_rejects_bulk_with_the_request_id() {
+        let (_listener, (mut dialer, connection_id)) = connected_bridges().await;
+        assert!(
+            command_output(&mut dialer, IpcMessage::CloseConnection { connection_id }).is_empty()
+        );
+        let command = bulk_command(connection_id, BulkOperation::Manifest, 1);
+        assert_eq!(
+            read_event(command_output(&mut dialer, command)),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: [1; 16],
+                protocol: NetworkProtocol::Bulk,
+                code: NetworkErrorCode::Disconnected,
+            }
+        );
     }
 }

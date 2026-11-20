@@ -162,7 +162,7 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 6. 仅重试未过期 outgoing，最多 3 次，间隔 1、5、30 秒；总有效期默认 10 分钟。
 7. 不把历史消息重新作为新 query 投喂模型。
 
-下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。schema v5 增加 `direct_inbound_conversations`，保存直连会话的本地轮次、语义消息预算和到期时间。schema v10 将有界 manifest 字节与暂存文件身份保存在 `transfers` 中，避免恢复依赖单独 manifest 路径。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。接收目标必须来自活动的 inbox 写授权；写入使用固定目录句柄、create-new 暂存文件、文件身份校验和不覆盖原子重命名。目录额度同时计算进行中的预留与已完成下载；这只约束经本机 broker 建立的任务，不代表可阻止用户或其他进程自行占用该目录。
+下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它在冷却窗口内阻止同一 `content_id` 的本机新 `Fetch` 任务和下载创建，不上传、不进入信任或贡献记录。若与本机任务及原请求匹配的 manifest 字节哈希正确但结构无效，工作线程同样记录 24 小时冷却，不建立任务预留或暂存文件。错哈希或 Grant 大小不符不会导致整个内容 ID 冷却。schema v5 增加 `direct_inbound_conversations`，保存直连会话的本地轮次、语义消息预算和到期时间。schema v10 将有界 manifest 字节与暂存文件身份保存在 `transfers` 中，避免恢复依赖单独 manifest 路径。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。接收目标必须来自活动的 inbox 写授权；写入使用固定目录句柄、create-new 暂存文件、文件身份校验和不覆盖原子重命名。目录额度同时计算进行中的预留与已完成下载；这只约束经本机 broker 建立的任务，不代表可阻止用户或其他进程自行占用该目录。
 
 ## 7. 清理、备份与身份迁移
 

@@ -20,12 +20,14 @@ use rand::{TryRng, rngs::SysRng};
 use crate::{libraries::LocalLibraries, network::NetworkCommand, profile::CoreAdmission};
 
 mod incoming;
-pub use incoming::{FetchManifestDetails, VerifiedFetchManifest};
+pub use incoming::{CorruptFetchManifest, FetchManifestDetails, VerifiedFetchManifest};
 use incoming::{IncomingFetchTracker, PendingManifest};
 
 const PERMIT_LIFETIME_MS: u64 = 10_000;
 const MAX_PENDING_BULK_REQUESTS: usize = 64;
 const MAX_COMPLETED_BULK_RESPONSES: usize = 64;
+pub(crate) const FETCH_TIMEOUT_MS: u64 =
+    2 * asl_net::transport::REQUEST_TIMEOUT.as_millis() as u64 + 1_000;
 
 pub(crate) struct TransferService {
     store: Store,
@@ -50,6 +52,7 @@ struct PendingBulkRequest {
     peer_id: PeerId,
     request: BulkRequest,
     expires_at_ms: u64,
+    retain_until_ms: u64,
     manifest: Option<PendingManifest>,
 }
 
@@ -61,12 +64,13 @@ struct CompletedBulkResponse {
 pub(crate) enum ReceivedBulk {
     Raw(MatchedBulkResponse),
     Manifest(VerifiedFetchManifest),
+    CorruptManifest(CorruptFetchManifest),
 }
 
 impl CompletedBulkResponse {
     fn into_received(self) -> Option<ReceivedBulk> {
         match self.manifest {
-            Some(manifest) => manifest.verify(self.matched).map(ReceivedBulk::Manifest),
+            Some(manifest) => manifest.verify(self.matched),
             None => Some(ReceivedBulk::Raw(self.matched)),
         }
     }
@@ -108,6 +112,11 @@ impl BulkResponseTracker {
                 peer_id: requester.peer.clone(),
                 request,
                 expires_at_ms,
+                // An expired manifest cannot advance the download, but Net
+                // may still report that it never sent the queued request.
+                retain_until_ms: manifest.as_ref().map_or(expires_at_ms, |manifest| {
+                    expires_at_ms.max(manifest.failure_expires_at_ms)
+                }),
                 manifest,
             },
         );
@@ -141,6 +150,9 @@ impl BulkResponseTracker {
         let Some(pending) = self.pending.remove(&request_id) else {
             return false;
         };
+        if pending.expires_at_ms <= now_ms {
+            return false;
+        }
         self.completed.push_back(CompletedBulkResponse {
             matched: MatchedBulkResponse {
                 connection_id,
@@ -181,7 +193,7 @@ impl BulkResponseTracker {
 
     fn expire(&mut self, now_ms: u64) {
         self.pending
-            .retain(|_, pending| pending.expires_at_ms > now_ms);
+            .retain(|_, pending| pending.retain_until_ms > now_ms);
     }
 
     fn try_recv(&mut self) -> Option<CompletedBulkResponse> {
@@ -874,15 +886,54 @@ mod bulk_response_tests {
         manifest.file_hash = *blake3::hash(b"xyz").as_bytes();
         manifest.chunk_hashes[0] = manifest.file_hash;
         let different_content = encode_manifest(&manifest).unwrap();
-        for (grant_size, payload, receive_at) in [
-            (grant.file_size + 1, encoded.clone(), 1_200),
-            (grant.file_size, different_content, 1_200),
-            (grant.file_size, encoded, grant.expires_at_ms),
+        let mut malformed = encoded.clone();
+        malformed[0] ^= 1;
+        for (content, grant_size, payload, receive_at, corrupt) in [
+            (
+                fetch.content_id,
+                grant.file_size + 1,
+                encoded.clone(),
+                1_200,
+                false,
+            ),
+            (
+                fetch.content_id,
+                grant.file_size,
+                different_content,
+                1_200,
+                false,
+            ),
+            (
+                fetch.content_id,
+                grant.file_size,
+                malformed.clone(),
+                1_200,
+                false,
+            ),
+            (
+                fetch.content_id,
+                grant.file_size,
+                encoded,
+                grant.expires_at_ms,
+                false,
+            ),
+            (
+                Hash32(content_id(&malformed)),
+                grant.file_size,
+                malformed,
+                1_200,
+                true,
+            ),
         ] {
             let mut fetches = IncomingFetchTracker::default();
             let mut bulk = BulkResponseTracker::default();
+            let fetch = FetchRequest {
+                content_id: content,
+                ..fetch.clone()
+            };
             let grant = FetchGrant {
                 file_size: grant_size,
+                content_id: content,
                 ..grant.clone()
             };
             fetches
@@ -918,11 +969,21 @@ mod bulk_response_tests {
                 },
                 receive_at,
             );
-            assert!(
-                bulk.try_recv()
-                    .and_then(|result| result.into_received())
-                    .is_none()
-            );
+            let result = bulk.try_recv().and_then(|result| result.into_received());
+            if corrupt {
+                let Some(ReceivedBulk::CorruptManifest(result)) = result else {
+                    panic!("expected a correlated corrupt manifest");
+                };
+                assert_eq!(result.fetch_request_id, fetch.message_id);
+                assert_eq!(result.root_task_id, fetch.root_task_id);
+                assert_eq!(result.content_id, content);
+                assert_eq!(result.connection_id, connection);
+                assert_eq!(result.agent_id, source.agent);
+                assert_eq!(result.peer_id, source.peer);
+                assert_eq!(result.expires_at_ms, grant.expires_at_ms);
+            } else {
+                assert!(result.is_none());
+            }
         }
     }
 
@@ -951,6 +1012,48 @@ mod bulk_response_tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn expired_manifest_still_correlates_a_net_failure_during_the_fetch() {
+        let (_, _, fetch, grant) = fetch_fixture();
+        let source = requester(1, 2);
+        let connection = [4; 16];
+        let mut fetches = IncomingFetchTracker::default();
+        let mut bulk = BulkResponseTracker::default();
+        fetches
+            .register(connection, &source, fetch.message_id.0, &fetch, 1_000)
+            .unwrap();
+        let pending = fetches
+            .accept_grant(connection, &source, fetch.message_id.0, &grant, 1_100)
+            .unwrap();
+        let request_id = Id128([11; 16]);
+        bulk.register(
+            connection,
+            &source,
+            BulkRequest {
+                operation: BulkOperation::Manifest,
+                request_id,
+                content_id: grant.content_id,
+                lease_id: grant.lease_id,
+                chunk_index: 0,
+            },
+            Some(pending),
+            1_100,
+        )
+        .unwrap();
+        let linked = bulk
+            .fail(
+                connection,
+                source.agent,
+                &source.peer,
+                request_id.0,
+                grant.expires_at_ms,
+            )
+            .unwrap()
+            .manifest
+            .unwrap();
+        assert_eq!(linked.fetch_request_id, fetch.message_id);
     }
 
     #[test]

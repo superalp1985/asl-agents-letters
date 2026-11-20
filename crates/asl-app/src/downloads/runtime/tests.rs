@@ -10,7 +10,7 @@ use asl_types::manifest::CHUNK_SIZE;
 
 use super::*;
 use crate::{
-    MatchedBulkResponse, VerifiedFetchManifest,
+    CorruptFetchManifest, MatchedBulkResponse, VerifiedFetchManifest,
     downloads::{DownloadMode, test_inbox::Inbox},
 };
 
@@ -140,6 +140,91 @@ impl Harness {
                 agent_id: Some(self.source.agent_id),
             });
     }
+}
+
+#[test]
+fn correlated_corrupt_manifest_blocks_refetch_after_worker_restart() {
+    let mut inbox = Inbox::new(b"local fixture");
+    let content = Hash32(asl_types::manifest::content_id(b"not an ASL manifest"));
+    inbox.event.0.content_id = content;
+    drop(inbox.local);
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h.fetch(inbox.grant, None);
+    let WorkerRequest::Fetch { request, .. } = h.request() else {
+        panic!("expected Fetch");
+    };
+    let connection_id = h.connection.unwrap();
+    let report = CorruptFetchManifest {
+        fetch_request_id: request.message_id,
+        root_task_id: request.root_task_id,
+        agent_id: h.source.agent_id,
+        peer_id: h.source.peer_id.clone(),
+        connection_id,
+        content_id: request.content_id,
+        expires_at_ms: unix_time_ms().unwrap(),
+    };
+    // Keep the simulated Fetch tracked while injecting an expired receipt.
+    // A subsequent capacity reply makes the worker retry only if it ignored it.
+    h.bridge
+        .deliver(&AdmittedNetworkEvent::FetchManifestCorrupt(report.clone()));
+    h.bridge.forward(&AdmittedNetworkEvent::RequestFailed {
+        connection_id,
+        agent_id: report.agent_id,
+        peer_id: report.peer_id.clone(),
+        request_id: report.fetch_request_id.0,
+        protocol: NetworkProtocol::Control,
+        code: crate::ipc::NetworkErrorCode::Capacity,
+    });
+    let WorkerRequest::Fetch { request, .. } = h.request() else {
+        panic!("expected retry after the expired report");
+    };
+    let database = Inbox::database(&inbox.home);
+    let count: i64 = database
+        .query_row(
+            "SELECT count(*) FROM transfer_cooldowns WHERE content_id=lower(hex(?1))",
+            [content.0.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    let before = unix_time_ms().unwrap() as i64;
+    h.bridge
+        .forward(&AdmittedNetworkEvent::FetchManifestCorrupt(
+            CorruptFetchManifest {
+                fetch_request_id: request.message_id,
+                expires_at_ms: before as u64 + 5_000,
+                ..report
+            },
+        ));
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::InvalidMessage)
+    ));
+    drop(h);
+
+    let (deadline, reason): (i64, String) = database
+        .query_row(
+            "SELECT retry_after_ms,reason FROM transfer_cooldowns WHERE content_id=lower(hex(?1))",
+            [content.0.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let cooldown = asl_store::transfers::DOWNLOAD_COOLDOWN_MS;
+    assert!((before + cooldown..=unix_time_ms().unwrap() as i64 + cooldown).contains(&deadline));
+    assert_eq!(reason, "invalid_manifest");
+    assert_eq!(fs::read_dir(&inbox.folder).unwrap().count(), 0);
+
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h.fetch(inbox.grant, None);
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::PolicyDenied)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
+    drop(h);
+    let broker = asl_store::transfers::DownloadBroker::open(&inbox.home).unwrap();
+    assert!(broker.ensure_retry_allowed(content, deadline - 1).is_err());
+    assert!(broker.ensure_retry_allowed(content, deadline).is_ok());
 }
 
 #[test]

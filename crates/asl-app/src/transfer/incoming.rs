@@ -6,11 +6,11 @@ use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    manifest::{Manifest, decode_manifest, encoded_len_for_size},
+    manifest::{Manifest, ManifestError, content_id, decode_manifest, encoded_len_for_size},
     protocol::{FetchGrant, FetchRequest},
 };
 
-use super::{MatchedBulkResponse, request_deadline};
+use super::{FETCH_TIMEOUT_MS, MatchedBulkResponse, ReceivedBulk, request_deadline};
 
 const MAX_PENDING_FETCHES: usize = 64;
 
@@ -41,6 +41,20 @@ pub struct FetchManifestDetails {
     pub manifest: Manifest,
 }
 
+/// The authenticated reply was bound to the requested content, but those
+/// exact bytes cannot represent a valid manifest under this wire version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct CorruptFetchManifest {
+    pub fetch_request_id: Id128,
+    pub root_task_id: Id128,
+    pub connection_id: [u8; 16],
+    pub agent_id: AgentId,
+    pub peer_id: PeerId,
+    pub content_id: Hash32,
+    pub expires_at_ms: u64,
+}
+
 impl fmt::Debug for VerifiedFetchManifest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VerifiedFetchManifest")
@@ -60,6 +74,7 @@ struct PendingFetch {
     peer_id: PeerId,
     request: FetchRequest,
     expires_at_ms: u64,
+    failure_expires_at_ms: u64,
 }
 
 pub(super) struct PendingManifest {
@@ -68,30 +83,51 @@ pub(super) struct PendingManifest {
     root_task_id: Id128,
     file_size: u64,
     pub(super) lease_expires_at_ms: u64,
+    pub(super) failure_expires_at_ms: u64,
 }
 
 impl PendingManifest {
-    pub(super) fn verify(self, matched: MatchedBulkResponse) -> Option<VerifiedFetchManifest> {
+    pub(super) fn verify(self, matched: MatchedBulkResponse) -> Option<ReceivedBulk> {
         if matched.response.status != BulkStatus::Success {
             return None;
         }
-        let content_id = matched.request.content_id;
-        let manifest = decode_manifest(&matched.response.payload, content_id.0).ok()?;
+        let expected = matched.request.content_id;
+        let payload = &matched.response.payload;
+        let manifest = match decode_manifest(payload, expected.0) {
+            Ok(manifest) => manifest,
+            Err(error)
+                if error != ManifestError::ContentIdMismatch
+                    && content_id(payload) == expected.0 =>
+            {
+                return Some(ReceivedBulk::CorruptManifest(CorruptFetchManifest {
+                    fetch_request_id: self.fetch_request_id,
+                    root_task_id: self.root_task_id,
+                    connection_id: matched.connection_id,
+                    agent_id: matched.agent_id,
+                    peer_id: matched.peer_id,
+                    content_id: expected,
+                    expires_at_ms: self.lease_expires_at_ms,
+                }));
+            }
+            Err(_) => return None,
+        };
         if manifest.file_size != self.file_size {
             return None;
         }
-        Some(VerifiedFetchManifest(FetchManifestDetails {
-            fetch_generation: self.generation,
-            fetch_request_id: self.fetch_request_id,
-            root_task_id: self.root_task_id,
-            connection_id: matched.connection_id,
-            agent_id: matched.agent_id,
-            peer_id: matched.peer_id,
-            content_id,
-            lease_id: matched.request.lease_id,
-            expires_at_ms: self.lease_expires_at_ms,
-            manifest,
-        }))
+        Some(ReceivedBulk::Manifest(VerifiedFetchManifest(
+            FetchManifestDetails {
+                fetch_generation: self.generation,
+                fetch_request_id: self.fetch_request_id,
+                root_task_id: self.root_task_id,
+                connection_id: matched.connection_id,
+                agent_id: matched.agent_id,
+                peer_id: matched.peer_id,
+                content_id: expected,
+                lease_id: matched.request.lease_id,
+                expires_at_ms: self.lease_expires_at_ms,
+                manifest,
+            },
+        )))
     }
 }
 
@@ -131,6 +167,7 @@ impl IncomingFetchTracker {
                 peer_id: requester.peer.clone(),
                 request: request.clone(),
                 expires_at_ms,
+                failure_expires_at_ms: now_ms.saturating_add(FETCH_TIMEOUT_MS),
             },
         );
         Ok(())
@@ -163,6 +200,7 @@ impl IncomingFetchTracker {
             root_task_id: pending.request.root_task_id,
             file_size: grant.file_size,
             lease_expires_at_ms: expires_at_ms,
+            failure_expires_at_ms: pending.failure_expires_at_ms,
         })
     }
 

@@ -904,6 +904,9 @@ impl Supervisor {
                     Some(ReceivedBulk::Raw(matched)) => {
                         Ok(Some(AdmittedNetworkEvent::BulkTransferResponse(matched)))
                     }
+                    Some(ReceivedBulk::CorruptManifest(manifest)) => {
+                        Ok(Some(AdmittedNetworkEvent::FetchManifestCorrupt(manifest)))
+                    }
                     None => Ok(None),
                 }
             }

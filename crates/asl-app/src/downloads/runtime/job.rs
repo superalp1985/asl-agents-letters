@@ -66,7 +66,13 @@ impl ActiveJob {
     pub(super) fn start(queued: QueuedJob, local: &mut LocalDownloads, now: u64) -> Option<Self> {
         let result = (|| {
             let selected = match &queued.job {
-                DownloadJob::Fetch(selection) => &selection.sources,
+                DownloadJob::Fetch(selection) => {
+                    local.broker.ensure_retry_allowed(
+                        selection.content_id,
+                        i64::try_from(now).map_err(|_| AslError::InvalidPolicyState)?,
+                    )?;
+                    &selection.sources
+                }
                 DownloadJob::Resume { sources, .. } => sources,
             };
             let sources = selected
@@ -134,6 +140,27 @@ impl ActiveJob {
         now: u64,
         send: &impl Fn(WorkerRequest) -> Receipt,
     ) -> Result<Option<DownloadInfo>, AslError> {
+        if let Some(AdmittedNetworkEvent::FetchManifestCorrupt(manifest)) = event
+            && manifest.root_task_id == self.root
+            && manifest.content_id == self.content
+            && manifest.expires_at_ms > now
+            && !matches!(&self.state, State::Selecting { deadline, .. } if *deadline <= now)
+            && self.sources.iter().any(|source| {
+                source.identity.agent_id == manifest.agent_id
+                    && source.identity.peer_id == manifest.peer_id
+                    && source.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.id == manifest.fetch_request_id
+                            && fetch.connection == manifest.connection_id
+                            && fetch.deadline > now
+                    })
+            })
+        {
+            local.broker.record_corrupt_manifest(
+                self.content,
+                i64::try_from(now).map_err(|_| AslError::InvalidPolicyState)?,
+            )?;
+            return Err(AslError::InvalidMessage);
+        }
         for source in &mut self.sources {
             source.observe(self.root, self.content, event, now);
         }
@@ -266,19 +293,19 @@ impl ActiveJob {
                 Ok(completed)
             }
             State::Inline { transfer, pending } => {
-                if let Some((index, inline, transport_deadline)) = pending {
+                if let Some((index, inline, receipt_deadline)) = pending {
                     if let Some(AdmittedNetworkEvent::BulkTransferResponse(response)) = event {
                         match inline.receive(local, response) {
                             Ok(Some(info)) => return Ok(Some(info)),
                             Ok(None) => {}
                             Err(AslError::NotFound | AslError::ExpiredMessage) => {
-                                *transport_deadline = now;
+                                *receipt_deadline = now;
                             }
                             Err(error) => return Err(error),
                         }
                     }
                     let failed = event.filter(|event| inline.failed_by(event));
-                    if failed.is_some() || now >= *transport_deadline {
+                    if failed.is_some() || now >= *receipt_deadline {
                         if !matches!(
                             failed,
                             Some(AdmittedNetworkEvent::RequestFailed {

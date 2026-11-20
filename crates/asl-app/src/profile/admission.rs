@@ -169,6 +169,7 @@ pub enum AdmittedNetworkEvent {
     },
     BulkTransferResponse(MatchedBulkResponse),
     FetchManifestReceived(VerifiedFetchManifest),
+    FetchManifestCorrupt(crate::transfer::CorruptFetchManifest),
     RequestFailed {
         connection_id: [u8; 16],
         agent_id: AgentId,

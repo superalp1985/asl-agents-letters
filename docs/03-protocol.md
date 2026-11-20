@@ -71,7 +71,7 @@ IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup I
 
 接收侧 IPC kind 27 `BulkReceived` 携带连接句柄、Net 端记录的原始本机请求 ID，以及通过 `/asl/blob/1.0.0` 响应关联校验的 BulkResponse。Core 再按当前准入的 AgentId、PeerId、连接、请求 ID 和期限匹配一次性待决请求；ASL blob 线上格式不变。匹配成功的普通 Bulk 响应通过 `BulkTransferResponse` 回调；未匹配响应不会交给调用方。
 
-本机网络处理器发出的 `FetchRequest` 按 Net 返回的原始控制请求 ID 关联 `FetchGrant`；Grant 的 `message_id` 独立，不用于关联。Core 检查同一准入连接、AgentId、PeerId、内容 ID、文件大小上限和 lease 期限，再在该连接发一次 manifest 请求。Bulk 响应的有效期取请求超时、会话和 lease 期限的最早值。清单按 `content_id` 校验，文件大小与 Grant 一致后，Core 才发出 `FetchManifestReceived` 本机事件，保留原请求 ID 和 root task ID。该事件不产生磁盘写入授权，也不自动下载文件或接受 Offer。
+本机网络处理器发出的 `FetchRequest` 按 Net 返回的原始控制请求 ID 关联 `FetchGrant`；Grant 的 `message_id` 独立，不用于关联。Core 检查同一准入连接、AgentId、PeerId、内容 ID、文件大小上限和 lease 期限，再在该连接发一次 manifest 请求。Bulk 响应的有效期取请求超时、会话和 lease 期限的最早值。清单按 `content_id` 校验，文件大小与 Grant 一致后，Core 才发出 `FetchManifestReceived` 本机事件，保留原请求 ID 和 root task ID。若收到的原始清单字节确实哈希为所请求的 `content_id`，但不符合固定清单格式，Core 交付关联的 `FetchManifestCorrupt` 本机事件；错哈希、Grant 大小不符或过期响应均不产生该事件。这些事件不产生磁盘写入授权，也不自动下载文件或接受 Offer。
 
 控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查由 Core `DeviceSession`/`CoreAdmission` 执行。任何未经过该身份闸门的调用路径，都不得把控制/bulk 消息交给 Agent 或据此生成业务回复。
 
@@ -262,7 +262,7 @@ Any non-durable -> Cancelled         on revoke/cancel
 
 同一 `ContentId` 的一份已校验 manifest 可用于核对所有来源的块，无需从每个节点重复请求清单。每个来源仍须独立签发当前连接的 lease；知道 `ContentId` 不代表可以下载，也不触发自动做种。
 
-每下载最多 4 个来源，每来源 2 个并发请求；调度优先缺失块、再处理超时块。3 次坏 hash 后禁用该来源于当前传输，记录完整性证据，不用贡献抵扣。
+每下载最多 4 个来源，每来源 2 个并发请求；调度优先缺失块、再处理超时块。Net 按已认证设备 PeerId 对实际在途的 manifest、chunk 和 inline 请求共享两槽上限，直到传输报告响应、失败或连接关闭；Core 命令入队及本机调度超时都不会释放 Net 的占位。Net 无槽时按原请求 ID 返回本机容量失败，不向远端发送请求。3 次坏 hash 后禁用该来源于当前传输，记录完整性证据，不用贡献抵扣。
 
 恢复时重验所有已标 DurableVerified 块；坏块退回 Missing。全文件 hash 和 content_id 都通过后，以本地生成名称原子移入私有接收区。未完成对象不能对外作为完整文件提供。
 
