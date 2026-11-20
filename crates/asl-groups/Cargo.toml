@@ -13,7 +13,9 @@ openmls.workspace = true
 asl-policy = { path = "../asl-policy" }
 asl-store = { path = "../asl-store" }
 cbor2.workspace = true
+openmls_basic_credential = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
 serde.workspace = true
 serde_bytes = "=0.11.19"
 zeroize.workspace = true

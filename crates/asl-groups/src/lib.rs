@@ -3,6 +3,9 @@
 mod application;
 #[cfg(windows)]
 pub mod local_state;
+pub mod membership;
+#[cfg(windows)]
+pub mod pending_join;
 
 pub use application::GroupApplication;
 pub use openmls::prelude::ProtocolVersion;

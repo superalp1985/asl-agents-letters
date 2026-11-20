@@ -8,7 +8,7 @@ use asl_types::{
     record::RecordPayload,
 };
 use curve25519_dalek::edwards::CompressedEdwardsY;
-use openmls::prelude::{BasicCredential, Ciphersuite, CredentialType, CredentialWithKey};
+use openmls::prelude::{BasicCredential, CredentialType, CredentialWithKey};
 use openmls_basic_credential::SignatureKeyPair;
 
 use crate::{
@@ -18,8 +18,7 @@ use crate::{
 
 use super::{RecordHistory, admission::transport_ed25519_key, verify_record};
 
-pub const GROUP_CIPHERSUITE: Ciphersuite =
-    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+pub use asl_groups::membership::GROUP_CIPHERSUITE;
 const DOMAIN: &[u8] = b"ASL-MLS-LEAF-v1\0";
 // v1 device certificate with a PeerId of at most 128 bytes.
 const MAX_CERTIFICATE_BYTES: usize = 272;

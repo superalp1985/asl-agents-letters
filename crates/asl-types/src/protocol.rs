@@ -1,4 +1,5 @@
 pub(crate) mod cbor;
+mod group;
 
 use serde::Serialize;
 
@@ -9,6 +10,10 @@ use crate::{
 pub use cbor::{
     MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, MAX_PAIRING_FRAME_BYTES, decode_control,
     decode_frame, encode_control, encode_frame,
+};
+pub use group::{
+    GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS, MAX_GROUP_MLS_OBJECT_BYTES,
+    MAX_GROUP_PAYLOAD_BYTES,
 };
 
 pub const MAX_PAIRING_NOTE_CHARS: usize = 120;

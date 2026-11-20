@@ -1,8 +1,12 @@
 //! Durable MLS state and member projection. A saved room does not authorize
 //! access until Core reconciles it with live chain and policy state.
 
+mod invite;
+#[cfg(test)]
+mod invite_tests;
 mod transition;
 
+pub use invite::{MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
 use asl_types::{
@@ -35,32 +39,11 @@ impl Store {
     /// A trusted caller may stage a new room. Do not attach a network
     /// identifier to an existing grant key or activate the room here.
     pub fn stage_mls_room(&mut self, room: PendingMlsRoom<'_>) -> Result<(), AslError> {
-        if *room.local_id.0.as_bytes() == [0; 16]
-            || room.wire_id.0 == [0; 32]
-            || room.sealed_snapshot.is_empty()
-            || room.sealed_snapshot.len() > MAX_SEALED_ROOM_BYTES
-        {
-            return Err(AslError::InvalidPolicyState);
-        }
-        let local_id = hex::encode(room.local_id.0.as_bytes());
-        let creator = bs58::encode(room.creator.as_bytes()).into_string();
-        let now = current_time_ms();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        tx.execute(
-            "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,mls_epoch,state,created_at_ms,updated_at_ms)
-             VALUES (?1,?2,?3,?4,'needs_sync',?5,?5)",
-            params![local_id, creator, room.local_name, sql_number(room.mls_epoch)?, now],
-        )
-        .map_err(database_error)?;
-        tx.execute(
-            "INSERT INTO mls_room_states(local_group_id,wire_group_id,sealed_snapshot)
-             VALUES (?1,?2,?3)",
-            params![local_id, room.wire_id.as_bytes(), room.sealed_snapshot],
-        )
-        .map_err(database_error)?;
+        insert_mls_room(&tx, &room, current_time_ms())?;
         tx.commit().map_err(database_error)
     }
 
@@ -104,6 +87,34 @@ impl Store {
     }
 }
 
+fn insert_mls_room(
+    tx: &rusqlite::Transaction<'_>,
+    room: &PendingMlsRoom<'_>,
+    now: i64,
+) -> Result<(), AslError> {
+    if *room.local_id.0.as_bytes() == [0; 16]
+        || room.wire_id.0 == [0; 32]
+        || !(1..=MAX_SEALED_ROOM_BYTES).contains(&room.sealed_snapshot.len())
+    {
+        return Err(AslError::InvalidPolicyState);
+    }
+    let local_id = hex::encode(room.local_id.0.as_bytes());
+    let creator = bs58::encode(room.creator.as_bytes()).into_string();
+    tx.execute(
+        "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,mls_epoch,state,created_at_ms,updated_at_ms)
+         VALUES (?1,?2,?3,?4,'needs_sync',?5,?5)",
+        params![local_id, creator, room.local_name, sql_number(room.mls_epoch)?, now],
+    )
+    .map_err(database_error)?;
+    tx.execute(
+        "INSERT INTO mls_room_states(local_group_id,wire_group_id,sealed_snapshot)
+         VALUES (?1,?2,?3)",
+        params![local_id, room.wire_id.as_bytes(), room.sealed_snapshot],
+    )
+    .map_err(database_error)?;
+    Ok(())
+}
+
 fn sql_number(value: u64) -> Result<i64, AslError> {
     i64::try_from(value).map_err(|_| AslError::InvalidPolicyState)
 }
@@ -117,13 +128,16 @@ mod tests {
     use super::*;
     use asl_types::ids::AgentId;
 
-    fn test_peer(seed: u8) -> PeerId {
+    pub(super) fn test_peer(seed: u8) -> PeerId {
         let key = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
         PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap()
     }
 
-    fn register_peer(store: &Store, peer: &PeerId, serial: i64) {
-        let agent = AgentId([1; 32]);
+    pub(super) fn register_peer(store: &Store, peer: &PeerId, serial: i64) {
+        register_agent_peer(store, AgentId([1; 32]), peer, serial);
+    }
+
+    pub(super) fn register_agent_peer(store: &Store, agent: AgentId, peer: &PeerId, serial: i64) {
         let agent_text = bs58::encode(agent.0).into_string();
         let peer_text = bs58::encode(peer.as_bytes()).into_string();
         store

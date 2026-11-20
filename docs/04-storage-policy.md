@@ -34,7 +34,7 @@ data/
 
 ## 2. 数据表
 
-数据库按 `specs/schema-v1.sql` 至 `specs/schema-v12.sql` 连续迁移。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除。v8 增加派生知识的公开继承标记、独立写入目录身份绑定及写入引用表；v9 为资源增加本地来源 AgentId 归因，既有资源默认无归因且不能获得贡献分；v10 将下载 manifest 字节与暂存文件身份绑定持久化，移除依赖 manifest 路径的旧列。v11 为本机直连下载确认补上目标文件名、大小和来源集合；旧的未绑定记录不作放行凭据。v12 增加线上群 ID 与本地房间键的一对一映射和密封状态存储；新记录保持 `needs_sync`，不赋予成员权限或复用旧授权。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 的存在不代表所有应用事务都已实现。
+数据库按 `specs/schema-v1.sql` 至 `specs/schema-v13.sql` 连续迁移。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除。v8 增加派生知识的公开继承标记、独立写入目录身份绑定及写入引用表；v9 为资源增加本地来源 AgentId 归因，既有资源默认无归因且不能获得贡献分；v10 将下载 manifest 字节与暂存文件身份绑定持久化，移除依赖 manifest 路径的旧列。v11 为本机直连下载确认补上目标文件名、大小和来源集合；旧的未绑定记录不作放行凭据。v12 增加线上群 ID 与本地房间键的一对一映射和密封状态存储。v13 记录入站群邀请的提示额度、审批后的一次性密封 KeyPackage 和消费状态；提交 Welcome 候选时一并写入新房间和成员投影。新房间保持 `needs_sync`，不赋予成员权限或复用旧授权。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 的存在不代表所有应用事务都已实现。
 
 T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL 字段不变。永久身份观察单独设 10,000 项硬上限；满额拒绝新的观察，不静默删除高水位或撤销记录。DPAPI 保护的本地快照绑定完整链配置与上述行的摘要，恢复先验证完整性与配置，再重验未过期证明。写失败或并发旧快照覆盖失败后停止返回正向链身份。DPAPI 不提供整库历史回滚防护；同一 Windows 用户恶意程序或已被恢复的整份旧数据库不在此完整性机制的保证内。
 
@@ -45,7 +45,7 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 | 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、授权修订与迁移 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
-| 群组 | asl_groups、group_members、group_events | MLS 群状态、成员授权与有期限密文事件 |
+| 群组 | asl_groups、group_members、group_events、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、定向入群邀请与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、本机检索索引和溯源 |
 | 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、CBOR 语义帧、重试与去重 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |

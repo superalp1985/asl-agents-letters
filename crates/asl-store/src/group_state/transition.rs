@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
+    protocol::{MAX_GROUP_MEMBERS, MAX_GROUP_PAYLOAD_BYTES},
     task::GroupId,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -10,8 +11,6 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use super::{MAX_SEALED_ROOM_BYTES, sql_number};
 use crate::{Store, current_time_ms, database_error};
 
-const MAX_MEMBERS: usize = 64;
-const MAX_EVENT_BYTES: usize = 65_536;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +53,7 @@ impl Store {
         &mut self,
         update: MlsRoomUpdate<'_>,
     ) -> Result<RoomVersion, AslError> {
-        if update.members.len() > MAX_MEMBERS
+        if update.members.len() > MAX_GROUP_MEMBERS
             || update.sealed_snapshot.is_empty()
             || update.sealed_snapshot.len() > MAX_SEALED_ROOM_BYTES
         {
@@ -91,10 +90,10 @@ impl Store {
         let former = tx.prepare(
             "SELECT peer_id FROM group_members WHERE group_id=?1 AND state='active' ORDER BY peer_id LIMIT ?2",
         ).map_err(database_error)?
-            .query_map(params![room, (MAX_MEMBERS + 1) as i64], |r| r.get::<_, String>(0))
+            .query_map(params![room, (MAX_GROUP_MEMBERS + 1) as i64], |r| r.get::<_, String>(0))
             .map_err(database_error)?
             .collect::<Result<BTreeSet<_>, _>>().map_err(database_error)?;
-        if former.len() > MAX_MEMBERS {
+        if former.len() > MAX_GROUP_MEMBERS {
             return Err(AslError::InvalidDatabase);
         }
 
@@ -103,7 +102,7 @@ impl Store {
         if let Some(event) = update.event {
             let event_sender = peer_text(event.sender);
             if !former.contains(&event_sender)
-                || !(1..=MAX_EVENT_BYTES).contains(&event.ciphertext.len())
+                || !(1..=MAX_GROUP_PAYLOAD_BYTES).contains(&event.ciphertext.len())
                 || match event.kind {
                     MlsJournalKind::Application(_) => {
                         changed || update.mls_epoch != expected.mls_epoch

@@ -79,7 +79,21 @@ IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup I
 
 `/asl/identity-proof/1.1.0` 修正此前 1.0.0 线格式与现有验证器不兼容的问题：旧结构省略账户 trie 验证所需字段、用 64 位 storage slot 且携带未经验证器推导的注册状态。本项目尚未发布，故直接冻结新的 1.1.0，禁止静默兼容旧结构。身份目录作为签名记录随身份证明返回，避免为目录另造信任根或额外发现步骤；记录本身仍须按第 3 节完整验签和核对当前链状态。
 
-PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode 字符的可选单句说明；拒绝换行、控制字符和句中多个句末标点，说明内容纳入身份根签名和 transcript。nonce 为 256-bit 随机值，不是低熵口令；身份通过已验证链状态下的身份根签名校验。邀请需本机用户明确批准才可接受，只建立 AgentId 本地 pin，不改变文件/目录授权。提示限额为每 AgentId 每 24 小时 1 次、本机每小时 20 次、最多 5 个同时待处理提示；超限邀请得到签名拒绝，不弹提示、不建立联系人。MLS group envelope 外层只含 group ID、epoch、操作码和有界 ciphertext；OpenMLS 解密后的 plaintext 必须再次通过 ASL 语义 CDDL 校验。
+PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode 字符的可选单句说明；拒绝换行、控制字符和句中多个句末标点，说明内容纳入身份根签名和 transcript。nonce 为 256-bit 随机值，不是低熵口令；身份通过已验证链状态下的身份根签名校验。邀请需本机用户明确批准才可接受，只建立 AgentId 本地 pin，不改变文件/目录授权。提示限额为每 AgentId 每 24 小时 1 次、本机每小时 20 次、最多 5 个同时待处理提示；超限邀请得到签名拒绝，不弹提示、不建立联系人。
+
+### 群子流
+
+`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
+
+| 请求 | 允许的回复 | 回复 epoch |
+| --- | --- | --- |
+| Application、Invite、Commit | Receipt | 请求 epoch |
+| KeyPackage | Welcome，回显邀请 ID | 请求 epoch + 1 |
+| SyncRequest | SyncCommit、AtHead、SyncUnavailable | 请求 epoch |
+
+Invite 通过 envelope 的消息 ID 标识邀请，写明目标 AgentId、目标 PeerId 和过期时间；不带群名、成员表或留言。KeyPackage 是接受邀请后的新请求，显式携带原邀请 ID。每个回复必须匹配原请求的消息 ID、完整群 ID 和已认证对端。Receipt 只表示收到了对应请求，不表示同意入群、持久写入或资源授权。
+
+同步绑定值是 `MLS-Exporter("ASL group sync binding v1", "", 32)` 的 32 字节结果，不发送原始 epoch authenticator。服务方必须独立从请求 epoch 的已提交状态取得绑定并作比对，且只服务当前有效成员；该 epoch 是本机持久 head 时回 `AtHead`，否则一次最多返回一个连续提交。缺少记录、分支不一致或无法复核成员身份时不能返回 `AtHead` 或提交。单一 `AtHead` 回复不能恢复授权；请求方仍须核对本机持久状态、链身份和群策略。
 
 设备证书签名覆盖下列规范二进制：
 

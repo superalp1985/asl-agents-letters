@@ -956,7 +956,7 @@ fn decode_group_envelope(mut fields: Fields) -> Result<WireFrame, AslError> {
     let group_id = Hash32(fixed_bytes::<32>(take(&mut fields, 3)?)?);
     let epoch = as_u64(take(&mut fields, 4)?)?;
     let operation = group_operation(take(&mut fields, 5)?)?;
-    let ciphertext = byte_string(take(&mut fields, 6)?, 1, 65_536)?;
+    let ciphertext = byte_string(take(&mut fields, 6)?, 1, super::MAX_GROUP_PAYLOAD_BYTES)?;
     finish(fields)?;
     Ok(WireFrame::GroupEnvelope(GroupEnvelope {
         message_id,
