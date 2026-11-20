@@ -260,6 +260,48 @@ fn durable_direct_search_requires_live_audience_at_disclosure() {
             [],
         )
         .unwrap();
+    let hidden_grant = hex::encode([0xdd; 16]);
+    fixture
+        .db
+        .execute(
+            "INSERT INTO agents(agent_id,identity_state) VALUES (?1,'verified')",
+            [agent_text(43)],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO grants(grant_id,root_path,volume_id,root_file_id,extensions_json,
+            audience,model_policy,max_snapshot_bytes,status,created_at_ms)
+         VALUES (?1,?2,'0000000000000001',?1,'[\"rs\"]','peers','never',4096,'active',0)",
+            params![hidden_grant, fixture._temp.path().to_str().unwrap()],
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "INSERT INTO grant_agents(grant_id,agent_id) VALUES (?1,?2)",
+            params![hidden_grant, agent_text(43)],
+        )
+        .unwrap();
+    let content = hex::encode(hash(PUBLIC.content).0);
+    fixture
+        .db
+        .execute(
+            "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<4096)
+         INSERT INTO resources(row_id,resource_key,content_id,grant_id,source_relative,
+            source_grant_epoch,origin,title,summary,evidence_status,created_at_ms,updated_at_ms)
+         SELECT 1000+seq.i,printf('%032x',seq.i+10000),?1,?2,'hidden.rs',1,
+            'local','','','source_backed',0,0 FROM seq",
+            params![content, hidden_grant],
+        )
+        .unwrap();
+    fixture.db.execute(
+        "INSERT INTO resource_fts(rowid,resource_key,title_tokens,summary_tokens,body_tokens,tag_tokens)
+         SELECT row_id,resource_key,'hidden','hidden','hidden','v1c101'
+         FROM resources WHERE row_id BETWEEN 1001 AND 5096",
+        [],
+    ).unwrap();
     let until = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -294,15 +336,19 @@ fn durable_direct_search_requires_live_audience_at_disclosure() {
     assert!(
         fixture
             .store
-            .with_current_direct_authority(&contact, revision, Some(permit), || Ok(()))
+            .with_current_direct_authority(&contact, revision, Some(permit), None, || Ok(()))
             .is_ok()
     );
     assert!(
         fixture
             .store
-            .with_current_direct_authority::<()>(&stranger, revision, Some(permit), || panic!(
-                "wrong device"
-            ))
+            .with_current_direct_authority::<()>(
+                &stranger,
+                revision,
+                Some(permit),
+                None,
+                || panic!("wrong device")
+            )
             .is_err()
     );
     fixture
@@ -313,11 +359,13 @@ fn durable_direct_search_requires_live_audience_at_disclosure() {
         )
         .unwrap();
     assert!(matches!(
-        fixture
-            .store
-            .with_current_direct_authority(&contact, revision, Some(permit), || panic!(
-                "revoked contact"
-            )),
+        fixture.store.with_current_direct_authority(
+            &contact,
+            revision,
+            Some(permit),
+            None,
+            || panic!("revoked contact")
+        ),
         Err::<(), _>(AslError::NotFound)
     ));
     fixture
@@ -334,7 +382,7 @@ fn durable_direct_search_requires_live_audience_at_disclosure() {
     assert!(matches!(
         fixture
             .store
-            .with_current_direct_authority(&stranger, revision, None, || Ok(())),
+            .with_current_direct_authority(&stranger, revision, None, None, || Ok(())),
         Err(AslError::NotFound)
     ));
 }

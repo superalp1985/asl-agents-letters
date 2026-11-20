@@ -13,11 +13,12 @@ pub mod resources;
 pub mod search;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
 const SCHEMA_V4: &str = include_str!("../../../specs/schema-v4.sql");
+const SCHEMA_V5: &str = include_str!("../../../specs/schema-v5.sql");
 
 pub struct Store {
     connection: Connection,
@@ -92,6 +93,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 4 {
             apply_migration_in_transaction(&transaction, SCHEMA_V4, 4, now)?;
+        }
+        if version < 5 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V5, 5, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
@@ -277,12 +281,12 @@ mod tests {
 
         {
             let store = open_store(database.path()).unwrap();
-            assert_eq!(store.schema_version(), 4);
+            assert_eq!(store.schema_version(), 5);
             assert_eq!(store.policy_revision().unwrap(), 1);
         }
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 4);
+        assert_eq!(store.schema_version(), 5);
         assert_eq!(store.policy_revision().unwrap(), 1);
 
         let migration_count: i64 = store
@@ -291,13 +295,40 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
 
         let integrity: String = store
             .connection
             .pragma_query_value(None, "integrity_check", |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn upgrades_v4_with_direct_inbound_conversation_budget() {
+        let database = TestDatabase::new();
+        drop(open_store(database.path()).unwrap());
+        let connection = Connection::open(database.path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE direct_inbound_conversations;
+             DELETE FROM schema_migrations WHERE version=5;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = open_store(database.path()).unwrap();
+        assert_eq!(store.schema_version(), 5);
+        let exists: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type='table' AND name='direct_inbound_conversations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 
     #[test]
@@ -333,7 +364,7 @@ mod tests {
         store.set_setting(key, value, 42).unwrap();
 
         assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
-        assert_eq!(store.schema_version(), 4);
+        assert_eq!(store.schema_version(), 5);
     }
 
     #[test]
@@ -346,7 +377,7 @@ mod tests {
                     version INTEGER PRIMARY KEY,
                     applied_at_ms INTEGER NOT NULL
                  );
-                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (5, 10);
+                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (6, 10);
                  CREATE TABLE preserved(value INTEGER);
                  INSERT INTO preserved(value) VALUES (7);",
             )
@@ -437,6 +468,6 @@ mod tests {
             upgraded.get_setting("keep").unwrap().as_deref(),
             Some("true")
         );
-        assert_eq!(upgraded.schema_version(), 4);
+        assert_eq!(upgraded.schema_version(), 5);
     }
 }

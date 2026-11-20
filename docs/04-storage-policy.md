@@ -53,7 +53,7 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 
 T19 已将 `tasks`、`messages`、`outbox` 和 `processed_requests` 接入 `asl-store`：任务预算、消息方向/类型、有限重试和请求去重在 SQLite 事务中持久化，重启后不会仅因内存状态丢失而再次回答旧请求。`messages.body_cbor` 保存已通过现有确定性 CBOR 编解码器的结构化控制帧；这表示本地存储路径已实现，不表示真实 Core/Net handler、完整公网会话或所有协议帧的端到端接入已完成。`fetch_grant`、lease 及其他传输授权不写入聊天消息和 outbox。
 
-T27 已将 `processed_requests` 接到生产直连处理路径。发起检索前占用 AgentId 和消息 ID 的组合键；在同一请求未过期时不重做、不排队重发。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。
+T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。发起检索前在一个事务内占用 AgentId/message ID 去重键并推进 AgentId/root-task 的三轮、六条语义消息预算；回答交给 Net 前在当前授权事务内再预留一条语义消息。请求去重和会话预算均跨进程重启和设备迁移保留，过期十分钟。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。
 
 数据库是本机数据边界，不是线上协议：`local_task_text`、资源标题/摘要、模型片段和 GUI 标签可包含本地文本，但不能未经映射复制到 ASL peer message、DHT 记录、链上状态或 MLS 应用明文。线上结构使用 `body_cbor` 等有界 BLOB。公开 profile、offer 和语义任务必须遵循 `schemas/asl-v1.cddl`，不得因数据库使用 JSON 或 TEXT 就将这些字段发送出去。
 
@@ -152,7 +152,7 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 6. 仅重试未过期 outgoing，最多 3 次，间隔 1、5、30 秒；总有效期默认 10 分钟。
 7. 不把历史消息重新作为新 query 投喂模型。
 
-下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。
+下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。schema v5 增加 `direct_inbound_conversations`，保存直连会话的本地轮次、语义消息预算和到期时间。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。
 
 ## 7. 清理、备份与身份迁移
 

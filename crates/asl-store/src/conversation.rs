@@ -210,6 +210,65 @@ impl Store {
         Ok(inserted == 1)
     }
 
+    /// Atomically deduplicates an incoming query and charges its durable
+    /// AgentId/root-task conversation budget.
+    pub fn claim_direct_inbound_query(
+        &mut self,
+        agent_id: AgentId,
+        root_task_id: Id128,
+        request_id: Id128,
+        now_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, AslError> {
+        if now_ms < 0 || expires_at_ms <= now_ms || expires_at_ms - now_ms > CONVERSATION_WINDOW_MS
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        let tx = immediate(&mut self.connection)?;
+        tx.execute(
+            "DELETE FROM processed_requests WHERE expires_at_ms<=?1",
+            [now_ms],
+        )
+        .map_err(database_error)?;
+        tx.execute(
+            "DELETE FROM direct_inbound_conversations WHERE expires_at_ms<=?1",
+            [now_ms],
+        )
+        .map_err(database_error)?;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO processed_requests(agent_id,request_id,expires_at_ms)
+             VALUES (?1,?2,?3)",
+                params![agent_text(agent_id), id_text(request_id), expires_at_ms],
+            )
+            .map_err(database_error)?;
+        if inserted == 0 {
+            tx.commit().map_err(database_error)?;
+            return Ok(false);
+        }
+        let charged = tx
+            .execute(
+                "INSERT INTO direct_inbound_conversations
+                (agent_id,root_task_id,rounds_used,messages_used,expires_at_ms)
+             VALUES (?1,?2,1,1,?3)
+             ON CONFLICT(agent_id,root_task_id) DO UPDATE SET
+                rounds_used=rounds_used+1,messages_used=messages_used+1
+             WHERE expires_at_ms>?4 AND rounds_used<3 AND messages_used<6",
+                params![
+                    agent_text(agent_id),
+                    id_text(root_task_id),
+                    now_ms.saturating_add(CONVERSATION_WINDOW_MS),
+                    now_ms
+                ],
+            )
+            .map_err(database_error)?;
+        if charged != 1 {
+            return Err(AslError::QuotaExceeded);
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(true)
+    }
+
     pub fn due_outbox(
         &self,
         now_ms: i64,

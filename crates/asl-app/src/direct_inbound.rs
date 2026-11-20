@@ -39,6 +39,7 @@ pub(crate) struct PreparedReply {
     requester: DirectRequester,
     revision: PolicyRevision,
     permit: Option<Permit>,
+    root_task_id: asl_types::ids::Id128,
     expires_at_ms: u64,
 }
 
@@ -96,8 +97,10 @@ impl DirectInbound {
     ) -> Result<Option<PreparedReply>, AslError> {
         let query = work.query();
         let expires_at_ms = query.expires_at_ms;
-        if !self.store.claim_processed_request(
+        let root_task_id = query.root_task_id;
+        if !self.store.claim_direct_inbound_query(
             requester.agent,
+            query.root_task_id,
             query.message_id,
             now_ms as i64,
             (now_ms + INBOUND_DEDUP_WINDOW_MS) as i64,
@@ -153,6 +156,7 @@ impl DirectInbound {
                 requester: requester.clone(),
                 revision,
                 permit,
+                root_task_id,
                 expires_at_ms,
             }))
     }
@@ -166,6 +170,7 @@ impl DirectInbound {
             &reply.requester,
             reply.revision,
             reply.permit.as_ref(),
+            Some(reply.root_task_id),
             || {
                 let expires_at_ms = reply
                     .expires_at_ms
@@ -320,7 +325,7 @@ mod tests {
     fn query(id: u8, now: u64) -> WireFrame {
         WireFrame::Query(Query {
             message_id: Id128([id; 16]),
-            root_task_id: Id128([id + 1; 16]),
+            root_task_id: Id128([2; 16]),
             created_at_ms: now,
             expires_at_ms: now + 10_000,
             intent_id: Intent::LocateResource,
@@ -350,7 +355,10 @@ mod tests {
         }
         configure(&fixture.path(), "answer").unwrap();
         let mut core = DirectInbound::open(&fixture.path()).unwrap();
-        let reply = core.prepare(sender, frame.clone(), now).unwrap().unwrap();
+        let reply = core
+            .prepare(sender.clone(), frame.clone(), now)
+            .unwrap()
+            .unwrap();
         let mut seen = false;
         core.enqueue(reply, |frame, _| {
             let WireFrame::Offer(offer) = frame else {
@@ -365,7 +373,22 @@ mod tests {
         })
         .unwrap();
         assert!(seen);
+        for id in [3, 5] {
+            std::thread::sleep(Duration::from_millis(1_050));
+            let reply = core
+                .prepare(sender.clone(), query(id, now), now)
+                .unwrap()
+                .unwrap();
+            core.enqueue(reply, |_, _| Ok(())).unwrap();
+        }
         drop(core);
+        std::thread::sleep(Duration::from_millis(1_050));
+        let mut after_restart = DirectInbound::open(&fixture.path()).unwrap();
+        assert!(matches!(
+            after_restart.prepare(sender.clone(), query(7, now), now),
+            Err(AslError::QuotaExceeded)
+        ));
+        drop(after_restart);
         let mut restarted = DirectInbound::open(&fixture.path()).unwrap();
         assert!(
             restarted

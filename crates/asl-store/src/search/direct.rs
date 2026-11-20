@@ -49,16 +49,32 @@ impl Store {
             .unchecked_transaction()
             .map_err(database_error)?;
         let revision = direct_revision(&tx, requester)?;
-        // Retired imports have no FTS entry and must not starve current resources.
+        // Apply the durable recipient audience before the bounded candidate
+        // window so private rows cannot starve resources this peer may search.
         let mut statement = tx
-            .prepare_cached("SELECT rowid FROM resource_fts ORDER BY rowid DESC LIMIT ?1")
+            .prepare_cached(&format!(
+                "SELECT f.rowid FROM resource_fts f
+             CROSS JOIN resources r ON r.row_id=f.rowid AND r.resource_key=f.resource_key
+             {AUTHORITY} AND g.audience<>'group'
+             ORDER BY f.rowid DESC LIMIT ?3"
+            ))
             .map_err(database_error)?;
         let rows = statement
-            .query_map([MAX_KEYS as i64], |row| row.get::<_, i64>(0))
+            .query_map(
+                params![
+                    agent_text(requester.agent),
+                    bs58::encode(requester.peer.as_bytes()).into_string(),
+                    MAX_KEYS as i64 + 1
+                ],
+                |row| row.get::<_, i64>(0),
+            )
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         drop(statement);
+        if rows.len() > MAX_KEYS {
+            return Err(AslError::QuotaExceeded);
+        }
         let ids = serde_json::to_string(&rows).map_err(|_| AslError::InvalidPolicyState)?;
         let mut snapshot = PolicySnapshot {
             revision,
@@ -97,6 +113,7 @@ impl Store {
         requester: &DirectRequester,
         expected_revision: PolicyRevision,
         permit: Option<&Permit>,
+        root_task_id: Option<Id128>,
         enqueue: impl FnOnce() -> Result<T, AslError>,
     ) -> Result<T, AslError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
@@ -127,7 +144,26 @@ impl Store {
                 return Err(AslError::NotFound);
             }
         }
-        // No writes to commit. Drop the lock immediately after queueing.
+        if let Some(root_task_id) = root_task_id {
+            let updated = tx
+                .execute(
+                    "UPDATE direct_inbound_conversations SET messages_used=messages_used+1
+                 WHERE agent_id=?1 AND root_task_id=?2 AND expires_at_ms>?3
+                   AND rounds_used<=3 AND messages_used<6",
+                    params![
+                        agent_text(requester.agent),
+                        hex::encode(root_task_id.0),
+                        current_time_ms()
+                    ],
+                )
+                .map_err(database_error)?;
+            if updated != 1 {
+                return Err(AslError::QuotaExceeded);
+            }
+        }
+        tx.commit().map_err(database_error)?;
+        // The caller performs only an in-process bounded queue try-send after
+        // durable authorization and message-budget reservation commit.
         enqueue()
     }
 }
