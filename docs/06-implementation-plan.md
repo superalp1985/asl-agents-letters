@@ -548,6 +548,12 @@ T23 下载来源登记（2026-11-20）：本机发起的 Fetch 收到相符清�
 
 本轮 Windows x64 / Rust 1.100.0 / `--locked --offline` 分批定向验收：`asl-policy` 库 21、`write_boundaries` 3、`asl-store` 库 46、`index_retention` 7、`transfer_resume` 19；`asl-app` 库 187、`asl-core` 1、`local_libraries` 4、`network_ipc` 8；`asl-types/schema_vectors` 4。共 300 通过、0 失败，1 项既有 30 秒重扫测试按设计忽略。上述四包全目标严格 Clippy 和格式检查通过。独立 Windows 进程测试覆盖列出、拒绝、批准真实本机请求，批准后仍由原 broker 创建并完成文件；来源登记走生产路由与本机链证明测试夹具。未验收 GUI、联网块调度、双节点完整下载或公网续传。
 
+T23 大文件接收协调器（2026-11-20）：`LocalDownloads` 在本机授权任务上连接现有多来源调度器、已准入 Bulk 请求和 SQLite 持久化。一个任务最多 4 个预选来源、每来源 2 个并发块；询问模式批准绑定整个来源集合。超时、断连、出队失败或坏块会回收未完成分配，旧请求 ID 不为新分配记账；当前来源不可用时暂停该会话，仍可使用其他已获准来源。重启跳过已复验的 durable 块，只接受原来源重新提供的已验证 lease；该 lease 不写盘。完整性禁用跨恢复保留，无进度到期释放收件预留，复用 Store 的整文件校验和不覆盖发布。
+
+运行入口 `Supervisor::run_with_download_driver` 提供已准入事件、定时轮询和可感知背压的发送接口，不改变默认 `asl-core` 的行为，也不自动接受 Offer。仍待接入默认 Core 下载工作线程及 Agent 调用入口，并验收两节点从 Fetch 到落盘全程及公网重连；本轮不宣称完成 T20–T24 整体联调。
+
+Windows x64 / Rust 1.100.0 / E 盘缓存 / `--locked --offline` 定向验收：`asl-app` 下载 13、`network_ipc` 8；`asl-store` 库 46、`transfer_resume` 19；`asl-transfer` 库 10，共 96 项通过。下载用例使用真实 NTFS 和 SQLite、模拟受准入的收发事件；另有 `asl-net --test driver_requests` 1 项真实双节点 TCP/QUIC 回环，验证控制、身份和 Bulk 关联，不传输完整文件。上述三个变更包的全目标严格 Clippy 与格式检查通过；未运行全 workspace、GUI 或公网联调。
+
 ### T24 — Inline、PDF 与头像 helper
 
 直连小文件接收接口（2026-11-20）：本机 handler 可把**已经获准并开始**的下载任务及其已验证来源传给 `LocalDownloads::prepare_inline`，得到走原有准入通道的一次请求与只在内存中的接收凭据。`InlineDownload::receive` 按原请求、AgentId、PeerId、连接及有效期接收匹配的响应；不匹配的响应不消费凭据，匹配响应只能处理一次。复用 Store 的块校验、同步、整文件校验和不覆盖重命名。空文件不制造虚拟块；超过 32 KiB 必须使用分块路径，不回退到 inline。无独立种子文件，不根据 Offer 自动落盘。

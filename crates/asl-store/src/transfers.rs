@@ -59,6 +59,7 @@ pub struct DownloadSchedule {
     pub manifest: Manifest,
     pub durable_indexes: Vec<u32>,
     pub sources: Vec<PeerId>,
+    pub expires_at_ms: i64,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -344,6 +345,30 @@ impl DownloadBroker {
         Ok(changed == 1)
     }
 
+    /// Reclaims work abandoned by the previous coordinator for this transfer.
+    /// Only the Core process that owns download scheduling may call this.
+    pub fn reset_chunk_assignments(&mut self, transfer_id: &TransferId) -> Result<(), AslError> {
+        reset_assignments(&self.store.connection, &id_text(transfer_id.0.0))?;
+        Ok(())
+    }
+
+    /// Reflects durable source penalties, including those from before a restart.
+    pub fn chunk_source_available(
+        &self,
+        transfer_id: &TransferId,
+        peer_id: &PeerId,
+    ) -> Result<bool, AslError> {
+        self.store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfer_sources
+                 WHERE transfer_id=?1 AND peer_id=?2 AND state IN ('candidate','active'))",
+                params![id_text(transfer_id.0.0), peer_text(peer_id)],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+
     pub fn write_chunk(
         &mut self,
         transfer_id: TransferId,
@@ -576,7 +601,46 @@ impl DownloadBroker {
             manifest,
             durable_indexes,
             sources,
+            expires_at_ms: row.expires_at_ms,
         })
+    }
+
+    /// Recheck the persisted progress deadline before releasing an idle task.
+    /// Returns its current deadline if a durable write already extended it.
+    pub fn expire_idle_download(
+        &mut self,
+        transfer_id: &TransferId,
+        now_ms: i64,
+    ) -> Result<Option<i64>, AslError> {
+        let row = self.load_row(transfer_id)?;
+        if row.reservation_state != "held" {
+            return Ok(None);
+        }
+        if row.expires_at_ms > now_ms {
+            return Ok(Some(row.expires_at_ms));
+        }
+        self.release_inactive(&row, now_ms)?;
+        Ok(None)
+    }
+
+    fn release_inactive(&mut self, row: &TransferRow, now_ms: i64) -> Result<(), AslError> {
+        let mut part = if row.reservation_state == "held" && row.grant_status == "active" {
+            self.open_part(row).ok()
+        } else {
+            None
+        };
+        let tx = self
+            .store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if let Some(part) = part.as_mut() {
+            ensure_active_transfer(&tx, row)?;
+            part.remove()?;
+        }
+        reset_assignments(&tx, &row.transfer)?;
+        release_row(&tx, row, "paused", now_ms)?;
+        tx.commit().map_err(database_error)
     }
 
     fn recover_one(
@@ -589,22 +653,7 @@ impl DownloadBroker {
             || row.expires_at_ms <= now_ms
             || row.grant_status != "active"
         {
-            let mut part = if row.reservation_state == "held" && row.grant_status == "active" {
-                self.open_part(&row).ok()
-            } else {
-                None
-            };
-            let tx = self
-                .store
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(database_error)?;
-            if let Some(part) = part.as_mut() {
-                ensure_active_transfer(&tx, &row)?;
-                part.remove()?;
-            }
-            release_row(&tx, &row, "paused", now_ms)?;
-            tx.commit().map_err(database_error)?;
+            self.release_inactive(&row, now_ms)?;
             return Ok(RecoveryAction::Released);
         }
         if row.part_file_id.is_none() || row.manifest_bytes.is_none() {
@@ -636,15 +685,7 @@ impl DownloadBroker {
                 return Ok(RecoveryAction::Released);
             }
         };
-        let reset = self
-            .store
-            .connection
-            .execute(
-                "UPDATE transfer_chunks SET state='missing',source_peer=NULL
-                 WHERE transfer_id=?1 AND state='assigned'",
-                [&row.transfer],
-            )
-            .map_err(database_error)?;
+        let reset = reset_assignments(&self.store.connection, &row.transfer)?;
         let grant = match self.write_grant(&row) {
             Ok(grant) => grant,
             Err(_) => {
@@ -1085,6 +1126,16 @@ fn ensure_active_write_grant(
     } else {
         Err(AslError::PolicyDenied)
     }
+}
+
+fn reset_assignments(connection: &rusqlite::Connection, transfer: &str) -> Result<usize, AslError> {
+    connection
+        .execute(
+            "UPDATE transfer_chunks SET state='missing',source_peer=NULL
+             WHERE transfer_id=?1 AND state='assigned'",
+            [transfer],
+        )
+        .map_err(database_error)
 }
 
 fn release_row(

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use asl_types::{error::AslError, ids::PeerId, manifest::CHUNK_SIZE};
 
 const ASSIGNMENT_TIMEOUT_MS: u64 = 10_000;
-const MAX_ACTIVE_SOURCES: usize = 4;
+pub const MAX_ACTIVE_SOURCES: usize = 4;
 const MAX_ACTIVE_PER_SOURCE: u8 = 2;
 const MAX_ACTIVE_REQUESTS: usize = MAX_ACTIVE_SOURCES * MAX_ACTIVE_PER_SOURCE as usize;
 const MAX_BAD_HASHES: u8 = 3;
@@ -154,12 +154,13 @@ impl Scheduler {
         }
     }
 
-    fn next_peer(&mut self) -> Option<PeerId> {
+    fn next_peer(&mut self, eligible: &impl Fn(&PeerId) -> bool) -> Option<PeerId> {
         for _ in 0..self.candidates.len() {
             let index = self.next_candidate % self.candidates.len();
             self.next_candidate = self.next_candidate.wrapping_add(1);
             let peer = self.candidates[index].clone();
-            if self.disabled.contains(&peer)
+            if !eligible(&peer)
+                || self.disabled.contains(&peer)
                 || self.active_by_peer.get(&peer).copied().unwrap_or(0) >= MAX_ACTIVE_PER_SOURCE
             {
                 continue;
@@ -180,10 +181,11 @@ impl Scheduler {
             .min(u64::from(CHUNK_SIZE));
         usize::try_from(length).map_err(|_| AslError::InvalidMessage)
     }
-}
-
-impl ChunkScheduler for Scheduler {
-    fn next(&mut self, now_ms: u64) -> Vec<ChunkAssignment> {
+    pub fn next_where(
+        &mut self,
+        now_ms: u64,
+        eligible: impl Fn(&PeerId) -> bool,
+    ) -> Vec<ChunkAssignment> {
         self.expire_assignments(now_ms);
         let mut assignments = Vec::new();
         let active_count: usize = self
@@ -199,7 +201,7 @@ impl ChunkScheduler for Scheduler {
             if !matches!(self.states[index], ChunkState::Missing) {
                 continue;
             }
-            let Some(peer_id) = self.next_peer() else {
+            let Some(peer_id) = self.next_peer(&eligible) else {
                 break;
             };
             let deadline_ms = now_ms.saturating_add(ASSIGNMENT_TIMEOUT_MS);
@@ -216,13 +218,13 @@ impl ChunkScheduler for Scheduler {
         }
         assignments
     }
-
-    fn received(
+    /// Verify the borrowed network buffer without making a second payload copy.
+    pub fn verify_and_buffer(
         &mut self,
         peer_id: &PeerId,
         index: u32,
         bytes: &[u8],
-    ) -> Result<VerifiedChunk, AslError> {
+    ) -> Result<[u8; 32], AslError> {
         let index_usize = usize::try_from(index).map_err(|_| AslError::InvalidMessage)?;
         let Some(state) = self.states.get(index_usize) else {
             return Err(AslError::NotFound);
@@ -246,6 +248,22 @@ impl ChunkScheduler for Scheduler {
         }
         decrement_active(&mut self.active_by_peer, peer_id);
         self.states[index_usize] = ChunkState::Buffered;
+        Ok(hash)
+    }
+}
+
+impl ChunkScheduler for Scheduler {
+    fn next(&mut self, now_ms: u64) -> Vec<ChunkAssignment> {
+        self.next_where(now_ms, |_| true)
+    }
+
+    fn received(
+        &mut self,
+        peer_id: &PeerId,
+        index: u32,
+        bytes: &[u8],
+    ) -> Result<VerifiedChunk, AslError> {
+        let hash = self.verify_and_buffer(peer_id, index, bytes)?;
         Ok(VerifiedChunk {
             index,
             hash,

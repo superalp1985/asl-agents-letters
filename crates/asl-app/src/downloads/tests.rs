@@ -35,7 +35,7 @@ fn maps_only_the_verified_content_peer_and_local_destination() {
         write_grant_id,
         destination_relative,
         sources,
-    } = direct_request(&event, grant, "local.bin").unwrap();
+    } = download_request(&[&event], grant, "local.bin").unwrap();
     assert_eq!(content_id, event.content_id);
     assert_eq!(manifest, encode_manifest(&event.manifest).unwrap());
     assert_eq!(write_grant_id, grant);
@@ -49,13 +49,13 @@ fn rejects_elapsed_lease_and_mismatched_content() {
     let mut event = manifest_event();
     event.0.expires_at_ms = unix_time_ms().unwrap();
     assert!(matches!(
-        direct_request(&event, grant, "local.bin"),
+        download_request(&[&event], grant, "local.bin"),
         Err(AslError::ExpiredMessage)
     ));
     let mut event = manifest_event();
     event.0.manifest.file_hash[0] ^= 1;
     assert!(matches!(
-        direct_request(&event, grant, "local.bin"),
+        download_request(&[&event], grant, "local.bin"),
         Err(AslError::InvalidMessage)
     ));
 }
@@ -67,7 +67,7 @@ fn accepts_only_one_local_filename() {
         "", ".", "..", "../x", "dir/x", r"dir\x", r"C:\x", "x:stream", "NUL.bin",
     ] {
         assert!(matches!(
-            direct_request(&event, Id128([6; 16]), name),
+            download_request(&[&event], Id128([6; 16]), name),
             Err(AslError::NotFound)
         ));
     }

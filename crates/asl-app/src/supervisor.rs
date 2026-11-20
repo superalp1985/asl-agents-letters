@@ -33,6 +33,7 @@ use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::direct_inbound::{self, DirectInbound};
 use crate::direct_outbound::DirectOutbound;
 use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
+use crate::downloads::{DownloadDriverEvent, DownloadEnqueue};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
@@ -343,8 +344,20 @@ impl Supervisor {
     }
 
     pub fn run_with_outgoing_queries(self, runtime: OutgoingQueryRuntime) -> Result<(), AslError> {
+        self.run_with_download_driver(runtime, |_, _| Ok(()))
+    }
+
+    /// Core-local download integration point. The driver chooses what to fetch
+    /// and when to poll; each emitted command still passes identity admission.
+    /// Keep the callbacks short, moving slow disk work off the event pump.
+    pub fn run_with_download_driver(
+        self,
+        runtime: OutgoingQueryRuntime,
+        driver: impl FnMut(DownloadDriverEvent<'_>, &mut DownloadEnqueue<'_>) -> Result<(), AslError>,
+    ) -> Result<(), AslError> {
         let mut inbound = DirectInbound::open(&self.state_database)?;
-        let mut transfer = TransferService::open(&self.state_database)?;
+        let transfer = std::cell::RefCell::new(TransferService::open(&self.state_database)?);
+        let driver = std::cell::RefCell::new(driver);
         let outbound =
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
@@ -352,21 +365,29 @@ impl Supervisor {
                 event @ AdmittedNetworkEvent::ControlRequest {
                     request: WireFrame::FetchRequest(_),
                     ..
-                } => supervisor.handle_fetch_request(&mut transfer, event),
+                } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
                 event @ AdmittedNetworkEvent::BulkRequest { .. } => {
-                    supervisor.handle_bulk_request(&mut transfer, event)
+                    supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
                 }
                 event @ AdmittedNetworkEvent::ControlRequest { .. } => {
                     supervisor.handle_direct_inbound(&mut inbound, event)
                 }
                 event => {
+                    let mut transfer = transfer.borrow_mut();
                     let now_ms = unix_time_ms()?;
                     let Some(event) =
                         supervisor.route_transfer_event(&mut transfer, event, now_ms)?
                     else {
                         return Ok(());
                     };
-                    outbound.borrow_mut().handle_event(&event, now_ms)
+                    outbound.borrow_mut().handle_event(&event, now_ms)?;
+                    driver.borrow_mut()(DownloadDriverEvent::Network(&event), &mut |command| {
+                        supervisor.try_send_admitted_network_command_with_transfer(
+                            &mut transfer,
+                            command,
+                            unix_time_ms()?,
+                        )
+                    })
                 }
             },
             |observation| match observation {
@@ -378,7 +399,17 @@ impl Supervisor {
                 }
                 _ => Ok(()),
             },
-            |supervisor| supervisor.poll_direct_outbound(&mut outbound.borrow_mut()),
+            |supervisor| {
+                supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
+                let mut transfer = transfer.borrow_mut();
+                driver.borrow_mut()(DownloadDriverEvent::Tick, &mut |command| {
+                    supervisor.try_send_admitted_network_command_with_transfer(
+                        &mut transfer,
+                        command,
+                        unix_time_ms()?,
+                    )
+                })
+            },
         )
     }
 
@@ -549,11 +580,14 @@ impl Supervisor {
                     return Ok(());
                 };
                 for command in handler(event) {
-                    supervisor.send_admitted_network_command_with_transfer(
+                    let sent = supervisor.try_send_admitted_network_command_with_transfer(
                         &mut transfers,
                         command,
                         unix_time_ms()?,
                     )?;
+                    if !sent {
+                        return Err(AslError::SandboxUnavailable);
+                    }
                 }
                 Ok(())
             },
@@ -565,12 +599,12 @@ impl Supervisor {
         )
     }
 
-    fn send_admitted_network_command_with_transfer(
+    fn try_send_admitted_network_command_with_transfer(
         &mut self,
         transfers: &mut TransferService,
         command: NetworkCommand,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<bool, AslError> {
         match command {
             NetworkCommand::SendControl {
                 connection_id,
@@ -589,12 +623,14 @@ impl Supervisor {
                     &fetch,
                     now_ms,
                 )?;
-                let sent = self.send_network_command(NetworkCommand::SendControl {
+                let sent = NetworkCommand::SendControl {
                     connection_id,
                     request_id,
                     request: WireFrame::FetchRequest(fetch),
-                });
-                if sent.is_err() {
+                }
+                .into_ipc()
+                .and_then(|message| self.net.try_send(&message));
+                if !matches!(sent, Ok(true)) {
                     transfers.fail_control_request(
                         connection_id,
                         requester.agent,
@@ -612,15 +648,17 @@ impl Supervisor {
                 let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
                 let authorized =
                     transfers.authorize_bulk_request(admission, connection_id, request, now_ms)?;
-                match self.send_network_command(authorized) {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        transfers.cancel_bulk_request(request_id);
-                        Err(error)
-                    }
+                let sent = authorized
+                    .into_ipc()
+                    .and_then(|message| self.net.try_send(&message));
+                if !matches!(sent, Ok(true)) {
+                    transfers.cancel_bulk_request(request_id);
                 }
+                sent
             }
-            command => self.send_admitted_network_command(command, now_ms),
+            command => self
+                .send_admitted_network_command(command, now_ms)
+                .map(|()| true),
         }
     }
 

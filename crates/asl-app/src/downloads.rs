@@ -1,7 +1,7 @@
 //! Core-local entry point for [`AdmittedNetworkEvent::FetchManifestReceived`].
 //! The caller supplies an existing inbox grant and a filename chosen locally.
-//! Nothing here accepts offers or enrolls devices. Small files can be requested
-//! explicitly over the admitted bulk channel after the download has started.
+//! Nothing here accepts offers or enrolls devices. File requests go through
+//! the admitted bulk channel after the download has started.
 //!
 //! [`AdmittedNetworkEvent::FetchManifestReceived`]: crate::profile::AdmittedNetworkEvent::FetchManifestReceived
 
@@ -10,6 +10,7 @@ use std::path::Path;
 use asl_policy::WriteGrant;
 use asl_store::transfers::{DownloadBroker, DownloadRequest};
 pub use asl_store::transfers::{DownloadConsent, DownloadInfo, DownloadMode, DownloadStart};
+use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
     error::AslError,
     ids::Id128,
@@ -18,11 +19,21 @@ use asl_types::{
 
 use crate::{VerifiedFetchManifest, paths::AppPaths, supervisor::unix_time_ms};
 
+mod chunks;
 mod inline;
 pub use inline::InlineDownload;
 
+pub enum DownloadDriverEvent<'a> {
+    Network(&'a crate::profile::AdmittedNetworkEvent),
+    Tick,
+}
+
+pub type DownloadEnqueue<'a> =
+    dyn FnMut(crate::network::NetworkCommand) -> Result<bool, AslError> + 'a;
+
 pub struct LocalDownloads {
     broker: DownloadBroker,
+    chunks: Option<chunks::ChunkDownload>,
 }
 
 impl LocalDownloads {
@@ -32,6 +43,7 @@ impl LocalDownloads {
     pub fn open(paths: &AppPaths) -> Result<Self, AslError> {
         Ok(Self {
             broker: DownloadBroker::open(paths.dos_root())?,
+            chunks: None,
         })
     }
 
@@ -57,8 +69,17 @@ impl LocalDownloads {
         inbox_grant: Id128,
         filename: &str,
     ) -> Result<DownloadStart, AslError> {
-        let request = direct_request(event, inbox_grant, filename)?;
-        self.broker.request_download(&request)
+        self.request_download_from(&[event], inbox_grant, filename)
+    }
+
+    pub fn request_download_from(
+        &mut self,
+        sources: &[&VerifiedFetchManifest],
+        inbox_grant: Id128,
+        filename: &str,
+    ) -> Result<DownloadStart, AslError> {
+        self.broker
+            .request_download(&download_request(sources, inbox_grant, filename)?)
     }
 
     /// Record the local user's decision. Approval alone does not start a transfer.
@@ -75,32 +96,61 @@ impl LocalDownloads {
         filename: &str,
         id: Id128,
     ) -> Result<DownloadInfo, AslError> {
-        let request = direct_request(event, inbox_grant, filename)?;
-        self.broker.begin_approved_download(&request, id)
+        self.begin_approved_download_from(&[event], inbox_grant, filename, id)
+    }
+
+    pub fn begin_approved_download_from(
+        &mut self,
+        sources: &[&VerifiedFetchManifest],
+        inbox_grant: Id128,
+        filename: &str,
+        id: Id128,
+    ) -> Result<DownloadInfo, AslError> {
+        self.broker
+            .begin_approved_download(&download_request(sources, inbox_grant, filename)?, id)
     }
 }
 
-fn direct_request(
-    event: &VerifiedFetchManifest,
+fn download_request(
+    sources: &[&VerifiedFetchManifest],
     inbox_grant: Id128,
     filename: &str,
 ) -> Result<DownloadRequest, AslError> {
+    let &[event, ..] = sources else {
+        return Err(AslError::NotFound);
+    };
+    if sources.len() > MAX_ACTIVE_SOURCES {
+        return Err(AslError::QuotaExceeded);
+    }
     let filename = WriteGrant::filename(Path::new(filename))?;
     let manifest = encode_manifest(&event.manifest).map_err(|_| AslError::InvalidMessage)?;
     if content_id(&manifest) != event.content_id.0 {
         return Err(AslError::InvalidMessage);
     }
-    if event.expires_at_ms <= unix_time_ms()? {
-        return Err(AslError::ExpiredMessage);
+    let now_ms = unix_time_ms()?;
+    let mut peers = Vec::with_capacity(sources.len());
+    for source in sources {
+        if source.content_id != event.content_id
+            || source.manifest != event.manifest
+            || peers.contains(&source.peer_id)
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        if source.expires_at_ms <= now_ms {
+            return Err(AslError::ExpiredMessage);
+        }
+        peers.push(source.peer_id.clone());
     }
     Ok(DownloadRequest {
         content_id: event.content_id,
         manifest,
         write_grant_id: inbox_grant,
         destination_relative: filename.into(),
-        sources: vec![event.peer_id.clone()],
+        sources: peers,
     })
 }
 
+#[cfg(all(test, windows))]
+mod test_inbox;
 #[cfg(test)]
 mod tests;
