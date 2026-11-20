@@ -31,9 +31,12 @@ const QUERY_EVENT_CHANNEL_CAPACITY: usize = 128;
 const SCOPED_EVENT_CAPACITY: usize = asl_agent::MAX_QUERY_PEERS + 2;
 
 pub struct OutgoingQueryPort {
-    tasks: SyncSender<QuerySubmission>,
+    tasks: SyncSender<OutgoingTask>,
+    scoped: SyncSender<ScopedSubmission>,
     events: Receiver<OutgoingQueryEvent>,
 }
+
+type ScopedSubmission = (OutgoingTask, SyncSender<OutgoingQueryEvent>);
 
 struct QuerySubmission {
     task: OutgoingTask,
@@ -63,32 +66,30 @@ impl OutgoingQueryTicket {
 
 impl OutgoingQueryPort {
     pub fn submit(&self, task: OutgoingTask) -> Result<(), AslError> {
-        self.enqueue(QuerySubmission { task, events: None })
+        task.validate()?;
+        enqueue(&self.tasks, task)
     }
 
     /// Submit without publishing this task or its results to the shared stream.
     pub fn submit_scoped(&self, task: OutgoingTask) -> Result<OutgoingQueryTicket, AslError> {
+        task.validate()?;
         let (events, receipt) = sync_channel(SCOPED_EVENT_CAPACITY);
-        self.enqueue(QuerySubmission {
-            task,
-            events: Some(events),
-        })?;
+        enqueue(&self.scoped, (task, events))?;
         Ok(OutgoingQueryTicket {
             events: Some(receipt),
         })
     }
 
-    fn enqueue(&self, submission: QuerySubmission) -> Result<(), AslError> {
-        submission.task.validate()?;
-        match self.tasks.try_send(submission) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(AslError::QuotaExceeded),
-            Err(TrySendError::Disconnected(_)) => Err(AslError::SandboxUnavailable),
-        }
-    }
-
     pub fn try_recv_event(&self) -> Result<Option<OutgoingQueryEvent>, AslError> {
         try_recv_event(&self.events)
+    }
+}
+
+fn enqueue<T>(queue: &SyncSender<T>, value: T) -> Result<(), AslError> {
+    match queue.try_send(value) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(AslError::QuotaExceeded),
+        Err(TrySendError::Disconnected(_)) => Err(AslError::SandboxUnavailable),
     }
 }
 
@@ -103,19 +104,26 @@ fn try_recv_event(
 }
 
 pub struct OutgoingQueryRuntime {
-    tasks: Receiver<QuerySubmission>,
+    tasks: Receiver<OutgoingTask>,
+    scoped: Receiver<ScopedSubmission>,
     events: SyncSender<OutgoingQueryEvent>,
 }
 
 pub fn outgoing_query_channel() -> (OutgoingQueryPort, OutgoingQueryRuntime) {
     let (task_sender, tasks) = sync_channel(MAX_QUEUED_TASKS);
+    let (scoped_sender, scoped) = sync_channel(MAX_QUEUED_TASKS);
     let (events, event_receiver) = sync_channel(QUERY_EVENT_CHANNEL_CAPACITY);
     (
         OutgoingQueryPort {
             tasks: task_sender,
+            scoped: scoped_sender,
             events: event_receiver,
         },
-        OutgoingQueryRuntime { tasks, events },
+        OutgoingQueryRuntime {
+            tasks,
+            scoped,
+            events,
+        },
     )
 }
 
@@ -173,7 +181,9 @@ struct PendingProviderDial {
 
 pub(crate) struct DirectOutbound {
     store: asl_store::Store,
-    tasks: Receiver<QuerySubmission>,
+    tasks: Receiver<OutgoingTask>,
+    scoped: Receiver<ScopedSubmission>,
+    prefer_scoped: bool,
     events: SyncSender<OutgoingQueryEvent>,
     scoped_events: HashMap<TaskId, SyncSender<OutgoingQueryEvent>>,
     router: QueryRouter,
@@ -192,6 +202,8 @@ impl DirectOutbound {
         Ok(Self {
             store: asl_store::open_store(path)?,
             tasks: runtime.tasks,
+            scoped: runtime.scoped,
+            prefer_scoped: true,
             events: runtime.events,
             scoped_events: HashMap::new(),
             router: QueryRouter::new(),
@@ -285,14 +297,9 @@ impl DirectOutbound {
         self.router
             .set_contacts(contacts.iter().map(|(_, _, peer)| peer.clone()));
 
-        while self.active_tasks.len() < MAX_ACTIVE_OUTGOING_TASKS
-            && self.buffered_events.len()
-                < MAX_QUERY_EVENT_BACKLOG
-                    - MAX_ACTIVE_OUTGOING_TASKS * (asl_agent::MAX_QUERY_PEERS + 2)
-        {
-            let QuerySubmission { task, events } = match self.tasks.try_recv() {
-                Ok(submission) => submission,
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        while self.active_tasks.len() < MAX_ACTIVE_OUTGOING_TASKS {
+            let Some(QuerySubmission { task, events }) = self.next_submission() else {
+                break;
             };
             let scope = task.scope;
             match self.router.start_query(task) {
@@ -533,6 +540,60 @@ impl DirectOutbound {
         self.finish_terminal_tasks();
         self.flush_events();
         Ok(())
+    }
+
+    fn next_submission(&mut self) -> Option<QuerySubmission> {
+        let shared = || {
+            if self.buffered_events.len()
+                >= MAX_QUERY_EVENT_BACKLOG - MAX_ACTIVE_OUTGOING_TASKS * SCOPED_EVENT_CAPACITY
+            {
+                return None;
+            }
+            self.tasks
+                .try_recv()
+                .ok()
+                .map(|task| QuerySubmission { task, events: None })
+        };
+        let scoped = || {
+            self.scoped
+                .try_recv()
+                .ok()
+                .map(|(task, events)| QuerySubmission {
+                    task,
+                    events: Some(events),
+                })
+        };
+        let submission = if self.prefer_scoped {
+            scoped().or_else(shared)
+        } else {
+            shared().or_else(scoped)
+        }?;
+        self.prefer_scoped = submission.events.is_none();
+        Some(submission)
+    }
+
+    pub(crate) fn poll_offline(&mut self, now_ms: u64) {
+        for _ in 0..MAX_QUEUED_TASKS {
+            let Ok((task, events)) = self.scoped.try_recv() else {
+                break;
+            };
+            let code = if task.expires_at_ms <= now_ms {
+                ErrorCode::Timeout
+            } else {
+                ErrorCode::Offline
+            };
+            let _ = events.try_send(OutgoingQueryEvent::TaskFailed { code });
+        }
+        for task_id in self.scoped_events.keys() {
+            if self
+                .router
+                .expires_at_ms(task_id)
+                .is_some_and(|expires| expires <= now_ms)
+            {
+                self.router.next_actions(task_id, now_ms);
+            }
+        }
+        self.finish_terminal_tasks();
     }
 
     fn pending_for_peer(&self, peer_id: &PeerId) -> bool {
@@ -1143,6 +1204,87 @@ mod tests {
             task_id
         };
         assert_ne!(drain(first), drain(second));
+        assert_eq!(port.try_recv_event().unwrap(), None);
+    }
+
+    #[test]
+    fn scoped_query_runs_while_shared_events_are_backpressured() {
+        let fixture = Fixture::new();
+        let (port, runtime) = outgoing_query_channel();
+        let mut runner = DirectOutbound::open(&fixture.0, runtime).unwrap();
+        let now = 10_000;
+        let shared_event = OutgoingQueryEvent::TaskFailed {
+            code: ErrorCode::Busy,
+        };
+        for _ in 0..QUERY_EVENT_CHANNEL_CAPACITY {
+            runner.events.try_send(shared_event.clone()).unwrap();
+        }
+        runner
+            .buffered_events
+            .resize(MAX_QUERY_EVENT_BACKLOG - 1, shared_event);
+        port.submit(task(now)).unwrap();
+        let mut ticket = port.submit_scoped(task(now)).unwrap();
+        runner
+            .poll(
+                &[],
+                &[],
+                now,
+                |_, _, _| panic!("no live contacts"),
+                |_, _| panic!("no DHT lookup"),
+                |_, _, _, _| panic!("no dial"),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ticket.try_recv_event().unwrap(),
+            Some(OutgoingQueryEvent::TaskStarted { .. })
+        ));
+        assert!(matches!(
+            ticket.try_recv_event().unwrap(),
+            Some(OutgoingQueryEvent::TaskFinished { .. })
+        ));
+        assert_eq!(runner.buffered_events.len(), MAX_QUERY_EVENT_BACKLOG - 1);
+        assert!(runner.tasks.try_recv().is_ok());
+    }
+
+    #[test]
+    fn offline_query_tick_terminates_new_and_expired_active_scoped_tasks() {
+        let fixture = Fixture::new();
+        let (port, runtime) = outgoing_query_channel();
+        let mut runner = DirectOutbound::open(&fixture.0, runtime).unwrap();
+        let now = 10_000;
+        let query = task(now);
+        let deadline = query.expires_at_ms;
+        let mut active = port.submit_scoped(query).unwrap();
+        runner
+            .poll(
+                &[(CONTACT, [1; 16], peer(1))],
+                &[],
+                now,
+                |_, _, _| Ok(()),
+                |_, _| panic!("no DHT lookup"),
+                |_, _, _, _| panic!("no dial"),
+            )
+            .unwrap();
+        let Some(OutgoingQueryEvent::TaskStarted { task_id }) = active.try_recv_event().unwrap()
+        else {
+            panic!("expected active query");
+        };
+        let mut offline = port.submit_scoped(task(deadline)).unwrap();
+        runner.poll_offline(deadline);
+        assert_eq!(
+            active.try_recv_event().unwrap(),
+            Some(OutgoingQueryEvent::TaskFinished {
+                task_id,
+                status: QueryStatus::Expired,
+            })
+        );
+        assert_eq!(
+            offline.try_recv_event().unwrap(),
+            Some(OutgoingQueryEvent::TaskFailed {
+                code: ErrorCode::Offline,
+            })
+        );
         assert_eq!(port.try_recv_event().unwrap(), None);
     }
 

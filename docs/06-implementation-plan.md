@@ -669,7 +669,7 @@ T29 集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离�
 
 验收宿主工具调用 -> 后台任务 -> 结果/来源/下载全链路；stdout 纯协议；未知工具拒绝；ASL 不自动导入宿主聊天或扩大权限。
 
-T30 查询任务交接切片（2026-11-20）：同进程受信任调用方可通过 `OutgoingQueryPort::submit_scoped` 提交结构化查询并取得独立的有界事件流。启动、已关联回复和终态只送达该任务的提交方，不进入原来的共享事件流；原有本机入口和网络授权规则不变。Windows `direct_outbound::tests` 4 项及 `asl-app` 全目标严格 Clippy 通过。尚未开放 stdio、宿主授权会话、私有 IPC 或 `asl_fetch`；不能据此宣称 MCP 已可使用。
+T30 查询任务交接切片（2026-11-20）：同进程受信任调用方可通过 `OutgoingQueryPort::submit_scoped` 提交结构化查询并取得独立的有界事件流。启动、已关联回复和终态只送达该任务的提交方，不进入原来的共享事件流。两类提交入口分别限制待处理数，共享事件阻塞不再拖住私有任务；未开放网络时，新私有提交返回离线或超时，已发起的私有任务仍会到期。原有网络授权规则不变。Windows `direct_outbound::tests` 6 项及 `asl-app` 全目标严格 Clippy 通过。尚未开放 stdio、宿主授权会话、私有 IPC 或 `asl_fetch`；不能据此宣称 MCP 已可使用。
 
 ```text
 cargo test -p asl-app --test mcp_contract

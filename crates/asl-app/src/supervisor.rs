@@ -1049,10 +1049,11 @@ impl Supervisor {
     }
 
     fn poll_direct_outbound(&mut self, outbound: &mut DirectOutbound) -> Result<(), AslError> {
+        let now_ms = unix_time_ms()?;
         if self.network_admission_status != NetworkAdmissionStatus::Active {
+            outbound.poll_offline(now_ms);
             return Ok(());
         }
-        let now_ms = unix_time_ms()?;
         let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
         let connections = admission.admitted_connections(now_ms);
         let connecting_peers = admission.connecting_peers();
