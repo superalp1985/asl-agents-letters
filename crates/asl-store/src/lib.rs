@@ -17,7 +17,7 @@ pub mod search;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -31,6 +31,7 @@ const SCHEMA_V10: &str = include_str!("../../../specs/schema-v10.sql");
 const SCHEMA_V11: &str = include_str!("../../../specs/schema-v11.sql");
 const SCHEMA_V12: &str = include_str!("../../../specs/schema-v12.sql");
 const SCHEMA_V13: &str = include_str!("../../../specs/schema-v13.sql");
+const SCHEMA_V14: &str = include_str!("../../../specs/schema-v14.sql");
 
 pub struct Store {
     connection: Connection,
@@ -132,6 +133,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 13 {
             apply_migration_in_transaction(&transaction, SCHEMA_V13, 13, now)?;
+        }
+        if version < 14 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V14, 14, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
@@ -317,12 +321,12 @@ mod tests {
 
         {
             let store = open_store(database.path()).unwrap();
-            assert_eq!(store.schema_version(), 13);
+            assert_eq!(store.schema_version(), 14);
             assert_eq!(store.policy_revision().unwrap(), 1);
         }
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 13);
+        assert_eq!(store.schema_version(), 14);
         assert_eq!(store.policy_revision().unwrap(), 1);
 
         let migration_count: i64 = store
@@ -331,7 +335,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 13);
+        assert_eq!(migration_count, 14);
 
         let integrity: String = store
             .connection
@@ -357,7 +361,7 @@ mod tests {
         drop(connection);
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 13);
+        assert_eq!(store.schema_version(), 14);
         let conversations_exist: i64 = store
             .connection
             .query_row(
@@ -433,7 +437,7 @@ mod tests {
         store.set_setting(key, value, 42).unwrap();
 
         assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
-        assert_eq!(store.schema_version(), 13);
+        assert_eq!(store.schema_version(), 14);
     }
 
     #[test]
@@ -446,9 +450,14 @@ mod tests {
                     version INTEGER PRIMARY KEY,
                     applied_at_ms INTEGER NOT NULL
                  );
-                 INSERT INTO schema_migrations(version, applied_at_ms) VALUES (14, 14);
                  CREATE TABLE preserved(value INTEGER);
                  INSERT INTO preserved(value) VALUES (7);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?1)",
+                [SCHEMA_VERSION + 1],
             )
             .unwrap();
         drop(connection);
@@ -537,6 +546,6 @@ mod tests {
             upgraded.get_setting("keep").unwrap().as_deref(),
             Some("true")
         );
-        assert_eq!(upgraded.schema_version(), 13);
+        assert_eq!(upgraded.schema_version(), 14);
     }
 }

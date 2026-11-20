@@ -482,3 +482,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘 Cargo 与 target 缓存、离线：`cargo test -p asl-app -p asl-store -p asl-transfer -p asl-policy --all-targets --locked --offline -- --test-threads=1`：416 项通过、0 失败、4 项忽略。忽略项为既有 30 秒重扫计时器 1 项、外部 TCP/UDP receiver 2 项、子进程入口 1 项。
 - `cargo clippy -p asl-app -p asl-store -p asl-transfer -p asl-policy --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和针对本轮文件的 `git diff --check` 均通过。Cargo 提示既有 `proc-macro-error2 2.0.1` 将在未来 Rust 版本被拒绝；本轮未升级该依赖。
 - 该用例只覆盖 Core 发送端快照路径；接收端下载流程、Ask 授权界面、真实 TCP/QUIC 文件往返、多来源下载和公网验证均未覆盖。未提交或推送。
+
+### 2026-11-20 T31：发方邀请与 Welcome 事务
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-store -p asl-groups --all-targets --locked --offline -- --test-threads=1` 共 123 项通过、0 失败、1 项子进程入口按标记忽略。相同两包全目标严格 Clippy 通过。
+- 独立复核后，KeyPackage 的消费标记不再随邀请 TTL 删除，提交日志使用冻结的内层尺寸上限。SQLite 验证 v13→v14 保留现有房间、存储失败全部回滚、重启后匹配原设备和原请求、移除后即使重入也不返回旧密文、过期邀请不能释放仍有效的包。
+- Windows 集成测试使用真实 OpenMLS、DPAPI 和 SQLite，验证发方 Add/Welcome 同事务落盘后重开、恢复密封状态和收方入群。链/设备准入行与 MLS 身份是测试夹具，未运行生产 Core、链 RPC、群网络、GUI 或全工作区测试。线上协议与依赖锁未改。

@@ -36,6 +36,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 12. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
 13. `docs/chain-verification.md`：当前链验证核心、依赖探针与尚未完成的接入验收。
 14. `docs/protocol-vectors.md`：固定 CBOR 样例和独立 CDDL 校验范围。
+15. [群组接线记录](docs/group-rooms.md)：OpenMLS、设备身份绑定与邀请持久化的当前范围。
 
 `schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
@@ -58,6 +59,8 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 - 应用数据目录由 `ASL_HOME` 指定。开发缓存目录由 `scripts/dev-env.ps1 -Root` 或 `ASL_DEV_ROOT` 指定。路径不可用时停止启动。
 
 ## 实施与验证状态
+
+**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 叶子凭据绑定 ASL 链身份和设备证书。SQLite v14 支持在发方一次提交新增成员、MLS 快照、提交日志和同一份待发 Welcome；重启后只能为原设备的同一请求取回 Welcome，不能重复加人。收方须先经本机同意才保存一次性 KeyPackage。房间仍为 `needs_sync`，生产群子流、Core 群权限对账、同步和群文件授权未开放。[实现与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -94,7 +97,7 @@ flowchart LR
 
 沙箱与 IPC 阶段的全工作区回归为 284 项通过、2 项外部端点测试忽略。已验证 Net 心跳、Worker 握手中止及新 Worker 接续，尚不代表运行中计算崩溃或 Supervisor 崩溃。外部 UDP 回包与真实 mDNS 仍待验收。完整分轮结果、云机夹具与本次验证范围见 [验证记录](docs/plan-validation.md)。
 
-HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；Net/Core IPC、公网发现与连接、群聊、Agent、文件传输、完整 GUI 和发布包也尚未完成。这些本地检查不代表完整产品或公网已验收。
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；公网发现与连接、群组、Agent 自主工作流、端到端文件传输、完整 GUI 和发布包仍未整体验收。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -164,6 +167,8 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
+**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS leaf credentials bind ASL chain identities to device certificates. SQLite v14 saves the added member, MLS snapshot, commit log and exact pending Welcome in one sender-side transaction. After restart, the store can retrieve that reply only for the original device and request; a retry cannot add the member again. On the receiving side, local consent is required before storing a single-use KeyPackage. Rooms remain in `needs_sync`; the production group substream, Core authorization reconciliation, synchronization and group file grants are not enabled. [Implementation and test scope](docs/group-rooms.md)
+
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 
 **Local MCP (T30):** Authorized hosts can run `asl.exe mcp --home <absolute path>` to submit structured queries and download resources offered in the current session. MCP is off by default; query and inbox access are granted separately. Real stdio to Core and approved downloads over TCP loopback were tested, not public-network transfers. [Setup and revocation](docs/05-agent-gui.md#7-stdio-mcp-接入)
@@ -199,4 +204,4 @@ flowchart LR
 
 The sandbox/IPC workspace run passed 284 tests with two external endpoint tests ignored. Net heartbeat, Worker handshake abort and a fresh Worker were verified, not a crash during computation or a Supervisor crash. External UDP echo and live mDNS exchange remain open. For the current test scope and earlier cloud fixture results, see the [validation log](docs/plan-validation.md).
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Net/Core IPC, public-network discovery/connectivity, groups, agent behavior, file transfer, the complete GUI and release packages are also pending. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.

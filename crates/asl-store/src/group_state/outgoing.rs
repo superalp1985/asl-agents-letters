@@ -1,0 +1,286 @@
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, Hash32, Id128, PeerId},
+    protocol::{GroupBody, GroupMembership, GroupPacket},
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+
+use super::{
+    MlsJournalKind, MlsRoomUpdate, RoomVersion,
+    invite::INVITE_TTL_MS,
+    sql_number,
+    transition::{commit_candidate, peer_text},
+};
+use crate::{Store, database_error};
+
+const MAX_OUTGOING_INVITES: i64 = 64;
+const MAX_CONSUMED_KEY_PACKAGES: i64 = 4_096;
+
+/// Core supplies its current local device, the admitted connection identity,
+/// and the reference computed from the verified KeyPackage.
+pub struct MlsWelcomeRequest<'a> {
+    pub local_creator: &'a PeerId,
+    pub recipient: AgentId,
+    pub device: &'a PeerId,
+    pub packet: &'a GroupPacket,
+    pub package_ref: Hash32,
+    /// `KeyPackage::life_time().not_after()` converted to milliseconds.
+    pub package_expires_at_ms: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum MlsInviteResponse {
+    Pending,
+    Committed(GroupPacket),
+}
+
+impl Store {
+    /// Persist the exact Invite before sending. Core must independently verify
+    /// creator authority and the target's current chain and connection evidence.
+    pub fn issue_mls_invite(
+        &mut self,
+        creator: &PeerId,
+        packet: &GroupPacket,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        packet.validate_request()?;
+        let GroupBody::Membership(GroupMembership::Invite {
+            agent,
+            device,
+            expires_at_ms,
+        }) = &packet.body
+        else {
+            return Err(AslError::InvalidMessage);
+        };
+        if device == creator
+            || !matches!(expires_at_ms.checked_sub(now_ms), Some(1..=INVITE_TTL_MS))
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        let now = sql_number(now_ms)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        prune(&tx, now)?;
+        let inserted = tx
+            .execute(
+                "INSERT INTO mls_outgoing_invites
+                (invite_id,wire_group_id,base_epoch,creator_peer_id,recipient_agent_id,
+                 recipient_peer_id,created_at_ms,expires_at_ms)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+             FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+             JOIN group_members c ON c.group_id=g.group_id AND c.peer_id=g.creator_peer_id
+             JOIN peers p ON p.peer_id=?6 AND p.agent_id=?5
+             JOIN device_identities d ON d.peer_id=p.peer_id AND d.agent_id=p.agent_id
+             JOIN device_identities own ON own.peer_id=g.creator_peer_id
+             WHERE s.wire_group_id=?2 AND g.mls_epoch=?3 AND g.creator_peer_id=?4
+               AND g.state='needs_sync' AND c.role='creator' AND c.state='active'
+               AND d.revoked_at_ms IS NULL AND d.certificate_expires_ms>?7
+               AND own.revoked_at_ms IS NULL AND own.certificate_expires_ms>?7
+               AND NOT EXISTS (SELECT 1 FROM group_members
+                   WHERE group_id=g.group_id AND peer_id=?6 AND state='active')
+               AND (SELECT count(*) FROM mls_outgoing_invites) < ?9
+             ON CONFLICT DO NOTHING",
+                params![
+                    packet.message_id.as_bytes(),
+                    packet.group_id.as_bytes(),
+                    sql_number(packet.epoch)?,
+                    peer_text(creator),
+                    agent_text(*agent),
+                    peer_text(device),
+                    now,
+                    sql_number(*expires_at_ms)?,
+                    MAX_OUTGOING_INVITES,
+                ],
+            )
+            .map_err(database_error)?;
+        if inserted != 1 {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        tx.commit().map_err(database_error)
+    }
+
+    /// A retry never constructs a second Welcome or applies a second Add.
+    /// Core must recheck live chain and local policy before sending anything.
+    pub fn mls_invite_response(
+        &self,
+        request: &MlsWelcomeRequest<'_>,
+        now_ms: u64,
+    ) -> Result<Option<MlsInviteResponse>, AslError> {
+        let invite = request.invite_id()?;
+        if request.package_expires_at_ms <= now_ms {
+            return Ok(None);
+        }
+        match lookup(&self.connection, request, invite, sql_number(now_ms)?)? {
+            Some(StoredInvite::Pending) => Ok(Some(MlsInviteResponse::Pending)),
+            Some(StoredInvite::Committed(welcome)) => Ok(Some(MlsInviteResponse::Committed(
+                request.welcome(invite, welcome)?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    /// Seal the already validated Add, its journal event and the exact
+    /// Welcome in one transaction. Callers must discard failed candidates.
+    pub fn commit_mls_invite_welcome(
+        &mut self,
+        request: &MlsWelcomeRequest<'_>,
+        update: MlsRoomUpdate<'_>,
+        welcome: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<RoomVersion, AslError> {
+        let invite = request.invite_id()?;
+        if request.package_expires_at_ms <= now_ms {
+            return Err(AslError::ExpiredMessage);
+        }
+        let reply = request.welcome(invite, welcome)?;
+        let GroupBody::Membership(GroupMembership::Welcome { message, .. }) = &reply.body else {
+            unreachable!("constructed as a Welcome");
+        };
+        let event = update.event.as_ref().ok_or(AslError::InvalidPolicyState)?;
+        if !matches!(event.kind, MlsJournalKind::Commit)
+            || update.wire_id != reply.group_id
+            || update.expected.mls_epoch != request.packet.epoch
+            || update.mls_epoch != reply.epoch
+        {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let now = sql_number(now_ms)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let Some(StoredInvite::Pending) = lookup(&tx, request, invite, now)? else {
+            return Err(AslError::PolicyVersionConflict);
+        };
+        if request.local_creator != event.sender {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let version = commit_candidate(&tx, update, Some(request.device), now)?;
+        let consumed = tx
+            .execute(
+                "INSERT INTO mls_consumed_key_packages(package_ref,expires_at_ms)
+             SELECT ?1,?2
+             WHERE (SELECT count(*) FROM mls_consumed_key_packages WHERE expires_at_ms>?3) < ?4
+             ON CONFLICT DO NOTHING",
+                params![
+                    request.package_ref.as_bytes(),
+                    sql_number(request.package_expires_at_ms)?,
+                    now,
+                    MAX_CONSUMED_KEY_PACKAGES,
+                ],
+            )
+            .map_err(database_error)?;
+        if consumed != 1 {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        tx.execute(
+            "UPDATE mls_outgoing_invites SET request_id=?2,package_ref=?3,welcome=?4 WHERE invite_id=?1",
+            params![
+                invite.as_bytes(), request.packet.message_id.as_bytes(),
+                request.package_ref.as_bytes(), message,
+            ],
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
+        Ok(version)
+    }
+}
+
+impl MlsWelcomeRequest<'_> {
+    fn invite_id(&self) -> Result<Id128, AslError> {
+        self.packet.validate_request()?;
+        match self.packet.body {
+            GroupBody::Membership(GroupMembership::KeyPackage { invite, .. })
+                if invite != self.packet.message_id && self.package_ref.0 != [0; 32] =>
+            {
+                Ok(invite)
+            }
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
+
+    fn welcome(&self, invite: Id128, message: Vec<u8>) -> Result<GroupPacket, AslError> {
+        let reply = GroupPacket {
+            message_id: self.packet.message_id,
+            group_id: self.packet.group_id,
+            epoch: self.packet.epoch + 1,
+            body: GroupBody::Membership(GroupMembership::Welcome {
+                invite,
+                package_ref: self.package_ref,
+                message,
+            }),
+        };
+        self.packet.match_reply(&reply)?;
+        Ok(reply)
+    }
+}
+
+enum StoredInvite {
+    Pending,
+    Committed(Vec<u8>),
+}
+
+fn lookup(
+    connection: &Connection,
+    request: &MlsWelcomeRequest<'_>,
+    invite: Id128,
+    now: i64,
+) -> Result<Option<StoredInvite>, AslError> {
+    connection.query_row(
+        "SELECT i.welcome FROM mls_outgoing_invites i
+         JOIN mls_room_states s ON s.wire_group_id=i.wire_group_id
+         JOIN asl_groups g ON g.group_id=s.local_group_id AND g.creator_peer_id=i.creator_peer_id
+         JOIN group_members c ON c.group_id=g.group_id AND c.peer_id=i.creator_peer_id
+         JOIN device_identities d ON d.peer_id=i.recipient_peer_id AND d.agent_id=i.recipient_agent_id
+         JOIN device_identities own ON own.peer_id=i.creator_peer_id
+         LEFT JOIN group_members m ON m.group_id=g.group_id AND m.peer_id=i.recipient_peer_id AND m.state='active'
+         WHERE i.invite_id=?1 AND i.wire_group_id=?2 AND i.base_epoch=?3
+           AND i.recipient_agent_id=?4 AND i.recipient_peer_id=?5 AND i.creator_peer_id=?9
+           AND i.created_at_ms<=?6 AND i.expires_at_ms>?6
+           AND g.state='needs_sync' AND c.role='creator' AND c.state='active'
+           AND d.revoked_at_ms IS NULL AND d.certificate_expires_ms>?6
+           AND own.revoked_at_ms IS NULL AND own.certificate_expires_ms>?6
+           AND ((i.request_id IS NULL AND m.peer_id IS NULL AND g.mls_epoch=i.base_epoch
+                 AND NOT EXISTS (SELECT 1 FROM mls_consumed_key_packages p WHERE p.package_ref=?8))
+             OR (i.request_id=?7 AND i.package_ref=?8 AND i.welcome IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM mls_consumed_key_packages p
+                     WHERE p.package_ref=?8 AND p.expires_at_ms=?10)
+                 AND m.peer_id IS NOT NULL AND g.mls_epoch>i.base_epoch))",
+        params![
+            invite.as_bytes(), request.packet.group_id.as_bytes(), sql_number(request.packet.epoch)?,
+            agent_text(request.recipient), peer_text(request.device), now,
+            request.packet.message_id.as_bytes(), request.package_ref.as_bytes(),
+            peer_text(request.local_creator), sql_number(request.package_expires_at_ms)?,
+        ],
+        |row| match row.get::<_, Option<Vec<u8>>>(0)? {
+            Some(welcome) => Ok(StoredInvite::Committed(welcome)),
+            None => Ok(StoredInvite::Pending),
+        },
+    ).optional().map_err(database_error)
+}
+
+pub(super) fn prune(connection: &Connection, now: i64) -> Result<(), AslError> {
+    connection
+        .execute(
+            "DELETE FROM mls_outgoing_invites AS i WHERE expires_at_ms<=?1
+               OR (request_id IS NULL AND EXISTS (
+                   SELECT 1 FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+                   WHERE s.wire_group_id=i.wire_group_id AND g.mls_epoch<>i.base_epoch
+               ))",
+            [now],
+        )
+        .map_err(database_error)?;
+    connection
+        .execute(
+            "DELETE FROM mls_consumed_key_packages WHERE expires_at_ms<=?1",
+            [now],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn agent_text(agent: AgentId) -> String {
+    bs58::encode(agent.as_bytes()).into_string()
+}

@@ -4,9 +4,13 @@
 mod invite;
 #[cfg(test)]
 mod invite_tests;
+mod outgoing;
+#[cfg(test)]
+mod outgoing_tests;
 mod transition;
 
 pub use invite::{MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom};
+pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
 use asl_types::{

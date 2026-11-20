@@ -1,0 +1,502 @@
+use std::path::PathBuf;
+
+use asl_types::{
+    ids::{AgentId, Hash32, Id128, PeerId},
+    protocol::{GroupBody, GroupMembership, GroupPacket},
+    task::GroupId,
+};
+use rusqlite::params;
+
+use super::{
+    MlsInviteResponse, MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, MlsWelcomeRequest,
+    PendingMlsRoom, RoomVersion,
+    tests::{register_agent_peer, test_peer},
+    transition::peer_text,
+};
+use crate::{Store, open_store};
+
+const LOCAL: GroupId = GroupId(Id128([1; 16]));
+const WIRE: Hash32 = Hash32([2; 32]);
+const INVITE: Id128 = Id128([3; 16]);
+const TARGET: AgentId = AgentId([2; 32]);
+const NOW: u64 = 1_000;
+const EXPIRES: u64 = 2_000;
+
+struct Fixture {
+    path: PathBuf,
+    _root: tempfile::TempDir,
+    creator: PeerId,
+    target: PeerId,
+    alternate: PeerId,
+}
+
+impl Fixture {
+    fn new() -> (Self, Store, RoomVersion) {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Self {
+            path: root.path().join("outgoing.sqlite3"),
+            _root: root,
+            creator: test_peer(1),
+            target: test_peer(2),
+            alternate: test_peer(3),
+        };
+        let mut store = open_store(&fixture.path).unwrap();
+        for (peer, agent, serial) in [
+            (&fixture.creator, AgentId([1; 32]), 1),
+            (&fixture.target, TARGET, 1),
+            (&fixture.alternate, TARGET, 2),
+        ] {
+            register_agent_peer(&store, agent, peer, serial);
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE device_identities SET certificate_expires_ms=?1",
+                [EXPIRES as i64 + 1],
+            )
+            .unwrap();
+        store
+            .stage_mls_room(PendingMlsRoom {
+                local_id: &LOCAL,
+                wire_id: WIRE,
+                creator: &fixture.creator,
+                local_name: "Local",
+                mls_epoch: 0,
+                sealed_snapshot: b"initial",
+            })
+            .unwrap();
+        let initial = store.mls_room_snapshot(WIRE).unwrap().unwrap().version;
+        let base = store
+            .commit_mls_room_candidate(MlsRoomUpdate {
+                local_id: &LOCAL,
+                wire_id: WIRE,
+                expected: initial,
+                mls_epoch: 0,
+                sealed_snapshot: b"projected",
+                members: std::slice::from_ref(&fixture.creator),
+                event: None,
+            })
+            .unwrap();
+        (fixture, store, base)
+    }
+
+    fn invite(&self) -> GroupPacket {
+        GroupPacket {
+            message_id: INVITE,
+            group_id: WIRE,
+            epoch: 0,
+            body: GroupBody::Membership(GroupMembership::Invite {
+                agent: TARGET,
+                device: self.target.clone(),
+                expires_at_ms: EXPIRES,
+            }),
+        }
+    }
+
+    fn request(&self, packet: &GroupPacket) -> GroupPacket {
+        GroupPacket {
+            message_id: Id128([4; 16]),
+            body: GroupBody::Membership(GroupMembership::KeyPackage {
+                invite: packet.message_id,
+                message: b"test package".to_vec(),
+            }),
+            ..packet.clone()
+        }
+    }
+
+    fn authenticate<'a>(&'a self, packet: &'a GroupPacket) -> MlsWelcomeRequest<'a> {
+        MlsWelcomeRequest {
+            local_creator: &self.creator,
+            recipient: TARGET,
+            device: &self.target,
+            packet,
+            package_ref: Hash32([5; 32]),
+            package_expires_at_ms: EXPIRES + 1_000,
+        }
+    }
+
+    fn change<'a>(
+        &'a self,
+        base: RoomVersion,
+        members: &'a [PeerId],
+        commit: &'a [u8],
+    ) -> MlsRoomUpdate<'a> {
+        MlsRoomUpdate {
+            local_id: &LOCAL,
+            wire_id: WIRE,
+            expected: base,
+            mls_epoch: base.mls_epoch + 1,
+            sealed_snapshot: b"next sealed snapshot",
+            members,
+            event: Some(MlsJournalEntry {
+                sender: &self.creator,
+                kind: MlsJournalKind::Commit,
+                ciphertext: commit,
+            }),
+        }
+    }
+}
+
+#[test]
+fn committed_welcome_survives_restart_and_matches_only_the_original_request() {
+    let (f, mut store, base) = Fixture::new();
+    let invite = f.invite();
+    let packet = f.request(&invite);
+    let request = f.authenticate(&packet);
+    assert!(store.mls_invite_response(&request, NOW).unwrap().is_none());
+    assert!(store.issue_mls_invite(&f.alternate, &invite, NOW).is_err());
+    store.issue_mls_invite(&f.creator, &invite, NOW).unwrap();
+    assert_eq!(
+        store.mls_invite_response(&request, NOW).unwrap(),
+        Some(MlsInviteResponse::Pending)
+    );
+    let wrong_device = MlsWelcomeRequest {
+        device: &f.alternate,
+        ..request
+    };
+    assert!(
+        store
+            .mls_invite_response(&wrong_device, NOW)
+            .unwrap()
+            .is_none()
+    );
+    let wrong_agent = MlsWelcomeRequest {
+        recipient: AgentId([9; 32]),
+        ..request
+    };
+    assert!(
+        store
+            .mls_invite_response(&wrong_agent, NOW)
+            .unwrap()
+            .is_none()
+    );
+    let wrong_local = MlsWelcomeRequest {
+        local_creator: &f.alternate,
+        ..request
+    };
+    assert!(
+        store
+            .mls_invite_response(&wrong_local, NOW)
+            .unwrap()
+            .is_none()
+    );
+    let roster = [f.creator.clone(), f.target.clone()];
+    let update = || f.change(base, &roster, b"add commit");
+    let added = store
+        .commit_mls_invite_welcome(&request, update(), b"one welcome".to_vec(), NOW)
+        .unwrap();
+    let exact = store.mls_invite_response(&request, NOW).unwrap().unwrap();
+    assert_eq!(
+        exact,
+        MlsInviteResponse::Committed(GroupPacket {
+            message_id: packet.message_id,
+            group_id: WIRE,
+            epoch: 1,
+            body: GroupBody::Membership(GroupMembership::Welcome {
+                invite: INVITE,
+                package_ref: request.package_ref,
+                message: b"one welcome".to_vec(),
+            }),
+        })
+    );
+    drop(store);
+
+    let mut store = open_store(&f.path).unwrap();
+    assert_eq!(
+        store.mls_invite_response(&request, NOW).unwrap(),
+        Some(exact)
+    );
+    assert!(
+        store
+            .commit_mls_invite_welcome(&request, update(), b"another welcome".to_vec(), NOW)
+            .is_err()
+    );
+    let mut other_group = WIRE;
+    other_group.0[31] ^= 1;
+    for wrong in [
+        GroupPacket {
+            group_id: other_group,
+            ..packet.clone()
+        },
+        GroupPacket {
+            epoch: 1,
+            ..packet.clone()
+        },
+        GroupPacket {
+            message_id: Id128([9; 16]),
+            ..packet.clone()
+        },
+        GroupPacket {
+            body: GroupBody::Membership(GroupMembership::KeyPackage {
+                invite: Id128([9; 16]),
+                message: b"test package".to_vec(),
+            }),
+            ..packet.clone()
+        },
+    ] {
+        assert!(
+            store
+                .mls_invite_response(&f.authenticate(&wrong), NOW)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let wrong_package = MlsWelcomeRequest {
+        package_ref: Hash32([9; 32]),
+        ..request
+    };
+    assert!(
+        store
+            .mls_invite_response(&wrong_package, NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .mls_invite_response(&wrong_device, NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .mls_invite_response(&request, EXPIRES)
+            .unwrap()
+            .is_none()
+    );
+    let room = store.mls_room_snapshot(WIRE).unwrap().unwrap();
+    assert_eq!(room.version, added);
+    assert_eq!(room.sealed_snapshot, b"next sealed snapshot");
+    assert_eq!(store.policy_revision().unwrap(), base.policy_revision);
+    assert_eq!(commit_count(&store), 1);
+}
+
+#[test]
+fn failed_welcome_write_rolls_back_commit_and_can_be_retried() {
+    let (f, mut store, base) = Fixture::new();
+    let invite = f.invite();
+    store.issue_mls_invite(&f.creator, &invite, NOW).unwrap();
+    let packet = f.request(&invite);
+    let request = f.authenticate(&packet);
+    let roster = [f.creator.clone(), f.target.clone()];
+    let extra = [f.creator.clone(), f.target.clone(), f.alternate.clone()];
+    let update = || f.change(base, &roster, b"add commit");
+    let too_large = vec![0; asl_types::protocol::MAX_GROUP_MLS_OBJECT_BYTES + 1];
+    assert!(
+        store
+            .commit_mls_invite_welcome(
+                &request,
+                f.change(base, &roster, &too_large),
+                b"welcome".to_vec(),
+                NOW,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .commit_mls_invite_welcome(
+                &request,
+                f.change(base, &extra, b"extra add"),
+                b"welcome".to_vec(),
+                NOW,
+            )
+            .is_err()
+    );
+    store
+        .connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_welcome BEFORE UPDATE OF welcome ON mls_outgoing_invites
+         WHEN NEW.welcome IS NOT NULL BEGIN SELECT RAISE(ABORT,'test rollback'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .commit_mls_invite_welcome(&request, update(), b"welcome".to_vec(), NOW)
+            .is_err()
+    );
+    let room = store.mls_room_snapshot(WIRE).unwrap().unwrap();
+    assert_eq!(room.version, base);
+    assert_eq!(room.sealed_snapshot, b"projected");
+    assert_eq!(commit_count(&store), 0);
+    assert_eq!(
+        store.mls_invite_response(&request, NOW).unwrap(),
+        Some(MlsInviteResponse::Pending)
+    );
+    store
+        .connection
+        .execute_batch("DROP TRIGGER reject_welcome")
+        .unwrap();
+    store
+        .commit_mls_invite_welcome(&request, update(), b"welcome".to_vec(), NOW)
+        .unwrap();
+    assert_eq!(commit_count(&store), 1);
+}
+
+#[test]
+fn removed_member_cannot_fetch_an_earlier_welcome_even_after_reentry() {
+    let (f, mut store, base) = Fixture::new();
+    let invite = f.invite();
+    store.issue_mls_invite(&f.creator, &invite, NOW).unwrap();
+    let packet = f.request(&invite);
+    let request = f.authenticate(&packet);
+    let roster = [f.creator.clone(), f.target.clone()];
+    let added = store
+        .commit_mls_invite_welcome(
+            &request,
+            f.change(base, &roster, b"add"),
+            b"welcome".to_vec(),
+            NOW,
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE device_identities SET revoked_at_ms=?2 WHERE peer_id=?1",
+            params![peer_text(&f.target), NOW as i64 + 1],
+        )
+        .unwrap();
+    assert!(
+        store
+            .mls_invite_response(&request, NOW + 1)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE device_identities SET revoked_at_ms=NULL WHERE peer_id=?1",
+            [peer_text(&f.target)],
+        )
+        .unwrap();
+    let later = store
+        .commit_mls_room_candidate(f.change(added, &roster, b"update"))
+        .unwrap();
+    assert!(matches!(
+        store.mls_invite_response(&request, NOW + 1).unwrap(),
+        Some(MlsInviteResponse::Committed(_))
+    ));
+    let removed = store
+        .commit_mls_room_candidate(f.change(later, std::slice::from_ref(&f.creator), b"remove"))
+        .unwrap();
+    store
+        .commit_mls_room_candidate(f.change(removed, &roster, b"new admission"))
+        .unwrap();
+    assert!(
+        store
+            .mls_invite_response(&request, NOW + 1)
+            .unwrap()
+            .is_none()
+    );
+    store.prune_mls_invites(EXPIRES).unwrap();
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM mls_outgoing_invites", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+fn commit_count(store: &Store) -> i64 {
+    store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM group_events WHERE kind='commit'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn upgrading_v13_keeps_the_existing_mls_snapshot() {
+    let (f, store, base) = Fixture::new();
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE mls_outgoing_invites;
+         DROP TABLE mls_consumed_key_packages;
+         DELETE FROM schema_migrations WHERE version=14;",
+        )
+        .unwrap();
+    drop(store);
+    let mut upgraded = open_store(&f.path).unwrap();
+    let room = upgraded.mls_room_snapshot(WIRE).unwrap().unwrap();
+    assert_eq!(room.version, base);
+    assert_eq!(room.sealed_snapshot, b"projected");
+    upgraded
+        .issue_mls_invite(&f.creator, &f.invite(), NOW)
+        .unwrap();
+}
+
+#[test]
+fn expired_invite_does_not_unconsume_a_key_package() {
+    let (f, mut store, base) = Fixture::new();
+    let first = f.invite();
+    let packet = f.request(&first);
+    let request = f.authenticate(&packet);
+    store.issue_mls_invite(&f.creator, &first, NOW).unwrap();
+    let roster = [f.creator.clone(), f.target.clone()];
+    let added = store
+        .commit_mls_invite_welcome(
+            &request,
+            f.change(base, &roster, b"add"),
+            b"welcome".to_vec(),
+            NOW,
+        )
+        .unwrap();
+    let removed = store
+        .commit_mls_room_candidate(f.change(added, std::slice::from_ref(&f.creator), b"remove"))
+        .unwrap();
+    let second = GroupPacket {
+        message_id: Id128([10; 16]),
+        epoch: removed.mls_epoch,
+        body: GroupBody::Membership(GroupMembership::Invite {
+            agent: TARGET,
+            device: f.target.clone(),
+            expires_at_ms: EXPIRES + 1_000,
+        }),
+        ..first
+    };
+    store
+        .issue_mls_invite(&f.creator, &second, EXPIRES)
+        .unwrap();
+    let packet = f.request(&second);
+    let reused = f.authenticate(&packet);
+    assert!(
+        store
+            .mls_invite_response(&reused, EXPIRES)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .commit_mls_invite_welcome(
+                &reused,
+                f.change(removed, &roster, b"no add"),
+                b"welcome".to_vec(),
+                EXPIRES,
+            )
+            .is_err()
+    );
+    let fresh = MlsWelcomeRequest {
+        package_ref: Hash32([11; 32]),
+        ..reused
+    };
+    assert_eq!(
+        store.mls_invite_response(&fresh, EXPIRES).unwrap(),
+        Some(MlsInviteResponse::Pending)
+    );
+    store
+        .prune_mls_invites(reused.package_expires_at_ms)
+        .unwrap();
+    let count: u32 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM mls_consumed_key_packages",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}

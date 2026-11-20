@@ -38,12 +38,38 @@ fn fixture_member(id: u8) -> (CredentialWithKey, SignatureKeyPair) {
     (credential, signer)
 }
 
+fn fixture_room(
+    provider: &OpenMlsRustCrypto,
+    signer: &SignatureKeyPair,
+    credential: CredentialWithKey,
+) -> MlsGroup {
+    let parameters = MlsGroupCreateConfig::builder()
+        .ciphersuite(SUITE)
+        .use_ratchet_tree_extension(true)
+        .build();
+    MlsGroup::new_with_group_id(
+        provider,
+        signer,
+        &parameters,
+        GroupId::from_slice(WIRE_ID.as_bytes()),
+        credential,
+    )
+    .unwrap()
+}
+
 fn read_wire(message: MlsMessageOut) -> MlsMessageIn {
     MlsMessageIn::tls_deserialize_exact(message.to_bytes().unwrap()).unwrap()
 }
 
 fn protocol(message: MlsMessageOut) -> ProtocolMessage {
     read_wire(message).try_into_protocol_message().unwrap()
+}
+
+#[cfg(windows)]
+fn fixture_peer(id: u8) -> asl_types::ids::PeerId {
+    let mut bytes = vec![0x12, 0x20];
+    bytes.extend_from_slice(&[id; 32]);
+    asl_types::ids::PeerId::from_bytes(bytes).unwrap()
 }
 
 #[cfg(windows)]
@@ -54,15 +80,10 @@ fn join_request(
 ) -> (GroupPacket, OpenMlsRustCrypto, Hash32) {
     use asl_groups::pending_join;
     use asl_store::group_state::MlsIncomingInvite;
-    use asl_types::ids::{AgentId, PeerId};
+    use asl_types::ids::AgentId;
 
-    let device = |id| {
-        let mut bytes = vec![0x12, 0x20];
-        bytes.extend_from_slice(&[id; 32]);
-        PeerId::from_bytes(bytes).unwrap()
-    };
-    let inviter = device(1);
-    let local = device(2);
+    let inviter = fixture_peer(1);
+    let local = fixture_peer(2);
     let invite = MlsIncomingInvite {
         id: invite,
         wire_id: WIRE_ID,
@@ -160,19 +181,7 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
     let creator = OpenMlsRustCrypto::default();
     let (creator_credential, creator_signer) = fixture_member(1);
     let (joiner_credential, joiner_signer) = fixture_member(2);
-    let group_id = GroupId::from_slice(WIRE_ID.as_bytes());
-    let parameters = MlsGroupCreateConfig::builder()
-        .ciphersuite(SUITE)
-        .use_ratchet_tree_extension(true)
-        .build();
-    let mut room = MlsGroup::new_with_group_id(
-        &creator,
-        &creator_signer,
-        &parameters,
-        group_id.clone(),
-        creator_credential.clone(),
-    )
-    .unwrap();
+    let mut room = fixture_room(&creator, &creator_signer, creator_credential.clone());
     let invite = Id128([7; 16]);
     let (request, joiner, local_ref) = join_request(invite, joiner_credential, &joiner_signer);
     let (verified, reference) = read_key_package(&request, creator.crypto()).unwrap();
@@ -219,7 +228,7 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
         .unwrap()
         .into_group(&joiner)
         .unwrap();
-    assert_eq!(joined.group_id(), &group_id);
+    assert_eq!(joined.group_id(), room.group_id());
     assert_eq!(joined.epoch(), room.epoch());
 
     #[cfg(windows)]
@@ -313,6 +322,242 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
         .create_message(&creator, &creator_signer, &encoded)
         .unwrap();
     assert!(joined.process_message(&joiner, protocol(next)).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn outgoing_welcome_survives_store_reopen_and_joins_the_mls_room() {
+    use asl_groups::local_state::{RoomBinding, restore, seal};
+    use asl_store::{
+        group_state::{
+            MlsInviteResponse, MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, MlsWelcomeRequest,
+            PendingMlsRoom,
+        },
+        open_store,
+    };
+    use asl_types::{ids::AgentId, task::GroupId as LocalGroupId};
+
+    const NOW: u64 = 1_000;
+    let database = OutgoingDatabase::new();
+    let mut store = open_store(&database.0).unwrap();
+    let peers = [fixture_peer(1), fixture_peer(2)];
+    let [sender, recipient] = &peers;
+    register_outgoing_devices(&mut store, &peers, NOW);
+
+    let provider = OpenMlsRustCrypto::default();
+    let (credential, signer) = fixture_member(1);
+    let mut room = fixture_room(&provider, &signer, credential);
+    let local_id = LocalGroupId(Id128([5; 16]));
+    let binding = RoomBinding {
+        local_id: &local_id,
+        wire_id: WIRE_ID,
+        device: sender,
+    };
+    let epoch = room.epoch().as_u64();
+    store
+        .stage_mls_room(PendingMlsRoom {
+            local_id: &local_id,
+            wire_id: WIRE_ID,
+            creator: sender,
+            local_name: "Outgoing test",
+            mls_epoch: epoch,
+            sealed_snapshot: &seal(&binding, 1, &room, &provider).unwrap(),
+        })
+        .unwrap();
+    let initial = store.mls_room_snapshot(WIRE_ID).unwrap().unwrap().version;
+    let base = store
+        .commit_mls_room_candidate(MlsRoomUpdate {
+            local_id: &local_id,
+            wire_id: WIRE_ID,
+            expected: initial,
+            mls_epoch: epoch,
+            sealed_snapshot: &seal(&binding, initial.revision + 1, &room, &provider).unwrap(),
+            members: std::slice::from_ref(sender),
+            event: None,
+        })
+        .unwrap();
+
+    let agent = AgentId([2; 32]);
+    let invite = packet(
+        7,
+        epoch,
+        GroupBody::Membership(GroupMembership::Invite {
+            agent,
+            device: recipient.clone(),
+            expires_at_ms: 100_000,
+        }),
+    );
+    store.issue_mls_invite(sender, &invite, NOW).unwrap();
+    let (credential, joiner_signer) = fixture_member(2);
+    let (request, joiner, local_ref) = join_request(invite.message_id, credential, &joiner_signer);
+    let (verified, package_ref) = read_key_package(&request, provider.crypto()).unwrap();
+    assert_eq!(package_ref, local_ref);
+    let lookup = MlsWelcomeRequest {
+        local_creator: sender,
+        recipient: agent,
+        device: recipient,
+        packet: &request,
+        package_ref,
+        package_expires_at_ms: verified.life_time().not_after().checked_mul(1_000).unwrap(),
+    };
+    let (commit, welcome, _) = room.add_members(&provider, &signer, &[verified]).unwrap();
+    room.merge_pending_commit(&provider).unwrap();
+    let epoch = room.epoch().as_u64();
+    let welcome = welcome.to_bytes().unwrap();
+    let version = store
+        .commit_mls_invite_welcome(
+            &lookup,
+            MlsRoomUpdate {
+                local_id: &local_id,
+                wire_id: WIRE_ID,
+                expected: base,
+                mls_epoch: epoch,
+                sealed_snapshot: &seal(&binding, base.revision + 1, &room, &provider).unwrap(),
+                members: &peers,
+                event: Some(MlsJournalEntry {
+                    sender,
+                    kind: MlsJournalKind::Commit,
+                    ciphertext: &commit.to_bytes().unwrap(),
+                }),
+            },
+            welcome.clone(),
+            NOW,
+        )
+        .unwrap();
+    drop(store);
+
+    let store = open_store(&database.0).unwrap();
+    let Some(MlsInviteResponse::Committed(reply)) =
+        store.mls_invite_response(&lookup, NOW).unwrap()
+    else {
+        panic!("expected the committed Welcome after reopening the sender store");
+    };
+    assert_eq!(
+        reply,
+        GroupPacket {
+            message_id: request.message_id,
+            group_id: WIRE_ID,
+            epoch,
+            body: GroupBody::Membership(GroupMembership::Welcome {
+                invite: invite.message_id,
+                package_ref,
+                message: welcome,
+            }),
+        }
+    );
+    let snapshot = store.mls_room_snapshot(WIRE_ID).unwrap().unwrap();
+    assert_eq!(snapshot.version, version);
+    let (_, restored) = restore(&binding, &snapshot).unwrap();
+    let joined = stage_welcome(&request, &reply, package_ref, &joiner)
+        .unwrap()
+        .into_group(&joiner)
+        .unwrap();
+    assert_eq!(joined.group_id(), restored.group_id());
+    assert_eq!(joined.epoch(), restored.epoch());
+    assert_eq!(
+        joined.epoch_authenticator().as_slice(),
+        restored.epoch_authenticator().as_slice()
+    );
+}
+
+#[cfg(windows)]
+fn register_outgoing_devices(
+    store: &mut asl_store::Store,
+    peers: &[asl_types::ids::PeerId; 2],
+    now: u64,
+) {
+    use asl_store::{
+        chain::{ChainBundle, ChainStateRow, IdentityObservationRow, ObservationStatus},
+        search::direct::DirectRequester,
+    };
+    use asl_types::{
+        ids::{AgentId, Signature65},
+        protocol::DeviceCertificate,
+    };
+
+    // Supply synthetic admission facts; this fixture does not verify chain proofs.
+    let bundle = ChainBundle {
+        state: ChainStateRow {
+            chain_id: 1,
+            registry_address: [1; 20],
+            registry_code_hash: [2; 32],
+            finalized_height: 1,
+            finalized_block_hash: [3; 32],
+            execution_state_root: [4; 32],
+            checkpoint_hash: [5; 32],
+            verified_header_state: vec![1],
+            updated_at_ms: now,
+        },
+        observations: [1, 2]
+            .into_iter()
+            .map(|id| IdentityObservationRow {
+                agent_id: AgentId([id; 32]),
+                chain_id: 1,
+                controller_address: [id; 20],
+                state_commitment: [id; 32],
+                sequence: 1,
+                status: ObservationStatus::Active,
+                finalized_height: 1,
+                storage_proof_hash: [id; 32],
+                verified_at_ms: now,
+            })
+            .collect(),
+        proofs: vec![],
+    };
+    store.save_chain_bundle(&bundle, None).unwrap();
+    for (peer, observation) in peers.iter().zip(bundle.observations) {
+        let certificate = DeviceCertificate {
+            agent_id: observation.agent_id,
+            peer_id: peer.clone(),
+            serial: 1,
+            issued_at_ms: now,
+            expires_at_ms: now + 100_000,
+            signature: Signature65([0; 65]),
+        };
+        let requester = DirectRequester {
+            agent: certificate.agent_id,
+            peer: peer.clone(),
+            session_expires_at_ms: certificate.expires_at_ms,
+            registry_sequence: observation.sequence,
+            directory_commitment: observation.state_commitment,
+            controller: observation.controller_address,
+        };
+        store
+            .register_transfer_peer(&requester, observation.chain_id, &certificate, [1; 32], now)
+            .unwrap();
+    }
+}
+
+#[cfg(windows)]
+struct OutgoingDatabase(std::path::PathBuf);
+
+#[cfg(windows)]
+impl OutgoingDatabase {
+    fn new() -> Self {
+        use std::{env, fs, path::PathBuf, process, time::SystemTime};
+
+        let base = env::var_os("ASL_TEST_FIXTURE_BASE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/asl-test-fs")
+            });
+        fs::create_dir_all(&base).unwrap();
+        let timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+        Self(base.join(format!(
+            "asl-mls-outgoing-{}-{timestamp}.sqlite3",
+            process::id()
+        )))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OutgoingDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        for extension in ["sqlite3-wal", "sqlite3-shm"] {
+            let _ = std::fs::remove_file(self.0.with_extension(extension));
+        }
+    }
 }
 
 #[cfg(windows)]

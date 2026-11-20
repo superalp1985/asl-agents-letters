@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use super::{MAX_SEALED_ROOM_BYTES, PendingMlsRoom, RoomVersion, insert_mls_room, sql_number};
 use crate::{Store, database_error};
 
-const INVITE_TTL_MS: u64 = 5 * 60 * 1_000;
+pub(super) const INVITE_TTL_MS: u64 = 5 * 60 * 1_000;
 const AGENT_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
 const GLOBAL_WINDOW_MS: i64 = 60 * 60 * 1_000;
 const MAX_OPEN_INVITES: i64 = 5;
@@ -347,7 +347,9 @@ impl Store {
 
     pub fn prune_mls_invites(&mut self, now_ms: u64) -> Result<(), AslError> {
         let tx = immediate(&mut self.connection)?;
-        prune(&tx, sql_number(now_ms)?)?;
+        let now = sql_number(now_ms)?;
+        prune(&tx, now)?;
+        super::outgoing::prune(&tx, now)?;
         tx.commit().map_err(database_error)
     }
 }
