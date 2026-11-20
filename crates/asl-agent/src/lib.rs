@@ -3,7 +3,9 @@
 mod conversation;
 pub mod decision;
 pub mod gateway;
+pub mod knowledge;
 mod query;
+pub mod reputation;
 pub mod runner;
 
 pub use conversation::{

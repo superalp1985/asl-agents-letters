@@ -6,7 +6,7 @@ use asl_net::{
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
     dht::MAX_DHT_VALUE_BYTES,
     relay::MAX_RELAY_ENDPOINT_BYTES,
-    transport::{DiscoveryCandidateState, TransportKind},
+    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     error::AslError,
@@ -14,8 +14,8 @@ use asl_types::{
     manifest::MAX_MANIFEST_LEN,
     protocol::{
         IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES,
-        WireFrame, decode_control, decode_frame as decode_asl_frame, encode_control,
-        encode_frame as encode_asl_frame,
+        MAX_PAIRING_FRAME_BYTES, PairingExchange, PairingInvite, WireFrame, decode_control,
+        decode_frame as decode_asl_frame, encode_control, encode_frame as encode_asl_frame,
     },
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -38,7 +38,9 @@ pub const MAX_IPC_EXTRACTOR_INPUT_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
 pub const MAX_IPC_EXTRACTOR_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
+pub const MAX_IPC_PAIRING_FRAME_BYTES: usize = MAX_PAIRING_FRAME_BYTES;
 pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
+const MAX_IPC_DHT_PROVIDER_CANDIDATES: usize = 20;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
 
@@ -59,7 +61,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
@@ -71,7 +73,7 @@ impl IpcRole {
                 )
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
-                | (Self::Net, Self::Core, 36..=39)
+                | (Self::Net, Self::Core, 36..=39 | 45..=47)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -218,6 +220,27 @@ pub enum IpcMessage {
         response_id: [u8; 16],
         proof: IdentityProof,
     },
+    PairingInviteRequested {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+    },
+    PairingExchangeReceived {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        invite: PairingInvite,
+        exchange: PairingExchange,
+    },
+    RequestPairing {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        invite: PairingInvite,
+    },
+    ReplyPairing {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        exchange: PairingExchange,
+    },
     Listen {
         operation_id: [u8; 16],
         kind: TransportKind,
@@ -266,6 +289,15 @@ pub enum IpcMessage {
         key: [u8; 32],
         value: Vec<u8>,
     },
+    FindProviders {
+        lookup_id: [u8; 16],
+        key: [u8; 32],
+    },
+    DhtProviders {
+        lookup_id: [u8; 16],
+        status: DhtLookupStatus,
+        providers: Vec<DhtProviderCandidate>,
+    },
     ControlRequested {
         connection_id: [u8; 16],
         response_id: [u8; 16],
@@ -299,6 +331,7 @@ pub enum IpcMessage {
     },
     BulkReceived {
         connection_id: [u8; 16],
+        request_id: [u8; 16],
         response: BulkResponse,
     },
     SendBulk {
@@ -338,6 +371,7 @@ pub enum NetworkProtocol {
     Control = 1,
     IdentityProof = 2,
     Bulk = 3,
+    Pairing = 4,
 }
 
 impl NetworkProtocol {
@@ -346,6 +380,7 @@ impl NetworkProtocol {
             1 => Ok(Self::Control),
             2 => Ok(Self::IdentityProof),
             3 => Ok(Self::Bulk),
+            4 => Ok(Self::Pairing),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -359,6 +394,7 @@ pub enum NetworkErrorCode {
     Disconnected = 3,
     TimedOut = 4,
     Transport = 5,
+    Authentication = 6,
 }
 
 impl NetworkErrorCode {
@@ -369,6 +405,7 @@ impl NetworkErrorCode {
             3 => Ok(Self::Disconnected),
             4 => Ok(Self::TimedOut),
             5 => Ok(Self::Transport),
+            6 => Ok(Self::Authentication),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -577,6 +614,31 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
             13
         }
+        IpcMessage::PairingInviteRequested {
+            connection_id,
+            response_id,
+            invite,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_pairing_invite(&mut body, invite)?;
+            46
+        }
+        IpcMessage::PairingExchangeReceived {
+            connection_id,
+            request_id,
+            invite,
+            exchange,
+        } => {
+            if *request_id != invite.invite_id.0 || exchange.exchange_id != invite.invite_id {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
+            append_pairing_invite(&mut body, invite)?;
+            append_pairing_exchange(&mut body, exchange)?;
+            47
+        }
         IpcMessage::NetReady { peer_id } => {
             let peer_bytes = peer_id.as_bytes();
             body.extend_from_slice(
@@ -595,6 +657,19 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             append_identity_frame(&mut body, &WireFrame::IdentityProofRequest(request.clone()))?;
             14
         }
+        IpcMessage::RequestPairing {
+            connection_id,
+            request_id,
+            invite,
+        } => {
+            if *request_id != invite.invite_id.0 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
+            append_pairing_invite(&mut body, invite)?;
+            48
+        }
         IpcMessage::ReplyIdentityProof {
             connection_id,
             response_id,
@@ -604,6 +679,16 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(response_id);
             append_identity_frame(&mut body, &WireFrame::IdentityProof(proof.clone()))?;
             15
+        }
+        IpcMessage::ReplyPairing {
+            connection_id,
+            response_id,
+            exchange,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_pairing_exchange(&mut body, exchange)?;
+            49
         }
         IpcMessage::Listen {
             operation_id,
@@ -797,9 +882,14 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
         }
         IpcMessage::BulkReceived {
             connection_id,
+            request_id,
             response,
         } => {
+            if *request_id != response.request_id.0 {
+                return Err(AslError::InvalidMessage);
+            }
             body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_id);
             append_bulk_response(&mut body, response)?;
             27
         }
@@ -866,6 +956,53 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             );
             body.extend_from_slice(value);
             39
+        }
+        IpcMessage::FindProviders { lookup_id, key } => {
+            if *lookup_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(lookup_id);
+            body.extend_from_slice(key);
+            44
+        }
+        IpcMessage::DhtProviders {
+            lookup_id,
+            status,
+            providers,
+        } => {
+            if *lookup_id == [0; 16] || providers.len() > MAX_IPC_DHT_PROVIDER_CANDIDATES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(lookup_id);
+            body.push(*status as u8);
+            body.push(providers.len() as u8);
+            let mut seen = std::collections::HashSet::new();
+            for provider in providers {
+                let peer_bytes = provider.peer_id.as_bytes();
+                if peer_bytes.is_empty()
+                    || peer_bytes.len() > 128
+                    || !seen.insert(provider.peer_id.clone())
+                {
+                    return Err(AslError::InvalidMessage);
+                }
+                body.extend_from_slice(
+                    &u16::try_from(peer_bytes.len())
+                        .map_err(|_| AslError::InvalidMessage)?
+                        .to_be_bytes(),
+                );
+                body.extend_from_slice(peer_bytes);
+                match provider.endpoint {
+                    Some((kind, address)) if address.port() != 0 => {
+                        body.push(1);
+                        body.push(transport_kind_code(kind));
+                        append_socket_addr(&mut body, address)?;
+                    }
+                    Some(_) => return Err(AslError::InvalidMessage),
+                    None => body.push(0),
+                }
+                body.push(u8::from(provider.relay_route_available));
+            }
+            45
         }
         IpcMessage::DecideDhtRecord {
             candidate_id,
@@ -981,14 +1118,51 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             connection_id: body[..16].try_into().unwrap(),
             proof: decode_identity_proof(&body[16..])?,
         }),
+        46 if body.len() >= 36 => Ok(IpcMessage::PairingInviteRequested {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            invite: decode_pairing_invite(&body[32..])?,
+        }),
+        47 if body.len() >= 40 => {
+            let (invite, invite_length) = decode_pairing_invite_prefix(&body[32..])?;
+            let exchange_offset = 32 + invite_length;
+            let exchange = decode_pairing_exchange(&body[exchange_offset..])?;
+            let request_id: [u8; 16] = body[16..32].try_into().unwrap();
+            if request_id != invite.invite_id.0 || exchange.exchange_id != invite.invite_id {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::PairingExchangeReceived {
+                connection_id: body[..16].try_into().unwrap(),
+                request_id,
+                invite,
+                exchange,
+            })
+        }
         14 if body.len() >= 20 => Ok(IpcMessage::RequestIdentityProof {
             connection_id: body[..16].try_into().unwrap(),
             request: decode_identity_request(&body[16..])?,
         }),
+        48 if body.len() >= 36 => {
+            let request_id: [u8; 16] = body[16..32].try_into().unwrap();
+            let invite = decode_pairing_invite(&body[32..])?;
+            if request_id != invite.invite_id.0 {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RequestPairing {
+                connection_id: body[..16].try_into().unwrap(),
+                request_id,
+                invite,
+            })
+        }
         15 if body.len() >= 36 => Ok(IpcMessage::ReplyIdentityProof {
             connection_id: body[..16].try_into().unwrap(),
             response_id: body[16..32].try_into().unwrap(),
             proof: decode_identity_proof(&body[32..])?,
+        }),
+        49 if body.len() >= 36 => Ok(IpcMessage::ReplyPairing {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            exchange: decode_pairing_exchange(&body[32..])?,
         }),
         16 if body.len() >= 3 => {
             let peer_length = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
@@ -1151,6 +1325,79 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 accept: body[16] == 1,
             })
         }
+        44 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::FindProviders {
+            lookup_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        45 if body.len() >= 18 && body[..16] != [0; 16] => {
+            let status = match body[16] {
+                1 => DhtLookupStatus::Completed,
+                2 => DhtLookupStatus::Failed,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let count = body[17] as usize;
+            if count > MAX_IPC_DHT_PROVIDER_CANDIDATES {
+                return Err(AslError::InvalidMessage);
+            }
+            let mut offset = 18;
+            let mut providers = Vec::with_capacity(count);
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..count {
+                if body.len() < offset + 2 {
+                    return Err(AslError::InvalidMessage);
+                }
+                let peer_len =
+                    u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                if peer_len == 0 || peer_len > 128 || body.len() < offset + peer_len + 1 {
+                    return Err(AslError::InvalidMessage);
+                }
+                let peer_id = PeerId::from_bytes(body[offset..offset + peer_len].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?;
+                if !seen.insert(peer_id.clone()) {
+                    return Err(AslError::InvalidMessage);
+                }
+                offset += peer_len;
+                let endpoint = match body[offset] {
+                    0 => {
+                        offset += 1;
+                        None
+                    }
+                    1 => {
+                        if body.len() < offset + 2 {
+                            return Err(AslError::InvalidMessage);
+                        }
+                        let kind = decode_transport_kind(body[offset + 1])?;
+                        let (address, address_len) = decode_socket_addr(&body[offset + 2..])?;
+                        if address.port() == 0 {
+                            return Err(AslError::InvalidMessage);
+                        }
+                        offset += 2 + address_len;
+                        Some((kind, address))
+                    }
+                    _ => return Err(AslError::InvalidMessage),
+                };
+                let relay_route_available = match body.get(offset) {
+                    Some(0) => false,
+                    Some(1) => true,
+                    _ => return Err(AslError::InvalidMessage),
+                };
+                offset += 1;
+                providers.push(DhtProviderCandidate {
+                    peer_id,
+                    endpoint,
+                    relay_route_available,
+                });
+            }
+            if offset != body.len() {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::DhtProviders {
+                lookup_id: body[..16].try_into().unwrap(),
+                status,
+                providers,
+            })
+        }
         22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
             connection_id: body[..16].try_into().unwrap(),
             response_id: body[16..32].try_into().unwrap(),
@@ -1182,10 +1429,18 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             response_id: body[16..32].try_into().unwrap(),
             request: decode_bulk_request(&body[32..])?,
         }),
-        27 if body.len() >= 37 => Ok(IpcMessage::BulkReceived {
-            connection_id: body[..16].try_into().unwrap(),
-            response: decode_bulk_response(&body[16..])?,
-        }),
+        27 if body.len() >= 53 => {
+            let request_id: [u8; 16] = body[16..32].try_into().unwrap();
+            let response = decode_bulk_response(&body[32..])?;
+            if request_id != response.request_id.0 {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::BulkReceived {
+                connection_id: body[..16].try_into().unwrap(),
+                request_id,
+                response,
+            })
+        }
         28 if body.len() == 16 + BULK_REQUEST_IPC_BYTES => Ok(IpcMessage::SendBulk {
             connection_id: body[..16].try_into().unwrap(),
             request: decode_bulk_request(&body[16..])?,
@@ -1227,6 +1482,65 @@ fn append_identity_frame(body: &mut Vec<u8>, frame: &WireFrame) -> Result<(), As
     );
     body.extend_from_slice(&bytes);
     Ok(())
+}
+
+fn append_pairing_invite(body: &mut Vec<u8>, invite: &PairingInvite) -> Result<(), AslError> {
+    let bytes = encode_asl_frame(&WireFrame::PairingInvite(invite.clone()))?;
+    if bytes.len() > MAX_IPC_PAIRING_FRAME_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    append_length_prefixed(body, &bytes)
+}
+
+fn append_pairing_exchange(body: &mut Vec<u8>, exchange: &PairingExchange) -> Result<(), AslError> {
+    let bytes = encode_asl_frame(&WireFrame::PairingExchange(exchange.clone()))?;
+    if bytes.len() > MAX_IPC_PAIRING_FRAME_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    append_length_prefixed(body, &bytes)
+}
+
+fn decode_pairing_invite(bytes: &[u8]) -> Result<PairingInvite, AslError> {
+    let (invite, consumed) = decode_pairing_invite_prefix(bytes)?;
+    if consumed != bytes.len() {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(invite)
+}
+
+fn decode_pairing_invite_prefix(bytes: &[u8]) -> Result<(PairingInvite, usize), AslError> {
+    let (frame, consumed) = decode_pairing_frame_prefix(bytes)?;
+    match frame {
+        WireFrame::PairingInvite(invite) => Ok((invite, consumed)),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn decode_pairing_exchange(bytes: &[u8]) -> Result<PairingExchange, AslError> {
+    let (frame, consumed) = decode_pairing_frame_prefix(bytes)?;
+    if consumed != bytes.len() {
+        return Err(AslError::InvalidMessage);
+    }
+    match frame {
+        WireFrame::PairingExchange(exchange) => Ok(exchange),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn decode_pairing_frame_prefix(bytes: &[u8]) -> Result<(WireFrame, usize), AslError> {
+    if bytes.len() < 4 {
+        return Err(AslError::InvalidMessage);
+    }
+    let frame_length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let consumed = 4usize
+        .checked_add(frame_length)
+        .filter(|length| {
+            frame_length > 0
+                && frame_length <= MAX_IPC_PAIRING_FRAME_BYTES
+                && *length <= bytes.len()
+        })
+        .ok_or(AslError::InvalidMessage)?;
+    Ok((decode_asl_frame(&bytes[4..consumed])?, consumed))
 }
 
 fn decode_identity_request(bytes: &[u8]) -> Result<IdentityProofRequest, AslError> {
@@ -1481,6 +1795,11 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         38 => 2 + 128 + 1 + 19 + 1,
         39 => 50 + MAX_DHT_VALUE_BYTES,
         40 => 17,
+        44 => 48,
+        45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
+        46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
+        47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
+        49 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         _ => return None,
     })
 }
@@ -1707,6 +2026,24 @@ mod tests {
 
     #[test]
     fn fixed_messages_round_trip_with_role_and_sequence_binding() {
+        let pair_invite = PairingInvite {
+            invite_id: asl_types::ids::Id128([40; 16]),
+            inviter: asl_types::ids::AgentId([41; 32]),
+            target: asl_types::ids::AgentId([42; 32]),
+            expires_at_ms: 100_000,
+            nonce: asl_types::ids::Hash32([43; 32]),
+            note: "Please pair.".into(),
+            signature: asl_types::ids::Signature65([44; 65]),
+        };
+        let pair_exchange = PairingExchange {
+            exchange_id: pair_invite.invite_id,
+            agent_id: pair_invite.target,
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            attempt: 1,
+            accepted: false,
+            signature: asl_types::ids::Signature65([45; 65]),
+            transcript_hash: asl_types::ids::Hash32([46; 32]),
+        };
         let messages = [
             IpcMessage::Ready,
             IpcMessage::Shutdown,
@@ -1775,6 +2112,10 @@ mod tests {
                 operation_id: [11; 16],
                 code: NetworkErrorCode::Transport,
             },
+            IpcMessage::OperationFailed {
+                operation_id: [12; 16],
+                code: NetworkErrorCode::Authentication,
+            },
             IpcMessage::Listening {
                 kind: TransportKind::Tcp,
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
@@ -1796,6 +2137,50 @@ mod tests {
                 candidate_id: [29; 16],
                 key: [30; 32],
                 value: vec![0x51, 0x52, 0x53],
+            },
+            IpcMessage::FindProviders {
+                lookup_id: [32; 16],
+                key: [33; 32],
+            },
+            IpcMessage::DhtProviders {
+                lookup_id: [34; 16],
+                status: DhtLookupStatus::Completed,
+                providers: vec![
+                    DhtProviderCandidate {
+                        peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                        endpoint: Some((
+                            TransportKind::Quic,
+                            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)), 4010),
+                        )),
+                        relay_route_available: false,
+                    },
+                    DhtProviderCandidate {
+                        peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                        endpoint: None,
+                        relay_route_available: true,
+                    },
+                ],
+            },
+            IpcMessage::PairingInviteRequested {
+                connection_id: [47; 16],
+                response_id: [48; 16],
+                invite: pair_invite.clone(),
+            },
+            IpcMessage::PairingExchangeReceived {
+                connection_id: [47; 16],
+                request_id: pair_invite.invite_id.0,
+                invite: pair_invite.clone(),
+                exchange: pair_exchange.clone(),
+            },
+            IpcMessage::RequestPairing {
+                connection_id: [47; 16],
+                request_id: pair_invite.invite_id.0,
+                invite: pair_invite,
+            },
+            IpcMessage::ReplyPairing {
+                connection_id: [47; 16],
+                response_id: [48; 16],
+                exchange: pair_exchange,
             },
             IpcMessage::DecideDhtRecord {
                 candidate_id: [31; 16],
@@ -1846,6 +2231,7 @@ mod tests {
             },
             IpcMessage::BulkReceived {
                 connection_id: [18; 16],
+                request_id: [20; 16],
                 response: BulkResponse {
                     request_id: asl_types::ids::Id128([20; 16]),
                     status: BulkStatus::Success,
@@ -1874,7 +2260,7 @@ mod tests {
             IpcMessage::RequestFailed {
                 connection_id: [24; 16],
                 request_id: [25; 16],
-                protocol: NetworkProtocol::Bulk,
+                protocol: NetworkProtocol::Pairing,
                 code: NetworkErrorCode::TimedOut,
             },
             IpcMessage::NetworkError {
@@ -1894,6 +2280,9 @@ mod tests {
                 | IpcMessage::RelayUnavailable { .. }
                 | IpcMessage::DiscoveryCandidate { .. }
                 | IpcMessage::DhtRecordCandidate { .. }
+                | IpcMessage::DhtProviders { .. }
+                | IpcMessage::PairingInviteRequested { .. }
+                | IpcMessage::PairingExchangeReceived { .. }
                 | IpcMessage::ControlRequested { .. }
                 | IpcMessage::ControlReceived { .. }
                 | IpcMessage::BulkRequested { .. }
@@ -1911,6 +2300,7 @@ mod tests {
                 | IpcMessage::SendBulk { .. }
                 | IpcMessage::ReplyBulk { .. }
                 | IpcMessage::SetAddressPolicy { .. }
+                | IpcMessage::FindProviders { .. }
                 | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)
@@ -1926,12 +2316,15 @@ mod tests {
                 | IpcMessage::PeerDisconnected { .. }
                 | IpcMessage::IdentityProofRequested { .. }
                 | IpcMessage::IdentityProofReceived { .. } => (IpcRole::Net, IpcRole::Core),
-                IpcMessage::RequestIdentityProof { .. } | IpcMessage::ReplyIdentityProof { .. } => {
-                    (IpcRole::Core, IpcRole::Net)
-                }
+                IpcMessage::RequestIdentityProof { .. }
+                | IpcMessage::ReplyIdentityProof { .. }
+                | IpcMessage::RequestPairing { .. }
+                | IpcMessage::ReplyPairing { .. } => (IpcRole::Core, IpcRole::Net),
             };
-            let bytes = encode_frame(sender, receiver, 7, &message).unwrap();
-            let decoded = decode_frame(&bytes, sender, receiver, 7).unwrap();
+            let bytes = encode_frame(sender, receiver, 7, &message)
+                .unwrap_or_else(|error| panic!("failed to encode {message:?}: {error:?}"));
+            let decoded = decode_frame(&bytes, sender, receiver, 7)
+                .unwrap_or_else(|error| panic!("failed to decode {message:?}: {error:?}"));
             assert_eq!(decoded.message, message);
             assert_eq!(decoded.sequence, 7);
         }

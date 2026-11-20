@@ -85,6 +85,11 @@ impl SnapshotBroker {
                 params![key, current_time_ms()],
             )
             .map_err(database_error)?;
+            super::knowledge::invalidate_derived_from(
+                &tx,
+                &ResourceKey(parse_id(&key)?),
+                current_time_ms(),
+            )?;
             bump_revision(&tx)?;
         }
         tx.commit().map_err(database_error)?;

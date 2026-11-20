@@ -18,7 +18,7 @@ data/
   manifests/ab/<content_id>.mnf
   incoming/<transfer_id>.part
   inbox/<content_id>.bin
-  derived/<resource_key>.md
+  derived/<resource_key>.json
   assets/avatars/<content_id>.png
   logs/
   backups/
@@ -34,7 +34,7 @@ data/
 
 ## 2. 数据表
 
-数据库由 `specs/schema-v1.sql`、`specs/schema-v2.sql`、`specs/schema-v3.sql` 依次建立。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除，也不改变线上协议。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 的存在不代表所有应用事务都已实现。
+数据库按 `specs/schema-v1.sql` 至 `specs/schema-v11.sql` 连续迁移。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除。v8 增加派生知识的公开继承标记、独立写入目录身份绑定及写入引用表；v9 为资源增加本地来源 AgentId 归因，既有资源默认无归因且不能获得贡献分；v10 将下载 manifest 字节与暂存文件身份绑定持久化，移除依赖 manifest 路径的旧列。v11 为本机直连下载确认补上目标文件名、大小和来源集合；旧的未绑定记录不作放行凭据。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。DDL 的存在不代表所有应用事务都已实现。
 
 T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL 字段不变。永久身份观察单独设 10,000 项硬上限；满额拒绝新的观察，不静默删除高水位或撤销记录。DPAPI 保护的本地快照绑定完整链配置与上述行的摘要，恢复先验证完整性与配置，再重验未过期证明。写失败或并发旧快照覆盖失败后停止返回正向链身份。DPAPI 不提供整库历史回滚防护；同一 Windows 用户恶意程序或已被恢复的整份旧数据库不在此完整性机制的保证内。
 
@@ -54,6 +54,10 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 T19 已将 `tasks`、`messages`、`outbox` 和 `processed_requests` 接入 `asl-store`：任务预算、消息方向/类型、有限重试和请求去重在 SQLite 事务中持久化，重启后不会仅因内存状态丢失而再次回答旧请求。`messages.body_cbor` 保存已通过现有确定性 CBOR 编解码器的结构化控制帧；这表示本地存储路径已实现，不表示真实 Core/Net handler、完整公网会话或所有协议帧的端到端接入已完成。`fetch_grant`、lease 及其他传输授权不写入聊天消息和 outbox。
 
 T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。发起检索前在一个事务内占用 AgentId/message ID 去重键并推进 AgentId/root-task 的三轮、六条语义消息预算；回答交给 Net 前在当前授权事务内再预留一条语义消息。请求去重和会话预算均跨进程重启和设备迁移保留，过期十分钟。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。
+
+T28 实现类型化派生经验记录：只接收已由 `ValidatedDecision` 校验的 claims；本地生成来源、时间和 `derived_unverified` 标签，模型不能指定路径、验证状态或发布策略。写入目录使用独立 `write_grant`，固定目录身份、create-new 文件和字节额度；每个来源都需通过 `WriteDerived`，公开还需每个来源同时通过 `PublishRecord`，否则仅本地私有。记录以 JSON 落盘并进入本地索引；来源或写入授权撤销后，派生记录级联停用并从 FTS 移除。该切片尚不表示经验收集流程已接入后台自主运行或 GUI。
+
+T29 将本机观察按 integrity/availability/evidence/promise 分开保存；出站请求成功、超时或断连只影响 availability，块 hash 成败只影响 integrity。偏好与信誉读取不写 `authorized_contacts`，检索候选始终从该授权表产生。贡献事件只接受完成任务、匹配任务 AgentId、匹配资源来源 AgentId 且状态为 `verified` 的远端资源；同一 `task_id + content_id + help_kind` 全机只记一次，全 AgentId 共用滚动 24 小时 100 条上限。传输完成、哈希通过或模型自报有用都不会单独记贡献。远端资源来源归因尚未接入完整导入/使用流程，因此缺少来源 AgentId 的资源不会自动产生贡献。
 
 数据库是本机数据边界，不是线上协议：`local_task_text`、资源标题/摘要、模型片段和 GUI 标签可包含本地文本，但不能未经映射复制到 ASL peer message、DHT 记录、链上状态或 MLS 应用明文。线上结构使用 `body_cbor` 等有界 BLOB。公开 profile、offer 和语义任务必须遵循 `schemas/asl-v1.cddl`，不得因数据库使用 JSON 或 TEXT 就将这些字段发送出去。
 
@@ -128,6 +132,12 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 
 `transfer_consents` 的待确认状态不构成 Permit。上传确认绑定源 grant、内容 ID 和目标 PeerId 或 group+epoch；下载确认绑定内容 ID、目标 write grant 和可选 group+epoch。确认过期、授权撤销或绑定变化后必须重新确认；确认之前不得开始源文件读取或目标文件写入。
 
+**已实现的直连收件规则：** 不指定活动 inbox 授权不能接收。SQLite `transfer_approval.download_mode` 缺省或 `"automatic"` 时仅在本机选定的授权目录、文件名和额度内启动；`"ask"` 才逐次询问，未知设置报错。示例 TOML 显式选择询问，不代表运行时会自动加载该样例。收件与上传设置独立，不开放远端审批或群组收件入口。
+
+一次同意绑定内容 ID、字节数、本机文件名、写授权 ID/版本及去重排序后的来源 PeerId 集合。待确认时不创建任务、预留或文件；同意与开始分开，消费确认与预留同一事务，创建 `.part` 前再次检查目录身份、授权版本和期限或自动模式。相同申请复用原编号，到期前切换到自动模式也不覆盖已有待处理、拒绝或已消费决定。全机有效窗口内最多 32 项（含拒绝及已消费），本机确认期限缺省 300 秒，可调为 1–300 秒；过期后不可见、不可消费，下一次创建询问时清理。确认不存 lease，不授予获取新数据块的权限。
+
+本机操作针对当前进程 `ASL_HOME` 指定的数据目录。`asl-core --downloads mode` 查看模式；`mode ask` / `mode automatic` 设置后立即供同一目录内的 Core 读取。`asl-core --downloads list` 返回未过期的待决定或已批准项；`asl-core --downloads approve <id>` / `asl-core --downloads deny <id>` 只修改决定。列表不触发下载恢复，命令也不能代为建立目录授权。如果决定时旧清单的 lease 已过期，应用入口需要同一来源、同一内容的新清单；未过期也不表示对端一定在线。
+
 派生资料包含至多 8 个直接来源、展开后至多 32 个 grant 引用、最大溯源深度 4。对 peer 的访问要求所有叶来源都允许该 peer，且远端再利用规则允许；交集为空、循环、超深或不可判定时标私有，不尝试猜测。
 
 模型披露单独求交：每个片段的 grant 必须允许同一个 provider。never 不能传给任何模型；local_only 只能传给明确授权的本地端点。worker 无网络只是隔离，不表示 core 可以随意把资料发往云端。
@@ -136,7 +146,7 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 
 同一连接串行执行授权写事务；SQLite WAL + foreign_keys + synchronous=FULL。数据库连接不能跨进程共享。
 
-预留事务先计算 active held/consumed，再检查全局、任务、来源及写授权上限，成功才插 reservations。默认单任务 1 GiB、陌生来源总预留 512 MiB；可由规则级授权提高，但单文件仍不得超过 64 GiB。
+预留事务先计算 active held/consumed，再检查全局、任务、来源及写授权上限，成功才插 reservations。默认单任务 1 GiB、陌生来源总预留 512 MiB；可由规则级授权提高，但单文件仍不得超过 64 GiB。未指定来源，或任意候选来源未获本机联系人授权的任务，共用这项陌生来源额度。身份验证、登记 PeerId 和信任评分都不豁免这项额度。
 
 无有效进展 5 分钟释放 held 预留并暂停任务；不能通过重复 ack/坏块刷新进展时间。已完成消耗从 reserved 转为实际文件占用；释放和重试幂等，不可双减或双加。
 
@@ -152,7 +162,7 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 6. 仅重试未过期 outgoing，最多 3 次，间隔 1、5、30 秒；总有效期默认 10 分钟。
 7. 不把历史消息重新作为新 query 投喂模型。
 
-下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。schema v5 增加 `direct_inbound_conversations`，保存直连会话的本地轮次、语义消息预算和到期时间。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。
+下载冷却记录持久化在 SQLite schema v4 的 `transfer_cooldowns` 中；它只阻止同一 `content_id` 在冷却窗口内重新创建下载，不上传、不进入信任或贡献记录。schema v5 增加 `direct_inbound_conversations`，保存直连会话的本地轮次、语义消息预算和到期时间。schema v10 将有界 manifest 字节与暂存文件身份保存在 `transfers` 中，避免恢复依赖单独 manifest 路径。`transfers`、`transfer_chunks` 和 `reservations` 保存下载状态；`assigned` 块在重启时回到 `missing`，`durable` 块必须重新读盘校验。接收目标必须来自活动的 inbox 写授权；写入使用固定目录句柄、create-new 暂存文件、文件身份校验和不覆盖原子重命名。目录额度同时计算进行中的预留与已完成下载；这只约束经本机 broker 建立的任务，不代表可阻止用户或其他进程自行占用该目录。
 
 ## 7. 清理、备份与身份迁移
 

@@ -5,7 +5,7 @@ use asl_app::ipc::{
 use asl_app::network::{LocalNetworkObservation, NetworkEvent};
 use asl_net::{
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
-    transport::{DiscoveryCandidateState, TransportKind},
+    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -243,6 +243,14 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
         (
             IpcRole::Net,
             IpcRole::Core,
+            IpcMessage::OperationFailed {
+                operation_id: [38; 16],
+                code: NetworkErrorCode::Authentication,
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
             IpcMessage::Listening {
                 kind: TransportKind::Tcp,
                 address,
@@ -275,6 +283,34 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
                 candidate_id: [60; 16],
                 key: [61; 32],
                 value: vec![0x82, 0x01, 0x02],
+            },
+        ),
+        (
+            IpcRole::Core,
+            IpcRole::Net,
+            IpcMessage::FindProviders {
+                lookup_id: [63; 16],
+                key: [64; 32],
+            },
+        ),
+        (
+            IpcRole::Net,
+            IpcRole::Core,
+            IpcMessage::DhtProviders {
+                lookup_id: [65; 16],
+                status: DhtLookupStatus::Completed,
+                providers: vec![
+                    DhtProviderCandidate {
+                        peer_id: peer_id(),
+                        endpoint: Some((TransportKind::Tcp, "192.168.1.12:4012".parse().unwrap())),
+                        relay_route_available: false,
+                    },
+                    DhtProviderCandidate {
+                        peer_id: peer_id(),
+                        endpoint: None,
+                        relay_route_available: true,
+                    },
+                ],
             },
         ),
         (
@@ -335,6 +371,7 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
             IpcRole::Core,
             IpcMessage::BulkReceived {
                 connection_id: [41; 16],
+                request_id: bulk_request.request_id.0,
                 response: BulkResponse {
                     request_id: bulk_request.request_id,
                     status: BulkStatus::Success,
@@ -392,10 +429,43 @@ fn net_driver_commands_and_events_round_trip_with_fixed_roles() {
             ..
         })
     ));
+
+    let provider_peer = peer_id();
+    let provider_event = IpcMessage::DhtProviders {
+        lookup_id: [66; 16],
+        status: DhtLookupStatus::Failed,
+        providers: vec![DhtProviderCandidate {
+            peer_id: provider_peer.clone(),
+            endpoint: None,
+            relay_route_available: false,
+        }],
+    };
+    let event = NetworkEvent::try_from(provider_event).unwrap();
+    assert!(matches!(
+        event.as_local_observation(),
+        Some(LocalNetworkObservation::DhtProviders {
+            lookup_id,
+            status: DhtLookupStatus::Failed,
+            providers,
+        }) if lookup_id == [66; 16]
+            && providers.len() == 1
+            && providers[0].peer_id == provider_peer
+    ));
 }
 
 #[test]
 fn net_driver_ipc_rejects_wrong_roles_and_non_control_payloads() {
+    let mismatched_bulk_ids = IpcMessage::BulkReceived {
+        connection_id: [50; 16],
+        request_id: [51; 16],
+        response: BulkResponse {
+            request_id: Id128([52; 16]),
+            status: BulkStatus::Success,
+            payload: vec![53],
+        },
+    };
+    assert!(encode_frame(IpcRole::Net, IpcRole::Core, 1, &mismatched_bulk_ids).is_err());
+
     let request = IpcMessage::SendControl {
         connection_id: [51; 16],
         request_id: [52; 16],
@@ -450,4 +520,59 @@ fn net_driver_ipc_rejects_wrong_roles_and_non_control_payloads() {
         )
         .is_err()
     );
+
+    let lookup = IpcMessage::FindProviders {
+        lookup_id: [67; 16],
+        key: [68; 32],
+    };
+    assert!(encode_frame(IpcRole::Net, IpcRole::Core, 1, &lookup).is_err());
+
+    let providers = IpcMessage::DhtProviders {
+        lookup_id: [69; 16],
+        status: DhtLookupStatus::Completed,
+        providers: vec![],
+    };
+    assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &providers).is_err());
+}
+
+#[test]
+fn dht_provider_ipc_rejects_zero_lookup_ids_duplicate_peers_and_excess_candidates() {
+    let candidate = DhtProviderCandidate {
+        peer_id: peer_id(),
+        endpoint: None,
+        relay_route_available: false,
+    };
+    for message in [
+        IpcMessage::FindProviders {
+            lookup_id: [0; 16],
+            key: [1; 32],
+        },
+        IpcMessage::DhtProviders {
+            lookup_id: [0; 16],
+            status: DhtLookupStatus::Completed,
+            providers: vec![],
+        },
+        IpcMessage::DhtProviders {
+            lookup_id: [2; 16],
+            status: DhtLookupStatus::Completed,
+            providers: vec![candidate.clone(), candidate.clone()],
+        },
+        IpcMessage::DhtProviders {
+            lookup_id: [3; 16],
+            status: DhtLookupStatus::Completed,
+            providers: (0..21)
+                .map(|seed| {
+                    let keypair = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
+                    DhtProviderCandidate {
+                        peer_id: PeerId::from_bytes(keypair.public().to_peer_id().to_bytes())
+                            .unwrap(),
+                        endpoint: None,
+                        relay_route_available: false,
+                    }
+                })
+                .collect(),
+        },
+    ] {
+        assert!(encode_frame(IpcRole::Core, IpcRole::Net, 1, &message).is_err());
+    }
 }

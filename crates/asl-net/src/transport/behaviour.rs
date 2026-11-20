@@ -22,6 +22,7 @@ pub(super) struct AslBehaviour {
     pub(super) dht: kad::Behaviour<BoundedRecordStore>,
     pub(super) control: request_response::Behaviour<ControlCodec>,
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
+    pub(super) pairing: request_response::Behaviour<PairingCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
 }
 
@@ -34,6 +35,7 @@ pub(super) enum BehaviourEvent {
     Kad(kad::Event),
     Control(request_response::Event<WireFrame, WireFrame>),
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
+    Pairing(request_response::Event<PairingInvite, PairingExchange>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
 }
 
@@ -78,6 +80,12 @@ impl From<request_response::Event<IdentityProofRequest, IdentityProof>> for Beha
     }
 }
 
+impl From<request_response::Event<PairingInvite, PairingExchange>> for BehaviourEvent {
+    fn from(value: request_response::Event<PairingInvite, PairingExchange>) -> Self {
+        Self::Pairing(value)
+    }
+}
+
 impl From<request_response::Event<BulkRequest, BulkResponse>> for BehaviourEvent {
     fn from(value: request_response::Event<BulkRequest, BulkResponse>) -> Self {
         Self::Bulk(value)
@@ -90,11 +98,19 @@ impl AslBehaviour {
             codec: C,
             protocol: C::Protocol,
         ) -> request_response::Behaviour<C> {
+            request_response_with_timeout(codec, protocol, REQUEST_TIMEOUT)
+        }
+
+        fn request_response_with_timeout<C: request_response::Codec + Clone + Send + 'static>(
+            codec: C,
+            protocol: C::Protocol,
+            timeout: Duration,
+        ) -> request_response::Behaviour<C> {
             request_response::Behaviour::with_codec(
                 codec,
                 [(protocol, ProtocolSupport::Full)],
                 request_response::Config::default()
-                    .with_request_timeout(REQUEST_TIMEOUT)
+                    .with_request_timeout(timeout)
                     .with_max_concurrent_streams(MAX_PROTOCOL_STREAMS_PER_PEER),
             )
         }
@@ -102,6 +118,7 @@ impl AslBehaviour {
         let store = BoundedRecordStore::new(local_peer_id);
         let mut kad_config = kad::Config::new(libp2p::StreamProtocol::new("/asl/kad/1.0.0"));
         kad_config
+            .set_query_timeout(super::DHT_QUERY_TIMEOUT)
             .set_record_filtering(kad::StoreInserts::FilterBoth)
             .set_record_ttl(Some(Duration::from_secs(30 * 60)))
             .set_publication_interval(Some(Duration::from_secs(10 * 60)))
@@ -117,6 +134,11 @@ impl AslBehaviour {
             dht,
             control: request_response(ControlCodec, CONTROL_PROTOCOL),
             identity_proof: request_response(IdentityProofCodec, IDENTITY_PROOF_PROTOCOL),
+            pairing: request_response_with_timeout(
+                PairingCodec,
+                PAIRING_PROTOCOL,
+                PAIRING_REQUEST_TIMEOUT,
+            ),
             bulk: request_response(BulkCodec, BULK_PROTOCOL),
         }
     }

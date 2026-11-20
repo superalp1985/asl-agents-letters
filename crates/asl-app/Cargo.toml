@@ -11,6 +11,7 @@ asl-policy = { path = "../asl-policy" }
 asl-net = { path = "../asl-net" }
 asl-types = { path = "../asl-types" }
 asl-store = { path = "../asl-store" }
+asl-transfer = { path = "../asl-transfer" }
 k256.workspace = true
 libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }
 rand.workspace = true

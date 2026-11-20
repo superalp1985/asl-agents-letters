@@ -80,7 +80,11 @@ async fn next_reservation_after_recovery(
             | TransportEvent::RelayReserved { .. }
             | TransportEvent::RelayUnavailable { .. }
             | TransportEvent::DiscoveryCandidate(_)
-            | TransportEvent::DhtRecordCandidate { .. } => {}
+            | TransportEvent::DhtRecordCandidate { .. }
+            | TransportEvent::DhtProviders { .. }
+            | TransportEvent::PairingInviteRequest { .. }
+            | TransportEvent::PairingExchangeResponse { .. }
+            | TransportEvent::DialFailed { .. } => {}
             event => panic!("unexpected relay event during recovery: {event:?}"),
         }
     }
@@ -154,7 +158,11 @@ async fn next_connected(
             | TransportEvent::RelayReserved { .. }
             | TransportEvent::RelayUnavailable { .. }
             | TransportEvent::DiscoveryCandidate(_)
-            | TransportEvent::DhtRecordCandidate { .. } => {}
+            | TransportEvent::DhtRecordCandidate { .. }
+            | TransportEvent::DhtProviders { .. }
+            | TransportEvent::PairingInviteRequest { .. }
+            | TransportEvent::PairingExchangeResponse { .. }
+            | TransportEvent::DialFailed { .. } => {}
             TransportEvent::Connected { .. }
             | TransportEvent::Disconnected { .. }
             | TransportEvent::ControlRequest { .. }

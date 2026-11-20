@@ -12,9 +12,10 @@ use asl_policy::{
     Audience,
     reconcile::{RECONCILE_INTERVAL, ReconcileDriver, ReconcileHints},
 };
-use asl_store::resources::SnapshotBroker;
+use asl_store::resources::{SnapshotBroker, StoredSnapshotReader};
 use asl_types::{
     error::AslError,
+    ids::{Hash32, Id128},
     task::{GrantId, ResourceKey},
 };
 
@@ -43,12 +44,47 @@ impl LocalLibraries {
         audience: &Audience,
         max_snapshot_bytes: u64,
     ) -> Result<GrantId, AslError> {
+        self.authorize_directory_with_derivation(
+            root,
+            extensions,
+            audience,
+            max_snapshot_bytes,
+            false,
+        )
+    }
+
+    pub fn authorize_directory_with_derivation(
+        &mut self,
+        root: &Path,
+        extensions: &[String],
+        audience: &Audience,
+        max_snapshot_bytes: u64,
+        allow_derived_disclosure: bool,
+    ) -> Result<GrantId, AslError> {
         self.check_health()?;
-        let grant =
-            self.broker
-                .authorize_directory(root, extensions, audience, max_snapshot_bytes)?;
+        let grant = self.broker.authorize_directory_with_derivation(
+            root,
+            extensions,
+            audience,
+            max_snapshot_bytes,
+            allow_derived_disclosure,
+        )?;
         self.worker.grants_changed();
         Ok(grant)
+    }
+
+    pub fn authorize_inbox_directory(
+        &mut self,
+        root: &Path,
+        max_bytes: u64,
+    ) -> Result<Id128, AslError> {
+        self.check_health()?;
+        self.broker.authorize_inbox_directory(root, max_bytes)
+    }
+
+    pub fn revoke_inbox_directory(&mut self, grant: Id128) -> Result<(), AslError> {
+        self.check_health()?;
+        self.broker.revoke_inbox_directory(grant)
     }
 
     /// Import only through a stored grant. A resource key is not a read permit.
@@ -65,6 +101,10 @@ impl LocalLibraries {
         self.worker.watches_dirty.store(true, Ordering::Release);
         self.worker.hints.changed(key.clone());
         Ok(key)
+    }
+
+    pub fn open_snapshot(&self, content_id: Hash32) -> Result<StoredSnapshotReader, AslError> {
+        self.broker.open_snapshot(content_id)
     }
 
     pub fn revoke_directory(&mut self, grant: &GrantId) -> Result<(), AslError> {

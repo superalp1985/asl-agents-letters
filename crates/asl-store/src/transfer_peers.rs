@@ -1,0 +1,74 @@
+use asl_types::{error::AslError, protocol::DeviceCertificate};
+use rusqlite::{TransactionBehavior, params};
+
+use crate::{Store, chain::agent_text, database_error, search::direct::DirectRequester};
+
+impl Store {
+    /// Core supplies the revalidated session, its signed certificate, and the Ed25519
+    /// key recovered from its transport PeerId. A manifest cannot replace a device.
+    pub fn register_transfer_peer(
+        &mut self,
+        source: &DirectRequester,
+        chain_id: u64,
+        certificate: &DeviceCertificate,
+        device_key: [u8; 32],
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if certificate.agent_id != source.agent || certificate.peer_id != source.peer {
+            return Err(AslError::InvalidDeviceCertificate);
+        }
+        if now_ms < certificate.issued_at_ms
+            || now_ms >= certificate.expires_at_ms
+            || now_ms >= source.session_expires_at_ms
+        {
+            return Err(AslError::ExpiredMessage);
+        }
+        let integer = |n| i64::try_from(n).map_err(|_| AslError::InvalidDeviceCertificate);
+        let agent = agent_text(source.agent);
+        let peer = bs58::encode(source.peer.as_bytes()).into_string();
+        let key = hex::encode(device_key);
+        let cbor = certificate.to_canonical_cbor()?;
+        let serial = integer(certificate.serial)?;
+        let expires = integer(certificate.expires_at_ms)?;
+        let now = integer(now_ms)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identity_registry_states r JOIN agents a USING(agent_id)
+             WHERE r.agent_id=?1 AND r.chain_id=?2 AND r.status='active' AND r.sequence=?3
+               AND r.controller_address=?4 AND r.state_commitment=?5
+               AND a.identity_state IN ('pending_anchor','verified'))",
+            params![agent, integer(chain_id)?, integer(source.registry_sequence)?,
+                &source.controller, &source.directory_commitment],
+            |r| r.get(0),
+        ).map_err(database_error)?;
+        if !current {
+            return Err(AslError::InvalidIdentity);
+        }
+
+        // Either unique key (PeerId or AgentId/serial) may already exist.
+        // Only the exact, unrevoked device row can supply the foreign key.
+        tx.execute(
+            "INSERT INTO device_identities(peer_id,agent_id,public_key_hex,certificate_cbor,
+                certificate_serial,certificate_expires_ms,created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING",
+            params![peer, agent, key, cbor, serial, expires, now],
+        )
+        .map_err(database_error)?;
+        let matched = tx.execute(
+            "INSERT INTO peers(peer_id,agent_id,last_seen_ms)
+             SELECT peer_id,agent_id,?7 FROM device_identities
+             WHERE peer_id=?1 AND agent_id=?2 AND public_key_hex=?3 AND certificate_cbor=?4
+               AND certificate_serial=?5 AND certificate_expires_ms=?6 AND revoked_at_ms IS NULL
+             ON CONFLICT(peer_id) DO UPDATE SET last_seen_ms=max(peers.last_seen_ms,excluded.last_seen_ms)
+             WHERE peers.agent_id=excluded.agent_id",
+            params![peer, agent, key, cbor, serial, expires, now],
+        ).map_err(database_error)?;
+        if matched != 1 {
+            return Err(AslError::InvalidDeviceCertificate);
+        }
+        tx.commit().map_err(database_error)
+    }
+}

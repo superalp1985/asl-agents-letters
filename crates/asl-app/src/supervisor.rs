@@ -23,7 +23,7 @@ use asl_policy::{
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
-    protocol::WireFrame,
+    protocol::{PairingExchange, PairingInvite, WireFrame},
     task::ProviderId,
 };
 use rand::{TryRng, rngs::SysRng};
@@ -36,17 +36,20 @@ use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
-    MAX_IPC_EXTRACTOR_INPUT_BYTES, MAX_IPC_TASK_PAYLOAD_BYTES, NetworkErrorCode, TaskStatus,
-    WorkerOperation, encode_frame, write_device_identity_prelude,
+    MAX_IPC_EXTRACTOR_INPUT_BYTES, MAX_IPC_TASK_PAYLOAD_BYTES, NetworkErrorCode, NetworkProtocol,
+    TaskStatus, WorkerOperation, encode_frame, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
 use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::network_settings::NetworkSettingsV1;
+use crate::pairing::{self, PairingAuthorization};
 use crate::paths::AppPaths;
 use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 use crate::providers::DpapiProviderCredentialSource;
+use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
+use asl_store::open_store;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -67,6 +70,7 @@ pub struct Supervisor {
     network_admission_status: NetworkAdmissionStatus,
     chain_refresh: Option<ChainRefreshWorker>,
     state_database: PathBuf,
+    pub(crate) pending_pairing_prompts: pairing::PendingPairingPrompts,
 }
 
 impl Supervisor {
@@ -107,6 +111,7 @@ impl Supervisor {
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
             state_database: paths.state().join("asl.sqlite3"),
+            pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
         };
         supervisor.apply_network_settings(&network_settings)?;
         Ok(supervisor)
@@ -179,6 +184,90 @@ impl Supervisor {
 
     pub fn network_admission_status(&self) -> NetworkAdmissionStatus {
         self.network_admission_status
+    }
+
+    pub fn issue_pairing_invite(
+        &mut self,
+        connection_id: [u8; 16],
+        target: AgentId,
+        note: &str,
+        now_ms: u64,
+    ) -> Result<PairingInvite, AslError> {
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let (remote_agent, _) = admission.admitted_peer_identity(connection_id, now_ms)?;
+        if remote_agent != target {
+            return Err(AslError::InvalidIdentity);
+        }
+        let invite = pairing::issue_signed_invite(&self.agent_identity, target, note, now_ms)?;
+        self.send_network_command(NetworkCommand::RequestPairing {
+            connection_id,
+            request_id: invite.invite_id.0,
+            invite: invite.clone(),
+        })?;
+        Ok(invite)
+    }
+
+    pub(crate) fn answer_pairing_invite(
+        &mut self,
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+        authorization: PairingAuthorization,
+        now_ms: u64,
+    ) -> Result<PairingExchange, AslError> {
+        let mut store = open_store(&self.state_database)?;
+        let exchange = pairing::answer_signed_invite(
+            &self.agent_identity,
+            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
+            &mut store,
+            &self.device_peer_id,
+            connection_id,
+            &invite,
+            authorization,
+            now_ms,
+        )?;
+        self.send_network_command(NetworkCommand::ReplyPairing {
+            connection_id,
+            response_id,
+            exchange: exchange.clone(),
+        })?;
+        Ok(exchange)
+    }
+
+    pub(crate) fn verify_pairing_response(
+        &mut self,
+        event: AdmittedNetworkEvent,
+        now_ms: u64,
+    ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
+        let AdmittedNetworkEvent::PairingExchangeReceived {
+            connection_id,
+            agent_id,
+            request_id: _,
+            invite,
+            exchange,
+        } = event
+        else {
+            return Ok(Some(event));
+        };
+        let mut store = open_store(&self.state_database)?;
+        let result = pairing::verify_signed_exchange(
+            &self.agent_identity,
+            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
+            &mut store,
+            &self.device_peer_id,
+            connection_id,
+            &invite,
+            &exchange,
+            now_ms,
+        );
+        match result {
+            Ok(true) => Ok(Some(AdmittedNetworkEvent::PairingAccepted { agent_id })),
+            Ok(false) => Ok(Some(AdmittedNetworkEvent::PairingDeclined { agent_id })),
+            Err(_) => {
+                self.send_network_command(NetworkCommand::CloseConnection { connection_id })?;
+                Ok(None)
+            }
+        }
     }
 
     pub fn activate_network_admission(
@@ -255,21 +344,134 @@ impl Supervisor {
 
     pub fn run_with_outgoing_queries(self, runtime: OutgoingQueryRuntime) -> Result<(), AslError> {
         let mut inbound = DirectInbound::open(&self.state_database)?;
+        let mut transfer = TransferService::open(&self.state_database)?;
         let outbound =
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
             |supervisor, event| match event {
+                event @ AdmittedNetworkEvent::ControlRequest {
+                    request: WireFrame::FetchRequest(_),
+                    ..
+                } => supervisor.handle_fetch_request(&mut transfer, event),
+                event @ AdmittedNetworkEvent::BulkRequest { .. } => {
+                    supervisor.handle_bulk_request(&mut transfer, event)
+                }
                 event @ AdmittedNetworkEvent::ControlRequest { .. } => {
                     supervisor.handle_direct_inbound(&mut inbound, event)
                 }
                 event => {
-                    outbound.borrow_mut().handle_event(&event, unix_time_ms()?);
-                    Ok(())
+                    let now_ms = unix_time_ms()?;
+                    let Some(event) =
+                        supervisor.route_transfer_event(&mut transfer, event, now_ms)?
+                    else {
+                        return Ok(());
+                    };
+                    outbound.borrow_mut().handle_event(&event, now_ms)
                 }
             },
-            |_| {},
+            |observation| match observation {
+                LocalNetworkObservation::DhtProviders { .. } => {
+                    outbound
+                        .borrow_mut()
+                        .handle_local_observation(observation, unix_time_ms()?);
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
             |supervisor| supervisor.poll_direct_outbound(&mut outbound.borrow_mut()),
         )
+    }
+
+    fn handle_fetch_request(
+        &mut self,
+        transfers: &mut TransferService,
+        event: AdmittedNetworkEvent,
+    ) -> Result<(), AslError> {
+        let AdmittedNetworkEvent::ControlRequest {
+            connection_id,
+            agent_id,
+            response_id,
+            request: WireFrame::FetchRequest(request),
+        } = event
+        else {
+            return Ok(());
+        };
+        let now_ms = unix_time_ms()?;
+        let Some(requester) = self
+            .admission
+            .as_ref()
+            .and_then(|admission| admission.direct_requester(connection_id, agent_id))
+        else {
+            return Ok(());
+        };
+        let Ok(prepared) = transfers.prepare_fetch(requester, &request, now_ms) else {
+            return Ok(());
+        };
+        let Some(admission) = self.admission.as_mut() else {
+            return Ok(());
+        };
+        let net = &self.net;
+        match transfers.finish_fetch(prepared, unix_time_ms()?, |response, _| {
+            let now_ms = unix_time_ms()?;
+            let Ok(command) =
+                admission.authorize_control_reply(connection_id, response_id, response, now_ms)
+            else {
+                return Ok(());
+            };
+            if net.try_send(&command.into_ipc()?)? {
+                Ok(())
+            } else {
+                Err(AslError::SandboxUnavailable)
+            }
+        }) {
+            Ok(()) | Err(AslError::NotFound | AslError::PolicyVersionConflict) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn handle_bulk_request(
+        &mut self,
+        transfers: &mut TransferService,
+        event: AdmittedNetworkEvent,
+    ) -> Result<(), AslError> {
+        let AdmittedNetworkEvent::BulkRequest {
+            connection_id,
+            agent_id,
+            response_id,
+            request,
+        } = event
+        else {
+            return Ok(());
+        };
+        let now_ms = unix_time_ms()?;
+        let Some(requester) = self
+            .admission
+            .as_ref()
+            .and_then(|admission| admission.direct_requester(connection_id, agent_id))
+        else {
+            return Ok(());
+        };
+        let prepared = transfers.prepare_bulk(&self.libraries, requester, request, now_ms);
+        let Some(admission) = self.admission.as_mut() else {
+            return Ok(());
+        };
+        let net = &self.net;
+        match transfers.finish_bulk(prepared, unix_time_ms()?, |response| {
+            let now_ms = unix_time_ms()?;
+            let Ok(command) =
+                admission.authorize_bulk_reply(connection_id, response_id, response, now_ms)
+            else {
+                return Ok(());
+            };
+            if net.try_send(&command.into_ipc()?)? {
+                Ok(())
+            } else {
+                Err(AslError::SandboxUnavailable)
+            }
+        }) {
+            Ok(()) | Err(AslError::NotFound | AslError::PolicyVersionConflict) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn handle_direct_inbound(
@@ -336,24 +538,256 @@ impl Supervisor {
     pub fn run_with_network_observers(
         self,
         mut handler: impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
-        observer: impl FnMut(LocalNetworkObservation),
+        mut observer: impl FnMut(LocalNetworkObservation),
     ) -> Result<(), AslError> {
+        let mut transfers = TransferService::open(&self.state_database)?;
         self.run_loop(
             |supervisor, event| {
+                let Some(event) =
+                    supervisor.route_transfer_event(&mut transfers, event, unix_time_ms()?)?
+                else {
+                    return Ok(());
+                };
                 for command in handler(event) {
-                    supervisor.send_admitted_network_command(command, unix_time_ms()?)?;
+                    supervisor.send_admitted_network_command_with_transfer(
+                        &mut transfers,
+                        command,
+                        unix_time_ms()?,
+                    )?;
                 }
                 Ok(())
             },
-            observer,
+            |observation| {
+                observer(observation);
+                Ok(())
+            },
             |_| Ok(()),
         )
+    }
+
+    fn send_admitted_network_command_with_transfer(
+        &mut self,
+        transfers: &mut TransferService,
+        command: NetworkCommand,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        match command {
+            NetworkCommand::SendControl {
+                connection_id,
+                request_id,
+                request: WireFrame::FetchRequest(fetch),
+            } => {
+                let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+                let (agent_id, _) = admission.admitted_peer_identity(connection_id, now_ms)?;
+                let requester = admission
+                    .direct_requester(connection_id, agent_id)
+                    .ok_or(AslError::InvalidIdentity)?;
+                transfers.expect_fetch_response(
+                    connection_id,
+                    &requester,
+                    request_id,
+                    &fetch,
+                    now_ms,
+                )?;
+                let sent = self.send_network_command(NetworkCommand::SendControl {
+                    connection_id,
+                    request_id,
+                    request: WireFrame::FetchRequest(fetch),
+                });
+                if sent.is_err() {
+                    transfers.fail_control_request(
+                        connection_id,
+                        requester.agent,
+                        &requester.peer,
+                        request_id,
+                    );
+                }
+                sent
+            }
+            NetworkCommand::SendBulk {
+                connection_id,
+                request,
+            } => {
+                let request_id = request.request_id.0;
+                let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+                let authorized =
+                    transfers.authorize_bulk_request(admission, connection_id, request, now_ms)?;
+                match self.send_network_command(authorized) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        transfers.cancel_bulk_request(request_id);
+                        Err(error)
+                    }
+                }
+            }
+            command => self.send_admitted_network_command(command, now_ms),
+        }
+    }
+
+    fn route_transfer_event(
+        &mut self,
+        transfers: &mut TransferService,
+        event: AdmittedNetworkEvent,
+        now_ms: u64,
+    ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
+        Self::route_transfer_with(
+            self.admission.as_mut(),
+            transfers,
+            event,
+            now_ms,
+            |command| self.net.try_send(&command.into_ipc()?),
+        )
+    }
+
+    pub(crate) fn route_transfer_with(
+        admission: Option<&mut CoreAdmission>,
+        transfers: &mut TransferService,
+        event: AdmittedNetworkEvent,
+        now_ms: u64,
+        enqueue: impl FnOnce(NetworkCommand) -> Result<bool, AslError>,
+    ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
+        transfers.expire_pending(now_ms);
+        match event {
+            AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                agent_id,
+                request_id,
+                response: WireFrame::FetchGrant(grant),
+            } => {
+                let Some(admission) = admission else {
+                    return Ok(None);
+                };
+                let Some(requester) = admission.direct_requester(connection_id, agent_id) else {
+                    return Ok(None);
+                };
+                let Ok(Some((bulk_id, command))) = transfers.prepare_manifest_request(
+                    admission,
+                    connection_id,
+                    &requester,
+                    request_id,
+                    &grant,
+                    now_ms,
+                ) else {
+                    return Ok(None);
+                };
+                if !enqueue(command)? {
+                    transfers.cancel_bulk_request(bulk_id.0);
+                }
+                Ok(None)
+            }
+            event @ AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                agent_id,
+                request_id,
+                ..
+            } => {
+                if let Some(requester) = admission
+                    .and_then(|admission| admission.direct_requester(connection_id, agent_id))
+                {
+                    transfers.fail_control_request(
+                        connection_id,
+                        agent_id,
+                        &requester.peer,
+                        request_id,
+                    );
+                }
+                Ok(Some(event))
+            }
+            AdmittedNetworkEvent::BulkResponse {
+                connection_id,
+                agent_id,
+                peer_id,
+                request_id,
+                response,
+            } => {
+                let result = transfers.accept_bulk_response(
+                    connection_id,
+                    agent_id,
+                    &peer_id,
+                    request_id,
+                    response,
+                    now_ms,
+                );
+                match result {
+                    Some(ReceivedBulk::Manifest(manifest)) => {
+                        let Some(admission) = admission else {
+                            return Ok(None);
+                        };
+                        match transfers.register_manifest_source(admission, &manifest, now_ms) {
+                            Ok(()) => {
+                                Ok(Some(AdmittedNetworkEvent::FetchManifestReceived(manifest)))
+                            }
+                            Err(
+                                AslError::InvalidIdentity
+                                | AslError::InvalidDeviceCertificate
+                                | AslError::ExpiredMessage
+                                | AslError::InvalidMessage,
+                            ) => Ok(None),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Some(ReceivedBulk::Raw(matched)) => {
+                        Ok(Some(AdmittedNetworkEvent::BulkTransferResponse(matched)))
+                    }
+                    None => Ok(None),
+                }
+            }
+            AdmittedNetworkEvent::RequestFailed {
+                connection_id,
+                agent_id,
+                peer_id,
+                request_id,
+                protocol: NetworkProtocol::Bulk,
+                code,
+            } => {
+                transfers.fail_bulk_request(connection_id, agent_id, &peer_id, request_id, now_ms);
+                Ok(Some(AdmittedNetworkEvent::RequestFailed {
+                    connection_id,
+                    agent_id,
+                    peer_id,
+                    request_id,
+                    protocol: NetworkProtocol::Bulk,
+                    code,
+                }))
+            }
+            AdmittedNetworkEvent::RequestFailed {
+                connection_id,
+                agent_id,
+                peer_id,
+                request_id,
+                protocol: NetworkProtocol::Control,
+                code,
+            } => {
+                transfers.fail_control_request(connection_id, agent_id, &peer_id, request_id);
+                Ok(Some(AdmittedNetworkEvent::RequestFailed {
+                    connection_id,
+                    agent_id,
+                    peer_id,
+                    request_id,
+                    protocol: NetworkProtocol::Control,
+                    code,
+                }))
+            }
+            AdmittedNetworkEvent::PeerDisconnected {
+                connection_id,
+                peer_id,
+                agent_id,
+            } => {
+                transfers.connection_disconnected(connection_id, peer_id.as_ref());
+                Ok(Some(AdmittedNetworkEvent::PeerDisconnected {
+                    connection_id,
+                    peer_id,
+                    agent_id,
+                }))
+            }
+            event => Ok(Some(event)),
+        }
     }
 
     fn run_loop(
         mut self,
         mut handler: impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
-        mut observer: impl FnMut(LocalNetworkObservation),
+        mut observer: impl FnMut(LocalNetworkObservation) -> Result<(), AslError>,
         mut tick: impl FnMut(&mut Self) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         let mut next_health_check = Instant::now();
@@ -406,7 +840,7 @@ impl Supervisor {
                 _ => return Err(AslError::InvalidMessage),
             };
             if let Some(observation) = event.as_local_observation() {
-                observer(observation);
+                observer(observation)?;
                 continue;
             }
             let now_ms = unix_time_ms()?;
@@ -429,9 +863,11 @@ impl Supervisor {
         let now_ms = unix_time_ms()?;
         let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
         let connections = admission.admitted_connections(now_ms);
+        let connecting_peers = admission.connecting_peers();
         let net = &self.net;
         outbound.poll(
             &connections,
+            &connecting_peers,
             now_ms,
             |connection_id, request_id, request| {
                 let command = admission.authorize_control_command(
@@ -440,7 +876,35 @@ impl Supervisor {
                     request,
                     now_ms,
                 )?;
-                if net.try_send(&command.into_ipc())? {
+                if net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+            |lookup_id, key| {
+                let command = NetworkCommand::FindProviders { lookup_id, key }.into_ipc()?;
+                if net.try_send(&command)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+            |operation_id, peer_id, endpoint, relay_route_available| {
+                let command = match endpoint {
+                    Some((kind, address)) => NetworkCommand::Dial {
+                        operation_id,
+                        kind,
+                        address,
+                        peer_id,
+                    },
+                    None if relay_route_available => NetworkCommand::DialViaRelays {
+                        operation_id,
+                        peer_id,
+                    },
+                    None => return Err(AslError::PolicyDenied),
+                };
+                if net.try_send(&command.into_ipc()?)? {
                     Ok(())
                 } else {
                     Err(AslError::SandboxUnavailable)
@@ -454,11 +918,59 @@ impl Supervisor {
         batch: AdmissionBatch,
         handler: &mut impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
+        self.pending_pairing_prompts.expire(unix_time_ms()?);
         for command in batch.commands {
             self.send_network_command(command)?;
         }
         for event in batch.events {
-            handler(self, event)?;
+            let now_ms = unix_time_ms()?;
+            match &event {
+                AdmittedNetworkEvent::PairingInviteReceived {
+                    connection_id,
+                    response_id,
+                    agent_id,
+                    invite,
+                } => {
+                    let can_prompt = self.pending_pairing_prompts.can_insert(invite.invite_id.0)
+                        && open_store(&self.state_database)
+                            .and_then(|mut store| {
+                                store.allow_pairing_prompt(*agent_id, invite.invite_id, now_ms)
+                            })
+                            .unwrap_or(false);
+                    if can_prompt {
+                        if !self.pending_pairing_prompts.insert(
+                            *connection_id,
+                            *response_id,
+                            invite.clone(),
+                        ) {
+                            return Err(AslError::InvalidMessage);
+                        }
+                    } else {
+                        let exchange = pairing::decline_rate_limited_invite(
+                            &self.agent_identity,
+                            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
+                            &self.device_peer_id,
+                            *connection_id,
+                            invite,
+                            now_ms,
+                        )?;
+                        self.send_network_command(NetworkCommand::ReplyPairing {
+                            connection_id: *connection_id,
+                            response_id: *response_id,
+                            exchange,
+                        })?;
+                        continue;
+                    }
+                }
+                AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
+                    self.pending_pairing_prompts
+                        .remove_connection(*connection_id);
+                }
+                _ => {}
+            }
+            if let Some(event) = self.verify_pairing_response(event, unix_time_ms()?)? {
+                handler(self, event)?;
+            }
         }
         Ok(())
     }
@@ -764,10 +1276,13 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::RelayUnavailable { .. }
             | IpcMessage::DiscoveryCandidate { .. }
             | IpcMessage::DhtRecordCandidate { .. }
+            | IpcMessage::DhtProviders { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
             | IpcMessage::IdentityProofReceived { .. }
+            | IpcMessage::PairingInviteRequested { .. }
+            | IpcMessage::PairingExchangeReceived { .. }
             | IpcMessage::ControlRequested { .. }
             | IpcMessage::ControlReceived { .. }
             | IpcMessage::BulkRequested { .. }
@@ -804,6 +1319,7 @@ fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
                 .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
         }
         NetworkEvent::DiscoveryCandidate { .. } => {}
+        NetworkEvent::DhtProviders { .. } => {}
         NetworkEvent::DhtRecordCandidate { candidate_id, .. } => {
             batch.commands.push(NetworkCommand::DecideDhtRecord {
                 candidate_id,
@@ -813,6 +1329,7 @@ fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
         NetworkEvent::PeerDisconnected { connection_id } => {
             batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
                 connection_id,
+                peer_id: None,
                 agent_id: None,
             });
         }
@@ -837,6 +1354,8 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         NetworkEvent::TransportConnected { connection_id, .. }
         | NetworkEvent::IdentityProofRequested { connection_id, .. }
         | NetworkEvent::IdentityProofReceived { connection_id, .. }
+        | NetworkEvent::UnverifiedPairingInvite { connection_id, .. }
+        | NetworkEvent::UnverifiedPairingExchangeResponse { connection_id, .. }
         | NetworkEvent::UnverifiedControlRequest { connection_id, .. }
         | NetworkEvent::UnverifiedControlResponse { connection_id, .. }
         | NetworkEvent::UnverifiedBulkRequest { connection_id, .. }
@@ -849,6 +1368,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::RelayUnavailable { .. }
         | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::DhtRecordCandidate { .. }
+        | NetworkEvent::DhtProviders { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
     }

@@ -1,20 +1,26 @@
 //! Trusted local broker only. Importing a file does not grant disclosure.
 mod grants;
 mod index_input;
+mod knowledge;
 mod recovery;
 mod reservations;
 mod sources;
 
+pub use knowledge::{DerivedResourceInfo, DerivedSource};
 pub use recovery::RecoveryReport;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
-use asl_policy::{AuthorizedFile, open_authorized_source, snapshot_files::PinnedHome};
+use asl_policy::{
+    AuthorizedFile, open_authorized_source,
+    snapshot_files::{PinnedHome, SnapshotReader},
+};
 use asl_types::{
     error::AslError,
-    ids::Id128,
+    ids::{Hash32, Id128},
+    manifest::{Manifest, decode_manifest},
     task::{GrantId, ResourceKey},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -28,6 +34,26 @@ pub struct SnapshotBroker {
     home: PathBuf,
     _pin: PinnedHome,
     reconcile_stop: Option<Arc<AtomicBool>>,
+}
+
+pub struct StoredSnapshotReader {
+    reader: SnapshotReader,
+    manifest_bytes: Vec<u8>,
+    manifest: Manifest,
+}
+
+impl StoredSnapshotReader {
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    pub fn read_range(&mut self, offset: u64, length: u32) -> Result<Vec<u8>, AslError> {
+        self.reader.read_range(offset, length)
+    }
 }
 
 impl SnapshotBroker {
@@ -47,6 +73,44 @@ impl SnapshotBroker {
 
     pub fn set_reconcile_stop(&mut self, stop: Arc<AtomicBool>) {
         self.reconcile_stop = Some(stop);
+    }
+
+    pub fn open_snapshot(&self, content_id: Hash32) -> Result<StoredSnapshotReader, AslError> {
+        let content = hex::encode(content_id.0);
+        let metadata: Option<(String, i64, i64, String)> = self
+            .store
+            .connection
+            .query_row(
+                "SELECT file_hash,file_size,chunk_count,state FROM snapshots
+                 WHERE content_id=?1",
+                [&content],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let (file_hash, file_size, chunk_count, state) = metadata.ok_or(AslError::NotFound)?;
+        if state != "ready" {
+            return Err(AslError::NotFound);
+        }
+        let mut reader = SnapshotReader::open(&self.home, content_id.0)?;
+        let manifest_bytes = reader.read_manifest()?;
+        let manifest = decode_manifest(&manifest_bytes, content_id.0)
+            .map_err(|_| AslError::InvalidDatabase)?;
+        let mut stored_file_hash = [0; 32];
+        hex::decode_to_slice(file_hash, &mut stored_file_hash)
+            .map_err(|_| AslError::InvalidDatabase)?;
+        if manifest.file_hash != stored_file_hash
+            || i64::try_from(manifest.file_size).ok() != Some(file_size)
+            || i64::try_from(manifest.chunk_hashes.len()).ok() != Some(chunk_count)
+            || reader.file_size()? != manifest.file_size
+        {
+            return Err(AslError::InvalidDatabase);
+        }
+        Ok(StoredSnapshotReader {
+            reader,
+            manifest_bytes,
+            manifest,
+        })
     }
 
     pub fn import_source(

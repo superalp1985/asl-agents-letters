@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use asl_policy::{
     AccessOperation, AccessRequest, Audience, AuthenticatedDevice, GrantPolicy, LeaseManager,
-    ModelPolicy, PolicyEngine, PolicyRevision, PolicyService, PolicySnapshot, Principal,
-    ResourceOrigin, ResourcePolicy, issue_fetch_grant, validate_fetch_grant,
+    MAX_ACTIVE_LEASES_PER_PEER, ModelPolicy, PolicyEngine, PolicyRevision, PolicyService,
+    PolicySnapshot, Principal, ResourceOrigin, ResourcePolicy, issue_fetch_grant,
+    validate_fetch_grant,
 };
 use asl_types::{
     error::AslError,
@@ -213,8 +214,67 @@ fn unrelated_policy_revision_keeps_a_valid_lease_usable() {
     );
 }
 
+#[test]
+fn lease_capacity_is_fair_per_authenticated_peer_and_releasable() {
+    let mut state = snapshot();
+    let second_agent = AgentId([7; 32]);
+    let second_peer = peer_with_byte(7);
+    state.devices.insert(
+        second_peer.clone(),
+        AuthenticatedDevice {
+            agent_id: second_agent,
+            active: true,
+            chain_valid_until_ms: NOW + 120_000,
+            certificate_valid_until_ms: NOW + 120_000,
+        },
+    );
+    state.contacts.insert(second_agent);
+    let engine = PolicyEngine::new(state, 60_000).unwrap();
+    let leases = LeaseManager::new();
+    let first_scope = engine.for_peer(peer());
+    let first_permit = first_scope.authorize(&request(), NOW).unwrap();
+
+    let mut lease_ids = Vec::new();
+    for _ in 0..MAX_ACTIVE_LEASES_PER_PEER {
+        lease_ids.push(
+            leases
+                .issue(&first_scope, &first_permit, 100, NOW)
+                .unwrap()
+                .lease_id,
+        );
+    }
+    assert!(matches!(
+        leases.issue(&first_scope, &first_permit, 100, NOW),
+        Err(AslError::QuotaExceeded)
+    ));
+
+    let second_scope = engine.for_peer(second_peer.clone());
+    let second_request = AccessRequest {
+        principal: Principal::Agent(second_agent),
+        ..request()
+    };
+    let second_permit = second_scope.authorize(&second_request, NOW).unwrap();
+    leases
+        .issue(&second_scope, &second_permit, 100, NOW)
+        .unwrap();
+
+    leases.release(lease_ids[0], &peer()).unwrap();
+    leases.issue(&first_scope, &first_permit, 100, NOW).unwrap();
+    leases.release(lease_ids[1], &second_peer).unwrap();
+    assert_eq!(
+        leases.active_count().unwrap(),
+        MAX_ACTIVE_LEASES_PER_PEER + 1
+    );
+}
+
 fn other_peer() -> PeerId {
     let mut bytes = vec![0, 36, 8, 1, 18, 32];
     bytes.extend_from_slice(&[2; 32]);
+    PeerId::from_bytes(bytes).unwrap()
+}
+
+fn peer_with_byte(byte: u8) -> PeerId {
+    let mut bytes = vec![0, 36, 8, 1, 18, 32];
+    bytes.extend_from_slice(&[byte; 32]);
     PeerId::from_bytes(bytes).unwrap()
 }

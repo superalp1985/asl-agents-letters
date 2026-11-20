@@ -9,15 +9,15 @@ use crate::{
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
         DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
-        IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer, PairingExchange,
-        PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus, StorageProof,
-        TypedValue, WireFrame,
+        IdentityProof, IdentityProofRequest, Intent, MAX_PAIRING_NOTE_BYTES, MediaKind, Offer,
+        PairingExchange, PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus,
+        StorageProof, TypedValue, WireFrame, validate_pairing_note,
     },
 };
 
 pub const MAX_CONTROL_FRAME_BYTES: usize = 65_536;
 pub const MAX_EXTENDED_FRAME_BYTES: usize = 256 * 1024;
-const MAX_PAIRING_FRAME_BYTES: usize = 8 * 1024;
+pub const MAX_PAIRING_FRAME_BYTES: usize = 8 * 1024;
 const MAX_SIGNED_DIRECTORY_BYTES: usize = 8 * 1024;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 const MAX_TIME_MS: u64 = i64::MAX as u64;
@@ -148,7 +148,9 @@ fn validate_tree(value: &Value, depth: usize) -> Result<(), AslError> {
         return invalid();
     }
     match value {
-        Value::Integer(_) | Value::Bytes(_) | Value::Bool(_) | Value::Null => Ok(()),
+        Value::Integer(_) | Value::Bytes(_) | Value::Text(_) | Value::Bool(_) | Value::Null => {
+            Ok(())
+        }
         Value::Array(values) if values.len() <= 4_096 => {
             for item in values {
                 validate_tree(item, depth + 1)?;
@@ -387,6 +389,16 @@ pub(crate) fn device_certificate_value(value: &DeviceCertificate) -> Value {
         (5, uint(value.expires_at_ms)),
         (6, Value::Bytes(value.signature.0.to_vec())),
     ])
+}
+
+impl DeviceCertificate {
+    /// The signed certificate object as nested in a v1 hello or device directory.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, AslError> {
+        let value = device_certificate_value(self);
+        let bytes = cbor2::to_canonical_vec(&value).map_err(|_| AslError::InvalidMessage)?;
+        device_certificate(value)?;
+        Ok(bytes)
+    }
 }
 
 fn feature(value: Value) -> Result<Feature, AslError> {
@@ -878,45 +890,57 @@ fn decode_identity_proof(mut fields: Fields) -> Result<WireFrame, AslError> {
 }
 
 fn decode_pairing_invite(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4, 5, 6, 7])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8])?;
     let invite_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let inviter = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
     let target = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
     let expires_at_ms = as_u64(take(&mut fields, 5)?)?;
-    let token = byte_string(take(&mut fields, 6)?, 16, 256)?;
+    let nonce = Hash32(fixed_bytes::<32>(take(&mut fields, 6)?)?);
     let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 7)?)?);
+    let note = match take(&mut fields, 8)? {
+        Value::Text(note) if note.len() <= MAX_PAIRING_NOTE_BYTES => note,
+        _ => return invalid(),
+    };
     finish(fields)?;
-    if expires_at_ms > MAX_TIME_MS {
+    if expires_at_ms > MAX_TIME_MS
+        || invite_id.0 == [0; 16]
+        || inviter == target
+        || nonce.0 == [0; 32]
+    {
         return invalid();
     }
+    validate_pairing_note(&note)?;
     Ok(WireFrame::PairingInvite(PairingInvite {
         invite_id,
         inviter,
         target,
         expires_at_ms,
-        token,
+        nonce,
+        note,
         signature,
     }))
 }
 
 fn decode_pairing_exchange(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4, 5, 6, 7])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8])?;
     let exchange_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let agent_id = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
     let peer_id = peer_id(take(&mut fields, 4)?)?;
-    let attempt = bounded_uint::<u8>(take(&mut fields, 5)?, 5)?;
-    if attempt == 0 {
+    let attempt = bounded_uint::<u8>(take(&mut fields, 5)?, 1)?;
+    if exchange_id.0 == [0; 16] || attempt != 1 {
         return invalid();
     }
-    let payload = byte_string(take(&mut fields, 6)?, 1, 4_096)?;
+    let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 6)?)?);
     let transcript_hash = Hash32(fixed_bytes::<32>(take(&mut fields, 7)?)?);
+    let accepted = as_bool(take(&mut fields, 8)?)?;
     finish(fields)?;
     Ok(WireFrame::PairingExchange(PairingExchange {
         exchange_id,
         agent_id,
         peer_id,
         attempt,
-        payload,
+        accepted,
+        signature,
         transcript_hash,
     }))
 }
@@ -1160,16 +1184,18 @@ fn encode_value(frame: &WireFrame) -> Value {
             (3, Value::Bytes(value.inviter.0.to_vec())),
             (4, Value::Bytes(value.target.0.to_vec())),
             (5, uint(value.expires_at_ms)),
-            (6, Value::Bytes(value.token.clone())),
+            (6, Value::Bytes(value.nonce.0.to_vec())),
             (7, Value::Bytes(value.signature.0.to_vec())),
+            (8, Value::Text(value.note.clone())),
         ]),
         WireFrame::PairingExchange(value) => entries.extend([
             (2, Value::Bytes(value.exchange_id.0.to_vec())),
             (3, Value::Bytes(value.agent_id.0.to_vec())),
             (4, Value::Bytes(value.peer_id.as_bytes().to_vec())),
             (5, uint(u64::from(value.attempt))),
-            (6, Value::Bytes(value.payload.clone())),
+            (6, Value::Bytes(value.signature.0.to_vec())),
             (7, Value::Bytes(value.transcript_hash.0.to_vec())),
+            (8, Value::Bool(value.accepted)),
         ]),
         WireFrame::GroupEnvelope(value) => entries.extend([
             (2, Value::Bytes(value.message_id.0.to_vec())),

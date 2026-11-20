@@ -78,6 +78,27 @@ impl SnapshotBroker {
         audience: &Audience,
         max_snapshot_bytes: u64,
     ) -> Result<GrantId, AslError> {
+        self.authorize_directory_with_derivation(
+            root,
+            extensions,
+            audience,
+            max_snapshot_bytes,
+            false,
+        )
+    }
+
+    /// Explicitly authorizes derived records to inherit public disclosure from this source.
+    pub fn authorize_directory_with_derivation(
+        &mut self,
+        root: &Path,
+        extensions: &[String],
+        audience: &Audience,
+        max_snapshot_bytes: u64,
+        allow_derived_disclosure: bool,
+    ) -> Result<GrantId, AslError> {
+        if allow_derived_disclosure && audience != &Audience::Public {
+            return Err(AslError::PolicyDenied);
+        }
         let rules = SourceRules::new(
             extensions.iter().cloned(),
             max_snapshot_bytes.min(MAX_FILE_BYTES),
@@ -96,10 +117,10 @@ impl SnapshotBroker {
         let extensions =
             serde_json::to_string(extensions).map_err(|_| AslError::InvalidPolicyState)?;
         let tx = immediate(&mut self.store.connection)?;
-        tx.execute("INSERT INTO grants(grant_id,root_path,volume_id,root_file_id,extensions_json,audience,group_id,model_policy,max_snapshot_bytes,status,created_at_ms)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,'never',?8,'active',?9)",
+        tx.execute("INSERT INTO grants(grant_id,root_path,volume_id,root_file_id,extensions_json,audience,group_id,model_policy,max_snapshot_bytes,status,created_at_ms,allow_derived_disclosure)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,'never',?8,'active',?9,?10)",
             params![key,root.to_str().ok_or(AslError::InvalidStorageRoot)?,format!("{:016x}",cap.identity().volume_serial),
-                hex::encode(cap.identity().file_id),extensions,kind,group,cap_bytes,current_time_ms()]).map_err(database_error)?;
+                hex::encode(cap.identity().file_id),extensions,kind,group,cap_bytes,current_time_ms(),allow_derived_disclosure]).map_err(database_error)?;
         if let Audience::Peers(agents) = audience {
             for agent in agents {
                 tx.execute(
@@ -120,6 +141,7 @@ impl SnapshotBroker {
         if tx.execute("UPDATE grants SET status='revoked',epoch=epoch+1 WHERE grant_id=?1 AND status='active'",[&key]).map_err(database_error)? != 0 {
             tx.execute("UPDATE resources SET active=0,updated_at_ms=?2 WHERE grant_id=?1 AND active=1",
                        params![key,current_time_ms()]).map_err(database_error)?;
+            super::knowledge::invalidate_derived_for_grant(&tx, &key, current_time_ms())?;
             bump_revision(&tx)?;
         }
         tx.commit().map_err(database_error)

@@ -319,6 +319,26 @@ fn rejects_unknown_enumerations_and_out_of_range_pairing_attempts() {
 }
 
 #[test]
+fn pairing_note_is_one_bounded_line_and_counts_unicode_characters() {
+    let mut invite = sample_frames()
+        .into_iter()
+        .find(|frame| matches!(frame, WireFrame::PairingInvite(_)))
+        .unwrap();
+    let WireFrame::PairingInvite(invite) = &mut invite else {
+        panic!("pairing fixture must be an invite");
+    };
+
+    invite.note = "中".repeat(120);
+    assert!(encode_frame(&WireFrame::PairingInvite(invite.clone())).is_ok());
+    invite.note = "中".repeat(121);
+    assert!(encode_frame(&WireFrame::PairingInvite(invite.clone())).is_err());
+    invite.note = "First. Second.".into();
+    assert!(encode_frame(&WireFrame::PairingInvite(invite.clone())).is_err());
+    invite.note = "Line one\u{2028}line two".into();
+    assert!(encode_frame(&WireFrame::PairingInvite(invite.clone())).is_err());
+}
+
+#[test]
 fn acknowledgement_matches_the_fixed_cbor_wire_vector() {
     let frame = sample_frames()[7].clone();
     let encoded = encode_frame(&frame).unwrap();

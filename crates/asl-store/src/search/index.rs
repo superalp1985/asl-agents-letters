@@ -61,7 +61,7 @@ impl PreparedIndex {
     ) -> Result<(), AslError> {
         let key = hex::encode(key.0.0);
         let row: i64 = db.query_row("UPDATE resources SET title=?3,summary=?4,tags_json=?5
-            WHERE resource_key=?1 AND content_id=?2 AND origin='local' AND active=1
+            WHERE resource_key=?1 AND content_id=?2 AND origin IN ('local','derived') AND active=1
             AND EXISTS(SELECT 1 FROM grants g WHERE g.grant_id=resources.grant_id
                 AND g.status='active' AND g.epoch=resources.source_grant_epoch)
             AND EXISTS(SELECT 1 FROM snapshots s WHERE s.content_id=resources.content_id AND s.state='ready')

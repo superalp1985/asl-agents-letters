@@ -1,5 +1,5 @@
 schema_version = 1
-home = 'E:\ASL\data'
+# The executable reads the user's absolute data directory from ASL_HOME.
 portable = true
 fallback_to_system_profile = false
 
@@ -62,6 +62,7 @@ approved_provider_ids = []
 
 [transfer_approval]
 upload_mode = "ask"
+# This example opts in to per-file confirmation. The local inbox default is automatic.
 download_mode = "ask"
 request_timeout_seconds = 300
 

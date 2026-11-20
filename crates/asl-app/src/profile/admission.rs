@@ -8,7 +8,7 @@ use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Id128, PeerId},
-    protocol::{Hello, IdentityProof, WireFrame},
+    protocol::{Hello, IdentityProof, PairingExchange, PairingInvite, WireFrame},
     record::{RecordKind, RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
@@ -16,6 +16,8 @@ use rand::{TryRng, rngs::SysRng};
 use crate::{
     chain::{DurableIdentityResolver, IdentityResolution, IdentityResolver, RegistryStatus},
     network::{NetworkCommand, NetworkEvent},
+    pairing::verify_incoming_invite,
+    transfer::{MatchedBulkResponse, VerifiedFetchManifest},
 };
 
 use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
@@ -118,6 +120,7 @@ pub enum AdmittedNetworkEvent {
     },
     PeerDisconnected {
         connection_id: [u8; 16],
+        peer_id: Option<PeerId>,
         agent_id: Option<AgentId>,
     },
     ControlRequest {
@@ -132,6 +135,25 @@ pub enum AdmittedNetworkEvent {
         request_id: [u8; 16],
         response: WireFrame,
     },
+    PairingInviteReceived {
+        connection_id: [u8; 16],
+        agent_id: AgentId,
+        response_id: [u8; 16],
+        invite: PairingInvite,
+    },
+    PairingExchangeReceived {
+        connection_id: [u8; 16],
+        agent_id: AgentId,
+        request_id: [u8; 16],
+        invite: PairingInvite,
+        exchange: PairingExchange,
+    },
+    PairingAccepted {
+        agent_id: AgentId,
+    },
+    PairingDeclined {
+        agent_id: AgentId,
+    },
     BulkRequest {
         connection_id: [u8; 16],
         agent_id: AgentId,
@@ -141,11 +163,16 @@ pub enum AdmittedNetworkEvent {
     BulkResponse {
         connection_id: [u8; 16],
         agent_id: AgentId,
+        peer_id: PeerId,
+        request_id: [u8; 16],
         response: BulkResponse,
     },
+    BulkTransferResponse(MatchedBulkResponse),
+    FetchManifestReceived(VerifiedFetchManifest),
     RequestFailed {
         connection_id: [u8; 16],
         agent_id: AgentId,
+        peer_id: PeerId,
         request_id: [u8; 16],
         protocol: crate::ipc::NetworkProtocol,
         code: crate::ipc::NetworkErrorCode,
@@ -340,7 +367,7 @@ impl CoreAdmission {
                     .events
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
-            NetworkEvent::DiscoveryCandidate { .. } => {}
+            NetworkEvent::DiscoveryCandidate { .. } | NetworkEvent::DhtProviders { .. } => {}
             NetworkEvent::DhtRecordCandidate {
                 candidate_id,
                 key,
@@ -351,15 +378,20 @@ impl CoreAdmission {
                 peer_id,
             } => self.connected(connection_id, peer_id, &mut batch),
             NetworkEvent::PeerDisconnected { connection_id } => {
-                let agent_id = self.peers.remove(&connection_id).and_then(|mut peer| {
-                    let agent = peer.admitted_agent;
-                    peer.session.close();
-                    agent
-                });
+                let (peer_id, agent_id) =
+                    self.peers
+                        .remove(&connection_id)
+                        .map_or((None, None), |mut peer| {
+                            let agent = peer.admitted_agent;
+                            let peer_id = peer.session.peer_id().clone();
+                            peer.session.close();
+                            (Some(peer_id), agent)
+                        });
                 self.pending_proofs
                     .retain(|pending| *pending != connection_id);
                 batch.events.push(AdmittedNetworkEvent::PeerDisconnected {
                     connection_id,
+                    peer_id,
                     agent_id,
                 });
             }
@@ -395,6 +427,67 @@ impl CoreAdmission {
                 connection_id,
                 proof,
             } => self.queue_proof(connection_id, proof, &mut batch),
+            NetworkEvent::UnverifiedPairingInvite {
+                connection_id,
+                response_id,
+                invite,
+            } => {
+                let remote_agent = self.current_agent(connection_id, now_ms);
+                let verified = remote_agent.and_then(|agent_id| {
+                    self.verified_controller(agent_id, now_ms)
+                        .ok()
+                        .and_then(|controller| {
+                            verify_incoming_invite(
+                                &invite,
+                                agent_id,
+                                self.local_hello.agent_id,
+                                now_ms,
+                                controller,
+                            )
+                            .ok()
+                            .map(|()| agent_id)
+                        })
+                });
+                if let Some(agent_id) = verified {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingInviteReceived {
+                            connection_id,
+                            agent_id,
+                            response_id,
+                            invite,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
+            }
+            NetworkEvent::UnverifiedPairingExchangeResponse {
+                connection_id,
+                request_id,
+                invite,
+                exchange,
+            } => {
+                let remote_agent = self.current_agent(connection_id, now_ms);
+                if let Some(agent_id) = remote_agent.filter(|agent_id| {
+                    invite.inviter == self.local_hello.agent_id
+                        && invite.target == *agent_id
+                        && request_id == invite.invite_id.0
+                        && exchange.exchange_id == invite.invite_id
+                        && exchange.agent_id == *agent_id
+                }) {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingExchangeReceived {
+                            connection_id,
+                            agent_id,
+                            request_id,
+                            invite,
+                            exchange,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
+            }
             NetworkEvent::UnverifiedControlRequest {
                 connection_id,
                 response_id,
@@ -474,12 +567,16 @@ impl CoreAdmission {
             }
             NetworkEvent::UnverifiedBulkResponse {
                 connection_id,
+                request_id,
                 response,
             } => {
-                if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                if let Ok((agent_id, peer_id)) = self.admitted_peer_identity(connection_id, now_ms)
+                {
                     batch.events.push(AdmittedNetworkEvent::BulkResponse {
                         connection_id,
                         agent_id,
+                        peer_id,
+                        request_id,
                         response,
                     });
                 } else {
@@ -506,10 +603,13 @@ impl CoreAdmission {
                     {
                         self.close(connection_id, &mut batch);
                     }
-                } else if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                } else if let Ok((agent_id, peer_id)) =
+                    self.admitted_peer_identity(connection_id, now_ms)
+                {
                     batch.events.push(AdmittedNetworkEvent::RequestFailed {
                         connection_id,
                         agent_id,
+                        peer_id,
                         request_id,
                         protocol,
                         code,
@@ -879,6 +979,72 @@ impl CoreAdmission {
             .ok_or(AslError::InvalidIdentity)
     }
 
+    pub(crate) fn admitted_peer_identity(
+        &mut self,
+        connection_id: [u8; 16],
+        now_ms: u64,
+    ) -> Result<(AgentId, PeerId), AslError> {
+        let agent_id = self.require_agent(connection_id, now_ms)?;
+        let peer_id = self
+            .peers
+            .get(&connection_id)
+            .ok_or(AslError::InvalidIdentity)?
+            .session
+            .peer_id()
+            .clone();
+        Ok((agent_id, peer_id))
+    }
+
+    pub(crate) fn register_manifest_source(
+        &mut self,
+        store: &mut asl_store::Store,
+        manifest: &VerifiedFetchManifest,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if manifest.expires_at_ms <= now_ms {
+            return Err(AslError::ExpiredMessage);
+        }
+        let connection = manifest.connection_id;
+        let agent = self.require_agent(connection, now_ms)?;
+        let source = self
+            .direct_requester(connection, agent)
+            .ok_or(AslError::InvalidIdentity)?;
+        if source.agent != manifest.agent_id || source.peer != manifest.peer_id {
+            return Err(AslError::InvalidIdentity);
+        }
+        // This hello cannot change after finish_proof checked it against the signed
+        // directory. require_agent just rechecked the session and its chain state.
+        let hello = self
+            .peers
+            .get(&connection)
+            .and_then(|p| p.remote_hello.as_ref())
+            .ok_or(AslError::InvalidDeviceCertificate)?;
+        let device_key = transport_ed25519_key(&source.peer)?;
+        store.register_transfer_peer(
+            &source,
+            self.resolver.deployment().chain_id,
+            &hello.device_certificate,
+            device_key,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn verified_controller(
+        &mut self,
+        agent_id: AgentId,
+        now_ms: u64,
+    ) -> Result<[u8; 20], AslError> {
+        match self.resolver.resolve(agent_id, now_ms / 1_000) {
+            IdentityResolution::Verified(identity)
+                if identity.agent_id() == agent_id
+                    && identity.state().status == RegistryStatus::Active =>
+            {
+                Ok(identity.state().controller)
+            }
+            _ => Err(AslError::InvalidIdentity),
+        }
+    }
+
     pub(crate) fn direct_requester(
         &self,
         connection_id: [u8; 16],
@@ -922,6 +1088,13 @@ impl CoreAdmission {
         admitted
     }
 
+    pub(crate) fn connecting_peers(&self) -> Vec<PeerId> {
+        self.peers
+            .values()
+            .map(|peer| peer.session.peer_id().clone())
+            .collect()
+    }
+
     fn close(&mut self, connection_id: [u8; 16], batch: &mut AdmissionBatch) {
         self.pending_proofs
             .retain(|pending| *pending != connection_id);
@@ -938,6 +1111,20 @@ impl CoreAdmission {
                 .push(NetworkCommand::CloseConnection { connection_id });
         }
     }
+}
+
+fn transport_ed25519_key(peer: &PeerId) -> Result<[u8; 32], AslError> {
+    let invalid = || AslError::InvalidDeviceCertificate;
+    let transport = libp2p_identity::PeerId::from_bytes(peer.as_bytes()).map_err(|_| invalid())?;
+    if transport.as_ref().code() != 0 {
+        return Err(invalid());
+    }
+    let key = libp2p_identity::PublicKey::try_decode_protobuf(transport.as_ref().digest())
+        .map_err(|_| invalid())?;
+    if key.to_peer_id() != transport {
+        return Err(invalid());
+    }
+    Ok(key.try_into_ed25519().map_err(|_| invalid())?.to_bytes())
 }
 
 fn mark_hello_response_seen(
@@ -967,6 +1154,19 @@ fn fresh_id() -> Result<[u8; 16], AslError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_device_key_requires_an_embedded_ed25519_key() {
+        let mut hashed = vec![0x12, 32];
+        hashed.extend([7; 32]);
+        for bytes in [hashed, vec![0, 1, 0xff]] {
+            let peer = PeerId::from_bytes(bytes).unwrap();
+            assert!(matches!(
+                transport_ed25519_key(&peer),
+                Err(AslError::InvalidDeviceCertificate)
+            ));
+        }
+    }
 
     #[test]
     fn proof_budget_limits_bursts_and_refills_at_two_per_second() {

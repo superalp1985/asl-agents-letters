@@ -469,3 +469,16 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / E 盘：`cargo test -p asl-app -p asl-store -p asl-agent -p asl-policy --all-targets --locked --offline -- --test-threads=1`：424 项通过、0 失败、4 项忽略。相同四包的严格 Clippy 与 `cargo fmt --all -- --check` 通过。未运行全 workspace。
 - 真实 SQLite 用例验证默认/只浏览静默、显式回答、仅回传匹配主题、换设备和重启不会重答、跨重启三轮/六条消息预算、4096 个无权 peer 资源不挤占授权候选、v4 到 v5 迁移、联系人/目录授权撤销、本机切换关闭，以及持久目录序号变更否决旧设备会话。现有本地传输用例验证 kind 43 编解码、过期回复不消耗句柄，以及有效结构化回答沿原连接返回。
 - 独立代码复核后补上持久链目录绑定、非阻塞有界交接与 Net 期限检查。仍未验证真实公网节点或链部署、持续管道背压、GUI、模型、传输及群；会话轮次跨重启和跨 Agent 公平排队仍是待办。
+
+### 2026-11-20 T28：类型化派生经验与权限继承
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-agent -p asl-app -p asl-policy -p asl-store --all-targets --locked --offline -- --test-threads=1`：438 项通过、0 失败、4 项忽略。
+- 补入派生直连搜索回归后，`cargo test -p asl-agent --test knowledge_labels -p asl-store --test visible_search --locked --offline`：12 项通过、0 失败；其中验证多来源公开/私有继承、源撤权级联、派生来源策略装载和直连检索。
+- 相同四包 `cargo clippy --all-targets --locked --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。验证范围仅为本机存储/策略/Agent/app 切片；未运行全 workspace、真实模型、后台经验收集、GUI、网络发布或公网互通。
+
+### 2026-11-20 T20/T21：Core 发送端快照读取接线
+
+- 在 `crates/asl-app/src/transfer.rs` 新增 Windows 集成用例：通过真实 `LocalLibraries` 导入本地公开 Markdown，执行 FetchGrant 签发与 Inline Bulk 服务，断言请求 ID、成功状态、原始字节和 BLAKE3。初次运行发现测试夹具的 AgentId 存储编码错误，修正为仓库使用的 Base58 后单项测试通过。
+- Windows x64 / Rust 1.100.0 / E 盘 Cargo 与 target 缓存、离线：`cargo test -p asl-app -p asl-store -p asl-transfer -p asl-policy --all-targets --locked --offline -- --test-threads=1`：416 项通过、0 失败、4 项忽略。忽略项为既有 30 秒重扫计时器 1 项、外部 TCP/UDP receiver 2 项、子进程入口 1 项。
+- `cargo clippy -p asl-app -p asl-store -p asl-transfer -p asl-policy --all-targets --locked --offline -- -D warnings`、`cargo fmt --all -- --check` 和针对本轮文件的 `git diff --check` 均通过。Cargo 提示既有 `proc-macro-error2 2.0.1` 将在未来 Rust 版本被拒绝；本轮未升级该依赖。
+- 该用例只覆盖 Core 发送端快照路径；接收端下载流程、Ask 授权界面、真实 TCP/QUIC 文件往返、多来源下载和公网验证均未覆盖。未提交或推送。

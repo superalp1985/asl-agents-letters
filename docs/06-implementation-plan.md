@@ -440,11 +440,19 @@ T18 有界查询路由切片（2026-11-19）：新增 `asl-agent::QueryRouter` �
 
 T18 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-agent --all-targets --locked --offline` 通过 8 项、0 失败；`cargo test -p asl-agent --test bounded_queries --locked --offline` 通过 3 项、0 失败。覆盖联系人优先、contacts-only 不泄露 DHT term、DHT provider 16 节点上限、查询超时、入站重放去重和环形路由不转发。`cargo clippy -p asl-agent --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 和 `git diff --check` 均通过。真实 DHT provider、SQLite 本地检索、网络三节点和 GUI 未在本轮验收。
 
-### T18a — 数字短码与 PAKE 配对
+T18 Public provider 查询与准入后直询切片（2026-11-20）：Public scope 现在通过 Net/Core IPC kind 44/45 发起有界 Kademlia provider lookup；每次查询最多 3 个概念 key，Net 单次最多返回 20 个去重 provider 候选，查询期限沿用 10 秒任务期限，Net DHT lookup 超时为 8 秒。Net 仅返回经过当前地址策略筛选的 provider/routing 端点或本机已配置 relay 可达标志；Core 将 PeerId 和地址视为候选，拨号后必须等 `CoreAdmission` 给出通过链身份、根签名设备证书和当前目录校验的活动连接，才发送结构化 Query。直询只在最多 4 个出站节点并发范围内进行，同一 PeerId 最多保留一条待完成控制请求。默认 LoopbackOnly 不因 Public scope 放宽；拨号时 Net 再次按锁定的本地地址策略核验。IPC 扩展不改变 ASL/1 应用线帧。当前没有 bootstrap 配置/节点入口，资源 provider 发布与资源索引接线未完成；因此不表示冷启动公网 DHT、跨网段/NAT 穿透或公网多节点互通已可用。
 
-依赖 T06、T14、T17。创建 `asl-net/src/pairing` 与身份解析 adapter。持久 16 位短码只查询候选；首次核验使用二维码/签名邀请或有期限的一次性 PAKE 码。PAKE 依赖需在本任务锁定前审查维护状态、许可和 API；不自行设计或拼接密码学协议。
+T18 Public provider 查询集中验收（2026-11-20，Windows x64，Rust 1.100.0，E 盘缓存与测试临时目录，离线）：`cargo test -p asl-agent -p asl-app -p asl-net --all-targets --locked --offline` 通过 290 项、0 失败、2 项忽略（`asl-agent` 34 项；`asl-app` 199 项、1 项忽略；`asl-net` 57 项、1 项忽略）。覆盖 DHT provider IPC 编解码和角色边界、provider 地址策略/PeerId 绑定、Public 查询只在身份准入连接后发送、TCP/QUIC 错误 PeerId 拒绝、拨号失败按 operation ID 回报。`cargo clippy -p asl-agent -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、`git diff --check` 均通过。两项忽略分别是依赖生产 30 秒扫描周期的本地库测试及仅供子进程启动的 transport helper；Cargo 仍提示 `proc-macro-error2 2.0.1` 存在未来 Rust 兼容性问题。本轮未运行真实多节点 DHT、公网 bootstrap、跨网互通或资源 provider 发布验收。
 
-验收：持久短码碰撞返回多个未核验候选；伪造声明、过期码、错误口令和 transcript/PeerId 不匹配拒绝；在线尝试最多 5 次，成功/过期后邀请码不可重放；配对成功只建立本地 AgentId pin，不隐式扩大目录授权。
+### T18a — 数字短码与签名邀请配对
+
+依赖 T06、T14、T17。创建 `asl-net/src/pairing`、签名邀请验证和本地联系人 pin 存储。持久 16 位短码只查询候选；候选通过 CoreAdmission 与链验证后再以 AgentId 匹配。首次配对使用目标绑定、身份根签名、至少 256-bit 随机 nonce 和短时效邀请；必须经过本机授权，成功只创建本地 AgentId pin，不写入资源授权。低熵口令 PAKE 暂不启用，除非有与目标 RFC 和当前 crate 版本对应的安全审计/规范一致性证据。
+
+验收：持久短码碰撞保留多个候选，错误 AgentId 不匹配；伪造签名、错误目标、过期邀请和 transcript/PeerId 不匹配拒绝；邀请回执持久化且不可重放；配对成功只建立本地 AgentId pin，不隐式扩大目录授权。
+
+T18a 配对核心切片（2026-11-20）：新增有界短码 provider 候选集与 CoreAdmission 后 AgentId 派生码过滤；新增 256-bit 随机、目标绑定、身份根签名邀请及针对双方 PeerId 的响应 transcript 签名；只有显式 `PairingAuthorization::Approve` 可接受邀请。SQLite schema v6 新增与 `authorized_contacts` 隔离的 `paired_contacts` 和一次性邀请回执，接受邀请只 pin AgentId，不创建资源 grant。低熵 PAKE 未加入，尚无满足本任务证据门槛的依赖决定。
+
+T18a 配对 request-response 接线与提示限流（2026-11-20）：邀请和接受/拒绝响应已接入 `/asl/pair/1.0.0`、Net/Core IPC、Supervisor admission 流程。邀请可附一条签名覆盖的可选单句说明，最多 120 个 Unicode 字符；提示记录升级到 SQLite schema v7，按 AgentId 每 24 小时最多展示 1 次，全机每小时最多展示 20 次，最多 5 个并行待处理提示。超限邀请签名拒绝且不 pin；回答命令必须精确匹配当前待处理邀请、连接和响应句柄。完整配对 GUI 仍未实现，本轮不声明端到端 UI 已完成。
 
 ### T19 — 会话、消息与有限 outbox
 
@@ -486,9 +494,11 @@ T20 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-transfer --test bulk_codec
 ```
 
-T21 已完成传输授权规划切片（2026-11-19）：复用现有 `asl-net` 固定 91 字节 bulk codec，在 `asl-transfer::bulk` 先验证当前 Peer 的 lease 和 manifest content ID，再按已验证 manifest 生成 `Manifest`、`Chunk` 或 `Inline` 的固定读取计划。chunk offset/length 由固定 1 MiB 块尺寸和 manifest 推导，不能由远端指定任意范围；越界块、非零固定 index、超 32 KiB inline、错误 manifest、错误 lease 和过期授权统一拒绝。该模块不接收路径、不按裸 hash 读盘，也不执行实际文件 IO。
+T21 传输授权规划切片（2026-11-19）：复用现有 `asl-net` 固定 91 字节 bulk codec，在 `asl-transfer::bulk` 先验证当前 Peer 的 lease 和 manifest content ID，再按已验证 manifest 生成 `Manifest`、`Chunk` 或 `Inline` 的固定读取计划。chunk offset/length 由固定 1 MiB 块尺寸和 manifest 推导，不能由远端指定任意范围；越界块、非零固定 index、超 32 KiB inline、错误 manifest、错误 lease 和过期授权统一拒绝。该模块不接收路径、不按裸 hash 读盘，也不执行实际文件 IO。
 
 T21 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-transfer --all-targets --offline` 通过 2 项、0 失败；`cargo clippy -p asl-transfer --all-targets --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。真实 bulk handler、manifest/chunk 磁盘读取、响应请求 ID 状态机、多来源调度和公网传输仍待后续 T22/T23，不能将本切片写成完整文件服务已完成。
+
+T20/T21 Core 发送端接线（2026-11-20）：新增 `asl-app::TransferService`，通过已准入连接的 `DirectRequester` 重新读取授权快照、签发短期 FetchGrant，并在 bulk 请求时重验 ReadChunk Permit/lease；manifest、固定块或 inline 内容只从受保护的 `LocalLibraries` 快照句柄读取，发送前再次核对授权版本，块或整文件 hash 错误不会返回内容。Windows 集成用例覆盖本地公开 `.md` 导入、FetchGrant 与 Inline Bulk 响应。Windows x64 / Rust 1.100.0 / E 盘缓存离线集中验证：四个相关 crate 全目标测试 416 项通过、4 项按既有环境/子进程要求忽略；严格 Clippy、全 workspace 格式检查和本次文件差异检查通过。接收侧 Bulk 响应关联已接入 Core，但 manifest 消费、下载目录授权/每次询问及多来源持久化调度仍未实现，因此 T20–T24 完整下载链路仍未完成。
 
 ### T22 — 纯多来源调度器
 
@@ -514,9 +524,29 @@ T22 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存�
 cargo test -p asl-store --test transfer_resume --offline
 ```
 
-T23 已完成下载持久化、恢复与额度切片（2026-11-19）：新增 SQLite schema v4 的 `transfer_cooldowns`，复用 `reservations`、`transfers`、`transfer_sources` 和 `transfer_chunks` 保存下载任务、来源、块状态及 24 小时完整性冷却。`asl-store::transfers::DownloadBroker` 在创建任务时先检查 write grant、全局/任务/陌生来源额度并提交 held reservation，再创建 manifest 与 `.part`；块写入必须通过 manifest 推导的精确长度和 BLAKE3，文件 `sync_all` 后才把块置为 `durable`。重启会重置 assigned、重验 durable 块、释放过期/撤权/缺失文件任务，并在所有块完成后重验整文件 hash、原子移动到授权目标。目标冲突不覆盖已有文件；完整 hash 不一致会释放预留、清理暂存并冷却该 content ID。
+T23 已完成下载持久化、恢复与额度切片（2026-11-19）：新增 SQLite schema v4 的 `transfer_cooldowns`，复用 `reservations`、`transfers`、`transfer_sources` 和 `transfer_chunks` 保存下载任务、来源、块状态及 24 小时完整性冷却。`asl-store::transfers::DownloadBroker` 在创建任务时先检查 write grant、全局/任务/陌生来源额度并提交 held reservation，再创建 `.part`；manifest 字节与暂存文件身份由 schema v10 持久化。块写入必须通过 manifest 推导的精确长度和 BLAKE3，文件 `sync_all` 后才把块置为 `durable`。重启会重置 assigned、重验 durable 块、释放过期/撤权/缺失文件任务，并在所有块完成后重验整文件 hash，再经固定 inbox 目录句柄原子重命名至授权目标。暂存文件使用 create-new，恢复时按文件身份重新打开，目标冲突不覆盖已有文件；完整 hash 不一致会释放预留、清理暂存并冷却该 content ID。
 
 T23 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-store --all-targets --offline` 通过 86 项、0 失败、1 项忽略；新增 `transfer_resume` 4 项覆盖 durable 块跨重启、损坏块回退、完整 hash 冷却和额度先于 `.part` 创建。`cargo clippy -p asl-store --all-targets --offline -- -D warnings`、`cargo fmt --all` 与 `git diff --check` 通过。尚未把 DownloadBroker 接到真实 Core/Net 请求、权限询问 UI、T22 内存调度器或公网多来源传输；磁盘满/掉电只覆盖到 SQLite 与文件同步边界，不能据此声称真实公网下载已完成。
+
+T23 收件目录写入补全（2026-11-20）：Windows `WriteGrant` 通过固定目录句柄 create-new、按文件身份重开，并以同目录不覆盖原子重命名完成暂存文件；SQLite schema v10 保存 manifest 字节及暂存文件身份，恢复不再依赖单独 manifest 路径。收件目录额度在同一预留事务中累计计算 held 与 consumed 下载，超额不会创建暂存文件。
+
+T23 收件目录写入集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo +1.100.0 test -q -p asl-policy -p asl-store -p asl-transfer -p asl-app --all-targets --locked --offline -- --test-threads=1` 全部可运行目标通过，0 失败；4 项按设计忽略（受控公网 TCP/UDP 端点、30 秒生产重扫计时器、子进程入口）。`cargo +1.100.0 clippy -q -p asl-policy -p asl-store -p asl-transfer -p asl-app --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check` 和 `git diff --check` 均通过。新增覆盖目录移动期间的固定句柄、暂存文件身份/替换、目标冲突不覆盖、未分配 Peer 拒绝写入及 held/consumed 下载累计额度。接收端下载协调器、manifest 消费、块调度和逐次询问流程仍未接入；本次不表示 T20–T24 端到端文件下载已完成。
+
+T23 接收侧 Bulk 响应关联（2026-11-20）：IPC kind 27 现在保留 Net 端原始请求 ID；Core 准入事件同时携带已验证连接上的 AgentId 与设备 PeerId。Core 发送 Bulk 请求前由 `TransferService` 的一次性待决表绑定请求操作、content ID、lease、连接、AgentId、PeerId 和 transport timeout；只有外层 IPC 请求 ID 与 BulkResponse 内 request ID 均匹配且身份/连接/期限一致时，响应才以 `BulkTransferResponse` 结构事件交给本机 handler。失败和断连只清除对应请求；重复、未知、错配或过期响应不推进状态。ASL blob wire frame 未变。此切片仅实现响应关联和分发，不包含 FetchGrant 到 manifest 的接收流程、DownloadBroker 写入、调度器、恢复、多来源或用户询问；T23/T20–T24 仍未完成。
+
+T23 接收侧 Bulk 响应关联集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘 Cargo 缓存、离线）：`cargo +1.100.0 test -p asl-app --lib bulk_response_tests --locked --offline` 通过 2 项，覆盖身份/连接/请求编号错配、重复、过期及 Bulk 失败关联；`cargo +1.100.0 test -p asl-app --test network_ipc --locked --offline` 通过 8 项，含 IPC 双请求编号不一致拒绝。`cargo +1.100.0 clippy -p asl-app -p asl-net --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt -p asl-app -p asl-net -- --check` 和本切片文件 `git diff --check` 通过。未运行 `asl-app` 全测试、全 workspace、真实 LAN/公网传输、MCP 或 GUI；不能据此宣称端到端下载完成。
+
+T23 接收清单切片（2026-11-20）：本机网络回调发出 `FetchRequest` 后，Core 按原始控制请求 ID 与当前连接的 AgentId、设备 PeerId 一次性关联 `FetchGrant`，不使用 Grant 自己的消息编号。核对内容及 lease 后复用 Bulk 请求表请求 manifest；只向本机交付内容 ID 与文件大小都匹配的 `FetchManifestReceived` 事件。`cargo +1.100.0 test -p asl-app --lib --test network_ipc --locked --offline -- --test-threads=1` 通过 188 项、0 失败，`asl-app` 全目标严格 Clippy 和格式检查通过。未启动默认后台拉取；待接入收件授权、下载任务持久化和块调度，再验收续传、多来源和真实节点。
+
+T22/T23 续传调度接口（2026-11-20）：下载库向协调层提供经恢复检查的 manifest、durable 块号及可用来源，并支持按任务、来源和块号撤销未完成分配，不增加耐久进度。调度器可以从 durable 块恢复，跳过已落盘块；写入失败的缓冲块可以退回 missing。陌生来源预留修复为全机共享额度；任一候选来源不在本机已授权联系人中即计入，所有来源均为空也计入。不能用登记设备、切换身份或混入授权联系人绕过。仍需将已准入来源按本机任务登记到下载库，并接通每次询问与存储工作线程；这些接口本身不构成已联网的续传。
+
+T22/T23 续传调度与额度验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo +1.100.0 test -p asl-store --test transfer_resume -p asl-transfer --lib --locked --offline -- --test-threads=1` 通过 65 项、0 失败；`asl-app`、`asl-store`、`asl-transfer` 全目标严格 Clippy 和三包格式检查通过。本轮没有运行全 workspace、带身份的两节点文件下载或公网验收。
+
+T23 本机直连收件确认（2026-11-20）：本机提供收件授权及文件名，Store 以一个入口处理授权内自动接收和显式询问。无活动授权不放行；待确认不创建任务、预留或 `.part`。确认不绑定会话令牌，绑定内容、大小、目录授权版本、文件名和来源集合；失效或拒绝的确认不可消费。`asl-core --downloads` 是本机控制入口，可查看或切换模式、列出申请、同意和拒绝，不执行传输恢复。批准不等于开始接收。[规则与期限](04-storage-policy.md)。
+
+T23 下载来源登记（2026-11-20）：本机发起的 Fetch 收到相符清单后，Core 重新核验当前连接和链状态，并通过同一事务登记真实 Ed25519 设备、公钥、规范 CBOR 证书与 PeerId。单纯握手、未请求响应和独立 Bulk 请求不登记；已撤销证书、同编号冲突或与已有证书不一致时丢弃本次清单，不借下载替换证书，也不授予联系人权限。经验证的清单可以交给 `LocalDownloads`；该接口重新检查 lease，且仅接收本机选择的收件目录和单个文件名。证书换发需要独立身份更新流程。
+
+本轮 Windows x64 / Rust 1.100.0 / `--locked --offline` 分批定向验收：`asl-policy` 库 21、`write_boundaries` 3、`asl-store` 库 46、`index_retention` 7、`transfer_resume` 19；`asl-app` 库 187、`asl-core` 1、`local_libraries` 4、`network_ipc` 8；`asl-types/schema_vectors` 4。共 300 通过、0 失败，1 项既有 30 秒重扫测试按设计忽略。上述四包全目标严格 Clippy 和格式检查通过。独立 Windows 进程测试覆盖列出、拒绝、批准真实本机请求，批准后仍由原 broker 创建并完成文件；来源登记走生产路由与本机链证明测试夹具。未验收 GUI、联网块调度、双节点完整下载或公网续传。
 
 ### T24 — Inline、PDF 与头像 helper
 
@@ -576,7 +606,7 @@ T27 直连集成（2026-11-20）：`Supervisor::run()` 已将认证连接上的 
 
 T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPort`，只接受本地类型化 `OutgoingTask` 且限 `ContactsOnly`；队列最多 16 项、同时运行最多 8 项。Core 从本机 `authorized_contacts` 与当前已准入会话的交集中，按本地授权顺序挑选现有在线联系人；没有通过身份准入的 PeerId 不进入查询路由。发送前仍由 `CoreAdmission` 对该连接重验链身份，再通过原 Net request-response 通道发送固定 CBOR `Query`。Answer、Offer、Error 只按 request ID/AgentId/连接关联，Answer/Offer 还须匹配 root task 与有效期限；Offer 只接受资源型任务。结果经有界结构事件端口回交调用方，不自动追问、不自动拉取文件，也不调用模型。QueryRouter 终结任务后释放状态槽。
 
-出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；仅向已在线且本地列入 `authorized_contacts` 的联系人直询。公共 scope/DHT provider 查询与候选地址拨号、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
+出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；contacts-only 只向已在线且本地列入 `authorized_contacts` 的联系人直询，Public scope 已接入 DHT provider 查询和准入后直询。bootstrap 配置/节点入口、资源 provider 发布、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
 
 ### T28 — 经验整理与权限继承
 
@@ -585,8 +615,13 @@ T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPor
 验收：local public 派生在规则授权后可发布；只要一个来源私有或远端不可复用即私有；循环/超深/源撤回后失效；模型不能把经验写成 policy 或 system prompt。写入只 create-new，受独立 write_grant 约束。
 
 ```text
-cargo test -p asl-agent --test knowledge_labels
+cargo test -p asl-agent --test knowledge_labels --locked
+cargo test -p asl-store --test visible_search --locked
 ```
+
+T28 实现切片（2026-11-20）：`KnowledgeRepository` 只保存已校验的类型化 claims，来源、时间和 `derived_unverified` 状态由本地生成；模型不能决定路径、公开性或验证标签。每个来源均需有效 `WriteDerived` permit；公开要求每个来源另有有效 `PublishRecord` permit，否则记录仅本地可见。派生文件通过固定目录身份的独立 `write_grant` 以 create-new 写入，并受额度约束；SQLite 持久化来源图、快照、索引与授权引用。来源文件失效、源 grant 撤销或写入 grant 撤销均级联停用派生后代并从 FTS 移除。直连检索加载派生来源策略并由现有策略引擎逐层核验。
+
+T28 集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo test -p asl-agent -p asl-app -p asl-policy -p asl-store --all-targets --locked --offline -- --test-threads=1` 通过 438 项，0 失败、4 项按环境/子进程用途忽略。之后新增的派生直连检索回归用例与完整 `visible_search` 目标共 11 项、`knowledge_labels` 1 项再次通过。相同四包的严格 Clippy 与全工作区 `cargo fmt --all -- --check` 通过。未运行全 workspace、真实模型、后台经验收集、GUI 或公网互通；本切片不代表端到端产品验收。
 
 ### T29 — 信任、贡献与公平队列
 
@@ -595,12 +630,16 @@ cargo test -p asl-agent --test knowledge_labels
 验收 `task/content/help_kind` 重复贡献只 1 条；incoming 垃圾资源不加贡献；换身份不能突破全局额度；preferred 不变 authorized_contacts；无授权的高分节点仍拒绝；可用性失败与恶意分开。
 
 ```text
-cargo test -p asl-agent --test reputation_is_not_authority
+cargo test -p asl-agent --test reputation_is_not_authority --locked
 ```
+
+T29 实现切片（2026-11-20）：SQLite v9 为远端资源增加本地来源 AgentId；只有任务完成、任务 AgentId 与资源来源一致、资源处于 active/verified 时才可登记贡献，同一 task/content/help_kind 唯一且全身份共用 24 小时 100 条上限。信任观察使用固定维度和本地证据 hash；直连请求结果记 availability，块 hash 成败记 integrity。偏好写入单独 `preferred_peers`，Agent 只对现有 authorized 联系人排序；超过 16 个时查询路由保留一个轮转探索位。资源导入/使用流程尚未接入来源归因，所以来源未知的旧资源不会计贡献。
+
+T29 集中验证（2026-11-20，Windows x64、Rust 1.100.0、E 盘缓存、离线）：`cargo test -p asl-agent -p asl-app -p asl-store --all-targets --locked --offline -- --test-threads=1` 全部通过；其中包含四项信誉/贡献专项验收及 app、store 全目标测试。三个 crate 的全目标严格 Clippy、全工作区格式检查及 `git diff --check` 均通过。此次验证不包含全 workspace、真实模型、来源 AgentId 的网络导入接线、GUI 或公网互通。
 
 ### T30 — 本机 stdio MCP
 
-依赖 T27、T29。创建 app mcp 和 CLI 子命令。
+依赖 T10、T20–T24、T27、T29。T20–T24 的授权、codec、调度和 SQLite 下载组件必须先接入真实 Core/Net 收发及本机下载授权；仅有独立组件不能满足 `asl_fetch`。创建 app mcp、本机受限 IPC 和 CLI 子命令。
 
 固定四工具，参数按 Agent 规范；输入 task/offer 必须属于当前本机授权会话，不接受任意路径/URL。
 

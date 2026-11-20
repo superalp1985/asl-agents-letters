@@ -164,7 +164,8 @@ pub fn sample_frames() -> Vec<WireFrame> {
             inviter: agent,
             target: AgentId([12; 32]),
             expires_at_ms: 200,
-            token: vec![13; 16],
+            nonce: Hash32([13; 32]),
+            note: "Pair.".into(),
             signature: Signature65([14; 65]),
         }),
         WireFrame::PairingExchange(PairingExchange {
@@ -172,7 +173,8 @@ pub fn sample_frames() -> Vec<WireFrame> {
             agent_id: agent,
             peer_id: peer,
             attempt: 1,
-            payload: vec![15; 64],
+            accepted: true,
+            signature: Signature65([15; 65]),
             transcript_hash: hash,
         }),
         WireFrame::GroupEnvelope(GroupEnvelope {

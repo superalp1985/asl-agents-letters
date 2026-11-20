@@ -4,16 +4,17 @@ use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
     relay::relay_endpoint_config,
-    transport::{DiscoveryCandidateState, TransportKind},
+    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
 };
 use asl_types::{
     error::AslError,
     ids::PeerId,
-    protocol::{IdentityProof, IdentityProofRequest, WireFrame},
+    protocol::{IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame},
 };
 
 use crate::{
     ipc::{IpcMessage, NetworkErrorCode, NetworkProtocol},
+    pairing::PairingAuthorization,
     profile::AdmittedNetworkEvent,
     supervisor::Supervisor,
 };
@@ -42,6 +43,22 @@ pub enum NetworkCommand {
         connection_id: [u8; 16],
         response_id: [u8; 16],
         proof: IdentityProof,
+    },
+    RequestPairing {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        invite: PairingInvite,
+    },
+    ReplyPairing {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        exchange: PairingExchange,
+    },
+    AnswerPairingInvite {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+        authorization: PairingAuthorization,
     },
     /// Caller must pass Hello to DeviceSession and admit the peer before
     /// delivering any subsequent application control frame to an Agent.
@@ -80,11 +97,15 @@ pub enum NetworkCommand {
         candidate_id: [u8; 16],
         accept: bool,
     },
+    FindProviders {
+        lookup_id: [u8; 16],
+        key: [u8; 32],
+    },
 }
 
 impl NetworkCommand {
-    pub(crate) fn into_ipc(self) -> IpcMessage {
-        match self {
+    pub(crate) fn into_ipc(self) -> Result<IpcMessage, AslError> {
+        Ok(match self {
             Self::Listen {
                 operation_id,
                 kind,
@@ -124,6 +145,25 @@ impl NetworkCommand {
                 response_id,
                 proof,
             },
+            Self::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            } => IpcMessage::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            },
+            Self::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            } => IpcMessage::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            },
+            Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
             Self::SendControl {
                 connection_id,
                 request_id,
@@ -186,7 +226,8 @@ impl NetworkCommand {
                 candidate_id,
                 accept,
             },
-        }
+            Self::FindProviders { lookup_id, key } => IpcMessage::FindProviders { lookup_id, key },
+        })
     }
 }
 
@@ -221,6 +262,11 @@ pub enum NetworkEvent {
         key: [u8; 32],
         value: Vec<u8>,
     },
+    DhtProviders {
+        lookup_id: [u8; 16],
+        status: DhtLookupStatus,
+        providers: Vec<DhtProviderCandidate>,
+    },
     /// The device transport is authenticated; the Agent identity is not.
     TransportConnected {
         connection_id: [u8; 16],
@@ -237,6 +283,17 @@ pub enum NetworkEvent {
     IdentityProofReceived {
         connection_id: [u8; 16],
         proof: IdentityProof,
+    },
+    UnverifiedPairingInvite {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+    },
+    UnverifiedPairingExchangeResponse {
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        invite: PairingInvite,
+        exchange: PairingExchange,
     },
     /// Untrusted until Core completes the chain identity and device-certificate gate.
     UnverifiedControlRequest {
@@ -256,6 +313,7 @@ pub enum NetworkEvent {
     },
     UnverifiedBulkResponse {
         connection_id: [u8; 16],
+        request_id: [u8; 16],
         response: BulkResponse,
     },
     RequestFailed {
@@ -277,6 +335,11 @@ pub enum LocalNetworkObservation {
         address: SocketAddr,
         state: DiscoveryCandidateState,
     },
+    DhtProviders {
+        lookup_id: [u8; 16],
+        status: DhtLookupStatus,
+        providers: Vec<DhtProviderCandidate>,
+    },
 }
 
 impl NetworkEvent {
@@ -292,6 +355,15 @@ impl NetworkEvent {
                 kind: *kind,
                 address: *address,
                 state: *state,
+            }),
+            Self::DhtProviders {
+                lookup_id,
+                status,
+                providers,
+            } => Some(LocalNetworkObservation::DhtProviders {
+                lookup_id: *lookup_id,
+                status: *status,
+                providers: providers.clone(),
             }),
             _ => None,
         }
@@ -340,6 +412,15 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 key,
                 value,
             }),
+            IpcMessage::DhtProviders {
+                lookup_id,
+                status,
+                providers,
+            } => Ok(Self::DhtProviders {
+                lookup_id,
+                status,
+                providers,
+            }),
             IpcMessage::PeerAuthenticated {
                 connection_id,
                 peer_id,
@@ -365,6 +446,26 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             } => Ok(Self::IdentityProofReceived {
                 connection_id,
                 proof,
+            }),
+            IpcMessage::PairingInviteRequested {
+                connection_id,
+                response_id,
+                invite,
+            } => Ok(Self::UnverifiedPairingInvite {
+                connection_id,
+                response_id,
+                invite,
+            }),
+            IpcMessage::PairingExchangeReceived {
+                connection_id,
+                request_id,
+                invite,
+                exchange,
+            } => Ok(Self::UnverifiedPairingExchangeResponse {
+                connection_id,
+                request_id,
+                invite,
+                exchange,
             }),
             IpcMessage::ControlRequested {
                 connection_id,
@@ -395,9 +496,11 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             }),
             IpcMessage::BulkReceived {
                 connection_id,
+                request_id,
                 response,
             } => Ok(Self::UnverifiedBulkResponse {
                 connection_id,
+                request_id,
                 response,
             }),
             IpcMessage::RequestFailed {
@@ -483,7 +586,7 @@ impl Supervisor {
     /// Commands are Core-only. Control payloads remain untrusted until the
     /// caller's per-connection DeviceSession has admitted the peer.
     pub(crate) fn send_network_command(&mut self, command: NetworkCommand) -> Result<(), AslError> {
-        self.send_network_ipc(command.into_ipc())
+        self.send_network_ipc(command.into_ipc()?)
     }
 
     pub(crate) fn receive_network_event(
@@ -507,14 +610,44 @@ impl Supervisor {
         for command in batch.commands {
             self.send_network_command(command)?;
         }
-        Ok(batch.events)
+        batch
+            .events
+            .into_iter()
+            .filter_map(|event| self.verify_pairing_response(event, now_ms).transpose())
+            .collect()
     }
 
-    pub fn send_admitted_network_command(
+    pub(crate) fn send_admitted_network_command(
         &mut self,
         command: NetworkCommand,
         now_ms: u64,
     ) -> Result<(), AslError> {
+        self.pending_pairing_prompts.expire(now_ms);
+        let command = match command {
+            NetworkCommand::AnswerPairingInvite {
+                connection_id,
+                response_id,
+                invite,
+                authorization,
+            } => {
+                if !self
+                    .pending_pairing_prompts
+                    .authorizes(connection_id, response_id, &invite)
+                {
+                    return Err(AslError::PolicyDenied);
+                }
+                self.answer_pairing_invite(
+                    connection_id,
+                    response_id,
+                    invite.clone(),
+                    authorization,
+                    now_ms,
+                )?;
+                self.pending_pairing_prompts.complete(invite.invite_id.0);
+                return Ok(());
+            }
+            command => command,
+        };
         let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
         let authorized = match &command {
             NetworkCommand::SendControl {
@@ -537,10 +670,7 @@ impl Supervisor {
                 response.clone(),
                 now_ms,
             )?,
-            NetworkCommand::SendBulk {
-                connection_id,
-                request,
-            } => admission.authorize_bulk_command(*connection_id, request.clone(), now_ms)?,
+            NetworkCommand::SendBulk { .. } => return Err(AslError::PolicyDenied),
             NetworkCommand::ReplyBulk {
                 connection_id,
                 response_id,

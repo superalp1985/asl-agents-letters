@@ -90,6 +90,29 @@ impl LocalTransport {
         Ok(token)
     }
 
+    pub fn send_pairing_request(
+        &mut self,
+        connection: &AuthenticatedPeer,
+        invite: PairingInvite,
+    ) -> io::Result<RequestToken> {
+        self.require_live(connection)?;
+        self.require_request_capacity()?;
+        let token = RequestToken::new(connection, self.requests.next_token()?);
+        let request_id = self
+            .swarm
+            .behaviour_mut()
+            .pairing
+            .send_request(&libp2p_peer(connection.peer_id())?, invite.clone());
+        self.track_request(
+            ProtocolKind::Pairing,
+            request_id,
+            connection,
+            &token,
+            PendingRequestKind::Pairing(invite),
+        );
+        Ok(token)
+    }
+
     pub fn send_bulk_request(
         &mut self,
         connection: &AuthenticatedPeer,
@@ -157,6 +180,33 @@ impl LocalTransport {
             .behaviour_mut()
             .identity_proof
             .send_response(channel, response)
+            .map_err(|_| io::ErrorKind::BrokenPipe.into())
+    }
+
+    pub fn send_pairing_response(
+        &mut self,
+        connection: &AuthenticatedPeer,
+        token: &ResponseToken,
+        exchange: PairingExchange,
+    ) -> io::Result<()> {
+        let pending = self.response_ref(connection, token, ProtocolKind::Pairing)?;
+        let PendingResponseKind::Pairing { invite, .. } = &pending.kind else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        if exchange.exchange_id != invite.invite_id
+            || exchange.agent_id != invite.target
+            || exchange.attempt != 1
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let pending = self.take_response(connection, token, ProtocolKind::Pairing)?;
+        let PendingResponseKind::Pairing { channel, .. } = pending.kind else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        self.swarm
+            .behaviour_mut()
+            .pairing
+            .send_response(channel, exchange)
             .map_err(|_| io::ErrorKind::BrokenPipe.into())
     }
 
@@ -411,6 +461,92 @@ impl LocalTransport {
         }
     }
 
+    pub(super) fn handle_pairing(
+        &mut self,
+        event: request_response::Event<PairingInvite, PairingExchange>,
+    ) -> io::Result<Option<TransportEvent>> {
+        match event {
+            request_response::Event::Message {
+                peer,
+                connection_id,
+                message:
+                    request_response::Message::Request {
+                        request_id,
+                        request,
+                        channel,
+                    },
+            } => {
+                let Some(connection) = self.authenticated_peer(peer, connection_id) else {
+                    return Ok(None);
+                };
+                let Some(response) = self.insert_response(
+                    ProtocolKind::Pairing,
+                    &connection,
+                    request_id,
+                    PendingResponseKind::Pairing {
+                        channel,
+                        invite: request.clone(),
+                    },
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some(TransportEvent::PairingInviteRequest {
+                    connection,
+                    invite: request,
+                    response,
+                }))
+            }
+            request_response::Event::Message {
+                peer,
+                connection_id,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+            } => Ok(self.complete_request(
+                ProtocolKind::Pairing,
+                peer,
+                connection_id,
+                request_id,
+                response,
+                |connection, pending, exchange| {
+                    let valid = matches!(
+                        &pending.kind,
+                        PendingRequestKind::Pairing(invite)
+                            if exchange.exchange_id == invite.invite_id
+                                && exchange.agent_id == invite.target
+                                && exchange.attempt == 1
+                    );
+                    if let PendingRequestKind::Pairing(invite) = &pending.kind
+                        && valid
+                    {
+                        TransportEvent::PairingExchangeResponse {
+                            connection,
+                            request: pending.token,
+                            invite: invite.clone(),
+                            exchange,
+                        }
+                    } else {
+                        failed_request(&pending)
+                    }
+                },
+            )),
+            request_response::Event::OutboundFailure { request_id, .. } => {
+                Ok(self.fail_request(ProtocolKind::Pairing, request_id))
+            }
+            request_response::Event::InboundFailure {
+                connection_id,
+                request_id,
+                ..
+            } => {
+                self.remove_inbound(ProtocolKind::Pairing, connection_id, request_id);
+                Ok(None)
+            }
+            request_response::Event::ResponseSent { .. } => Ok(None),
+        }
+    }
+
     pub(super) fn handle_bulk(
         &mut self,
         event: request_response::Event<BulkRequest, BulkResponse>,
@@ -576,6 +712,7 @@ impl LocalTransport {
 enum ProtocolKind {
     Control,
     IdentityProof,
+    Pairing,
     Bulk,
 }
 
@@ -591,6 +728,10 @@ enum PendingResponseKind {
         channel: ResponseChannel<IdentityProof>,
         request: IdentityProofRequest,
     },
+    Pairing {
+        channel: ResponseChannel<PairingExchange>,
+        invite: PairingInvite,
+    },
     Bulk {
         channel: ResponseChannel<BulkResponse>,
         request: BulkRequest,
@@ -600,6 +741,7 @@ enum PendingResponseKind {
 enum PendingRequestKind {
     Control,
     IdentityProof(IdentityProofRequest),
+    Pairing(PairingInvite),
     Bulk(BulkRequest),
 }
 

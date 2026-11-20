@@ -11,6 +11,7 @@ use crate::{AccessOperation, Permit, PolicyService};
 
 pub const LEASE_TTL_MS: u64 = 60_000;
 pub const MAX_ACTIVE_LEASES: usize = 4_096;
+pub const MAX_ACTIVE_LEASES_PER_PEER: usize = 64;
 const MAX_FILE_SIZE: u64 = 68_719_476_736;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,7 +87,13 @@ impl LeaseManager {
             .lock()
             .map_err(|_| AslError::InvalidPolicyState)?;
         purge_expired(&mut leases, now_ms);
-        if leases.len() >= MAX_ACTIVE_LEASES {
+        if leases.len() >= MAX_ACTIVE_LEASES
+            || leases
+                .values()
+                .filter(|lease| lease.peer_id == peer_id)
+                .count()
+                >= MAX_ACTIVE_LEASES_PER_PEER
+        {
             return Err(AslError::QuotaExceeded);
         }
         leases.insert(
@@ -141,6 +148,20 @@ impl LeaseManager {
             .lock()
             .map(|leases| leases.len())
             .map_err(|_| AslError::InvalidPolicyState)
+    }
+
+    pub fn release(&self, lease_id: Hash32, peer_id: &PeerId) -> Result<(), AslError> {
+        let mut leases = self
+            .leases
+            .lock()
+            .map_err(|_| AslError::InvalidPolicyState)?;
+        if leases
+            .get(&lease_id)
+            .is_some_and(|lease| lease.peer_id == *peer_id)
+        {
+            leases.remove(&lease_id);
+        }
+        Ok(())
     }
 }
 

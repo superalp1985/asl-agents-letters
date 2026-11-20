@@ -318,9 +318,10 @@ async fn run_dialer_child(
 
     if wrong_expected_peer {
         match event {
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                write_tag(control, WRONG_PEER_REJECTED, deadline).await
-            }
+            Ok(TransportEvent::DialFailed {
+                failure: asl_net::transport::DialFailure::PeerIdentityMismatch,
+                ..
+            }) => write_tag(control, WRONG_PEER_REJECTED, deadline).await,
             Err(error) => Err(io::Error::new(
                 error.kind(),
                 "wrong expected PeerId was not rejected as an identity mismatch",

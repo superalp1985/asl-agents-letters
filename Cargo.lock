@@ -918,12 +918,17 @@ name = "asl-agent"
 version = "0.1.0"
 dependencies = [
  "asl-policy",
+ "asl-store",
  "asl-types",
+ "bs58",
+ "hex",
  "libp2p-identity",
  "rand 0.10.4",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "zeroize",
 ]
@@ -941,6 +946,7 @@ dependencies = [
  "asl-net",
  "asl-policy",
  "asl-store",
+ "asl-transfer",
  "asl-types",
  "blake3",
  "bs58",
@@ -990,6 +996,7 @@ dependencies = [
  "blake3",
  "hex",
  "rand 0.10.4",
+ "tempfile",
  "windows",
  "zeroize",
 ]

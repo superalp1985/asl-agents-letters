@@ -8,13 +8,14 @@ use std::{
 use asl_net::{
     codec::{BulkRequest, BulkResponse},
     transport::{
-        AuthenticatedPeer, LocalConnectionId, LocalTransport, RequestToken, ResponseToken,
-        TransportEvent,
+        AuthenticatedPeer, DialFailure, LocalConnectionId, LocalTransport, RequestToken,
+        ResponseToken, TransportEvent,
     },
 };
 use asl_types::{
     error::AslError,
-    protocol::{IdentityProof, WireFrame},
+    ids::PeerId,
+    protocol::{IdentityProof, PairingExchange, PairingInvite, WireFrame},
 };
 use rand::{TryRng, rngs::SysRng};
 use tokio::{runtime::Builder, sync::mpsc};
@@ -25,6 +26,7 @@ use crate::identity::DeviceIdentity;
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const MAX_PENDING_IPC_REQUESTS: usize = 96;
 const RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_secs(10);
+const PAIRING_RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_secs(3 * 60);
 const RESPONSE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) fn run(identity: DeviceIdentity, input: Stdin, output: Stdout) -> Result<(), AslError> {
@@ -97,6 +99,7 @@ struct NetworkBridge {
     closing: HashSet<[u8; 16]>,
     responses: HashMap<[u8; 16], PendingResponse>,
     requests: HashMap<([u8; 16], [u8; 16], NetworkProtocol), PendingRequest>,
+    pending_dials: HashMap<PeerId, [u8; 16]>,
 }
 
 impl NetworkBridge {
@@ -108,6 +111,7 @@ impl NetworkBridge {
             closing: HashSet::new(),
             responses: HashMap::new(),
             requests: HashMap::new(),
+            pending_dials: HashMap::new(),
         }
     }
 
@@ -145,6 +149,9 @@ impl NetworkBridge {
                 peer_id,
             } => {
                 let result = self.transport.dial(kind, address, &peer_id);
+                if result.is_ok() {
+                    self.pending_dials.insert(peer_id, operation_id);
+                }
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
@@ -163,6 +170,9 @@ impl NetworkBridge {
                 peer_id,
             } => {
                 let result = self.transport.dial_via_relays(&peer_id);
+                if result.is_ok() {
+                    self.pending_dials.insert(peer_id, operation_id);
+                }
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
@@ -181,6 +191,11 @@ impl NetworkBridge {
                 self.transport
                     .decide_dht_record(candidate_id, accept)
                     .map_err(|error| error_code(&error))?;
+                Ok(false)
+            }
+            IpcMessage::FindProviders { lookup_id, key } => {
+                let result = self.transport.find_providers(key, lookup_id).map(|_| ());
+                self.send_operation_result(lookup_id, result, writer)?;
                 Ok(false)
             }
             IpcMessage::CloseConnection { connection_id } => {
@@ -262,6 +277,23 @@ impl NetworkBridge {
                 proof,
             } => {
                 self.reply_identity_proof(connection_id, response_id, proof)
+                    .map_err(|error| error_code(&error))?;
+                Ok(false)
+            }
+            IpcMessage::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            } => {
+                self.send_pairing(connection_id, request_id, invite, writer)?;
+                Ok(false)
+            }
+            IpcMessage::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            } => {
+                self.reply_pairing(connection_id, response_id, exchange)
                     .map_err(|error| error_code(&error))?;
                 Ok(false)
             }
@@ -437,6 +469,73 @@ impl NetworkBridge {
         Ok(())
     }
 
+    fn send_pairing<W: Write>(
+        &mut self,
+        connection_id: [u8; 16],
+        request_id: [u8; 16],
+        invite: PairingInvite,
+        writer: &mut FrameWriter<W>,
+    ) -> Result<(), NetworkErrorCode> {
+        let protocol = NetworkProtocol::Pairing;
+        let key = (connection_id, request_id, protocol);
+        if self.closing.contains(&connection_id) {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::Disconnected,
+                writer,
+            );
+        }
+        if invite.invite_id.0 != request_id || self.requests.contains_key(&key) {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::InvalidCommand,
+                writer,
+            );
+        }
+        if self.requests.len() >= MAX_PENDING_IPC_REQUESTS {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::Capacity,
+                writer,
+            );
+        }
+        let Some(connection) = self.connections.get(&connection_id) else {
+            return self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                NetworkErrorCode::Disconnected,
+                writer,
+            );
+        };
+        match self.transport.send_pairing_request(connection, invite) {
+            Ok(token) => {
+                self.requests.insert(
+                    key,
+                    PendingRequest {
+                        connection_id,
+                        request_id,
+                        token,
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => self.send_request_failure(
+                connection_id,
+                request_id,
+                protocol,
+                error_code(&error),
+                writer,
+            ),
+        }
+    }
+
     fn send_bulk<W: Write>(
         &mut self,
         connection_id: [u8; 16],
@@ -531,6 +630,35 @@ impl NetworkBridge {
         Ok(())
     }
 
+    fn reply_pairing(
+        &mut self,
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        exchange: PairingExchange,
+    ) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        let entry = self
+            .responses
+            .get(&response_id)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if entry.connection_id != connection_id || entry.protocol != NetworkProtocol::Pairing {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if entry.expires_at <= Instant::now() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let connection = self
+            .connections
+            .get(&connection_id)
+            .ok_or(io::ErrorKind::NotConnected)?;
+        self.transport
+            .send_pairing_response(connection, &entry.token, exchange)?;
+        self.responses.remove(&response_id);
+        Ok(())
+    }
+
     fn reply_control(
         &mut self,
         connection_id: [u8; 16],
@@ -619,6 +747,17 @@ impl NetworkBridge {
                     state: candidate.state,
                 })?;
             }
+            TransportEvent::DhtProviders {
+                lookup_id,
+                status,
+                providers,
+            } => {
+                writer.send(&IpcMessage::DhtProviders {
+                    lookup_id,
+                    status,
+                    providers,
+                })?;
+            }
             TransportEvent::DhtRecordCandidate {
                 candidate_id,
                 key,
@@ -634,6 +773,7 @@ impl NetworkBridge {
             TransportEvent::Connected { connection } => {
                 let connection_id = fresh_handle(&self.connections)?;
                 let peer_id = connection.peer_id().clone();
+                self.pending_dials.remove(&peer_id);
                 self.connection_handles
                     .insert(connection.connection_id(), connection_id);
                 self.connections.insert(connection_id, connection);
@@ -642,7 +782,10 @@ impl NetworkBridge {
                     peer_id,
                 })?;
             }
-            TransportEvent::Disconnected { connection_id, .. } => {
+            TransportEvent::Disconnected {
+                connection_id,
+                peer: _,
+            } => {
                 if let Some(handle) = self.connection_handles.remove(&connection_id) {
                     self.closing.remove(&handle);
                     self.connections.remove(&handle);
@@ -668,6 +811,18 @@ impl NetworkBridge {
                     })?;
                 }
             }
+            TransportEvent::DialFailed { peer_id, failure } => {
+                let code = match failure {
+                    DialFailure::PeerIdentityMismatch => NetworkErrorCode::Authentication,
+                    DialFailure::Busy => NetworkErrorCode::Capacity,
+                    DialFailure::Transport => NetworkErrorCode::Transport,
+                };
+                if let Some(operation_id) = self.pending_dials.remove(&peer_id) {
+                    writer.send(&IpcMessage::OperationFailed { operation_id, code })?;
+                } else {
+                    writer.send(&IpcMessage::NetworkError { code })?;
+                }
+            }
             TransportEvent::IdentityProofRequest {
                 connection,
                 request,
@@ -684,6 +839,43 @@ impl NetworkBridge {
                     },
                     writer,
                 )?;
+            }
+            TransportEvent::PairingInviteRequest {
+                connection,
+                invite,
+                response,
+            } => {
+                self.forward_request_with_lifetime(
+                    connection,
+                    NetworkProtocol::Pairing,
+                    response,
+                    PAIRING_RESPONSE_HANDLE_LIFETIME,
+                    |connection_id, response_id| IpcMessage::PairingInviteRequested {
+                        connection_id,
+                        response_id,
+                        invite,
+                    },
+                    writer,
+                )?;
+            }
+            TransportEvent::PairingExchangeResponse {
+                connection,
+                request,
+                invite,
+                exchange,
+            } => {
+                if let Some(pending) = self.take_request(
+                    connection.connection_id(),
+                    &request,
+                    NetworkProtocol::Pairing,
+                ) {
+                    writer.send(&IpcMessage::PairingExchangeReceived {
+                        connection_id: pending.connection_id,
+                        request_id: pending.request_id,
+                        invite,
+                        exchange,
+                    })?;
+                }
             }
             TransportEvent::IdentityProofResponse {
                 connection,
@@ -762,6 +954,7 @@ impl NetworkBridge {
                 {
                     writer.send(&IpcMessage::BulkReceived {
                         connection_id: pending.connection_id,
+                        request_id: pending.request_id,
                         response,
                     })?;
                 }
@@ -782,6 +975,7 @@ impl NetworkBridge {
                     NetworkProtocol::Control,
                     NetworkProtocol::IdentityProof,
                     NetworkProtocol::Bulk,
+                    NetworkProtocol::Pairing,
                 ] {
                     if let Some(pending) = self.take_request(connection_id, &request, protocol) {
                         writer.send(&IpcMessage::RequestFailed {
@@ -806,6 +1000,25 @@ impl NetworkBridge {
         event: impl FnOnce([u8; 16], [u8; 16]) -> IpcMessage,
         writer: &mut FrameWriter<W>,
     ) -> Result<(), AslError> {
+        self.forward_request_with_lifetime(
+            connection,
+            protocol,
+            token,
+            RESPONSE_HANDLE_LIFETIME,
+            event,
+            writer,
+        )
+    }
+
+    fn forward_request_with_lifetime<W: Write>(
+        &mut self,
+        connection: AuthenticatedPeer,
+        protocol: NetworkProtocol,
+        token: ResponseToken,
+        lifetime: Duration,
+        event: impl FnOnce([u8; 16], [u8; 16]) -> IpcMessage,
+        writer: &mut FrameWriter<W>,
+    ) -> Result<(), AslError> {
         let local_id = connection.connection_id();
         let Some(&connection_id) = self.connection_handles.get(&local_id) else {
             return Ok(());
@@ -820,7 +1033,7 @@ impl NetworkBridge {
                 connection_id,
                 protocol,
                 token,
-                expires_at: Instant::now() + RESPONSE_HANDLE_LIFETIME,
+                expires_at: Instant::now() + lifetime,
             },
         );
         writer.send(&event(connection_id, response_id))?;

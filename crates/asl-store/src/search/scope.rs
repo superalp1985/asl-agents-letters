@@ -32,7 +32,7 @@ const FIELDS: &str = "SELECT r.row_id,r.resource_key,r.grant_id,r.content_id,g.e
 pub(super) const AUTHORITY: &str = "CROSS JOIN grants g ON g.grant_id=r.grant_id
     CROSS JOIN snapshots s ON s.content_id=r.content_id
     LEFT JOIN asl_groups grp ON grp.group_id=g.group_id
-    WHERE r.origin='local' AND r.active=1 AND s.state='ready' AND g.status='active'
+    WHERE r.origin IN ('local','derived') AND r.active=1 AND s.state='ready' AND g.status='active'
     AND r.source_grant_epoch=g.epoch AND s.file_size<=g.max_snapshot_bytes
     AND (g.audience='public'
       OR (g.audience='contacts' AND EXISTS(SELECT 1 FROM authorized_contacts WHERE agent_id=?1))

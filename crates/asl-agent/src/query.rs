@@ -148,6 +148,7 @@ struct ActiveTask {
 
 pub struct QueryRouter {
     contacts: Vec<PeerId>,
+    contact_rotation: usize,
     tasks: HashMap<TaskId, ActiveTask>,
     inbound_seen: HashMap<InboundKey, u64>,
     inbound_order: VecDeque<(InboundKey, u64)>,
@@ -163,6 +164,7 @@ impl QueryRouter {
     pub fn new() -> Self {
         Self {
             contacts: Vec::new(),
+            contact_rotation: 0,
             tasks: HashMap::new(),
             inbound_seen: HashMap::new(),
             inbound_order: VecDeque::new(),
@@ -176,12 +178,14 @@ impl QueryRouter {
     }
 
     pub fn set_contacts(&mut self, contacts: impl IntoIterator<Item = PeerId>) {
-        self.contacts.clear();
         let mut seen = HashSet::new();
-        for peer_id in contacts {
-            if seen.insert(peer_id.clone()) {
-                self.contacts.push(peer_id);
-            }
+        let contacts = contacts
+            .into_iter()
+            .filter(|peer_id| seen.insert(peer_id.clone()))
+            .collect::<Vec<_>>();
+        if self.contacts != contacts {
+            self.contacts = contacts;
+            self.contact_rotation = 0;
         }
     }
 
@@ -203,8 +207,7 @@ impl QueryRouter {
         let pending_peers = HashSet::new();
         let mut direct_peers = HashSet::new();
 
-        for peer_id in self.contacts.iter().take(MAX_QUERY_PEERS) {
-            let peer_id = peer_id.clone();
+        for peer_id in self.contact_batch() {
             if !direct_peers.insert(peer_id.clone()) {
                 continue;
             }
@@ -236,6 +239,19 @@ impl QueryRouter {
         }
         self.tasks.insert(task_id.clone(), active);
         Ok(task_id)
+    }
+
+    fn contact_batch(&mut self) -> Vec<PeerId> {
+        if self.contacts.len() <= MAX_QUERY_PEERS {
+            return self.contacts.clone();
+        }
+        let fixed_count = MAX_QUERY_PEERS - 1;
+        let overflow_count = self.contacts.len() - fixed_count;
+        let rotating_index = fixed_count + self.contact_rotation % overflow_count;
+        self.contact_rotation = (self.contact_rotation + 1) % overflow_count;
+        let mut selected = self.contacts[..fixed_count].to_vec();
+        selected.push(self.contacts[rotating_index].clone());
+        selected
     }
 
     pub fn next_actions(&mut self, task_id: &TaskId, now_ms: u64) -> Vec<QueryAction> {
@@ -286,7 +302,7 @@ impl QueryRouter {
         concept: ConceptRef,
         peers: impl IntoIterator<Item = PeerId>,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<Vec<PeerId>, AslError> {
         let task = self.tasks.get_mut(task_id).ok_or(AslError::NotFound)?;
         expire_if_needed(task, now_ms);
         if task.status != QueryStatus::Active {
@@ -301,6 +317,7 @@ impl QueryRouter {
         };
         task.pending_dht_terms.remove(index);
 
+        let mut selected = Vec::new();
         for peer_id in peers {
             if task.direct_peers.len() >= MAX_QUERY_PEERS {
                 break;
@@ -309,6 +326,7 @@ impl QueryRouter {
                 task.pending_peers.insert(peer_id.clone());
                 let mut query = task.query.clone();
                 query.message_id = fresh_id()?;
+                selected.push(peer_id.clone());
                 task.actions.push_back(QueryAction::Contact {
                     task_id: task_id.clone(),
                     peer_id,
@@ -317,11 +335,15 @@ impl QueryRouter {
             }
         }
         maybe_complete(task);
-        Ok(())
+        Ok(selected)
     }
 
     pub fn status(&self, task_id: &TaskId) -> Option<QueryStatus> {
         self.tasks.get(task_id).map(|task| task.status)
+    }
+
+    pub fn expires_at_ms(&self, task_id: &TaskId) -> Option<u64> {
+        self.tasks.get(task_id).map(|task| task.query.expires_at_ms)
     }
 
     pub fn remove_terminal_task(&mut self, task_id: &TaskId) -> bool {
@@ -550,6 +572,37 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         assert_eq!(unique.len(), MAX_QUERY_PEERS);
+    }
+
+    #[test]
+    fn authorized_contact_overflow_gets_a_rotating_exploration_slot() {
+        let peers = (1..=(MAX_QUERY_PEERS as u8 + 2))
+            .map(peer)
+            .collect::<Vec<_>>();
+        let mut router = QueryRouter::with_contacts(peers.clone());
+        let mut overflow_seen = Vec::new();
+
+        for _ in 0..2 {
+            let task_id = router.start_query(task(QueryScope::ContactsOnly)).unwrap();
+            let actions = router.next_actions(&task_id, 1_001);
+            assert_eq!(actions.len(), MAX_QUERY_PEERS);
+            let selected = actions
+                .iter()
+                .map(|action| match action {
+                    QueryAction::Contact { peer_id, .. } => peer_id,
+                    QueryAction::DhtLookup { .. } => unreachable!(),
+                })
+                .collect::<HashSet<_>>();
+            assert!(selected.contains(&peers[0]));
+            assert!(selected.contains(&peers[MAX_QUERY_PEERS - 2]));
+            overflow_seen.push(
+                (MAX_QUERY_PEERS - 1..peers.len())
+                    .find(|index| selected.contains(&peers[*index]))
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(overflow_seen, [MAX_QUERY_PEERS - 1, MAX_QUERY_PEERS]);
     }
 
     #[test]

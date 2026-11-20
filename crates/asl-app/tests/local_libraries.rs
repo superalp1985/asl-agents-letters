@@ -41,6 +41,81 @@ fn active(db: &Connection, name: &str) -> bool {
     .unwrap()
 }
 
+#[test]
+fn local_cli_can_review_and_decide_while_the_download_broker_stays_open() {
+    use asl_store::transfers::{DownloadBroker, DownloadRequest, DownloadStart};
+    use asl_types::{
+        ids::Hash32,
+        manifest::{Manifest, content_id, encode_manifest},
+    };
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    let _paths = AppPaths::open(&home).unwrap();
+    let inbox = fixture.0.join("downloads");
+    fs::create_dir(&inbox).unwrap();
+    let grant = SnapshotBroker::open(&home)
+        .unwrap()
+        .authorize_inbox_directory(&inbox, 1024)
+        .unwrap();
+    let mut broker = DownloadBroker::open(&home).unwrap();
+    let cli = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_asl-core"))
+            .env("ASL_HOME", &home)
+            .arg("--downloads")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(cli(&["mode", "ask"])["download_mode"], "ask");
+    let manifest = encode_manifest(&Manifest {
+        file_size: 0,
+        file_hash: *blake3::hash(b"").as_bytes(),
+        chunk_hashes: vec![],
+    })
+    .unwrap();
+    let mut request = DownloadRequest {
+        content_id: Hash32(content_id(&manifest)),
+        manifest,
+        write_grant_id: grant,
+        destination_relative: "one.bin".into(),
+        sources: vec![],
+    };
+    for (action, decision) in [("deny", false), ("approve", true)] {
+        let DownloadStart::Pending(id) = broker.request_download(&request).unwrap() else {
+            panic!("expected a pending local prompt");
+        };
+        let rows = cli(&["list"]);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(
+            rows[0]["destination"],
+            serde_json::json!(inbox.join(&request.destination_relative))
+        );
+        let id_text = rows[0]["id"].as_str().unwrap();
+        assert_eq!(
+            &cli(&[action, id_text])["state"],
+            if decision { "approved" } else { "denied" }
+        );
+        assert!(fs::read_dir(&inbox).unwrap().next().is_none());
+        let started = broker.begin_approved_download(&request, id);
+        if decision {
+            let task = started.unwrap();
+            assert!(task.part_path.exists());
+            let done = broker.complete(task.transfer_id).unwrap();
+            assert_eq!(fs::read(done.destination_path).unwrap(), b"");
+        } else {
+            assert!(matches!(started, Err(AslError::PolicyDenied)));
+        }
+        assert_eq!(cli(&["list"]), serde_json::json!([]));
+        request.destination_relative = "two.bin".into();
+    }
+}
+
 fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) {
     let start = Instant::now();
     while !done() {

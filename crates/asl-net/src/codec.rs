@@ -4,7 +4,8 @@ use std::io;
 
 use asl_types::protocol::{
     IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES,
-    WireFrame, decode_control, decode_frame, encode_control, encode_frame,
+    MAX_PAIRING_FRAME_BYTES, PairingExchange, PairingInvite, WireFrame, decode_control,
+    decode_frame, encode_control, encode_frame,
 };
 
 mod bulk;
@@ -18,6 +19,7 @@ use libp2p::{
 pub const CONTROL_PROTOCOL: StreamProtocol = StreamProtocol::new("/asl/control/1.0.0");
 pub const IDENTITY_PROOF_PROTOCOL: StreamProtocol =
     StreamProtocol::new("/asl/identity-proof/1.1.0");
+pub const PAIRING_PROTOCOL: StreamProtocol = StreamProtocol::new("/asl/pair/1.0.0");
 
 // Canonical CBOR map with five one-byte keys, two one-byte values, and three fixed byte strings.
 const PROOF_REQUEST_BYTES: usize = 1 + 5 + 2 + (1 + 16) + (2 + 32) + (2 + 32);
@@ -147,6 +149,75 @@ impl Codec for IdentityProofCodec {
     {
         check_protocol(protocol, IDENTITY_PROOF_PROTOCOL)?;
         let bytes = encode_frame(&WireFrame::IdentityProof(response))
+            .map_err(|_| io::ErrorKind::InvalidInput)?;
+        write_payload(io, &bytes).await
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PairingCodec;
+
+impl Codec for PairingCodec {
+    type Protocol = StreamProtocol;
+    type Request = PairingInvite;
+    type Response = PairingExchange;
+
+    async fn read_request<T>(
+        &mut self,
+        protocol: &StreamProtocol,
+        io: &mut T,
+    ) -> io::Result<PairingInvite>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        check_protocol(protocol, PAIRING_PROTOCOL)?;
+        match decode_frame(&read_payload(io, MAX_PAIRING_FRAME_BYTES).await?) {
+            Ok(WireFrame::PairingInvite(invite)) => Ok(invite),
+            _ => Err(io::ErrorKind::InvalidData.into()),
+        }
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        protocol: &StreamProtocol,
+        io: &mut T,
+    ) -> io::Result<PairingExchange>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        check_protocol(protocol, PAIRING_PROTOCOL)?;
+        match decode_frame(&read_payload(io, MAX_PAIRING_FRAME_BYTES).await?) {
+            Ok(WireFrame::PairingExchange(exchange)) => Ok(exchange),
+            _ => Err(io::ErrorKind::InvalidData.into()),
+        }
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        protocol: &StreamProtocol,
+        io: &mut T,
+        request: PairingInvite,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        check_protocol(protocol, PAIRING_PROTOCOL)?;
+        let bytes = encode_frame(&WireFrame::PairingInvite(request))
+            .map_err(|_| io::ErrorKind::InvalidInput)?;
+        write_payload(io, &bytes).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        protocol: &StreamProtocol,
+        io: &mut T,
+        response: PairingExchange,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        check_protocol(protocol, PAIRING_PROTOCOL)?;
+        let bytes = encode_frame(&WireFrame::PairingExchange(response))
             .map_err(|_| io::ErrorKind::InvalidInput)?;
         write_payload(io, &bytes).await
     }

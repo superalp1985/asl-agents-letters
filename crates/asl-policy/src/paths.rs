@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, Prefix};
+#[cfg(windows)]
+use std::{fs::File, sync::Arc};
 
 use asl_types::error::AslError;
 
@@ -111,6 +113,263 @@ pub struct AuthorizedFile {
     unavailable: std::convert::Infallible,
 }
 
+/// A pinned local destination that can only create new files beneath its root.
+pub struct WriteGrant {
+    #[cfg(windows)]
+    root: handles::SourceRoot,
+    #[cfg(not(windows))]
+    unavailable: std::convert::Infallible,
+}
+
+pub struct AuthorizedWriteFile {
+    #[cfg(windows)]
+    inner: File,
+    #[cfg(windows)]
+    _pins: Vec<Arc<File>>,
+    #[cfg(windows)]
+    root_identity: FileIdentity,
+    #[cfg(windows)]
+    retained: bool,
+    #[cfg(not(windows))]
+    unavailable: std::convert::Infallible,
+}
+
+impl WriteGrant {
+    pub fn open(root: &Path, protected_root: &Path) -> Result<Self, AslError> {
+        validate_absolute(root)?;
+        validate_absolute(protected_root)?;
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                root: handles::SourceRoot::open(root, protected_root)?,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (root, protected_root);
+            Err(AslError::PlatformUnavailable)
+        }
+    }
+
+    pub fn restore(
+        root: &Path,
+        protected_root: &Path,
+        expected: &FileIdentity,
+    ) -> Result<Self, AslError> {
+        let grant = Self::open(root, protected_root)?;
+        if grant.identity() != expected {
+            return Err(AslError::NotFound);
+        }
+        Ok(grant)
+    }
+
+    pub fn identity(&self) -> &FileIdentity {
+        #[cfg(windows)]
+        {
+            self.root.identity()
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+
+    /// Validate a local inbox filename for the same rules used at creation, without opening it.
+    pub fn filename(relative: &Path) -> Result<String, AslError> {
+        let mut components = validated_relative(relative)?;
+        if components.len() != 1 {
+            return Err(AslError::NotFound);
+        }
+        components.pop().ok_or(AslError::NotFound)
+    }
+
+    pub fn create_new(&self, relative: &Path) -> Result<AuthorizedWriteFile, AslError> {
+        let name = Self::filename(relative)?;
+        #[cfg(windows)]
+        {
+            let root_identity = self.identity().clone();
+            let inner = self.root.create_new_file(&name)?;
+            Ok(AuthorizedWriteFile {
+                inner,
+                _pins: self.root.write_pins(),
+                root_identity,
+                retained: false,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = name;
+            Err(AslError::PlatformUnavailable)
+        }
+    }
+
+    pub fn open_existing(
+        &self,
+        relative: &Path,
+        expected: &FileIdentity,
+    ) -> Result<AuthorizedWriteFile, AslError> {
+        let components = validated_relative(relative)?;
+        if components.len() != 1 || expected.volume_serial != self.identity().volume_serial {
+            return Err(AslError::NotFound);
+        }
+        #[cfg(windows)]
+        {
+            let file = self.root.open_existing_write_file(&components[0])?;
+            if self.root.file_identity(&file)? != *expected {
+                return Err(AslError::PolicyDenied);
+            }
+            Ok(AuthorizedWriteFile {
+                inner: file,
+                _pins: self.root.write_pins(),
+                root_identity: self.identity().clone(),
+                retained: true,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = components;
+            Err(AslError::PlatformUnavailable)
+        }
+    }
+
+    pub fn rename_new(
+        &self,
+        file: &mut AuthorizedWriteFile,
+        relative: &Path,
+    ) -> Result<(), AslError> {
+        let components = validated_relative(relative)?;
+        if components.len() != 1 {
+            return Err(AslError::NotFound);
+        }
+        #[cfg(windows)]
+        {
+            self.root
+                .rename_file(&file.inner, &file.root_identity, &components[0])?;
+            file.retained = true;
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (file, components);
+            Err(AslError::PlatformUnavailable)
+        }
+    }
+}
+
+impl AuthorizedWriteFile {
+    pub fn identity(&self) -> Result<FileIdentity, AslError> {
+        #[cfg(windows)]
+        {
+            let id = windows_file_identity(&self.inner)?;
+            if id.volume_serial != self.root_identity.volume_serial {
+                return Err(AslError::PolicyDenied);
+            }
+            Ok(id)
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+
+    pub fn set_len(&mut self, length: u64) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.set_len(length)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = length;
+            match self.unavailable {}
+        }
+    }
+
+    pub fn len(&self) -> io::Result<u64> {
+        #[cfg(windows)]
+        {
+            self.inner.metadata().map(|metadata| metadata.len())
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+
+    pub fn is_empty(&self) -> io::Result<bool> {
+        self.len().map(|length| length == 0)
+    }
+
+    pub fn retain(&mut self) {
+        #[cfg(windows)]
+        {
+            self.retained = true;
+        }
+    }
+
+    pub fn remove(&mut self) -> Result<(), AslError> {
+        #[cfg(windows)]
+        {
+            crate::platform::windows::handles::snapshot::mark_delete(&self.inner)?;
+            self.retained = true;
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+
+    pub fn sync_all(&self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.sync_all()
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> Result<FileIdentity, AslError> {
+    crate::platform::windows::handles::file_identity(file)
+}
+
+impl Drop for AuthorizedWriteFile {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if !self.retained {
+            let _ = handles::snapshot::mark_delete(&self.inner);
+        }
+    }
+}
+
+impl Write for AuthorizedWriteFile {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        {
+            self.inner.write(buffer)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = buffer;
+            match self.unavailable {}
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.inner.flush()
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
+    }
+}
+
 impl AuthorizedFile {
     pub fn identity(&self) -> &FileIdentity {
         #[cfg(windows)]
@@ -148,6 +407,34 @@ impl Read for AuthorizedFile {
         #[cfg(not(windows))]
         {
             let _ = buffer;
+            match self.unavailable {}
+        }
+    }
+}
+
+impl Read for AuthorizedWriteFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        {
+            self.inner.read(buffer)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = buffer;
+            match self.unavailable {}
+        }
+    }
+}
+
+impl Seek for AuthorizedWriteFile {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        #[cfg(windows)]
+        {
+            self.inner.seek(position)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = position;
             match self.unavailable {}
         }
     }

@@ -99,6 +99,35 @@ impl Scheduler {
         })
     }
 
+    pub fn from_durable(
+        file_size: u64,
+        expected_hashes: Vec<[u8; 32]>,
+        candidates: impl IntoIterator<Item = PeerId>,
+        durable_indexes: &[u32],
+    ) -> Result<Self, AslError> {
+        let mut scheduler = Self::new(file_size, expected_hashes, candidates)?;
+        for &index in durable_indexes {
+            let state = scheduler
+                .states
+                .get_mut(index as usize)
+                .ok_or(AslError::InvalidMessage)?;
+            *state = ChunkState::Durable;
+        }
+        Ok(scheduler)
+    }
+
+    pub fn discard_buffered(&mut self, index: u32) -> Result<(), AslError> {
+        let state = self
+            .states
+            .get_mut(index as usize)
+            .ok_or(AslError::NotFound)?;
+        if !matches!(state, ChunkState::Buffered) {
+            return Err(AslError::InvalidMessage);
+        }
+        *state = ChunkState::Missing;
+        Ok(())
+    }
+
     pub fn durable_count(&self) -> usize {
         self.states
             .iter()
@@ -361,5 +390,32 @@ mod tests {
         scheduler.mark_durable(&[0]).unwrap();
         assert_eq!(scheduler.durable_count(), 1);
         assert!(scheduler.mark_durable(&[0]).is_err());
+    }
+
+    #[test]
+    fn resumed_scheduler_skips_durable_blocks_and_retries_an_unsaved_buffer() {
+        let blocks = [vec![7; CHUNK_SIZE as usize], vec![8; 3]];
+        let hashes = blocks
+            .iter()
+            .map(|block| *blake3::hash(block).as_bytes())
+            .collect();
+        let mut scheduler =
+            Scheduler::from_durable(u64::from(CHUNK_SIZE) + 3, hashes, [peer(1)], &[0]).unwrap();
+        assert_eq!(scheduler.durable_count(), 1);
+        let assignment = scheduler.next(1_000).pop().unwrap();
+        assert_eq!(assignment.index, 1);
+        scheduler
+            .received(&assignment.peer_id, assignment.index, &blocks[1])
+            .unwrap();
+        assert!(scheduler.next(1_001).is_empty());
+        scheduler.discard_buffered(1).unwrap();
+        assert_eq!(
+            scheduler
+                .next(1_002)
+                .iter()
+                .map(|assignment| assignment.index)
+                .collect::<Vec<_>>(),
+            [1]
+        );
     }
 }

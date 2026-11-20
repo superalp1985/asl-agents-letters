@@ -67,13 +67,19 @@ T27 直连集成（2026-11-20）更新了上面的历史接线状态：常驻命
 
 IPC kind 38 `DiscoveryCandidate` 仅由 Net 发给 Core，正文为 u16 长度加规范 PeerId、传输类型、SocketAddr 和状态枚举（1=Discovered，2=Expired），正文上限 151 字节。它只表示通过本机地址策略筛选的 mDNS 候选元数据，不表示传输连接已建立、Agent 身份已验证或节点在线，也不授予联系人、查询或文件权限。Supervisor 将其转换成不产生网络命令的 `LocalNetworkObservation`，只交给单独的只读观察回调，不进入 Agent 业务 handler；默认事件泵不显示或持久化该观察。
 
+IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup ID 和 32 字节 DHT key。kind 45 `DhtProviders` 仅由 Net 发给 Core，包含 lookup ID、完成/失败状态及最多 20 个去重 provider 候选；每个候选只含规范 PeerId、可选的 TCP/QUIC SocketAddr 和已配置 relay 路由标志。Net 只从本地 provider/routing 地址中选取符合当前地址策略、且 PeerId 绑定一致的直接端点；无可用直接端点时不携带地址。候选及地址均为不可信发现数据，不表示 Agent 身份、资源内容或授权。Supervisor 将结果作为本机只读网络观察交给当前出站查询状态机；只有 CoreAdmission 提供的已准入连接才会收到 ASL Query。新增 IPC kind 不改变 ASL/1 应用帧。当前仍未配置 DHT bootstrap，资源 provider 发布也未接入，不能据此宣称冷启动公网发现可用。
+
+接收侧 IPC kind 27 `BulkReceived` 携带连接句柄、Net 端记录的原始本机请求 ID，以及通过 `/asl/blob/1.0.0` 响应关联校验的 BulkResponse。Core 再按当前准入的 AgentId、PeerId、连接、请求 ID 和期限匹配一次性待决请求；ASL blob 线上格式不变。匹配成功的普通 Bulk 响应通过 `BulkTransferResponse` 回调；未匹配响应不会交给调用方。
+
+本机网络处理器发出的 `FetchRequest` 按 Net 返回的原始控制请求 ID 关联 `FetchGrant`；Grant 的 `message_id` 独立，不用于关联。Core 检查同一准入连接、AgentId、PeerId、内容 ID、文件大小上限和 lease 期限，再在该连接发一次 manifest 请求。Bulk 响应的有效期取请求超时、会话和 lease 期限的最早值。清单按 `content_id` 校验，文件大小与 Grant 一致后，Core 才发出 `FetchManifestReceived` 本机事件，保留原请求 ID 和 root task ID。该事件不产生磁盘写入授权，也不自动下载文件或接受 Offer。
+
 控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查由 Core `DeviceSession`/`CoreAdmission` 执行。任何未经过该身份闸门的调用路径，都不得把控制/bulk 消息交给 Agent 或据此生成业务回复。
 
 控制连接经 libp2p 认证与加密。传输握手认证设备 PeerId；ASL hello 携带 AgentId 和设备证书。双方按需在独立 identity-proof stream 交换证明：request 的 checkpoint 字段绑定请求方本机已接受的 finalized block hash，不能由对端指定信任根；响应必须精确匹配 request ID、AgentId 和 checkpoint。响应包含 finalized height/block hash/state root、完整 EIP-1186 account verifier inputs（nonce、balance、storage root、code hash、nodes）、恰好三个 `{slot: bytes32, value: bytes32, nodes}` 路径，以及最多 8 KiB 的身份根签名 device-directory record。链 ID、registry address 和可信状态根只取本机已验证配置/轻客户端；controller、commitment、sequence、revocation 等状态由 Core 运行现有 Ethereum MPT 验证器从槽值解码，不采信对端派生字段。随后 Core 验证签名目录、链上 commitment/sequence、当前证书和传输 PeerId。每条路径最多 32 个节点、每节点最多 2 KiB、总帧 256 KiB。证明必须来自请求中指定的 checkpoint；对端无法提供时握手失败，不接受它建议的新 root。昂贵验签/证明验证必须经过每连接及全局预算闸门；验证成功前只放行有界 hello/proof/pair 消息。
 
 `/asl/identity-proof/1.1.0` 修正此前 1.0.0 线格式与现有验证器不兼容的问题：旧结构省略账户 trie 验证所需字段、用 64 位 storage slot 且携带未经验证器推导的注册状态。本项目尚未发布，故直接冻结新的 1.1.0，禁止静默兼容旧结构。身份目录作为签名记录随身份证明返回，避免为目录另造信任根或额外发现步骤；记录本身仍须按第 3 节完整验签和核对当前链状态。
 
-PAIR invite/exchange 帧只含 AgentId、PeerId、期限、一次性 token、有限尝试序号、transcript hash 和所选成熟 PAKE 的有界密码学 payload。MLS group envelope 外层只含 group ID、epoch、操作码和有界 ciphertext；OpenMLS 解密后的 plaintext 必须再次通过 ASL 语义 CDDL 校验。
+PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode 字符的可选单句说明；拒绝换行、控制字符和句中多个句末标点，说明内容纳入身份根签名和 transcript。nonce 为 256-bit 随机值，不是低熵口令；身份通过已验证链状态下的身份根签名校验。邀请需本机用户明确批准才可接受，只建立 AgentId 本地 pin，不改变文件/目录授权。提示限额为每 AgentId 每 24 小时 1 次、本机每小时 20 次、最多 5 个同时待处理提示；超限邀请得到签名拒绝，不弹提示、不建立联系人。MLS group envelope 外层只含 group ID、epoch、操作码和有界 ciphertext；OpenMLS 解密后的 plaintext 必须再次通过 ASL 语义 CDDL 校验。
 
 设备证书签名覆盖下列规范二进制：
 
@@ -151,11 +157,13 @@ profile key = BLAKE3("ASL-PROFILE-v1\0" + agent_id_bytes)
 
 只对 public 范围资源发布 concept/content provider。contacts 与指定 peers 的资源仅在获准直询中返回；hash 和概念 ID 都不是保密技术。
 
-持久短码按固定版本算法从 AgentId 派生，显示为分组十进制数字。短码只提供查找便利，不是身份、认证凭据或全局唯一名称。DHT 使用 `BLAKE3("ASL-HANDLE-v1\0" + 16 位补零十进制 ASCII)` 查找，并通过可返回多个 PeerId 的 provider 记录发现候选。任何候选均不代表 Agent 身份或授权；直接握手得到 AgentId 后，客户端读取并验证该 AgentId 对应的身份根签名短码声明和有效链状态，完成 PAKE/指纹步骤前仍保持未核验联系人。DHT 隐瞒、日蚀和离线仍可能造成漏查。
+持久短码按固定版本算法从 AgentId 派生，显示为分组十进制数字。短码只提供查找便利，不是身份、认证凭据或全局唯一名称。DHT 使用 `BLAKE3("ASL-HANDLE-v1\0" + 16 位补零十进制 ASCII)` 查找，并通过可返回多个 PeerId 的 provider 记录发现候选。任何候选均不代表 Agent 身份或授权；直接握手得到 AgentId 后，Core 验证链状态、根签名设备证书和 PeerId，再计算短码并过滤候选。碰撞保留多个已验证候选，由本机授权具体目标。DHT 隐瞒、日蚀和离线仍可能造成漏查。
 
 固定 1.0 派生算法：`n = LE64(BLAKE3("ASL-HANDLE-ID-v1\0" || agent_id_bytes)[0..8]) mod 10^16`，左侧补零至 16 位，界面按每 4 位分组。输出碰撞是合法状态，禁止抢占/覆盖或声称全局唯一。数字短码只用于发现，不进行链上注册，不作为凭证。身份解析通过版本化 `IdentityResolver` 接口。
 
-配对协议使用独立 `/asl/pair/1.0.0` request-response。局域网配对码为一次性 6 位 PAKE 凭据，有效期 2–5 分钟；公网邀请优先使用含随机至少 128-bit token、目标 AgentId、期限和身份根签名的二维码/链接，也可用 12 位一次性 PAKE 码。线上只编码固定字段，不含自然语言说明。所有 PAKE 记录绑定双方 AgentId、设备 PeerId、传输会话 transcript 和期限；最多 5 次在线尝试，成功或过期立即作废。具体 Rust PAKE crate 必须经依赖/安全评估后固定，未完成前不得自行拼装密码学协议。
+配对协议使用独立 `/asl/pair/1.0.0` request-response。持久数字短码只负责发现；首次配对由本机针对某个已验证 AgentId 明确批准。邀请包含至少 256-bit 随机 nonce、目标 AgentId、短期期限、可选的 120 字单句说明和身份根签名；响应由目标身份根签名，并绑定双方 AgentId、当前 PeerId、邀请字段与 transcript hash。接受和拒绝邀请都会持久化回执以防重放；仅接受会固定联系人。超限自动签名拒绝不写回执，避免拒绝洪泛造成数据库增长。低熵 6/12 位数字口令不作凭据；当前未选定 PAKE crate，因此不实现口令 PAKE，也不自创密码协议。
+
+邀请说明是唯一允许随配对邀请显示的人类可读文本，最多 120 个 Unicode 字符、单行、单句；空字符串表示不附说明。它仅以纯文本显示，不作为 Agent 指令或富文本解析。提示名额由 SQLite 持久记录控制，并在用户授权事件发出前预留；AgentId、邀请 ID 和当前连接/响应句柄都必须与待处理提示完全一致才能接受或拒绝。超限时只签发拒绝响应，不落拒绝回执，避免请求洪泛造成无界数据库增长。
 
 provider 记录最长 1 小时，15 分钟续发；应用只把它视为候选节点，必须直连验证。入口与 provider 地址先经本机地址策略过滤，禁止借远端地址驱动 HTTP、SMB、文件协议或系统命令。
 

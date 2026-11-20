@@ -25,7 +25,9 @@ use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
 use requests::Requests;
 
 use asl_types::ids::PeerId;
-use asl_types::protocol::{IdentityProof, IdentityProofRequest, WireFrame};
+use asl_types::protocol::{
+    IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame,
+};
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     core::{
@@ -51,7 +53,7 @@ use rand::{TryRng, rngs::SysRng};
 
 use crate::codec::{
     BULK_PROTOCOL, BulkCodec, BulkRequest, BulkResponse, CONTROL_PROTOCOL, ControlCodec,
-    IDENTITY_PROOF_PROTOCOL, IdentityProofCodec,
+    IDENTITY_PROOF_PROTOCOL, IdentityProofCodec, PAIRING_PROTOCOL, PairingCodec,
 };
 
 const MAX_LISTENERS: usize = 16;
@@ -62,14 +64,18 @@ const MAX_PENDING_DISCOVERY_DIALS: usize = 8;
 const MAX_DISCOVERY_CANDIDATES: usize = 128;
 const MAX_PENDING_DISCOVERY_OBSERVATIONS: usize = 256;
 const MAX_PENDING_DHT_RECORDS: usize = 32;
+const MAX_PENDING_DHT_PROVIDER_LOOKUPS: usize = 24;
+const MAX_DHT_PROVIDER_CANDIDATES: usize = 20;
 const DHT_CANDIDATE_LIFETIME: Duration = Duration::from_secs(10);
+const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_RELAY_ENDPOINTS: usize = 8;
-const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 3 * 2;
+const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 4 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
 const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const PAIRING_REQUEST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const RELAY_RETRY_BASE: Duration = Duration::from_secs(1);
 const RELAY_RETRY_MAX: Duration = Duration::from_secs(60);
 const RELAY_RETRY_MAX_SHIFT: u32 = 6;
@@ -85,6 +91,27 @@ pub enum TransportKind {
 pub enum DiscoveryCandidateState {
     Discovered = 1,
     Expired = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DhtLookupStatus {
+    Completed = 1,
+    Failed = 2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DhtProviderCandidate {
+    pub peer_id: PeerId,
+    pub endpoint: Option<(TransportKind, SocketAddr)>,
+    pub relay_route_available: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialFailure {
+    PeerIdentityMismatch,
+    Busy,
+    Transport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,12 +220,21 @@ pub enum TransportEvent {
         relay_peer_id: libp2p::PeerId,
     },
     DiscoveryCandidate(DiscoveryCandidate),
+    DhtProviders {
+        lookup_id: [u8; 16],
+        status: DhtLookupStatus,
+        providers: Vec<DhtProviderCandidate>,
+    },
     DhtRecordCandidate {
         candidate_id: [u8; 16],
         key: [u8; 32],
         value: Vec<u8>,
     },
     InboundRejected,
+    DialFailed {
+        peer_id: PeerId,
+        failure: DialFailure,
+    },
     /// Authenticated device key only; no agent identity, certificate or grant is implied.
     Connected {
         connection: AuthenticatedPeer,
@@ -218,6 +254,17 @@ pub enum TransportEvent {
         connection: AuthenticatedPeer,
         request: IdentityProofRequest,
         response: ResponseToken,
+    },
+    PairingInviteRequest {
+        connection: AuthenticatedPeer,
+        invite: PairingInvite,
+        response: ResponseToken,
+    },
+    PairingExchangeResponse {
+        connection: AuthenticatedPeer,
+        request: RequestToken,
+        invite: PairingInvite,
+        exchange: PairingExchange,
     },
     IdentityProofResponse {
         connection: AuthenticatedPeer,
@@ -262,6 +309,13 @@ pub struct LocalTransport {
     relay_retries: HashMap<libp2p::PeerId, RelayRetry>,
     reserved_relays: HashSet<libp2p::PeerId>,
     pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
+    pending_dht_provider_lookups: HashMap<kad::QueryId, PendingDhtProviderLookup>,
+}
+
+struct PendingDhtProviderLookup {
+    lookup_id: [u8; 16],
+    key: RecordKey,
+    providers: HashSet<libp2p::PeerId>,
 }
 
 struct RelayRetry {
@@ -312,6 +366,7 @@ impl LocalTransport {
             relay_retries: HashMap::new(),
             reserved_relays: HashSet::new(),
             pending_dht_records: HashMap::new(),
+            pending_dht_provider_lookups: HashMap::new(),
         })
     }
 
@@ -547,6 +602,37 @@ impl LocalTransport {
         Ok(self.swarm.behaviour_mut().dht.get_providers(key))
     }
 
+    pub fn find_providers(
+        &mut self,
+        key: [u8; 32],
+        lookup_id: [u8; 16],
+    ) -> io::Result<kad::QueryId> {
+        if lookup_id == [0; 16] {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if self.pending_dht_provider_lookups.len() >= MAX_PENDING_DHT_PROVIDER_LOOKUPS {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        if self
+            .pending_dht_provider_lookups
+            .values()
+            .any(|lookup| lookup.lookup_id == lookup_id)
+        {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let key = RecordKey::new(&key);
+        let query_id = self.swarm.behaviour_mut().dht.get_providers(key.clone());
+        self.pending_dht_provider_lookups.insert(
+            query_id,
+            PendingDhtProviderLookup {
+                lookup_id,
+                key,
+                providers: HashSet::new(),
+            },
+        );
+        Ok(query_id)
+    }
+
     pub fn get_record(&mut self, key: RecordKey) -> io::Result<kad::QueryId> {
         if key.as_ref().len() != 32 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -680,6 +766,11 @@ impl LocalTransport {
                         return Ok(event);
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Pairing(event)) => {
+                    if let Some(event) = self.handle_pairing(event)? {
+                        return Ok(event);
+                    }
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Bulk(event)) => {
                     if let Some(event) = self.handle_bulk(event)? {
                         return Ok(event);
@@ -769,6 +860,18 @@ impl LocalTransport {
                     };
                     if was_discovery {
                         continue;
+                    }
+                    if let Some(peer_id) = peer_id {
+                        return Ok(TransportEvent::DialFailed {
+                            peer_id: device_peer(peer_id)?,
+                            failure: match &error {
+                                DialError::WrongPeerId { .. } => DialFailure::PeerIdentityMismatch,
+                                DialError::DialPeerConditionFalse(_) | DialError::Denied { .. } => {
+                                    DialFailure::Busy
+                                }
+                                _ => DialFailure::Transport,
+                            },
+                        });
                     }
                     return Err(dial_error(error));
                 }
@@ -978,6 +1081,16 @@ impl LocalTransport {
     }
 
     fn handle_dht(&mut self, event: kad::Event) -> io::Result<Option<TransportEvent>> {
+        if let kad::Event::OutboundQueryProgressed {
+            id,
+            result: kad::QueryResult::GetProviders(result),
+            step,
+            ..
+        } = &event
+        {
+            return self.handle_provider_lookup_progress(*id, result, step.last);
+        }
+
         let record = match event {
             kad::Event::InboundRequest {
                 request:
@@ -1052,12 +1165,118 @@ impl LocalTransport {
         Ok(None)
     }
 
+    fn handle_provider_lookup_progress(
+        &mut self,
+        query_id: kad::QueryId,
+        result: &kad::GetProvidersResult,
+        is_last: bool,
+    ) -> io::Result<Option<TransportEvent>> {
+        match result {
+            Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) => {
+                if let Some(lookup) = self.pending_dht_provider_lookups.get_mut(&query_id) {
+                    for provider in providers {
+                        if lookup.providers.len() >= MAX_DHT_PROVIDER_CANDIDATES {
+                            break;
+                        }
+                        lookup.providers.insert(*provider);
+                    }
+                }
+                if !is_last {
+                    return Ok(None);
+                }
+                self.finish_provider_lookup(query_id, DhtLookupStatus::Completed)
+            }
+            Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. }) => {
+                self.finish_provider_lookup(query_id, DhtLookupStatus::Completed)
+            }
+            Err(_) => self.finish_provider_lookup(query_id, DhtLookupStatus::Failed),
+        }
+    }
+
+    fn finish_provider_lookup(
+        &mut self,
+        query_id: kad::QueryId,
+        status: DhtLookupStatus,
+    ) -> io::Result<Option<TransportEvent>> {
+        let Some(lookup) = self.pending_dht_provider_lookups.remove(&query_id) else {
+            return Ok(None);
+        };
+        let local_peer = *self.swarm.local_peer_id();
+        let mut peers = lookup.providers.into_iter().collect::<Vec<_>>();
+        peers.retain(|peer| *peer != local_peer);
+        peers.sort_by_key(|peer| peer.to_bytes());
+
+        let providers = peers
+            .into_iter()
+            .take(MAX_DHT_PROVIDER_CANDIDATES)
+            .map(|peer| {
+                let endpoint = self.provider_endpoint(&lookup.key, peer);
+                let relay_route_available = self
+                    .relay_route_addresses(&peer)
+                    .is_ok_and(|addresses| !addresses.is_empty());
+                Ok(DhtProviderCandidate {
+                    peer_id: device_peer(peer)?,
+                    endpoint,
+                    relay_route_available,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        Ok(Some(TransportEvent::DhtProviders {
+            lookup_id: lookup.lookup_id,
+            status,
+            providers,
+        }))
+    }
+
+    fn provider_endpoint(
+        &mut self,
+        key: &RecordKey,
+        peer: libp2p::PeerId,
+    ) -> Option<(TransportKind, SocketAddr)> {
+        let mut addresses = self
+            .swarm
+            .behaviour_mut()
+            .dht
+            .store_mut()
+            .providers(key)
+            .into_iter()
+            .find(|record| record.provider == peer)
+            .map(|record| record.addresses)
+            .unwrap_or_default();
+        addresses.extend(
+            self.swarm
+                .behaviour_mut()
+                .dht
+                .kbuckets()
+                .find_map(|bucket| {
+                    bucket
+                        .iter()
+                        .find(|entry| entry.node.key.preimage() == &peer)
+                        .map(|entry| entry.node.value.iter().cloned().collect::<Vec<_>>())
+                })
+                .unwrap_or_default(),
+        );
+        select_provider_endpoint(self.address_policy, &peer, addresses)
+    }
+
     fn next_pending_dht_deadline(&self) -> Option<tokio::time::Instant> {
         self.pending_dht_records
             .values()
             .map(|(_, deadline)| *deadline)
             .min()
     }
+}
+
+fn select_provider_endpoint(
+    policy: AddressPolicy,
+    peer: &libp2p::PeerId,
+    addresses: impl IntoIterator<Item = Multiaddr>,
+) -> Option<(TransportKind, SocketAddr)> {
+    addresses.into_iter().find_map(|address| {
+        validate_multiaddr(policy, peer, &address).ok()?;
+        bound_endpoint(&address)
+    })
 }
 
 fn policy_approved_discovery_address(
@@ -1620,6 +1839,37 @@ mod tests {
         assert!(
             policy_approved_discovery_address(AddressPolicy::LanOnly, &local, local, accepted)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_endpoints_are_selected_only_with_matching_peer_and_policy_scope() {
+        let remote = peer();
+        let private: Multiaddr = format!("/ip4/192.168.1.10/tcp/4001/p2p/{remote}")
+            .parse()
+            .unwrap();
+        let public: Multiaddr = format!("/ip4/8.8.8.8/udp/4002/quic-v1/p2p/{remote}")
+            .parse()
+            .unwrap();
+        let wrong_peer: Multiaddr = format!("/ip4/192.168.1.10/tcp/4001/p2p/{}", peer())
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            select_provider_endpoint(
+                AddressPolicy::LanOnly,
+                &remote,
+                [public.clone(), private.clone()]
+            ),
+            Some((TransportKind::Tcp, "192.168.1.10:4001".parse().unwrap()))
+        );
+        assert_eq!(
+            select_provider_endpoint(AddressPolicy::InternetOnly, &remote, [public]),
+            Some((TransportKind::Quic, "8.8.8.8:4002".parse().unwrap()))
+        );
+        assert_eq!(
+            select_provider_endpoint(AddressPolicy::LanOnly, &remote, [wrong_peer]),
+            None
         );
     }
 

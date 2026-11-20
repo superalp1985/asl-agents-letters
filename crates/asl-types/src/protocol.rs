@@ -3,13 +3,43 @@ pub(crate) mod cbor;
 use serde::Serialize;
 
 use crate::{
-    error::ErrorCode,
+    error::{AslError, ErrorCode},
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
 };
 pub use cbor::{
-    MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, decode_control, decode_frame,
-    encode_control, encode_frame,
+    MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, MAX_PAIRING_FRAME_BYTES, decode_control,
+    decode_frame, encode_control, encode_frame,
 };
+
+pub const MAX_PAIRING_NOTE_CHARS: usize = 120;
+pub const MAX_PAIRING_NOTE_BYTES: usize = MAX_PAIRING_NOTE_CHARS * 4;
+
+pub fn validate_pairing_note(note: &str) -> Result<(), AslError> {
+    if note.chars().count() > MAX_PAIRING_NOTE_CHARS
+        || note.len() > MAX_PAIRING_NOTE_BYTES
+        || note
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(AslError::InvalidMessage);
+    }
+
+    let last_non_whitespace = note
+        .char_indices()
+        .filter(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .next_back();
+    let sentence_endings = [
+        '.', '!', '?', '\u{037e}', '\u{0589}', '\u{061f}', '\u{06d4}', '\u{0964}', '\u{0965}',
+        '\u{1362}', '\u{3002}', '\u{ff01}', '\u{ff0e}', '\u{ff1f}',
+    ];
+    if note.char_indices().any(|(index, character)| {
+        sentence_endings.contains(&character) && Some(index) != last_non_whitespace
+    }) {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Feature {
@@ -279,7 +309,8 @@ pub struct PairingInvite {
     pub inviter: AgentId,
     pub target: AgentId,
     pub expires_at_ms: u64,
-    pub token: Vec<u8>,
+    pub nonce: Hash32,
+    pub note: String,
     pub signature: Signature65,
 }
 
@@ -289,7 +320,8 @@ pub struct PairingExchange {
     pub agent_id: AgentId,
     pub peer_id: PeerId,
     pub attempt: u8,
-    pub payload: Vec<u8>,
+    pub accepted: bool,
+    pub signature: Signature65,
     pub transcript_hash: Hash32,
 }
 

@@ -196,8 +196,9 @@ pairing-invite = {
   3: agent-id,
   4: agent-id,
   5: time-ms,
-  6: bstr .size (16..256),
-  7: signature65
+  6: hash32,
+  7: signature65,
+  8: tstr .size (0..480)
 }
 
 pairing-exchange = {
@@ -206,9 +207,10 @@ pairing-exchange = {
   2: id128,
   3: agent-id,
   4: peer-id,
-  5: 1..5,
-  6: bstr .size (1..4096),
-  7: hash32
+  5: 1,
+  6: signature65,
+  7: hash32,
+  8: bool
 }
 
 group-envelope = {

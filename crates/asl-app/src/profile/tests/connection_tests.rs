@@ -802,6 +802,280 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
 
 #[cfg(windows)]
 #[test]
+fn only_a_matched_fetch_manifest_registers_its_admitted_device() {
+    use crate::{supervisor::Supervisor, transfer::TransferService};
+    use asl_net::codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus};
+    use asl_types::{
+        manifest::{Manifest, content_id, encode_manifest},
+        protocol::{FetchGrant, FetchRequest},
+    };
+
+    let root = AgentIdentity::generate().unwrap();
+    let keys = Keypair::generate_ed25519().public();
+    let peer = PeerId::from_bytes(keys.to_peer_id().to_bytes()).unwrap();
+    let device = certificate(&root, &peer, 2);
+    let local_peer = DeviceIdentity::generate().unwrap().peer_id();
+    let dir = directory(
+        &root,
+        7,
+        vec![certificate(&root, &local_peer, 1), device.clone()],
+        vec![],
+    );
+    let signed = signed_directory(&root, &dir, 1);
+    let (db, resolver, proof) = durable_directory_resolver(&root, &dir);
+    let mut admission =
+        CoreAdmission::for_local_identity(&root, local_peer, signed.clone(), resolver, NOW)
+            .unwrap();
+    let connection_id = [51; 16];
+    admission.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id,
+            peer_id: peer.clone(),
+        },
+        NOW,
+    );
+    let batch = admission.handle_event(
+        NetworkEvent::UnverifiedControlRequest {
+            connection_id,
+            response_id: [52; 16],
+            request: WireFrame::Hello(hello(&device)),
+        },
+        NOW,
+    );
+    let request = batch
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            NetworkCommand::RequestIdentityProof { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    let proof = crate::chain::identity_proof_to_wire(request, proof, signed);
+    let batch = admission.handle_event(
+        NetworkEvent::IdentityProofReceived {
+            connection_id,
+            proof,
+        },
+        NOW,
+    );
+    assert!(matches!(
+        batch.events.as_slice(),
+        [AdmittedNetworkEvent::PeerAdmitted { .. }]
+    ));
+
+    let sql = rusqlite::Connection::open(&db.path).unwrap();
+    let counts = || {
+        sql.query_row(
+            "SELECT (SELECT count(*) FROM device_identities), (SELECT count(*) FROM peers)",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(counts(), (0, 0));
+    let mut transfers = TransferService::open(&db.path).unwrap();
+    let hash = *blake3::hash(b"x").as_bytes();
+    let payload = encode_manifest(&Manifest {
+        file_size: 1,
+        file_hash: hash,
+        chunk_hashes: vec![hash],
+    })
+    .unwrap();
+    let fetch = FetchRequest {
+        message_id: Id128([53; 16]),
+        root_task_id: Id128([54; 16]),
+        content_id: Hash32(content_id(&payload)),
+    };
+    let control_id = [55; 16];
+    let grant = FetchGrant {
+        message_id: Id128([56; 16]),
+        content_id: fetch.content_id,
+        lease_id: Hash32([57; 32]),
+        file_size: 1,
+        expires_at_ms: NOW + 5_000,
+    };
+    let requester = admission
+        .direct_requester(connection_id, root.agent_id())
+        .unwrap();
+    let request_manifest = |admission: &mut CoreAdmission, transfers: &mut TransferService| {
+        let mut bulk_id = None;
+        let event = AdmittedNetworkEvent::ControlResponse {
+            connection_id,
+            agent_id: root.agent_id(),
+            request_id: control_id,
+            response: WireFrame::FetchGrant(grant.clone()),
+        };
+        assert!(
+            Supervisor::route_transfer_with(Some(admission), transfers, event, NOW, |command| {
+                let NetworkCommand::SendBulk { request, .. } = command else {
+                    panic!("expected manifest request")
+                };
+                assert_eq!(request.operation, BulkOperation::Manifest);
+                bulk_id = Some(request.request_id);
+                Ok(true)
+            })
+            .unwrap()
+            .is_none()
+        );
+        bulk_id
+    };
+    let deliver = |admission: &mut CoreAdmission,
+                   transfers: &mut TransferService,
+                   id: Id128,
+                   bytes: &[u8]| {
+        let batch = admission.handle_event(
+            NetworkEvent::UnverifiedBulkResponse {
+                connection_id,
+                request_id: id.0,
+                response: BulkResponse {
+                    request_id: id,
+                    status: BulkStatus::Success,
+                    payload: bytes.to_vec(),
+                },
+            },
+            NOW,
+        );
+        let event = batch.events.into_iter().next().unwrap();
+        Supervisor::route_transfer_with(Some(admission), transfers, event, NOW, |_| {
+            panic!("unexpected send")
+        })
+        .unwrap()
+    };
+    assert!(request_manifest(&mut admission, &mut transfers).is_none());
+    let raw_id = Id128([58; 16]);
+    assert!(deliver(&mut admission, &mut transfers, raw_id, &payload).is_none());
+    transfers
+        .authorize_bulk_request(
+            &mut admission,
+            connection_id,
+            BulkRequest {
+                operation: BulkOperation::Manifest,
+                request_id: raw_id,
+                content_id: fetch.content_id,
+                lease_id: grant.lease_id,
+                chunk_index: 0,
+            },
+            NOW,
+        )
+        .unwrap();
+    assert!(matches!(
+        deliver(&mut admission, &mut transfers, raw_id, &payload),
+        Some(AdmittedNetworkEvent::BulkTransferResponse(_))
+    ));
+    assert_eq!(counts(), (0, 0));
+
+    let fetch_once =
+        |admission: &mut CoreAdmission, transfers: &mut TransferService, bytes: &[u8]| {
+            transfers
+                .expect_fetch_response(connection_id, &requester, control_id, &fetch, NOW)
+                .unwrap();
+            let id = request_manifest(admission, transfers).unwrap();
+            let event = deliver(admission, transfers, id, bytes);
+            assert!(deliver(admission, transfers, id, bytes).is_none());
+            event
+        };
+    assert!(fetch_once(&mut admission, &mut transfers, &[0]).is_none());
+    assert_eq!(counts(), (0, 0));
+    sql.execute("UPDATE identity_registry_states SET sequence=8", [])
+        .unwrap();
+    assert!(fetch_once(&mut admission, &mut transfers, &payload).is_none());
+    assert_eq!(counts(), (0, 0));
+    sql.execute("UPDATE identity_registry_states SET sequence=7", [])
+        .unwrap();
+
+    // Historical, genuinely signed certificates cannot be displaced by a download.
+    let other_key = Keypair::generate_ed25519().public();
+    let other_peer = PeerId::from_bytes(other_key.to_peer_id().to_bytes()).unwrap();
+    let key_hex = |key: libp2p_identity::PublicKey| {
+        alloy_primitives::hex::encode(key.try_into_ed25519().unwrap().to_bytes())
+    };
+    for (existing, existing_key) in [
+        (certificate(&root, &other_peer, device.serial), &other_key),
+        (certificate(&root, &peer, device.serial + 1), &keys),
+        (
+            root.issue_device_certificate(peer.clone(), device.serial, NOW, device.expires_at_ms)
+                .unwrap(),
+            &keys,
+        ),
+    ] {
+        let cbor = existing.to_canonical_cbor().unwrap();
+        sql.execute(
+            "INSERT INTO device_identities(peer_id,agent_id,public_key_hex,certificate_cbor,
+                certificate_serial,certificate_expires_ms,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![bs58::encode(existing.peer_id.as_bytes()).into_string(),
+                bs58::encode(existing.agent_id.0).into_string(), key_hex(existing_key.clone()),
+                cbor, existing.serial as i64, existing.expires_at_ms as i64, NOW as i64],
+        ).unwrap();
+        assert!(fetch_once(&mut admission, &mut transfers, &payload).is_none());
+        assert_eq!(counts(), (1, 0));
+        assert_eq!(
+            sql.execute(
+                "DELETE FROM device_identities WHERE certificate_cbor=?1",
+                [&cbor]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    for _ in 0..2 {
+        assert!(
+            matches!(fetch_once(&mut admission, &mut transfers, &payload),
+            Some(AdmittedNetworkEvent::FetchManifestReceived(m)) if m.peer_id == peer && m.root_task_id == fetch.root_task_id)
+        );
+        assert_eq!(counts(), (1, 1));
+    }
+    let row = sql
+        .query_row(
+            "SELECT p.peer_id,p.agent_id,d.public_key_hex,d.certificate_cbor
+        FROM peers p JOIN device_identities d USING(peer_id,agent_id)",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            keys.to_peer_id().to_base58(),
+            bs58::encode(root.agent_id().0).into_string(),
+            key_hex(keys),
+            device.to_canonical_cbor().unwrap()
+        )
+    );
+    assert!(db.open().authorized_contacts().unwrap().is_empty());
+    let elevations: i64 = sql
+        .query_row(
+            "SELECT (SELECT count(*) FROM paired_contacts)
+        + (SELECT count(*) FROM preferred_peers) + (SELECT count(*) FROM trust_events)
+        + (SELECT count(*) FROM contribution_events)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(elevations, 0);
+
+    sql.execute(
+        "UPDATE device_identities SET revoked_at_ms=?1",
+        [NOW as i64],
+    )
+    .unwrap();
+    assert!(fetch_once(&mut admission, &mut transfers, &payload).is_none());
+    let revoked: i64 = sql
+        .query_row("SELECT revoked_at_ms FROM device_identities", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(revoked, NOW as i64);
+}
+
+#[cfg(windows)]
+#[test]
 fn dht_records_are_cached_only_after_key_signature_and_chain_admission() {
     let root = AgentIdentity::generate().unwrap();
     let local_device = DeviceIdentity::generate().unwrap();

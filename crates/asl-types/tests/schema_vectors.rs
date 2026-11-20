@@ -57,6 +57,17 @@ fn signed_payloads_reuse_the_profile_and_nested_device_certificate() {
         panic!("expected device directory payload");
     };
     assert_eq!(directory.agent_id, hello.agent_id);
+    let Value::Map(fields) = cbor2::from_slice(&fixed_bytes("hello-v1")).unwrap() else {
+        panic!("expected hello map");
+    };
+    let (_, nested) = fields
+        .iter()
+        .find(|(key, _)| key == &Value::Integer(5.into()))
+        .unwrap();
+    assert_eq!(
+        hello.device_certificate.to_canonical_cbor().unwrap(),
+        cbor2::to_canonical_vec(nested).unwrap()
+    );
     assert_eq!(directory.devices, vec![hello.device_certificate]);
 }
 
