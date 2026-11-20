@@ -16,7 +16,7 @@ use asl_transfer::scheduler::MAX_ACTIVE_PER_SOURCE;
 use asl_types::{
     error::AslError,
     ids::PeerId,
-    protocol::{IdentityProof, PairingExchange, PairingInvite, WireFrame},
+    protocol::{GroupPacket, IdentityProof, PairingExchange, PairingInvite, WireFrame},
 };
 use rand::{TryRng, rngs::SysRng};
 use tokio::{runtime::Builder, sync::mpsc};
@@ -26,7 +26,8 @@ use crate::identity::DeviceIdentity;
 
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const MAX_PENDING_IPC_REQUESTS: usize = 96;
-const RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_secs(10);
+const RESPONSE_HANDLE_LIFETIME_MS: u64 = 10_000;
+const RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_millis(RESPONSE_HANDLE_LIFETIME_MS);
 const PAIRING_RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_secs(3 * 60);
 const RESPONSE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -344,6 +345,24 @@ impl NetworkBridge {
                 response,
             } => {
                 self.reply_bulk(connection_id, response_id, response)
+                    .map_err(|error| error_code(&error))?;
+                Ok(false)
+            }
+            IpcMessage::SendGroup {
+                connection_id,
+                request_handle,
+                deadline_ms,
+                request,
+            } => {
+                self.send_group(connection_id, request_handle, deadline_ms, request, writer)?;
+                Ok(false)
+            }
+            IpcMessage::ReplyGroup {
+                connection_id,
+                response_id,
+                response,
+            } => {
+                self.reply_group(connection_id, response_id, response)
                     .map_err(|error| error_code(&error))?;
                 Ok(false)
             }
@@ -725,6 +744,88 @@ impl NetworkBridge {
         Ok(())
     }
 
+    fn send_group<W: Write>(
+        &mut self,
+        connection_id: [u8; 16],
+        request_handle: [u8; 16],
+        deadline_ms: u64,
+        request: GroupPacket,
+        writer: &mut FrameWriter<W>,
+    ) -> Result<(), NetworkErrorCode> {
+        let protocol = NetworkProtocol::Group;
+        let now_ms =
+            crate::supervisor::unix_time_ms().map_err(|_| NetworkErrorCode::InvalidCommand)?;
+        if now_ms >= deadline_ms {
+            return self.send_request_failure(
+                connection_id,
+                request_handle,
+                protocol,
+                NetworkErrorCode::TimedOut,
+                writer,
+            );
+        }
+        let key = (connection_id, request_handle, protocol);
+        let result = match self.connections.get(&connection_id) {
+            Some(connection) if !self.closing.contains(&connection_id) => {
+                if self.requests.contains_key(&key) {
+                    Err(NetworkErrorCode::InvalidCommand)
+                } else if self.requests.len() >= MAX_PENDING_IPC_REQUESTS {
+                    Err(NetworkErrorCode::Capacity)
+                } else {
+                    self.transport
+                        .send_group_request(connection, request)
+                        .map_err(|error| error_code(&error))
+                }
+            }
+            _ => Err(NetworkErrorCode::Disconnected),
+        };
+        match result {
+            Ok(token) => {
+                self.requests.insert(
+                    key,
+                    PendingRequest {
+                        connection_id,
+                        request_id: request_handle,
+                        token,
+                    },
+                );
+                Ok(())
+            }
+            Err(code) => {
+                self.send_request_failure(connection_id, request_handle, protocol, code, writer)
+            }
+        }
+    }
+
+    fn reply_group(
+        &mut self,
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        response: GroupPacket,
+    ) -> io::Result<()> {
+        if self.closing.contains(&connection_id) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        let entry = self
+            .responses
+            .get(&response_id)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if entry.connection_id != connection_id || entry.protocol != NetworkProtocol::Group {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if entry.expires_at <= Instant::now() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let connection = self
+            .connections
+            .get(&connection_id)
+            .ok_or(io::ErrorKind::NotConnected)?;
+        self.transport
+            .send_group_response(connection, &entry.token, response)?;
+        self.responses.remove(&response_id);
+        Ok(())
+    }
+
     fn handle_event<W: Write>(
         &mut self,
         event: TransportEvent,
@@ -970,6 +1071,43 @@ impl NetworkBridge {
                     })?;
                 }
             }
+            TransportEvent::GroupRequest {
+                connection,
+                request,
+                response,
+            } => {
+                // Advertise the same lifetime, starting no later than handle registration.
+                let deadline_ms = crate::supervisor::unix_time_ms()?
+                    .checked_add(RESPONSE_HANDLE_LIFETIME_MS)
+                    .ok_or(AslError::InvalidMessage)?;
+                self.forward_request(
+                    connection,
+                    NetworkProtocol::Group,
+                    response,
+                    |connection_id, response_id| IpcMessage::GroupRequested {
+                        connection_id,
+                        response_id,
+                        deadline_ms,
+                        request,
+                    },
+                    writer,
+                )?;
+            }
+            TransportEvent::GroupResponse {
+                connection,
+                request,
+                response,
+            } => {
+                if let Some(pending) =
+                    self.take_request(connection.connection_id(), &request, NetworkProtocol::Group)
+                {
+                    writer.send(&IpcMessage::GroupReceived {
+                        connection_id: pending.connection_id,
+                        request_handle: pending.request_id,
+                        response,
+                    })?;
+                }
+            }
             TransportEvent::RequestFailed {
                 connection_id,
                 request,
@@ -987,6 +1125,7 @@ impl NetworkBridge {
                     NetworkProtocol::IdentityProof,
                     NetworkProtocol::Bulk,
                     NetworkProtocol::Pairing,
+                    NetworkProtocol::Group,
                 ] {
                     if let Some(pending) = self.take_request(connection_id, &request, protocol) {
                         writer.send(&IpcMessage::RequestFailed {
@@ -1119,7 +1258,8 @@ mod tests {
     };
     use asl_types::ids::{Id128, PeerId};
     use asl_types::protocol::{
-        Answer, AnswerStatus, ConceptRef, Intent, Query, ResultShape, ResultStatus, WireFrame,
+        Answer, AnswerStatus, ConceptRef, GroupBody, GroupMembership, Intent, Query, ResultShape,
+        ResultStatus, WireFrame,
     };
     use libp2p_identity::Keypair;
     use std::{
@@ -1155,9 +1295,15 @@ mod tests {
     }
 
     async fn connected_bridges() -> ((NetworkBridge, [u8; 16]), (NetworkBridge, [u8; 16])) {
+        connected_bridges_with(LocalTransport::new).await
+    }
+
+    async fn connected_bridges_with(
+        make_transport: fn(Keypair) -> io::Result<LocalTransport>,
+    ) -> ((NetworkBridge, [u8; 16]), (NetworkBridge, [u8; 16])) {
         let listener_key = Keypair::generate_ed25519();
         let listener_peer = peer_id(&listener_key);
-        let mut listener = NetworkBridge::new(LocalTransport::new(listener_key).unwrap());
+        let mut listener = NetworkBridge::new(make_transport(listener_key).unwrap());
         listener
             .transport
             .listen(
@@ -1173,7 +1319,7 @@ mod tests {
 
         let dialer_key = Keypair::generate_ed25519();
         let dialer_peer = peer_id(&dialer_key);
-        let mut dialer = NetworkBridge::new(LocalTransport::new(dialer_key).unwrap());
+        let mut dialer = NetworkBridge::new(make_transport(dialer_key).unwrap());
         dialer
             .transport
             .dial(TransportKind::Tcp, address, &listener_peer)
@@ -1342,6 +1488,254 @@ mod tests {
         let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
         assert!(!bridge.handle_command(command, &mut writer).unwrap());
         writer.into_inner()
+    }
+
+    fn group_request() -> GroupPacket {
+        GroupPacket {
+            message_id: Id128([71; 16]),
+            group_id: [72; 32].into(),
+            epoch: 2,
+            body: GroupBody::Membership(GroupMembership::SyncRequest {
+                epoch_binding: [73; 32].into(),
+            }),
+        }
+    }
+
+    async fn next_group_event(
+        listener: &mut NetworkBridge,
+        dialer: &mut NetworkBridge,
+    ) -> TransportEvent {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = next_event_from_either(listener, dialer).await;
+                match event {
+                    TransportEvent::GroupRequest { .. } | TransportEvent::GroupResponse { .. } => {
+                        break event;
+                    }
+                    TransportEvent::Disconnected { .. } | TransportEvent::RequestFailed { .. } => {
+                        panic!("unexpected group transport failure: {event:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn group_reply_handles_are_single_use_and_late_events_cannot_complete_retries() {
+        let ((mut listener, listener_id), (mut dialer, connection_id)) =
+            connected_bridges_with(LocalTransport::new_with_loopback_groups).await;
+        let request = group_request();
+        let request_handle = [81; 16];
+        let retry_handle = [82; 16];
+        let send = |request_handle| IpcMessage::SendGroup {
+            connection_id,
+            request_handle,
+            deadline_ms: crate::supervisor::unix_time_ms().unwrap() + 5_000,
+            request: request.clone(),
+        };
+        assert!(command_output(&mut dialer, send(request_handle)).is_empty());
+        assert_eq!(
+            read_event(command_output(&mut dialer, send(request_handle))),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: request_handle,
+                protocol: NetworkProtocol::Group,
+                code: NetworkErrorCode::InvalidCommand,
+            }
+        );
+
+        let event = next_group_event(&mut listener, &mut dialer).await;
+        let before_dispatch_ms = crate::supervisor::unix_time_ms().unwrap();
+        let IpcMessage::GroupRequested {
+            connection_id: received_connection,
+            response_id,
+            deadline_ms,
+            request: received_request,
+        } = bridge_event(&mut listener, event)
+        else {
+            panic!("expected a group request");
+        };
+        assert_eq!(received_connection, listener_id);
+        assert_eq!(received_request, request);
+        let after_dispatch_ms = crate::supervisor::unix_time_ms().unwrap();
+        assert!(
+            (before_dispatch_ms + RESPONSE_HANDLE_LIFETIME_MS
+                ..=after_dispatch_ms + RESPONSE_HANDLE_LIFETIME_MS)
+                .contains(&deadline_ms)
+        );
+
+        let response = GroupPacket {
+            body: GroupBody::Membership(GroupMembership::AtHead {
+                epoch_binding: [73; 32].into(),
+            }),
+            ..request.clone()
+        };
+        assert_eq!(
+            listener
+                .reply_group([0; 16], response_id, response.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            listener
+                .reply_bulk(
+                    listener_id,
+                    response_id,
+                    BulkResponse {
+                        request_id: request.message_id,
+                        status: BulkStatus::NotFound,
+                        payload: Vec::new(),
+                    },
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let pending = listener.responses.get_mut(&response_id).unwrap();
+        let live_expiry = std::mem::replace(&mut pending.expires_at, Instant::now());
+        assert_eq!(
+            listener
+                .reply_group(listener_id, response_id, response.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        listener.responses.get_mut(&response_id).unwrap().expires_at = live_expiry;
+        assert!(
+            command_output(
+                &mut listener,
+                IpcMessage::ReplyGroup {
+                    connection_id: listener_id,
+                    response_id,
+                    response: response.clone(),
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            listener
+                .reply_group(listener_id, response_id, response.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+
+        let late_reply = next_group_event(&mut listener, &mut dialer).await;
+        let TransportEvent::GroupResponse {
+            connection,
+            request: token,
+            ..
+        } = &late_reply
+        else {
+            panic!("expected a group response");
+        };
+        // Core can retry before the child processes the first attempt's failure.
+        assert!(command_output(&mut dialer, send(retry_handle)).is_empty());
+        let old_timeout = || TransportEvent::RequestFailed {
+            connection_id: connection.connection_id(),
+            request: token.clone(),
+        };
+        assert_eq!(
+            bridge_event(&mut dialer, old_timeout()),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: request_handle,
+                protocol: NetworkProtocol::Group,
+                code: NetworkErrorCode::TimedOut,
+            }
+        );
+        let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
+        dialer.handle_event(old_timeout(), &mut writer).unwrap();
+        dialer.handle_event(late_reply, &mut writer).unwrap();
+        assert!(writer.into_inner().is_empty());
+
+        let event = next_group_event(&mut listener, &mut dialer).await;
+        let IpcMessage::GroupRequested {
+            connection_id: received_connection,
+            response_id,
+            request: retried_request,
+            ..
+        } = bridge_event(&mut listener, event)
+        else {
+            panic!("expected a retried group request");
+        };
+        assert_eq!(received_connection, listener_id);
+        assert_eq!(retried_request, request);
+        assert!(
+            command_output(
+                &mut listener,
+                IpcMessage::ReplyGroup {
+                    connection_id: listener_id,
+                    response_id,
+                    response: response.clone(),
+                },
+            )
+            .is_empty()
+        );
+        let event = next_group_event(&mut listener, &mut dialer).await;
+        assert_eq!(
+            bridge_event(&mut dialer, event),
+            IpcMessage::GroupReceived {
+                connection_id,
+                request_handle: retry_handle,
+                response,
+            }
+        );
+        assert!(dialer.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_group_send_is_rejected_before_transport() {
+        let (_listener, (mut dialer, connection_id)) = connected_bridges().await;
+        let now_ms = crate::supervisor::unix_time_ms().unwrap();
+        // A live command on the default transport would fail as Transport, not TimedOut.
+        assert_eq!(
+            read_event(command_output(
+                &mut dialer,
+                IpcMessage::SendGroup {
+                    connection_id,
+                    request_handle: [83; 16],
+                    deadline_ms: now_ms,
+                    request: group_request(),
+                },
+            )),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: [83; 16],
+                protocol: NetworkProtocol::Group,
+                code: NetworkErrorCode::TimedOut,
+            }
+        );
+        assert!(dialer.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_transport_rejects_group_commands_without_retaining_requests() {
+        let (_listener, (mut dialer, connection_id)) = connected_bridges().await;
+        let request = group_request();
+        let request_handle = [83; 16];
+        assert_eq!(
+            read_event(command_output(
+                &mut dialer,
+                IpcMessage::SendGroup {
+                    connection_id,
+                    request_handle,
+                    deadline_ms: crate::supervisor::unix_time_ms().unwrap() + 5_000,
+                    request,
+                },
+            )),
+            IpcMessage::RequestFailed {
+                connection_id,
+                request_id: request_handle,
+                protocol: NetworkProtocol::Group,
+                code: NetworkErrorCode::Transport,
+            }
+        );
+        assert!(dialer.requests.is_empty());
     }
 
     fn bulk_command(connection_id: [u8; 16], operation: BulkOperation, id: u8) -> IpcMessage {

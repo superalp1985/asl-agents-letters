@@ -55,8 +55,7 @@ impl CoreAdmission {
             &candidate.roster.members,
             self.resolver.deployment().chain_id,
             now_ms,
-        )?;
-        Ok(packet)
+        )
     }
 
     /// Resolve a verified KeyPackage request against the durable Invite.

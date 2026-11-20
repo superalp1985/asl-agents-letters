@@ -505,3 +505,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 
 - Windows x64 / Rust 1.100.0 / E 盘离线：三包群相关库用例 15 项与 `asl-groups --test mls_application` 3 项通过，0 失败；相同三包全目标严格 Clippy 与格式检查通过。本切片未重跑全工作区。
 - 双 Core 本机用例覆盖错设备拒收、重复邀请不再提示、未同意不能准备加入包、链状态错配不能批准、SQLite 重开后精确恢复原请求。测试用真实 OpenMLS、DPAPI 和 SQLite，链数据为合成证明。未启动 GUI、群子流或真实链 RPC。
+
+### 2026-11-21 T31：回环网络与待决回复
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-net -p asl-store --all-targets --locked --offline -- --test-threads=1` 共 445 项通过、0 失败、3 项按原有标记忽略；同三包全目标严格 Clippy 与 `cargo fmt --all -- --check`、`git diff --check` 通过。此前并行运行复现了已记录的链历史恢复 `InvalidLocalState` 偶发失败，最终串行中该用例通过；本轮未改链 HTTP 代码。
+- 真实 TCP 回环验证 Net 的 IPC 编解码、原连接回复句柄、过期发包拒绝、跨协议句柄拒绝、旧尝试与当前重试隔离，以及默认不开放群协议。独立的双 Core 用例用真实 OpenMLS、DPAPI 和 SQLite、合成链证据及注入的 Net 事件，验证重开数据库后按原 ID 和期限重发 Invite、过期请求不提交 Add、无实际待决发送不处理 Welcome、断开重试和单次入群。两类测试不是一条生产端到端链路。
+- 独立静态复核定位并修正了邀请入队失败不能恢复、IPC 期限缺失和 Welcome 直接提交入口。子流协商/读写延迟不受本机 IPC 期限完整覆盖，生产开放前仍须接入。未验收生产 Supervisor 群路由、外网、GUI、真实链 RPC 或群同步。房间保留 `needs_sync`，未修改 P2P CBOR、SQLite schema 或依赖锁。

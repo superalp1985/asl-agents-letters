@@ -25,7 +25,7 @@ use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 #[cfg(windows)]
 mod group_rooms;
 #[cfg(windows)]
-pub use group_rooms::{ApprovedMlsWelcome, ReconciledMlsRoom};
+pub use group_rooms::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom};
 
 const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
@@ -44,6 +44,8 @@ pub struct CoreAdmission {
     dht_histories: HashMap<AgentId, RecordHistory>,
     pending_proofs: VecDeque<[u8; 16]>,
     proof_budget: ProofVerificationBudget,
+    #[cfg(windows)]
+    mls_joins: group_rooms::MlsJoinAttempts,
 }
 
 struct PeerAdmission {
@@ -278,6 +280,8 @@ impl CoreAdmission {
             dht_histories,
             pending_proofs: VecDeque::new(),
             proof_budget: ProofVerificationBudget::new(Instant::now()),
+            #[cfg(windows)]
+            mls_joins: group_rooms::MlsJoinAttempts::default(),
         })
     }
 
@@ -330,6 +334,8 @@ impl CoreAdmission {
     }
 
     pub fn poll(&mut self, now_ms: u64) -> AdmissionBatch {
+        #[cfg(windows)]
+        self.mls_joins.expire(now_ms);
         let mut batch = AdmissionBatch::default();
         self.drain_proofs(now_ms, &mut batch);
         batch
@@ -384,6 +390,8 @@ impl CoreAdmission {
                 peer_id,
             } => self.connected(connection_id, peer_id, &mut batch),
             NetworkEvent::PeerDisconnected { connection_id } => {
+                #[cfg(windows)]
+                self.mls_joins.disconnect(connection_id);
                 let (peer_id, agent_id) =
                     self.peers
                         .remove(&connection_id)
@@ -589,12 +597,21 @@ impl CoreAdmission {
                     self.close(connection_id, &mut batch);
                 }
             }
+            // The group driver needs the store and fresh member directories;
+            // raw group frames do not go to generic local or Agent handlers.
+            NetworkEvent::UnverifiedGroupRequest { .. }
+            | NetworkEvent::UnverifiedGroupResponse { .. } => {}
             NetworkEvent::RequestFailed {
                 connection_id,
                 request_id,
                 protocol,
                 code,
             } => {
+                if protocol == crate::ipc::NetworkProtocol::Group {
+                    #[cfg(windows)]
+                    self.mls_joins.fail(connection_id, request_id);
+                    return batch;
+                }
                 let is_pending_handshake = self.peers.get(&connection_id).is_some_and(|peer| {
                     (peer.hello_request_id == request_id
                         && protocol == crate::ipc::NetworkProtocol::Control)
@@ -1137,6 +1154,8 @@ impl CoreAdmission {
     }
 
     fn close(&mut self, connection_id: [u8; 16], batch: &mut AdmissionBatch) {
+        #[cfg(windows)]
+        self.mls_joins.disconnect(connection_id);
         self.pending_proofs
             .retain(|pending| *pending != connection_id);
         if let Some(mut peer) = self.peers.remove(&connection_id) {

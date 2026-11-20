@@ -6,7 +6,7 @@ use crate::dht::BoundedRecordStore;
 use libp2p::{
     kad, mdns, relay,
     request_response::ProtocolSupport,
-    swarm::{THandlerInEvent, dummy},
+    swarm::{THandlerInEvent, behaviour::toggle::Toggle, dummy},
 };
 use std::{
     convert::Infallible,
@@ -24,6 +24,7 @@ pub(super) struct AslBehaviour {
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
     pub(super) pairing: request_response::Behaviour<PairingCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
+    pub(super) group: Toggle<request_response::Behaviour<GroupCodec>>,
 }
 
 #[derive(Debug)]
@@ -37,6 +38,7 @@ pub(super) enum BehaviourEvent {
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
     Pairing(request_response::Event<PairingInvite, PairingExchange>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
+    Group(request_response::Event<GroupEnvelope, GroupEnvelope>),
 }
 
 #[derive(Debug)]
@@ -92,8 +94,18 @@ impl From<request_response::Event<BulkRequest, BulkResponse>> for BehaviourEvent
     }
 }
 
+impl From<request_response::Event<GroupEnvelope, GroupEnvelope>> for BehaviourEvent {
+    fn from(value: request_response::Event<GroupEnvelope, GroupEnvelope>) -> Self {
+        Self::Group(value)
+    }
+}
+
 impl AslBehaviour {
-    pub(super) fn new(local_peer_id: libp2p::PeerId, relay: relay::client::Behaviour) -> Self {
+    pub(super) fn new(
+        local_peer_id: libp2p::PeerId,
+        relay: relay::client::Behaviour,
+        loopback_groups: bool,
+    ) -> Self {
         fn request_response<C: request_response::Codec + Clone + Send + 'static>(
             codec: C,
             protocol: C::Protocol,
@@ -140,6 +152,9 @@ impl AslBehaviour {
                 PAIRING_REQUEST_TIMEOUT,
             ),
             bulk: request_response(BulkCodec, BULK_PROTOCOL),
+            group: loopback_groups
+                .then(|| request_response(GroupCodec, GROUP_PROTOCOL))
+                .into(),
         }
     }
 

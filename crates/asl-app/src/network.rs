@@ -9,7 +9,9 @@ use asl_net::{
 use asl_types::{
     error::AslError,
     ids::PeerId,
-    protocol::{IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame},
+    protocol::{
+        GroupPacket, IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame,
+    },
 };
 
 use crate::{
@@ -80,6 +82,17 @@ pub enum NetworkCommand {
         connection_id: [u8; 16],
         response_id: [u8; 16],
         response: BulkResponse,
+    },
+    SendGroup {
+        connection_id: [u8; 16],
+        request_handle: [u8; 16],
+        deadline_ms: u64,
+        request: GroupPacket,
+    },
+    ReplyGroup {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        response: GroupPacket,
     },
     SetAddressPolicy {
         operation_id: [u8; 16],
@@ -194,6 +207,26 @@ impl NetworkCommand {
                 response_id,
                 response,
             } => IpcMessage::ReplyBulk {
+                connection_id,
+                response_id,
+                response,
+            },
+            Self::SendGroup {
+                connection_id,
+                request_handle,
+                deadline_ms,
+                request,
+            } => IpcMessage::SendGroup {
+                connection_id,
+                request_handle,
+                deadline_ms,
+                request,
+            },
+            Self::ReplyGroup {
+                connection_id,
+                response_id,
+                response,
+            } => IpcMessage::ReplyGroup {
                 connection_id,
                 response_id,
                 response,
@@ -315,6 +348,17 @@ pub enum NetworkEvent {
         connection_id: [u8; 16],
         request_id: [u8; 16],
         response: BulkResponse,
+    },
+    UnverifiedGroupRequest {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        deadline_ms: u64,
+        request: GroupPacket,
+    },
+    UnverifiedGroupResponse {
+        connection_id: [u8; 16],
+        request_handle: [u8; 16],
+        response: GroupPacket,
     },
     RequestFailed {
         connection_id: [u8; 16],
@@ -501,6 +545,26 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             } => Ok(Self::UnverifiedBulkResponse {
                 connection_id,
                 request_id,
+                response,
+            }),
+            IpcMessage::GroupRequested {
+                connection_id,
+                response_id,
+                deadline_ms,
+                request,
+            } => Ok(Self::UnverifiedGroupRequest {
+                connection_id,
+                response_id,
+                deadline_ms,
+                request,
+            }),
+            IpcMessage::GroupReceived {
+                connection_id,
+                request_handle,
+                response,
+            } => Ok(Self::UnverifiedGroupResponse {
+                connection_id,
+                request_handle,
                 response,
             }),
             IpcMessage::RequestFailed {

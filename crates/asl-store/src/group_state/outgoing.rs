@@ -47,10 +47,13 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), AslError> {
         self.issue_mls_invite_inner(creator, packet, None, now_ms)
+            .map(|_| ())
     }
 
     /// Persist an Invite only while Core's room version and supplied member
     /// evidence still match storage, including the creator and exact target.
+    /// An explicit retry returns the original unexpired Invite without
+    /// extending its lifetime or replacing its ID.
     pub fn issue_verified_mls_invite(
         &mut self,
         creator: &PeerId,
@@ -59,7 +62,7 @@ impl Store {
         members: &[MlsMemberEvidence],
         chain_id: u64,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<GroupPacket, AslError> {
         self.issue_mls_invite_inner(
             creator,
             packet,
@@ -74,7 +77,7 @@ impl Store {
         packet: &GroupPacket,
         verified: Option<(RoomVersion, VerifiedInviteMembers<'_>)>,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<GroupPacket, AslError> {
         packet.validate_request()?;
         let GroupBody::Membership(GroupMembership::Invite {
             agent,
@@ -94,14 +97,57 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        if let Some((expected, members)) = verified {
+        if let Some((expected, members)) = &verified {
             if packet.epoch != expected.mls_epoch {
                 return Err(AslError::PolicyVersionConflict);
             }
-            require_room_version(&tx, packet.group_id, expected)?;
+            require_room_version(&tx, packet.group_id, *expected)?;
             members.require(&tx, creator, (*agent, device), None, now_ms)?;
         }
         prune(&tx, now)?;
+        if verified.is_some() {
+            let original: Option<(Vec<u8>, i64)> = tx
+                .query_row(
+                    "SELECT i.invite_id,i.expires_at_ms FROM mls_outgoing_invites i
+                     JOIN mls_room_states s ON s.wire_group_id=i.wire_group_id
+                     JOIN asl_groups g ON g.group_id=s.local_group_id
+                       AND g.creator_peer_id=i.creator_peer_id
+                     JOIN group_members c ON c.group_id=g.group_id AND c.peer_id=i.creator_peer_id
+                     WHERE i.wire_group_id=?1 AND i.base_epoch=?2 AND i.creator_peer_id=?3
+                       AND i.recipient_agent_id=?4 AND i.recipient_peer_id=?5
+                       AND i.created_at_ms<=?6 AND i.expires_at_ms>?6
+                       AND i.request_id IS NULL AND c.role='creator' AND c.state='active'
+                       AND NOT EXISTS (SELECT 1 FROM group_members m
+                         WHERE m.group_id=g.group_id AND m.peer_id=i.recipient_peer_id
+                           AND m.state='active')",
+                    params![
+                        packet.group_id.as_bytes(),
+                        sql_number(packet.epoch)?,
+                        peer_text(creator),
+                        agent_text(*agent),
+                        peer_text(device),
+                        now,
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(database_error)?;
+            if let Some((id, expiry)) = original {
+                let original = GroupPacket {
+                    message_id: Id128(id.try_into().map_err(|_| AslError::InvalidDatabase)?),
+                    body: GroupBody::Membership(GroupMembership::Invite {
+                        agent: *agent,
+                        device: device.clone(),
+                        expires_at_ms: u64::try_from(expiry)
+                            .map_err(|_| AslError::InvalidDatabase)?,
+                    }),
+                    ..packet.clone()
+                };
+                original.validate_request()?;
+                tx.commit().map_err(database_error)?;
+                return Ok(original);
+            }
+        }
         let inserted = tx
             .execute(
                 "INSERT INTO mls_outgoing_invites
@@ -137,7 +183,8 @@ impl Store {
         if inserted != 1 {
             return Err(AslError::PolicyVersionConflict);
         }
-        tx.commit().map_err(database_error)
+        tx.commit().map_err(database_error)?;
+        Ok(packet.clone())
     }
 
     /// A retry never constructs a second Welcome or applies a second Add.

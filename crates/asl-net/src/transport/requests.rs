@@ -1,5 +1,7 @@
 use super::*;
 
+mod group;
+
 pub(super) struct Requests {
     inbound: HashMap<ResponseToken, PendingResponse>,
     outbound: HashMap<(ProtocolKind, OutboundRequestId), PendingRequest>,
@@ -714,6 +716,7 @@ enum ProtocolKind {
     IdentityProof,
     Pairing,
     Bulk,
+    Group,
 }
 
 struct PendingResponse {
@@ -736,6 +739,10 @@ enum PendingResponseKind {
         channel: ResponseChannel<BulkResponse>,
         request: BulkRequest,
     },
+    Group {
+        channel: ResponseChannel<GroupEnvelope>,
+        request: GroupPacket,
+    },
 }
 
 enum PendingRequestKind {
@@ -743,6 +750,7 @@ enum PendingRequestKind {
     IdentityProof(IdentityProofRequest),
     Pairing(PairingInvite),
     Bulk(BulkRequest),
+    Group(GroupPacket),
 }
 
 struct PendingRequest {

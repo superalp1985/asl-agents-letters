@@ -171,6 +171,8 @@ async fn next_connected(
             | TransportEvent::IdentityProofResponse { .. }
             | TransportEvent::BulkRequest { .. }
             | TransportEvent::BulkResponse { .. }
+            | TransportEvent::GroupRequest { .. }
+            | TransportEvent::GroupResponse { .. }
             | TransportEvent::RequestFailed { .. } => {}
         }
     }

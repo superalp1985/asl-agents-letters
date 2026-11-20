@@ -11,7 +11,8 @@ use openmls::prelude::{GroupId as MlsGroupId, MlsGroup, MlsGroupCreateConfig, Op
 use openmls_basic_credential::SignatureKeyPair;
 
 use crate::profile::{
-    ApprovedMlsWelcome, admission::transport_ed25519_key, group_credential::issue_group_credential,
+    MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, admission::transport_ed25519_key,
+    group_credential::issue_group_credential,
 };
 
 use super::*;
@@ -99,7 +100,13 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         creator_proof,
         &signed,
     );
-    admit(&mut recipient, connection_id, &creator_cert, proof, &signed);
+    admit(
+        &mut recipient,
+        connection_id,
+        &creator_cert,
+        proof.clone(),
+        &signed,
+    );
     let creator_sql = rusqlite::Connection::open(&creator_db.path).unwrap();
     creator_sql
         .execute("UPDATE identity_registry_states SET sequence=8", [])
@@ -118,16 +125,60 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     creator_sql
         .execute("UPDATE identity_registry_states SET sequence=7", [])
         .unwrap();
-    let invitation = creator
-        .issue_targeted_mls_invite(
+    let invite_send = |expires_at_ms| MlsInviteSend {
+        connection_id,
+        wire_id,
+        expires_at_ms,
+    };
+    let mut failed_send = None;
+    assert!(matches!(
+        creator.send_targeted_mls_invite(
             &mut creator_store,
-            connection_id,
-            wire_id,
-            NOW + 60_000,
+            invite_send(NOW + 60_000),
             &dirs,
             NOW,
+            |command| {
+                failed_send = Some(command);
+                Err(AslError::QuotaExceeded)
+            }
+        ),
+        Err(AslError::QuotaExceeded)
+    ));
+    let Some(NetworkCommand::SendGroup {
+        request: persisted_invite,
+        request_handle: failed_handle,
+        ..
+    }) = failed_send
+    else {
+        panic!("expected the first Invite before enqueue failed");
+    };
+    drop(creator_store);
+    let mut creator_store = creator_db.open();
+    let mut sent = None;
+    creator
+        .send_targeted_mls_invite(
+            &mut creator_store,
+            invite_send(NOW + 90_000),
+            &dirs,
+            NOW,
+            |command| {
+                sent = Some(command);
+                Ok(())
+            },
         )
         .unwrap();
+    let Some(NetworkCommand::SendGroup {
+        connection_id: target,
+        request_handle: retry_handle,
+        request: invitation,
+        ..
+    }) = sent
+    else {
+        panic!("expected a targeted Invite");
+    };
+    assert_eq!(target, connection_id);
+    assert_eq!(invitation, persisted_invite);
+    assert_ne!(retry_handle, failed_handle);
     let wrong_device = GroupPacket {
         body: GroupBody::Membership(GroupMembership::Invite {
             agent: local_cert.agent_id,
@@ -140,15 +191,36 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         recipient.receive_targeted_mls_invite(&mut store, connection_id, &wrong_device, &dirs, NOW),
         Err(AslError::InvalidIdentity)
     ));
-    let invite = recipient
-        .receive_targeted_mls_invite(&mut store, connection_id, &invitation, &dirs, NOW)
+    let offer = || NetworkEvent::UnverifiedGroupRequest {
+        connection_id,
+        response_id: [17; 16],
+        deadline_ms: NOW + 100,
+        request: invitation.clone(),
+    };
+    let Some(MlsNetworkOutcome::InviteForApproval(invite)) = recipient
+        .handle_mls_network_event(&mut store, offer(), &dirs, NOW, |command| {
+            let NetworkCommand::ReplyGroup {
+                connection_id: target,
+                response_id,
+                response,
+            } = command
+            else {
+                panic!("invitation must only send a receipt");
+            };
+            assert_eq!(target, connection_id);
+            assert_eq!(response_id, [17; 16]);
+            invitation.match_reply(&response).unwrap();
+            Ok(())
+        })
         .unwrap()
-        .unwrap();
+    else {
+        panic!("expected one local approval prompt");
+    };
     assert_eq!(invite.inviter_device, creator_cert.peer_id);
     assert_eq!(invite.recipient_device, local_cert.peer_id);
     assert!(
         recipient
-            .receive_targeted_mls_invite(&mut store, connection_id, &invitation, &dirs, NOW)
+            .handle_mls_network_event(&mut store, offer(), &dirs, NOW, |_| Ok(()))
             .unwrap()
             .is_none()
     );
@@ -195,14 +267,18 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         .unwrap()
         .unwrap();
     let local_id = GroupId(Id128([8; 16]));
-    let welcome = |reply| ApprovedMlsWelcome {
+    let send = |connection_id| MlsJoinSend {
         connection_id,
         invite: &invite,
-        reply,
         local_id: &local_id,
         local_name: "Locally approved",
-        directories: &dirs,
     };
+    let response =
+        |connection_id, request_handle, response| NetworkEvent::UnverifiedGroupResponse {
+            connection_id,
+            request_handle,
+            response,
+        };
 
     // A verified credential and an MLS-valid Welcome do not establish origin.
     let other_provider = RoomProvider::default();
@@ -229,8 +305,17 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     let (_, candidate) = pending_join::restore(&invite, join_key, &sealed_package).unwrap();
     asl_groups::membership::stage_welcome(&request, &invalid, join_key.package_ref, &candidate)
         .unwrap();
+    let attempt = recipient
+        .send_approved_mls_join(&mut store, send(connection_id), &dirs, NOW, |_| Ok(()))
+        .unwrap();
     assert!(matches!(
-        recipient.finish_approved_mls_welcome(&mut store, welcome(&invalid), NOW),
+        recipient.handle_mls_network_event(
+            &mut store,
+            response(connection_id, attempt, invalid),
+            &dirs,
+            NOW,
+            |_| panic!("Welcome does not carry a send handle")
+        ),
         Err(AslError::InvalidMessage)
     ));
     assert!(
@@ -259,9 +344,57 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     creator_sql
         .execute("UPDATE identity_registry_states SET sequence=7", [])
         .unwrap();
-    let valid = creator
-        .answer_mls_key_package(&mut creator_store, connection_id, &request, &dirs, NOW)
-        .unwrap();
+    let key_package = |deadline_ms| NetworkEvent::UnverifiedGroupRequest {
+        connection_id,
+        response_id: [18; 16],
+        deadline_ms,
+        request: request.clone(),
+    };
+    assert!(matches!(
+        creator.handle_mls_network_event(
+            &mut creator_store,
+            key_package(NOW),
+            &dirs,
+            NOW,
+            |_| panic!("expired request must not receive a Welcome")
+        ),
+        Err(AslError::ExpiredMessage)
+    ));
+    assert_eq!(
+        creator_store
+            .mls_room_snapshot(wire_id)
+            .unwrap()
+            .unwrap()
+            .version
+            .mls_epoch,
+        0
+    );
+    let mut sent = None;
+    assert!(
+        creator
+            .handle_mls_network_event(
+                &mut creator_store,
+                key_package(NOW + 100),
+                &dirs,
+                NOW,
+                |command| {
+                    sent = Some(command);
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .is_none()
+    );
+    let Some(NetworkCommand::ReplyGroup {
+        connection_id: target,
+        response_id,
+        response: valid,
+    }) = sent
+    else {
+        panic!("expected Welcome on the original reply channel");
+    };
+    assert_eq!(target, connection_id);
+    assert_eq!(response_id, [18; 16]);
     let committed = creator_store
         .mls_room_snapshot(wire_id)
         .unwrap()
@@ -304,9 +437,151 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         &snapshot,
     )
     .unwrap();
-    let version = recipient
-        .finish_approved_mls_welcome(&mut store, welcome(&valid), NOW)
+    let check_send = |expected_connection_id| {
+        let request = &request;
+        move |command| {
+            let NetworkCommand::SendGroup {
+                connection_id,
+                request: sent,
+                ..
+            } = command
+            else {
+                panic!("expected the approved KeyPackage");
+            };
+            assert_eq!(connection_id, expected_connection_id);
+            assert_eq!(&sent, request);
+            Ok(())
+        }
+    };
+    let never_send = |_| panic!("receiving a Welcome must not send anything");
+    let retry_at = NOW + 10_001;
+    let first = recipient
+        .send_approved_mls_join(
+            &mut store,
+            send(connection_id),
+            &dirs,
+            NOW,
+            check_send(connection_id),
+        )
         .unwrap();
+    let first_reply = || response(connection_id, first, valid.clone());
+    assert!(
+        recipient
+            .handle_mls_network_event(&mut store, first_reply(), &dirs, retry_at, never_send)
+            .unwrap()
+            .is_none()
+    );
+    let second = recipient
+        .send_approved_mls_join(
+            &mut store,
+            send(connection_id),
+            &dirs,
+            retry_at,
+            check_send(connection_id),
+        )
+        .unwrap();
+    assert_ne!(first, second);
+    assert!(
+        recipient
+            .handle_mls_network_event(&mut store, first_reply(), &dirs, retry_at, never_send)
+            .unwrap()
+            .is_none()
+    );
+    recipient.handle_event(
+        NetworkEvent::RequestFailed {
+            connection_id,
+            request_id: second,
+            protocol: crate::ipc::NetworkProtocol::Group,
+            code: crate::ipc::NetworkErrorCode::TimedOut,
+        },
+        retry_at,
+    );
+    assert!(
+        recipient
+            .handle_mls_network_event(
+                &mut store,
+                response(connection_id, second, valid.clone()),
+                &dirs,
+                retry_at,
+                never_send
+            )
+            .unwrap()
+            .is_none()
+    );
+    let disconnected = recipient
+        .send_approved_mls_join(
+            &mut store,
+            send(connection_id),
+            &dirs,
+            retry_at,
+            check_send(connection_id),
+        )
+        .unwrap();
+    recipient.handle_event(NetworkEvent::PeerDisconnected { connection_id }, retry_at);
+    let reconnect = [19; 16];
+    admit(&mut recipient, reconnect, &creator_cert, proof, &signed);
+    assert!(matches!(
+        recipient.send_approved_mls_join(&mut store, send(reconnect), &dirs, retry_at, |_| Err(
+            AslError::QuotaExceeded
+        )),
+        Err(AslError::QuotaExceeded)
+    ));
+    let current = recipient
+        .send_approved_mls_join(
+            &mut store,
+            send(reconnect),
+            &dirs,
+            retry_at,
+            check_send(reconnect),
+        )
+        .unwrap();
+    assert_ne!(current, disconnected);
+    for (connection, handle) in [(reconnect, disconnected), (connection_id, current)] {
+        assert!(
+            recipient
+                .handle_mls_network_event(
+                    &mut store,
+                    response(connection, handle, valid.clone()),
+                    &dirs,
+                    retry_at,
+                    never_send
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+    let wrong_group = GroupPacket {
+        group_id: Hash32([11; 32]),
+        ..valid.clone()
+    };
+    assert!(matches!(
+        recipient.handle_mls_network_event(
+            &mut store,
+            response(reconnect, current, wrong_group),
+            &dirs,
+            retry_at,
+            never_send
+        ),
+        Err(AslError::InvalidMessage)
+    ));
+    assert!(store.mls_room_snapshot(wire_id).unwrap().is_none());
+    let reply = || response(reconnect, current, valid.clone());
+    let Some(MlsNetworkOutcome::Joined {
+        local_id: joined_id,
+        version,
+    }) = recipient
+        .handle_mls_network_event(&mut store, reply(), &dirs, retry_at, never_send)
+        .unwrap()
+    else {
+        panic!("only the live matched reply should commit the Welcome");
+    };
+    assert_eq!(joined_id, local_id);
+    assert!(
+        recipient
+            .handle_mls_network_event(&mut store, reply(), &dirs, retry_at, never_send)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(version.mls_epoch, 1);
     let (join_provider, joined_room) = restore(
         &RoomBinding {

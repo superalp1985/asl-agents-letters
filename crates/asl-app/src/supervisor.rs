@@ -1503,6 +1503,8 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::ControlReceived { .. }
             | IpcMessage::BulkRequested { .. }
             | IpcMessage::BulkReceived { .. }
+            | IpcMessage::GroupRequested { .. }
+            | IpcMessage::GroupReceived { .. }
             | IpcMessage::RequestFailed { .. }
             | IpcMessage::NetworkError { .. }
     )
@@ -1576,6 +1578,8 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::UnverifiedControlResponse { connection_id, .. }
         | NetworkEvent::UnverifiedBulkRequest { connection_id, .. }
         | NetworkEvent::UnverifiedBulkResponse { connection_id, .. }
+        | NetworkEvent::UnverifiedGroupRequest { connection_id, .. }
+        | NetworkEvent::UnverifiedGroupResponse { connection_id, .. }
         | NetworkEvent::RequestFailed { connection_id, .. } => Some(*connection_id),
         NetworkEvent::OperationAccepted { .. }
         | NetworkEvent::OperationFailed { .. }

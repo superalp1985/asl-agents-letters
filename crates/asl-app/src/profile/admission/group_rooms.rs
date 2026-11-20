@@ -1,8 +1,12 @@
-//! Local Core boundary for attested MLS rooms. None of these operations
-//! activates a room, opens the group substream or grants access to files.
+//! Core boundary for attested MLS rooms. None of these operations activates
+//! a room, enables a transport or grants access to files.
 
 mod incoming;
+mod network;
 mod outgoing;
+
+pub(super) use network::MlsJoinAttempts;
+pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
@@ -50,15 +54,15 @@ pub struct ReconciledMlsRoom {
     pub members: Vec<PeerId>,
 }
 
-pub struct ApprovedMlsWelcome<'a> {
-    pub connection_id: [u8; 16],
-    pub invite: &'a MlsIncomingInvite,
-    pub reply: &'a GroupPacket,
-    pub local_id: &'a GroupId,
-    pub local_name: &'a str,
+struct ApprovedMlsWelcome<'a> {
+    connection_id: [u8; 16],
+    invite: &'a MlsIncomingInvite,
+    reply: &'a GroupPacket,
+    local_id: &'a GroupId,
+    local_name: &'a str,
     /// Core supplies locally collected signed device directories, not an
     /// unverified directory bundle from the Welcome or from a model.
-    pub directories: &'a HashMap<AgentId, Vec<u8>>,
+    directories: &'a HashMap<AgentId, Vec<u8>>,
 }
 
 impl CoreAdmission {
@@ -165,7 +169,7 @@ impl CoreAdmission {
 
     /// Consume a durable local approval only when the creator, local leaf,
     /// roster and the currently admitted sender all agree.
-    pub fn finish_approved_mls_welcome(
+    fn finish_approved_mls_welcome(
         &mut self,
         store: &mut Store,
         welcome: ApprovedMlsWelcome<'_>,

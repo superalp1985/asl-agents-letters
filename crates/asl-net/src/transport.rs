@@ -26,7 +26,8 @@ use requests::Requests;
 
 use asl_types::ids::PeerId;
 use asl_types::protocol::{
-    IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame,
+    GroupEnvelope, GroupPacket, IdentityProof, IdentityProofRequest, PairingExchange,
+    PairingInvite, WireFrame,
 };
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
@@ -53,7 +54,8 @@ use rand::{TryRng, rngs::SysRng};
 
 use crate::codec::{
     BULK_PROTOCOL, BulkCodec, BulkRequest, BulkResponse, CONTROL_PROTOCOL, ControlCodec,
-    IDENTITY_PROOF_PROTOCOL, IdentityProofCodec, PAIRING_PROTOCOL, PairingCodec,
+    GROUP_PROTOCOL, GroupCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec, PAIRING_PROTOCOL,
+    PairingCodec,
 };
 
 const MAX_LISTENERS: usize = 16;
@@ -281,6 +283,16 @@ pub enum TransportEvent {
         request: RequestToken,
         response: BulkResponse,
     },
+    GroupRequest {
+        connection: AuthenticatedPeer,
+        request: GroupPacket,
+        response: ResponseToken,
+    },
+    GroupResponse {
+        connection: AuthenticatedPeer,
+        request: RequestToken,
+        response: GroupPacket,
+    },
     RequestFailed {
         connection_id: LocalConnectionId,
         request: RequestToken,
@@ -325,6 +337,16 @@ struct RelayRetry {
 
 impl LocalTransport {
     pub fn new(identity: Keypair) -> io::Result<Self> {
+        Self::build(identity, false)
+    }
+
+    /// Enables only the loopback group adapter. The caller still needs to
+    /// authorize each group operation against an admitted ASL session.
+    pub fn new_with_loopback_groups(identity: Keypair) -> io::Result<Self> {
+        Self::build(identity, true)
+    }
+
+    fn build(identity: Keypair, loopback_groups: bool) -> io::Result<Self> {
         let local_peer_id = identity.public().to_peer_id();
         let swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
@@ -341,7 +363,7 @@ impl LocalTransport {
             })
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|_| io::Error::other("cannot configure relay client"))?
-            .with_behaviour(|_, relay| AslBehaviour::new(local_peer_id, relay))
+            .with_behaviour(|_, relay| AslBehaviour::new(local_peer_id, relay, loopback_groups))
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
@@ -435,6 +457,9 @@ impl LocalTransport {
     }
 
     pub fn set_address_policy(&mut self, policy: AddressPolicy) -> io::Result<()> {
+        if self.swarm.behaviour().group.is_enabled() && policy != AddressPolicy::LoopbackOnly {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         if self.policy_configured
             || self.network_started
             || !self.listeners.is_empty()
@@ -486,6 +511,9 @@ impl LocalTransport {
     }
 
     pub fn reserve_relay(&mut self, address: &Multiaddr) -> io::Result<libp2p::PeerId> {
+        if self.swarm.behaviour().group.is_enabled() {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         let endpoint = parse_relay_endpoint(address)?;
         if endpoint.peer_id == *self.swarm.local_peer_id()
             || (self.address_policy != AddressPolicy::RelayOnly
@@ -773,6 +801,11 @@ impl LocalTransport {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Bulk(event)) => {
                     if let Some(event) = self.handle_bulk(event)? {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Group(event)) => {
+                    if let Some(event) = self.handle_group(event) {
                         return Ok(event);
                     }
                 }
@@ -1642,6 +1675,27 @@ mod tests {
                 .kind(),
             io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn loopback_group_transport_cannot_enable_public_addresses_or_relays() {
+        let mut transport =
+            LocalTransport::new_with_loopback_groups(Keypair::generate_ed25519()).unwrap();
+        assert_eq!(
+            transport
+                .set_address_policy(AddressPolicy::Hybrid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let relay = endpoint().with(Protocol::P2p(peer()));
+        assert_eq!(
+            transport.reserve_relay(&relay).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        transport
+            .set_address_policy(AddressPolicy::LoopbackOnly)
+            .unwrap();
     }
 
     #[test]

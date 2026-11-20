@@ -13,9 +13,10 @@ use asl_types::{
     ids::PeerId,
     manifest::MAX_MANIFEST_LEN,
     protocol::{
-        IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES,
-        MAX_PAIRING_FRAME_BYTES, PairingExchange, PairingInvite, WireFrame, decode_control,
-        decode_frame as decode_asl_frame, encode_control, encode_frame as encode_asl_frame,
+        GroupPacket, IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES,
+        MAX_EXTENDED_FRAME_BYTES, MAX_PAIRING_FRAME_BYTES, PairingExchange, PairingInvite,
+        WireFrame, decode_control, decode_frame as decode_asl_frame, encode_control,
+        encode_frame as encode_asl_frame,
     },
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -40,6 +41,7 @@ pub const MAX_IPC_EXTRACTOR_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IPC_IDENTITY_PROOF_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 pub const MAX_IPC_PAIRING_FRAME_BYTES: usize = MAX_PAIRING_FRAME_BYTES;
 pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
+const MAX_IPC_GROUP_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 const MAX_IPC_DHT_PROVIDER_CANDIDATES: usize = 20;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
@@ -64,6 +66,7 @@ impl IpcRole {
             ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
+                | (Self::Core, Self::Net, 50..=51)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (Self::Core, Self::Extractor, 41)
                 | (
@@ -74,6 +77,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Net, Self::Core, 36..=39 | 45..=47)
+                | (Self::Net, Self::Core, 52..=53)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -343,6 +347,31 @@ pub enum IpcMessage {
         response_id: [u8; 16],
         response: BulkResponse,
     },
+    SendGroup {
+        connection_id: [u8; 16],
+        /// Fresh Core attempt handle; not the packet's wire message ID.
+        request_handle: [u8; 16],
+        /// Unix millisecond at or after which the child must not send this attempt.
+        deadline_ms: u64,
+        request: GroupPacket,
+    },
+    ReplyGroup {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        response: GroupPacket,
+    },
+    GroupRequested {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        /// Child-local response handle deadline, in Unix milliseconds.
+        deadline_ms: u64,
+        request: GroupPacket,
+    },
+    GroupReceived {
+        connection_id: [u8; 16],
+        request_handle: [u8; 16],
+        response: GroupPacket,
+    },
     RequestFailed {
         connection_id: [u8; 16],
         request_id: [u8; 16],
@@ -372,6 +401,7 @@ pub enum NetworkProtocol {
     IdentityProof = 2,
     Bulk = 3,
     Pairing = 4,
+    Group = 5,
 }
 
 impl NetworkProtocol {
@@ -381,6 +411,7 @@ impl NetworkProtocol {
             2 => Ok(Self::IdentityProof),
             3 => Ok(Self::Bulk),
             4 => Ok(Self::Pairing),
+            5 => Ok(Self::Group),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -910,6 +941,58 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(response_id);
             append_bulk_response(&mut body, response)?;
             29
+        }
+        IpcMessage::SendGroup {
+            connection_id,
+            request_handle,
+            deadline_ms,
+            request,
+        } => {
+            if *deadline_ms == 0 {
+                return Err(AslError::InvalidMessage);
+            }
+            request.validate_request()?;
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_handle);
+            body.extend_from_slice(&deadline_ms.to_be_bytes());
+            append_group_packet(&mut body, request)?;
+            50
+        }
+        IpcMessage::ReplyGroup {
+            connection_id,
+            response_id,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            append_group_packet(&mut body, response)?;
+            51
+        }
+        IpcMessage::GroupRequested {
+            connection_id,
+            response_id,
+            deadline_ms,
+            request,
+        } => {
+            if *deadline_ms == 0 {
+                return Err(AslError::InvalidMessage);
+            }
+            request.validate_request()?;
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            body.extend_from_slice(&deadline_ms.to_be_bytes());
+            append_group_packet(&mut body, request)?;
+            52
+        }
+        IpcMessage::GroupReceived {
+            connection_id,
+            request_handle,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(request_handle);
+            append_group_packet(&mut body, response)?;
+            53
         }
         IpcMessage::RequestFailed {
             connection_id,
@@ -1450,6 +1533,36 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             response_id: body[16..32].try_into().unwrap(),
             response: decode_bulk_response(&body[32..])?,
         }),
+        50 if body.len() >= 44 && body[32..40] != [0; 8] => {
+            let request = decode_group_packet(&body[40..])?;
+            request.validate_request()?;
+            Ok(IpcMessage::SendGroup {
+                connection_id: body[..16].try_into().unwrap(),
+                request_handle: body[16..32].try_into().unwrap(),
+                deadline_ms: u64::from_be_bytes(body[32..40].try_into().unwrap()),
+                request,
+            })
+        }
+        51 if body.len() >= 36 => Ok(IpcMessage::ReplyGroup {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            response: decode_group_packet(&body[32..])?,
+        }),
+        52 if body.len() >= 44 && body[32..40] != [0; 8] => {
+            let request = decode_group_packet(&body[40..])?;
+            request.validate_request()?;
+            Ok(IpcMessage::GroupRequested {
+                connection_id: body[..16].try_into().unwrap(),
+                response_id: body[16..32].try_into().unwrap(),
+                deadline_ms: u64::from_be_bytes(body[32..40].try_into().unwrap()),
+                request,
+            })
+        }
+        53 if body.len() >= 36 => Ok(IpcMessage::GroupReceived {
+            connection_id: body[..16].try_into().unwrap(),
+            request_handle: body[16..32].try_into().unwrap(),
+            response: decode_group_packet(&body[32..])?,
+        }),
         30 if body.len() == 34 => Ok(IpcMessage::RequestFailed {
             connection_id: body[..16].try_into().unwrap(),
             request_id: body[16..32].try_into().unwrap(),
@@ -1588,6 +1701,20 @@ fn append_control_frame(body: &mut Vec<u8>, frame: &WireFrame) -> Result<(), Asl
 fn decode_control_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     let payload = decode_length_prefixed(bytes, MAX_CONTROL_FRAME_BYTES)?;
     decode_control(payload)
+}
+
+fn append_group_packet(body: &mut Vec<u8>, packet: &GroupPacket) -> Result<(), AslError> {
+    let envelope = packet.clone().into_envelope()?;
+    let bytes = encode_asl_frame(&WireFrame::GroupEnvelope(envelope))?;
+    append_length_prefixed(body, &bytes)
+}
+
+fn decode_group_packet(bytes: &[u8]) -> Result<GroupPacket, AslError> {
+    let payload = decode_length_prefixed(bytes, MAX_IPC_GROUP_FRAME_BYTES)?;
+    match decode_asl_frame(payload)? {
+        WireFrame::GroupEnvelope(envelope) => GroupPacket::from_envelope(envelope),
+        _ => Err(AslError::InvalidMessage),
+    }
 }
 
 fn append_length_prefixed(body: &mut Vec<u8>, bytes: &[u8]) -> Result<(), AslError> {
@@ -1800,6 +1927,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
         49 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
+        50 | 52 => 32 + 8 + 4 + MAX_IPC_GROUP_FRAME_BYTES,
+        51 | 53 => 32 + 4 + MAX_IPC_GROUP_FRAME_BYTES,
         _ => return None,
     })
 }
@@ -2287,6 +2416,8 @@ mod tests {
                 | IpcMessage::ControlReceived { .. }
                 | IpcMessage::BulkRequested { .. }
                 | IpcMessage::BulkReceived { .. }
+                | IpcMessage::GroupRequested { .. }
+                | IpcMessage::GroupReceived { .. }
                 | IpcMessage::RequestFailed { .. }
                 | IpcMessage::NetworkError { .. } => (IpcRole::Net, IpcRole::Core),
                 IpcMessage::Shutdown
@@ -2299,6 +2430,8 @@ mod tests {
                 | IpcMessage::ReplyDirect { .. }
                 | IpcMessage::SendBulk { .. }
                 | IpcMessage::ReplyBulk { .. }
+                | IpcMessage::SendGroup { .. }
+                | IpcMessage::ReplyGroup { .. }
                 | IpcMessage::SetAddressPolicy { .. }
                 | IpcMessage::FindProviders { .. }
                 | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
@@ -2328,6 +2461,138 @@ mod tests {
             assert_eq!(decoded.message, message);
             assert_eq!(decoded.sequence, 7);
         }
+    }
+
+    #[test]
+    fn group_ipc_is_role_bound_and_keeps_attempt_handles_separate() {
+        use asl_types::{
+            ids::{Hash32, Id128},
+            protocol::{GroupBody, GroupMembership, MAX_GROUP_PAYLOAD_BYTES},
+        };
+
+        let connection_id = [1; 16];
+        let response_id = [2; 16];
+        let request_handle = [3; 16];
+        let deadline_ms = 1_800_000_000_000;
+        let request = GroupPacket {
+            message_id: Id128([4; 16]),
+            group_id: Hash32([4; 32]),
+            epoch: 5,
+            body: GroupBody::Application(vec![6; MAX_GROUP_PAYLOAD_BYTES]),
+        };
+        let response = GroupPacket {
+            body: GroupBody::Membership(GroupMembership::Receipt),
+            ..request.clone()
+        };
+        let cases = [
+            (
+                IpcRole::Core,
+                IpcRole::Net,
+                IpcMessage::SendGroup {
+                    connection_id,
+                    request_handle,
+                    deadline_ms,
+                    request: request.clone(),
+                },
+            ),
+            (
+                IpcRole::Core,
+                IpcRole::Net,
+                IpcMessage::ReplyGroup {
+                    connection_id,
+                    response_id,
+                    response: response.clone(),
+                },
+            ),
+            (
+                IpcRole::Net,
+                IpcRole::Core,
+                IpcMessage::GroupRequested {
+                    connection_id,
+                    response_id,
+                    deadline_ms,
+                    request: request.clone(),
+                },
+            ),
+            (
+                IpcRole::Net,
+                IpcRole::Core,
+                IpcMessage::GroupReceived {
+                    connection_id,
+                    request_handle,
+                    response,
+                },
+            ),
+            (
+                IpcRole::Net,
+                IpcRole::Core,
+                IpcMessage::RequestFailed {
+                    connection_id,
+                    request_id: request_handle,
+                    protocol: NetworkProtocol::Group,
+                    code: NetworkErrorCode::TimedOut,
+                },
+            ),
+        ];
+        for (sender, receiver, message) in cases {
+            let mut bytes = encode_frame(sender, receiver, 1, &message).unwrap();
+            assert_eq!(
+                decode_frame(&bytes, sender, receiver, 1).unwrap().message,
+                message
+            );
+            let mut invalid = message.clone();
+            if let IpcMessage::SendGroup { deadline_ms, .. }
+            | IpcMessage::GroupRequested { deadline_ms, .. } = &mut invalid
+            {
+                *deadline_ms = 0;
+                assert!(encode_frame(sender, receiver, 1, &invalid).is_err());
+                let mut zero_deadline = bytes.clone();
+                zero_deadline[HEADER_BYTES + 32..HEADER_BYTES + 40].fill(0);
+                assert!(decode_frame(&zero_deadline, sender, receiver, 1).is_err());
+            }
+            assert!(encode_frame(receiver, sender, 1, &message).is_err());
+            bytes[6] = receiver as u8;
+            assert!(decode_frame(&bytes, receiver, sender, 1).is_err());
+        }
+
+        assert!(
+            encode_frame(
+                IpcRole::Core,
+                IpcRole::Net,
+                1,
+                &IpcMessage::SendGroup {
+                    connection_id,
+                    request_handle,
+                    deadline_ms,
+                    request: GroupPacket {
+                        body: GroupBody::Application(vec![6; MAX_GROUP_PAYLOAD_BYTES + 1]),
+                        ..request.clone()
+                    },
+                },
+            )
+            .is_err()
+        );
+
+        let mut bytes = encode_frame(
+            IpcRole::Core,
+            IpcRole::Net,
+            1,
+            &IpcMessage::SendGroup {
+                connection_id,
+                request_handle,
+                deadline_ms,
+                request,
+            },
+        )
+        .unwrap();
+        let oversized_body = (32 + 8 + 4 + MAX_EXTENDED_FRAME_BYTES + 1) as u32;
+        bytes[16..20].copy_from_slice(&oversized_body.to_be_bytes());
+        let mut reader = FrameReader::new(
+            Cursor::new(&bytes[..HEADER_BYTES]),
+            IpcRole::Core,
+            IpcRole::Net,
+        );
+        assert!(matches!(reader.receive(), Err(AslError::InvalidMessage)));
     }
 
     #[test]

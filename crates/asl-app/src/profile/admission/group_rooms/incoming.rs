@@ -79,8 +79,8 @@ impl CoreAdmission {
         )
     }
 
-    /// Restore the same request after local approval. The future network
-    /// driver must bind the actual send and response to this connection.
+    /// Restore the same request after local approval. Use
+    /// `send_approved_mls_join` to bind an actual attempt to this connection.
     pub fn prepare_approved_mls_join(
         &mut self,
         store: &mut Store,
