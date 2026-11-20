@@ -125,7 +125,7 @@ pub(super) fn require_member(
     Ok(())
 }
 
-fn active_members(
+pub(super) fn active_members(
     tx: &Transaction<'_>,
     wire_id: Hash32,
     creator: &PeerId,

@@ -78,11 +78,48 @@ fn snapshot_rejects_overlong_or_overflowing_history() {
     let mut window = HistoryWindow {
         first_base_epoch: 3,
         digests: VecDeque::from(vec![FIRST; 257]),
+        downloaded: None,
     };
     assert!(read_history(FORMAT_V2, 260, Some(&window)).is_err());
     window.first_base_epoch = u64::MAX;
     window.digests.truncate(1);
     assert!(read_history(FORMAT_V2, 0, Some(&window)).is_err());
+}
+
+#[test]
+fn catchup_budget_survives_snapshot_reopen_and_window_eviction() {
+    let mut history = SyncHistory::default();
+    for epoch in 10..265 {
+        history.append_downloaded(epoch, FIRST).unwrap();
+    }
+    assert_eq!(history.remaining_catchup(), 1);
+    assert!(read_history(FORMAT_V2, 265, Some(&history.0)).is_err());
+    let mut reopened = read_history(FORMAT_V3, 265, Some(&history.0)).unwrap();
+    assert_eq!(reopened.remaining_catchup(), 1);
+    reopened.append_downloaded(265, SECOND).unwrap();
+    reopened.append(266, FIRST).unwrap();
+    assert_eq!(reopened.digest(10), None);
+    assert_eq!(reopened.remaining_catchup(), 0);
+    assert!(matches!(
+        reopened.append_downloaded(267, SECOND),
+        Err(AslError::QuotaExceeded)
+    ));
+    assert_eq!(reopened.digest(267), None);
+}
+
+#[test]
+fn legacy_window_is_conservatively_charged_until_the_first_new_sync() {
+    let mut history = SyncHistory::default();
+    history.append(7, FIRST).unwrap();
+    let mut reopened = read_history(FORMAT_V2, 8, Some(&history.0)).unwrap();
+    assert_eq!(reopened.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
+    assert!(reopened.append_downloaded(9, SECOND).is_err());
+    assert_eq!(reopened.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
+    reopened.append_downloaded(8, SECOND).unwrap();
+    assert_eq!(reopened.remaining_catchup(), MLS_SYNC_MAX_STEPS - 2);
+    assert!(read_history(FORMAT_V3, 8, Some(&history.0)).is_err());
+    reopened.0.downloaded = Some(3);
+    assert!(read_history(FORMAT_V3, 9, Some(&reopened.0)).is_err());
 }
 
 #[test]
@@ -119,7 +156,7 @@ fn sealed_history_cannot_be_dropped_by_the_legacy_api() {
         device: &device,
     };
     let mut history = SyncHistory::default();
-    history.append(0, SECOND).unwrap();
+    history.append_downloaded(0, SECOND).unwrap();
     let sealed_snapshot = seal_with_history(&binding, 1, &group, &provider, &history).unwrap();
     assert!(seal(&binding, 2, &group, &provider).is_err());
     let row = MlsRoomSnapshot {
@@ -138,8 +175,12 @@ fn sealed_history_cannot_be_dropped_by_the_legacy_api() {
     ));
     let (provider, group, history) = restore_with_history(&binding, &row).unwrap();
     assert_eq!(history.digest(0), Some(SECOND));
+    assert_eq!(history.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
     assert!(seal(&binding, 2, &group, &provider).is_err());
     assert!(seal_with_history(&binding, 2, &group, &provider, &SyncHistory::default()).is_err());
+    let mut downgrade = history.clone();
+    downgrade.0.downloaded = None;
+    assert!(seal_with_history(&binding, 2, &group, &provider, &downgrade).is_err());
     assert!(seal_with_history(&binding, 2, &group, &provider, &history).is_ok());
 }
 

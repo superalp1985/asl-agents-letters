@@ -10,7 +10,7 @@ use std::{
 };
 
 use asl_policy::{protect_secret, unprotect_secret};
-use asl_store::group_state::{MAX_SEALED_ROOM_BYTES, MlsRoomSnapshot};
+use asl_store::group_state::{MAX_SEALED_ROOM_BYTES, MLS_SYNC_MAX_STEPS, MlsRoomSnapshot};
 use asl_types::{
     error::AslError,
     ids::{Hash32, PeerId},
@@ -27,7 +27,8 @@ use zeroize::Zeroizing;
 
 const FORMAT_V1: &str = "ASL-MLS-ROOM-v1";
 const FORMAT_V2: &str = "ASL-MLS-ROOM-v2";
-const MAX_SYNC_HISTORY: usize = 256;
+const FORMAT_V3: &str = "ASL-MLS-ROOM-v3";
+const MAX_SYNC_HISTORY: usize = MLS_SYNC_MAX_STEPS as usize;
 // Memory-only guard for the shared provider type, outside OpenMLS's labeled keys.
 const HISTORY_REQUIRED_KEY: &[u8] = b"\0ASL-MLS-SYNC-HISTORY";
 
@@ -63,6 +64,21 @@ impl SyncHistory {
         self.0.digests.get(usize::try_from(index).ok()?).copied()
     }
 
+    /// Old snapshots did not distinguish local commits from catch-up commits.
+    pub fn remaining_catchup(&self) -> u64 {
+        MLS_SYNC_MAX_STEPS - self.0.downloaded.unwrap_or(self.0.digests.len() as u64)
+    }
+
+    pub fn append_downloaded(&mut self, base_epoch: u64, digest: Hash32) -> Result<(), AslError> {
+        let remaining = self.remaining_catchup();
+        if remaining == 0 {
+            return Err(AslError::QuotaExceeded);
+        }
+        self.append(base_epoch, digest)?;
+        self.0.downloaded = Some(MLS_SYNC_MAX_STEPS - remaining + 1);
+        Ok(())
+    }
+
     fn is_empty(&self) -> bool {
         self.0.digests.is_empty()
     }
@@ -74,7 +90,13 @@ impl SyncHistory {
     }
 
     fn matches_epoch(&self, epoch: u64) -> bool {
-        if self.is_empty() {
+        if self
+            .0
+            .downloaded
+            .is_some_and(|count| count == 0 || count > self.0.digests.len() as u64)
+        {
+            false
+        } else if self.is_empty() {
             self.0.first_base_epoch == 0
         } else {
             self.head_epoch() == Some(epoch)
@@ -88,6 +110,12 @@ struct HistoryWindow {
     first_base_epoch: u64,
     #[serde(deserialize_with = "deserialize_digests")]
     digests: VecDeque<Hash32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_history_field"
+    )]
+    downloaded: Option<u64>,
 }
 
 fn deserialize_digests<'de, D: Deserializer<'de>>(
@@ -189,10 +217,16 @@ fn seal_snapshot(
         .values
         .write()
         .map_err(|_| AslError::InvalidPolicyState)?;
-    let requires_history = records.contains_key(HISTORY_REQUIRED_KEY);
     let has_history = history.is_some_and(|history| !history.is_empty());
-    if requires_history && !has_history {
-        return Err(AslError::InvalidPolicyState);
+    let downloaded = history.and_then(|history| history.0.downloaded);
+    let marker = downloaded.map(u64::to_be_bytes);
+    let budget = marker.as_ref().map_or(&[][..], |count| &count[..]);
+    if let Some(saved) = records.get(HISTORY_REQUIRED_KEY) {
+        // Big-endian counters allow a monotonic byte comparison. An empty
+        // marker only requires history (legacy snapshots had no counter).
+        if !has_history || saved.as_slice() > budget {
+            return Err(AslError::InvalidPolicyState);
+        }
     }
     let mls_records = records
         .iter()
@@ -212,10 +246,10 @@ fn seal_snapshot(
         .collect::<Vec<_>>();
     entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
     let snapshot = Snapshot {
-        format: if history.is_some() {
-            FORMAT_V2
-        } else {
-            FORMAT_V1
+        format: match (history, downloaded) {
+            (_, Some(_)) => FORMAT_V3,
+            (Some(_), None) => FORMAT_V2,
+            (None, None) => FORMAT_V1,
         },
         room: binding.local_id.clone(),
         wire: binding.wire_id,
@@ -234,8 +268,8 @@ fn seal_snapshot(
     if sealed.len() > MAX_SEALED_ROOM_BYTES {
         return Err(AslError::QuotaExceeded);
     }
-    if has_history && !requires_history {
-        records.insert(HISTORY_REQUIRED_KEY.to_vec(), Vec::new());
+    if has_history {
+        records.insert(HISTORY_REQUIRED_KEY.to_vec(), budget.to_vec());
     }
     Ok(sealed)
 }
@@ -253,7 +287,7 @@ pub fn restore(
     Ok((provider, group))
 }
 
-/// Restores the MLS state and its sync history. A v1 snapshot has no history.
+/// Restores MLS state, sync history and (v3) the catch-up budget.
 pub fn restore_with_history(
     binding: &RoomBinding<'_>,
     row: &MlsRoomSnapshot,
@@ -287,7 +321,13 @@ pub fn restore_with_history(
         return Err(AslError::InvalidDatabase);
     }
     if !history.is_empty() {
-        records.insert(HISTORY_REQUIRED_KEY.to_vec(), Vec::new());
+        records.insert(
+            HISTORY_REQUIRED_KEY.to_vec(),
+            history
+                .0
+                .downloaded
+                .map_or_else(Vec::new, |count| count.to_be_bytes().to_vec()),
+        );
     }
     let provider = RoomProvider::default();
     *provider
@@ -311,7 +351,8 @@ fn decode_snapshot(plaintext: &[u8]) -> Result<(StoredSnapshot, SyncHistory), As
         cbor2::from_slice(plaintext).map_err(|_| AslError::InvalidDatabase)?;
     let history = match (snapshot.format.as_str(), snapshot.history.take()) {
         (FORMAT_V1, None) => SyncHistory::default(),
-        (FORMAT_V2, Some(history)) => SyncHistory(history),
+        (FORMAT_V2, Some(history)) if history.downloaded.is_none() => SyncHistory(history),
+        (FORMAT_V3, Some(history)) if history.downloaded.is_some() => SyncHistory(history),
         _ => return Err(AslError::InvalidDatabase),
     };
     if !history.matches_epoch(snapshot.epoch) {

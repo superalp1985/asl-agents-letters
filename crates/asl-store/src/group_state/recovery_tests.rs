@@ -7,7 +7,8 @@ use asl_types::{
 use rusqlite::params;
 
 use super::{
-    MlsMemberEvidence, MlsRoomUpdate, PendingMlsRoom,
+    MlsEpochBindings, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
+    MlsSyncAddAuthority, MlsSyncReadAuthority, PendingMlsRoom,
     tests::{register_agent_peer, register_peer, test_peer},
     transition::peer_text,
 };
@@ -209,4 +210,123 @@ fn reconciliation_requires_exact_live_device_and_chain_records() {
         .execute("DELETE FROM peers WHERE peer_id=?1", [&peer])
         .unwrap();
     assert!(!matches(&evidence, 1, 10));
+}
+
+#[test]
+fn sync_requires_current_authority_and_rolls_back_an_expired_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = open_store(&directory.path().join("sync.sqlite3")).unwrap();
+    let creator = test_peer(1);
+    let forwarder = test_peer(2);
+    let added = test_peer(3);
+    let roster = [
+        register_evidence(&store, AgentId([1; 32]), &creator, 100),
+        register_evidence(&store, AgentId([2; 32]), &forwarder, 30),
+        register_evidence(&store, AgentId([3; 32]), &added, 100),
+    ];
+    let local_id = GroupId(Id128([11; 16]));
+    let wire_id = Hash32([12; 32]);
+    store
+        .stage_mls_room(PendingMlsRoom {
+            local_id: &local_id,
+            wire_id,
+            creator: &creator,
+            local_name: "Paused",
+            mls_epoch: 4,
+            sealed_snapshot: b"staged",
+        })
+        .unwrap();
+    let initial = store.mls_room_snapshot(wire_id).unwrap().unwrap().version;
+    let original = store
+        .commit_mls_room_candidate(MlsRoomUpdate {
+            local_id: &local_id,
+            wire_id,
+            expected: initial,
+            mls_epoch: 4,
+            sealed_snapshot: b"original",
+            members: &[creator.clone(), forwarder.clone()],
+            event: None,
+        })
+        .unwrap();
+    let head_binding = Hash32([14; 32]);
+    let projection = [creator.clone(), forwarder.clone(), added.clone()];
+    let update = || MlsRoomUpdate {
+        local_id: &local_id,
+        wire_id,
+        expected: original,
+        mls_epoch: 5,
+        sealed_snapshot: b"new",
+        members: &projection,
+        event: Some(MlsJournalEntry {
+            sender: &creator,
+            kind: MlsJournalKind::SyncCommit(MlsEpochBindings {
+                base: Hash32([13; 32]),
+                next: head_binding,
+            }),
+            ciphertext: b"commit",
+        }),
+    };
+    let authority = || MlsSyncAddAuthority {
+        source: &forwarder,
+        added: &added,
+        members: &roster,
+        chain_id: 1,
+    };
+    let mut times = [20, 30].into_iter();
+    assert!(matches!(
+        store.commit_verified_mls_sync_add(update(), authority(), 20, || Ok(times.next().unwrap())),
+        Err(AslError::ExpiredMessage)
+    ));
+    let saved = store.mls_room_for_reconciliation(wire_id).unwrap().unwrap();
+    assert_eq!(saved.snapshot.version, original);
+    assert_eq!(saved.members.len(), 2);
+    assert!(store.mls_sync_step(wire_id, 4, 21).unwrap().is_none());
+
+    let committed = store
+        .commit_verified_mls_sync_add(update(), authority(), 20, || Ok(20))
+        .unwrap();
+    let check = || MlsSyncReadAuthority {
+        wire_id,
+        expected: committed,
+        creator: &creator,
+        requester: &forwarder,
+        members: &roster,
+        chain_id: 1,
+    };
+    assert!(
+        store
+            .read_authorized_mls_sync_step(
+                check(),
+                Some((4, Hash32([15; 32]))),
+                || Ok(21),
+                |_| Ok(true),
+            )
+            .unwrap()
+            .is_none()
+    );
+    let step = store
+        .read_authorized_mls_sync_step(check(), Some((4, head_binding)), || Ok(21), |_| Ok(true))
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.signer, creator);
+    store
+        .connection
+        .execute(
+            "UPDATE device_identities SET revoked_at_ms=21 WHERE peer_id=?1",
+            [peer_text(&forwarder)],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.read_authorized_mls_sync_step(
+            check(),
+            Some((4, head_binding)),
+            || Ok(22),
+            |_| Ok(true)
+        ),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    assert!(matches!(
+        store.read_authorized_mls_sync_step(check(), None, || Ok(22), |_| Ok(false)),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
 }

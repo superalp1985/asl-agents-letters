@@ -535,3 +535,15 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - 本机合成链证明用例覆盖容量为 1 时同行证明淘汰普通本机缓存但不影响准入或证明回复，以及新鲜目录不能代替过期链证明。IPC 模拟用满写入队列验证断连去重、阻塞后补发及心跳先入队。
 - SQLite v15 与 DPAPI v2 用例覆盖 v14 升级不回填、失败事务回滚、旧快照兼容、日志过期、256 步窗口、断档及密文和期限的摘要绑定。本机真实 MLS/DPAPI/SQLite 夹具核对已密封 Add、持久同步历史及 exporter；链数据仍是夹具。
 - 未改 P2P CBOR 或依赖锁。未验收网络同步、群权限激活、真实链 RPC、跨正式进程入组或公网。
+
+### 2026-11-21 T31：回环 Add 补齐与连续后缀核对
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-net -p asl-store --all-targets --locked --offline -- --test-threads=1`，475 项通过、0 失败、3 项按已有标记忽略。相同四包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 三 Core 用例使用合成链证据、真实 OpenMLS、DPAPI、SQLite 和注入的 Net 事件，验证错误 exporter 拒绝、错句柄和重放不推进、单步添加及 `AtHead` 不改变房间和文件权限。SQLite 用例覆盖当前设备授权、处理途中到期回滚，及同长损坏的末步让整个后缀无法发送。
+- 未改 P2P CBOR、SQLite schema 或依赖锁。未执行真实链 RPC、公网或跨正式进程群同步；未实现 Remove、Update 或权限激活。
+
+### 2026-11-21 T31：持久补齐预算
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`asl-app`、`asl-groups`、`asl-net`、`asl-store`、`asl-types` 五包全目标锁定、离线、串行测试 529 项通过、0 失败、3 项按已有标记忽略。相同五包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- DPAPI v3 用例验证重开、历史滚动后计数不回退，达到 256 后拒绝下一步，旧 v2 快照保守计数，拒绝把带实际计数的快照降级成 v2。三 Core 恢复用例确认 `AtHead` 不清零。独立复核后限制 SQLite 签名者字段长度，逐步解码前查期限，并验证到期会停止剩余扫描。
+- DPAPI 绑定快照与本机设备，不提供全数据库备份防回滚。未改线上协议或 SQLite schema；未测真实链 RPC、跨正式进程群同步或公网。

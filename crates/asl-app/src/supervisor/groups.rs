@@ -29,6 +29,7 @@ use super::{
 };
 
 const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
+const SYNC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_JOIN_DIAGNOSTICS: usize = 5;
 
@@ -62,6 +63,8 @@ pub(super) struct LoopbackGroups {
     next_prune: Instant,
     cleanup_failed: bool,
     join_diagnostics: VecDeque<(Id128, &'static str)>,
+    next_sync_probe: Instant,
+    sync_cursor: Option<(Hash32, PeerId)>,
 }
 
 impl LoopbackGroups {
@@ -73,6 +76,8 @@ impl LoopbackGroups {
             next_prune: Instant::now() + PRUNE_INTERVAL,
             cleanup_failed: false,
             join_diagnostics: VecDeque::new(),
+            next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
+            sync_cursor: None,
         })
     }
 }
@@ -94,6 +99,14 @@ impl Supervisor {
             return;
         }
         let net = &self.net;
+        let joined_route = match &event {
+            NetworkEvent::UnverifiedGroupResponse {
+                connection_id,
+                response,
+                ..
+            } => Some((*connection_id, response.group_id)),
+            _ => None,
+        };
         // Room state and invitations are already durable. Neither raw frames
         // nor protocol errors should reach the generic Agent handler.
         let invite = admission.mls_reply_invite(&event, now_ms);
@@ -104,6 +117,18 @@ impl Supervisor {
             now_ms,
             |command| enqueue(net, command),
         );
+        if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
+            && let Some((connection_id, wire_id)) = joined_route
+        {
+            let _ = admission.start_mls_sync(
+                &groups.store,
+                connection_id,
+                wire_id,
+                &HashMap::new(),
+                now_ms,
+                |command| enqueue(net, command),
+            );
+        }
         if let Some(id) = invite {
             match result {
                 Ok(Some(MlsNetworkOutcome::Joined { .. })) => {
@@ -133,6 +158,12 @@ impl Supervisor {
             if now >= groups.next_prune {
                 groups.next_prune = now + PRUNE_INTERVAL;
                 groups.cleanup_failed = groups.store.prune_mls_invites(unix_time_ms()?).is_err();
+            }
+            if self.network_admission_status == NetworkAdmissionStatus::Active
+                && !groups.cleanup_failed
+                && let Some(admission) = &mut self.admission
+            {
+                groups.poll_sync(admission, &self.net, now, unix_time_ms()?);
             }
         }
         let Some(controls) = &self.group_controls else {
@@ -328,6 +359,51 @@ impl Supervisor {
             LocalGroupAction::List | LocalGroupAction::Room(_) | LocalGroupAction::Reject(_) => {
                 unreachable!()
             }
+        }
+    }
+}
+
+impl LoopbackGroups {
+    fn poll_sync(
+        &mut self,
+        admission: &mut crate::profile::CoreAdmission,
+        net: &NetRuntime,
+        now: Instant,
+        now_ms: u64,
+    ) {
+        let directories = HashMap::new();
+        let _ = admission.poll_mls_sync(&self.store, &directories, now_ms, |command| {
+            enqueue(net, command)
+        });
+        if now < self.next_sync_probe {
+            return;
+        }
+        self.next_sync_probe = now + SYNC_PROBE_INTERVAL;
+        let mut next: Option<(Hash32, PeerId, [u8; 16])> = None;
+        for (_, connection, peer) in admission.admitted_connections(now_ms) {
+            let after = self
+                .sync_cursor
+                .as_ref()
+                .map(|(room, last)| (*room, peer.as_bytes() > last.as_bytes()));
+            let Ok(Some(room)) = self.store.next_mls_sync_room(&peer, after) else {
+                continue;
+            };
+            if next.as_ref().is_none_or(|(current, current_peer, _)| {
+                (room.as_bytes(), peer.as_bytes()) < (current.as_bytes(), current_peer.as_bytes())
+            }) {
+                next = Some((room, peer, connection));
+            }
+        }
+        self.sync_cursor = next.as_ref().map(|(room, peer, _)| (*room, peer.clone()));
+        if let Some((room, _, connection)) = next {
+            let _ = admission.start_mls_sync(
+                &self.store,
+                connection,
+                room,
+                &directories,
+                now_ms,
+                |command| enqueue(net, command),
+            );
         }
     }
 }

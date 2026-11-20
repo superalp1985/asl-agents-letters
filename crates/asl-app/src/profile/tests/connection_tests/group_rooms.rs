@@ -5,7 +5,7 @@ use asl_groups::{
     membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
 };
-use asl_store::group_state::MlsIncomingInvite;
+use asl_store::group_state::{MLS_SYNC_MAX_STEPS, MlsIncomingInvite};
 use asl_types::protocol::{GroupBody, GroupMembership, GroupPacket};
 use openmls::prelude::{GroupId as MlsGroupId, MlsGroup, MlsGroupCreateConfig, OpenMlsProvider};
 use openmls_basic_credential::SignatureKeyPair;
@@ -18,7 +18,7 @@ use crate::profile::{
 use super::*;
 
 #[test]
-fn third_member_can_join_using_a_verified_directory_after_its_peer_disconnects() {
+fn group_catch_up_follows_verified_adds_after_directory_peer_disconnects() {
     let roots: [AgentIdentity; 3] = std::array::from_fn(|_| AgentIdentity::generate().unwrap());
     let certs = roots
         .each_ref()
@@ -50,9 +50,11 @@ fn third_member_can_join_using_a_verified_directory_after_its_peer_disconnects()
             BOOTSTRAP_TIME,
         )
         .unwrap();
-        resolver
-            .accept_proof(certs[i].agent_id, &proofs[i], BOOTSTRAP_TIME)
-            .unwrap();
+        for proof in &proofs {
+            resolver
+                .accept_proof(proof.agent_id, proof, BOOTSTRAP_TIME)
+                .unwrap();
+        }
         let mut core = CoreAdmission::for_local_identity(
             &roots[i],
             certs[i].peer_id.clone(),
@@ -161,7 +163,7 @@ fn third_member_can_join_using_a_verified_directory_after_its_peer_disconnects()
             NOW,
         );
     };
-    let (_first_db, mut first_store, mut first) = node(1);
+    let (first_db, mut first_store, mut first) = node(1);
     join(&mut first, &mut first_store, 1);
     let (_second_db, mut second_store, mut second) = node(2);
     let prior_connection = [9; 16];
@@ -198,6 +200,197 @@ fn third_member_can_join_using_a_verified_directory_after_its_peer_disconnects()
         }],
     );
     join(&mut second, &mut second_store, 2);
+
+    // The first member can obtain the second Add without a new Welcome.
+    // This supplies signed material independently of the synchronization frame.
+    let sync_dirs = HashMap::from([(certs[2].agent_id, signed[2].clone())]);
+    let connection = [10; 16];
+    std::thread::sleep(Duration::from_millis(510));
+    admit(
+        &mut creator,
+        connection,
+        &certs[1],
+        proofs[1].clone(),
+        &signed[1],
+    );
+    admit(
+        &mut first,
+        connection,
+        &certs[0],
+        proofs[0].clone(),
+        &signed[0],
+    );
+    let started = std::time::Instant::now();
+    let probe_now = || NOW + started.elapsed().as_millis() as u64;
+    let original = first_store
+        .mls_room_snapshot(wire_id)
+        .unwrap()
+        .unwrap()
+        .version;
+    assert_eq!(original.mls_epoch, 1);
+    assert_eq!(
+        first_store
+            .next_mls_sync_room(&certs[0].peer_id, None)
+            .unwrap(),
+        Some(wire_id)
+    );
+    assert_eq!(
+        first_store
+            .next_mls_sync_room(&certs[0].peer_id, Some((wire_id, false)))
+            .unwrap(),
+        None
+    );
+    let mut outgoing = None;
+    first
+        .start_mls_sync(
+            &first_store,
+            connection,
+            wire_id,
+            &sync_dirs,
+            probe_now(),
+            |command| {
+                outgoing = Some(command);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let Some(NetworkCommand::SendGroup {
+        request_handle,
+        request,
+        ..
+    }) = outgoing
+    else {
+        panic!("expected a sync request");
+    };
+    assert_eq!(request.epoch, 1);
+    let mut other_branch = request.clone();
+    other_branch.body = GroupBody::Membership(GroupMembership::SyncRequest {
+        epoch_binding: Hash32([0x94; 32]),
+    });
+    let serve = |source: &mut CoreAdmission, store: &mut asl_store::Store, request| {
+        let mut reply = None;
+        let now = probe_now();
+        assert!(
+            source
+                .handle_mls_network_event(
+                    store,
+                    NetworkEvent::UnverifiedGroupRequest {
+                        connection_id: connection,
+                        response_id: [62; 16],
+                        deadline_ms: now + 1_000,
+                        request,
+                    },
+                    &no_imports,
+                    now,
+                    |command| {
+                        reply = Some(command);
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        let Some(NetworkCommand::ReplyGroup {
+            response_id,
+            response,
+            ..
+        }) = reply
+        else {
+            panic!("expected a sync reply");
+        };
+        assert_eq!(response_id, [62; 16]);
+        response
+    };
+    assert!(matches!(
+        serve(&mut creator, &mut creator_store, other_branch).body,
+        GroupBody::Membership(GroupMembership::SyncUnavailable)
+    ));
+    let response = serve(&mut creator, &mut creator_store, request);
+    assert!(matches!(
+        response.body,
+        GroupBody::Membership(GroupMembership::SyncCommit(_))
+    ));
+    let deliver =
+        |target: &mut CoreAdmission, store: &mut asl_store::Store, request_handle, response| {
+            target.handle_mls_network_event(
+                store,
+                NetworkEvent::UnverifiedGroupResponse {
+                    connection_id: connection,
+                    request_handle,
+                    response,
+                },
+                &sync_dirs,
+                probe_now(),
+                |_| panic!("reply processing does not enqueue immediately"),
+            )
+        };
+    assert!(
+        deliver(&mut first, &mut first_store, [88; 16], response.clone())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        first_store
+            .mls_room_snapshot(wire_id)
+            .unwrap()
+            .unwrap()
+            .version,
+        original
+    );
+    assert!(matches!(
+        deliver(&mut first, &mut first_store, request_handle, response.clone()),
+        Ok(Some(MlsNetworkOutcome::SyncAdvanced { wire_id: room, version }))
+            if room == wire_id && version.mls_epoch == 2
+                && version.policy_revision == original.policy_revision
+                && version.membership_epoch == original.membership_epoch
+    ));
+    assert!(
+        deliver(&mut first, &mut first_store, request_handle, response)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        first_store
+            .mls_sync_step(wire_id, 1, probe_now())
+            .unwrap()
+            .unwrap()
+            .signer,
+        certs[0].peer_id
+    );
+    std::thread::sleep(Duration::from_millis(510));
+    let mut outgoing = None;
+    first
+        .poll_mls_sync(&first_store, &sync_dirs, probe_now(), |command| {
+            outgoing = Some(command);
+            Ok(())
+        })
+        .unwrap();
+    let Some(NetworkCommand::SendGroup {
+        request_handle,
+        request,
+        ..
+    }) = outgoing
+    else {
+        panic!("expected the head check");
+    };
+    assert_eq!(request.epoch, 2);
+    let head = serve(&mut creator, &mut creator_store, request);
+    assert!(matches!(
+        deliver(&mut first, &mut first_store, request_handle, head),
+        Ok(Some(MlsNetworkOutcome::SyncHead { version, .. })) if version.mls_epoch == 2
+    ));
+    assert_eq!(
+        first_store.mls_room_progress(wire_id).unwrap(),
+        Some(("needs_sync".into(), 2))
+    );
+    let reopened = first_db.open().mls_room_snapshot(wire_id).unwrap().unwrap();
+    let binding = RoomBinding {
+        local_id: &reopened.local_id,
+        wire_id,
+        device: &certs[1].peer_id,
+    };
+    let (_, _, history) = restore_with_history(&binding, &reopened).unwrap();
+    assert_eq!(history.remaining_catchup(), MLS_SYNC_MAX_STEPS - 1);
 }
 
 #[test]

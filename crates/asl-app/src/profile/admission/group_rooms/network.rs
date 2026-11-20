@@ -12,7 +12,7 @@ use asl_types::{
     task::GroupId,
 };
 
-use super::{ApprovedMlsWelcome, CoreAdmission};
+use super::{ApprovedMlsWelcome, CoreAdmission, sync::SyncClock};
 use crate::{
     network::{NetworkCommand, NetworkEvent},
     profile::admission::fresh_id,
@@ -39,6 +39,17 @@ pub enum MlsNetworkOutcome {
     Joined {
         local_id: GroupId,
         version: RoomVersion,
+    },
+    SyncAdvanced {
+        wire_id: Hash32,
+        version: RoomVersion,
+    },
+    SyncHead {
+        wire_id: Hash32,
+        version: RoomVersion,
+    },
+    SyncStopped {
+        wire_id: Hash32,
     },
 }
 
@@ -208,6 +219,26 @@ impl CoreAdmission {
                 if now_ms >= deadline_ms {
                     return Err(AslError::ExpiredMessage);
                 }
+                if matches!(
+                    &request.body,
+                    GroupBody::Membership(GroupMembership::SyncRequest { .. })
+                ) {
+                    let clock = SyncClock::inbound(now_ms, deadline_ms);
+                    let response = self.serve_mls_sync_step(
+                        store,
+                        connection_id,
+                        &request,
+                        directories,
+                        &clock,
+                    )?;
+                    self.admitted_peer_identity(connection_id, clock.now_ms()?)?;
+                    enqueue(NetworkCommand::ReplyGroup {
+                        connection_id,
+                        response_id,
+                        response,
+                    })?;
+                    return Ok(None);
+                }
                 let (response, outcome) = match &request.body {
                     GroupBody::Membership(GroupMembership::Invite { .. }) => {
                         let invite = self.receive_targeted_mls_invite(
@@ -233,8 +264,7 @@ impl CoreAdmission {
                         )?,
                         None,
                     ),
-                    // No catch-up, membership updates or application frames
-                    // may enter the room through the invitation adapter.
+                    // Standalone updates and application frames are not active.
                     _ => return Err(AslError::PolicyDenied),
                 };
                 self.admitted_peer_identity(connection_id, now_ms)?;
@@ -255,6 +285,23 @@ impl CoreAdmission {
                 request_handle,
                 response,
             } => {
+                if matches!(
+                    &response.body,
+                    GroupBody::Membership(
+                        GroupMembership::SyncCommit(_)
+                            | GroupMembership::AtHead { .. }
+                            | GroupMembership::SyncUnavailable
+                    )
+                ) {
+                    return self.receive_mls_sync_reply(
+                        store,
+                        connection_id,
+                        request_handle,
+                        &response,
+                        directories,
+                        now_ms,
+                    );
+                }
                 let Some(attempt) = self.mls_joins.pending.get(&request_handle) else {
                     return Ok(None);
                 };

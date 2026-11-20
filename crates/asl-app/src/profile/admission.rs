@@ -48,6 +48,8 @@ pub struct CoreAdmission {
     #[cfg(windows)]
     mls_joins: group_rooms::MlsJoinAttempts,
     #[cfg(windows)]
+    mls_sync: group_rooms::MlsSyncRuntime,
+    #[cfg(windows)]
     group_directories: Option<group_rooms::GroupDirectoryCache>,
 }
 
@@ -330,6 +332,8 @@ impl CoreAdmission {
             #[cfg(windows)]
             mls_joins: group_rooms::MlsJoinAttempts::default(),
             #[cfg(windows)]
+            mls_sync: group_rooms::MlsSyncRuntime::default(),
+            #[cfg(windows)]
             group_directories: None,
         })
     }
@@ -471,7 +475,10 @@ impl CoreAdmission {
 
     pub fn poll(&mut self, now_ms: u64) -> AdmissionBatch {
         #[cfg(windows)]
-        self.mls_joins.expire(now_ms);
+        {
+            self.mls_joins.expire(now_ms);
+            self.mls_sync.expire(now_ms);
+        }
         let mut batch = AdmissionBatch::default();
         self.drain_proofs(now_ms, &mut batch);
         batch
@@ -532,7 +539,10 @@ impl CoreAdmission {
             } => self.connected(connection_id, peer_id, &mut batch),
             NetworkEvent::PeerDisconnected { connection_id } => {
                 #[cfg(windows)]
-                self.mls_joins.disconnect(connection_id);
+                {
+                    self.mls_joins.disconnect(connection_id);
+                    self.mls_sync.disconnect(connection_id);
+                }
                 let (peer_id, agent_id) =
                     self.peers
                         .remove(&connection_id)
@@ -750,7 +760,10 @@ impl CoreAdmission {
             } => {
                 if protocol == crate::ipc::NetworkProtocol::Group {
                     #[cfg(windows)]
-                    self.mls_joins.fail(connection_id, request_id);
+                    {
+                        self.mls_joins.fail(connection_id, request_id);
+                        self.mls_sync.fail(connection_id, request_id);
+                    }
                     return batch;
                 }
                 let is_pending_handshake = self.peers.get(&connection_id).is_some_and(|peer| {
@@ -1327,7 +1340,10 @@ impl CoreAdmission {
 
     pub(crate) fn invalidate_connection(&mut self, connection_id: [u8; 16]) {
         #[cfg(windows)]
-        self.mls_joins.disconnect(connection_id);
+        {
+            self.mls_joins.disconnect(connection_id);
+            self.mls_sync.disconnect(connection_id);
+        }
         self.pending_proofs
             .retain(|pending| *pending != connection_id);
         if let Some(mut peer) = self.peers.remove(&connection_id) {

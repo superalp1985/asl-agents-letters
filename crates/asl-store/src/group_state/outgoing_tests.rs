@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use asl_types::{
+    error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{GroupBody, GroupMembership, GroupPacket},
     task::GroupId,
@@ -590,6 +591,63 @@ fn sync_lookup_keeps_only_the_latest_256_base_epochs() {
             .unwrap()
             .is_none()
     );
+
+    let verify = |step: &MlsSyncStoredStep| {
+        let digest = |bytes: &[u8]| {
+            step.bindings.digest(
+                &LOCAL,
+                WIRE,
+                &f.creator,
+                (step.base_epoch, NOW + MLS_SYNC_RETENTION_MS),
+                &f.creator,
+                bytes,
+            )
+        };
+        Ok(digest(&step.commit) == digest(&step.base_epoch.to_be_bytes()))
+    };
+    let verified = || {
+        super::sync_log::read_step(
+            &store.connection,
+            WIRE,
+            1,
+            Some(bindings(256).next),
+            || Ok(NOW),
+            verify,
+        )
+        .unwrap()
+    };
+    assert_eq!(verified(), Some(oldest));
+    let reads = std::cell::Cell::new(0);
+    let visited = std::cell::Cell::new(0);
+    let result = super::sync_log::read_step(
+        &store.connection,
+        WIRE,
+        1,
+        Some(bindings(256).next),
+        || {
+            let count = reads.get() + 1;
+            reads.set(count);
+            if count == 3 {
+                Err(AslError::ExpiredMessage)
+            } else {
+                Ok(NOW)
+            }
+        },
+        |step| {
+            visited.set(visited.get() + 1);
+            verify(step)
+        },
+    );
+    assert!(matches!(result, Err(AslError::ExpiredMessage)));
+    assert_eq!(visited.get(), 1);
+    store
+        .connection
+        .execute(
+            "UPDATE group_events SET ciphertext=zeroblob(8) WHERE mls_epoch=256",
+            [],
+        )
+        .unwrap();
+    assert!(verified().is_none());
 
     store
         .connection

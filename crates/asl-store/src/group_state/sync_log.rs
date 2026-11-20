@@ -4,13 +4,16 @@ use asl_types::{
     protocol::MAX_GROUP_MLS_OBJECT_BYTES,
     task::GroupId,
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 
 use super::{RoomVersion, sql_number, unsigned};
 use crate::{Store, database_error};
 
-const SYNC_WINDOW: i64 = 256;
+pub const MLS_SYNC_MAX_STEPS: u64 = 256;
+const SYNC_WINDOW: i64 = MLS_SYNC_MAX_STEPS as i64;
 const EXPIRY_PRUNE_BATCH: i64 = 256;
+// A byte needs fewer than two Base58 digits even at maximum width.
+const MAX_SIGNER_TEXT_BYTES: usize = 2 * PeerId::MAX_BYTES;
 pub const MLS_SYNC_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,95 +62,124 @@ pub struct MlsSyncStoredStep {
 
 impl Store {
     /// Read a step from an unexpired, contiguous suffix ending at the current
-    /// head. Core must verify its seal and authorize the requester separately.
+    /// head. This is a local inspection API, not an authorization decision.
     pub fn mls_sync_step(
         &self,
         wire_id: Hash32,
         base_epoch: u64,
         now_ms: u64,
     ) -> Result<Option<MlsSyncStoredStep>, AslError> {
-        let base = sql_number(base_epoch)?;
-        let now = sql_number(now_ms)?;
-        // Uniqueness per base plus the exact count rules out missing or
-        // expired steps; adjacent bindings also have to agree.
-        let row = self
-            .connection
-            .query_row(
-                "SELECT s.local_group_id,j.base_binding,j.next_binding,e.sender_peer_id,e.ciphertext,
-                        e.expires_at_ms,s.revision,g.mls_epoch,g.membership_epoch,p.revision
+        read_step(
+            &self.connection,
+            wire_id,
+            base_epoch,
+            None,
+            || Ok(now_ms),
+            |_| Ok(true),
+        )
+    }
+}
+
+pub(super) fn read_step(
+    connection: &Connection,
+    wire_id: Hash32,
+    base_epoch: u64,
+    head_binding: Option<Hash32>,
+    current_time: impl Fn() -> Result<u64, AslError>,
+    mut verify: impl FnMut(&MlsSyncStoredStep) -> Result<bool, AslError>,
+) -> Result<Option<MlsSyncStoredStep>, AslError> {
+    let base = sql_number(base_epoch)?;
+    let now = sql_number(current_time()?)?;
+    // Stream one bounded suffix in order, keeping just the requested step.
+    let mut statement = connection
+        .prepare(
+            "SELECT s.local_group_id,j.base_epoch,j.base_binding,j.next_binding,
+                        e.sender_peer_id,e.ciphertext,e.expires_at_ms,
+                        s.revision,g.mls_epoch,g.membership_epoch,p.revision
                  FROM mls_room_states s
                  JOIN asl_groups g ON g.group_id=s.local_group_id
-                 JOIN mls_sync_log j ON j.room_id=s.local_group_id AND j.base_epoch=?2
+                 JOIN mls_sync_log j ON j.room_id=s.local_group_id
                  JOIN group_events e ON e.event_id=j.event_id
                  CROSS JOIN policy_state p
                  WHERE s.wire_group_id=?1 AND p.singleton=1
                    AND g.state IN ('needs_sync','active')
-                   AND ?2>=g.mls_epoch-?4 AND ?2<g.mls_epoch
-                   AND (SELECT count(*) FROM mls_sync_log c
-                        JOIN group_events ev ON ev.event_id=c.event_id
-                        WHERE c.room_id=j.room_id AND c.base_epoch>=?2 AND c.base_epoch<g.mls_epoch
-                          AND c.seq=c.base_epoch+1
-                          AND ev.group_id=c.room_id AND ev.mls_epoch=c.base_epoch AND ev.kind='commit'
-                          AND ev.created_at_ms<=?3 AND c.expires_at_ms>?3
-                          AND ev.expires_at_ms=c.expires_at_ms
-                          AND length(ev.ciphertext) BETWEEN 1 AND ?5
-                          AND (c.seq=g.mls_epoch OR EXISTS (
-                              SELECT 1 FROM mls_sync_log n
-                              WHERE n.room_id=c.room_id AND n.base_epoch=c.seq
-                                AND n.base_binding=c.next_binding
-                          )))=g.mls_epoch-?2",
-                params![
-                    wire_id.as_bytes(),
-                    base,
-                    now,
-                    SYNC_WINDOW,
-                    MAX_GROUP_MLS_OBJECT_BYTES as i64,
-                ],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Vec<u8>>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Vec<u8>>(4)?,
-                        r.get::<_, i64>(5)?,
-                        r.get::<_, i64>(6)?,
-                        r.get::<_, i64>(7)?,
-                        r.get::<_, i64>(8)?,
-                        r.get::<_, i64>(9)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(database_error)?;
-        row.map(
-            |(room, base, next, signer, commit, expires, revision, head, membership, policy)| {
-                let mut local_id = [0; Id128::LENGTH];
-                hex::decode_to_slice(room, &mut local_id).map_err(|_| AslError::InvalidDatabase)?;
-                let signer = bs58::decode(signer)
-                    .into_vec()
-                    .map_err(|_| AslError::InvalidDatabase)?;
-                Ok(MlsSyncStoredStep {
-                    local_id: GroupId(Id128(local_id)),
-                    base_epoch,
-                    expires_at_ms: unsigned(expires)?,
-                    bindings: MlsEpochBindings {
-                        base: Hash32(base.try_into().map_err(|_| AslError::InvalidDatabase)?),
-                        next: Hash32(next.try_into().map_err(|_| AslError::InvalidDatabase)?),
-                    },
-                    signer: PeerId::from_bytes(signer).map_err(|_| AslError::InvalidDatabase)?,
-                    commit,
-                    version: RoomVersion {
-                        revision: unsigned(revision)?,
-                        mls_epoch: unsigned(head)?,
-                        membership_epoch: unsigned(membership)?,
-                        policy_revision: unsigned(policy)?,
-                    },
-                })
-            },
+                   AND ?2>=g.mls_epoch-?4 AND j.base_epoch>=?2 AND j.base_epoch<g.mls_epoch
+                   AND j.seq=j.base_epoch+1
+                   AND e.group_id=j.room_id AND e.mls_epoch=j.base_epoch AND e.kind='commit'
+                   AND e.created_at_ms<=?3 AND j.expires_at_ms>?3
+                   AND e.expires_at_ms=j.expires_at_ms AND length(e.ciphertext) BETWEEN 1 AND ?5
+                   AND octet_length(e.sender_peer_id) BETWEEN 1 AND ?6
+                 ORDER BY j.base_epoch LIMIT ?4",
         )
-        .transpose()
+        .map_err(database_error)?;
+    let mut rows = statement
+        .query(params![
+            wire_id.as_bytes(),
+            base,
+            now,
+            SYNC_WINDOW,
+            MAX_GROUP_MLS_OBJECT_BYTES as i64,
+            MAX_SIGNER_TEXT_BYTES as i64,
+        ])
+        .map_err(database_error)?;
+    let mut first = None;
+    let mut expected = base_epoch;
+    let mut bound = None;
+    while let Some(row) = rows.next().map_err(database_error)? {
+        let expires_at_ms = unsigned(row.get(6).map_err(database_error)?)?;
+        if current_time()? >= expires_at_ms {
+            return Ok(None);
+        }
+        let epoch = unsigned(row.get(1).map_err(database_error)?)?;
+        let bindings = MlsEpochBindings {
+            base: read_binding(row, 2)?,
+            next: read_binding(row, 3)?,
+        };
+        if epoch != expected || bound.is_some_and(|prev| prev != bindings.base) {
+            return Ok(None);
+        }
+        let mut local_id = [0; Id128::LENGTH];
+        hex::decode_to_slice(
+            row.get::<_, String>(0).map_err(database_error)?,
+            &mut local_id,
+        )
+        .map_err(|_| AslError::InvalidDatabase)?;
+        let signer = bs58::decode(row.get::<_, String>(4).map_err(database_error)?)
+            .into_vec()
+            .map_err(|_| AslError::InvalidDatabase)?;
+        let step = MlsSyncStoredStep {
+            local_id: GroupId(Id128(local_id)),
+            base_epoch: epoch,
+            expires_at_ms,
+            bindings,
+            signer: PeerId::from_bytes(signer).map_err(|_| AslError::InvalidDatabase)?,
+            commit: row.get(5).map_err(database_error)?,
+            version: RoomVersion {
+                revision: unsigned(row.get(7).map_err(database_error)?)?,
+                mls_epoch: unsigned(row.get(8).map_err(database_error)?)?,
+                membership_epoch: unsigned(row.get(9).map_err(database_error)?)?,
+                policy_revision: unsigned(row.get(10).map_err(database_error)?)?,
+            },
+        };
+        if !verify(&step)? {
+            return Ok(None);
+        }
+        expected += 1;
+        bound = Some(bindings.next);
+        if first.is_none() {
+            first = Some(step);
+        }
     }
+    Ok(first.filter(|step| {
+        expected == step.version.mls_epoch && head_binding.is_none_or(|head| Some(head) == bound)
+    }))
+}
+
+fn read_binding(row: &rusqlite::Row<'_>, index: usize) -> Result<Hash32, AslError> {
+    let bytes: Vec<u8> = row.get(index).map_err(database_error)?;
+    Ok(Hash32(
+        bytes.try_into().map_err(|_| AslError::InvalidDatabase)?,
+    ))
 }
 
 pub(super) fn insert(

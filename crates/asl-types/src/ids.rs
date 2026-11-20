@@ -40,8 +40,10 @@ impl Signature65 {
 pub struct PeerId(Vec<u8>);
 
 impl PeerId {
+    pub const MAX_BYTES: usize = 128;
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, &'static str> {
-        if !(1..=128).contains(&bytes.len()) {
+        if !(1..=Self::MAX_BYTES).contains(&bytes.len()) {
             return Err("invalid PeerId length");
         }
         let parsed =

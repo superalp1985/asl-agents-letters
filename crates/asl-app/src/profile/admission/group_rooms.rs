@@ -5,10 +5,12 @@ mod directories;
 mod incoming;
 mod network;
 mod outgoing;
+mod sync;
 
 pub(super) use directories::GroupDirectoryCache;
 pub(super) use network::MlsJoinAttempts;
 pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};
+pub(super) use sync::MlsSyncRuntime;
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
