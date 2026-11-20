@@ -19,7 +19,8 @@ pub mod supervisor;
 mod transfer;
 
 pub use direct_outbound::{
-    OutgoingQueryEvent, OutgoingQueryPort, OutgoingQueryRuntime, outgoing_query_channel,
+    OutgoingQueryEvent, OutgoingQueryPort, OutgoingQueryRuntime, OutgoingQueryTicket,
+    outgoing_query_channel,
 };
 pub use transfer::{
     CorruptFetchManifest, FetchManifestDetails, MatchedBulkResponse, VerifiedFetchManifest,
