@@ -76,6 +76,10 @@ impl Permit {
         self.content_id
     }
 
+    pub fn file_size(&self) -> u64 {
+        self.dependencies[&self.request.resource_key].file_size
+    }
+
     pub fn operation(&self) -> AccessOperation {
         self.request.operation
     }

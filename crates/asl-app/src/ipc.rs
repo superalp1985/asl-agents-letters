@@ -60,7 +60,7 @@ impl IpcRole {
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
             ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40)
-                | (Self::Core, Self::Net, 34 | 35)
+                | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Worker, 6 | 9)
                 | (Self::Core, Self::Extractor, 41)
@@ -284,6 +284,12 @@ pub enum IpcMessage {
     ReplyControl {
         connection_id: [u8; 16],
         response_id: [u8; 16],
+        response: WireFrame,
+    },
+    ReplyDirect {
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        expires_at_ms: u64,
         response: WireFrame,
     },
     BulkRequested {
@@ -767,6 +773,18 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             append_control_frame(&mut body, response)?;
             25
         }
+        IpcMessage::ReplyDirect {
+            connection_id,
+            response_id,
+            expires_at_ms,
+            response,
+        } => {
+            body.extend_from_slice(connection_id);
+            body.extend_from_slice(response_id);
+            body.extend_from_slice(&expires_at_ms.to_be_bytes());
+            append_control_frame(&mut body, response)?;
+            43
+        }
         IpcMessage::BulkRequested {
             connection_id,
             response_id,
@@ -1153,6 +1171,12 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             response_id: body[16..32].try_into().unwrap(),
             response: decode_control_frame(&body[32..])?,
         }),
+        43 if body.len() >= 44 => Ok(IpcMessage::ReplyDirect {
+            connection_id: body[..16].try_into().unwrap(),
+            response_id: body[16..32].try_into().unwrap(),
+            expires_at_ms: u64::from_be_bytes(body[32..40].try_into().unwrap()),
+            response: decode_control_frame(&body[40..])?,
+        }),
         26 if body.len() == 16 + 16 + BULK_REQUEST_IPC_BYTES => Ok(IpcMessage::BulkRequested {
             connection_id: body[..16].try_into().unwrap(),
             response_id: body[16..32].try_into().unwrap(),
@@ -1428,6 +1452,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         6 => MAX_IPC_TASK_PAYLOAD_BYTES + TASK_BODY_HEADER_BYTES,
         41 => MAX_IPC_EXTRACTOR_INPUT_BYTES + TASK_BODY_HEADER_BYTES,
         42 => 21 + MAX_IPC_EXTRACTOR_OUTPUT_BYTES,
+        43 => 40 + 4 + MAX_CONTROL_FRAME_BYTES,
         7 => 17,
         8..=9 => 16,
         10 => 18 + 128,
@@ -1515,11 +1540,17 @@ impl<W: Write> FrameWriter<W> {
     }
 
     pub fn send(&mut self, message: &IpcMessage) -> Result<(), AslError> {
+        let frame = encode_frame(self.sender, self.receiver, 1, message)?;
+        self.send_prepared(frame)
+    }
+
+    /// The ordered writer assigns the actual sequence after a local handoff.
+    pub(crate) fn send_prepared(&mut self, mut frame: Vec<u8>) -> Result<(), AslError> {
         if self.failed {
             return Err(AslError::InvalidMessage);
         }
         let sequence = self.next_sequence.ok_or(AslError::InvalidMessage)?;
-        let frame = encode_frame(self.sender, self.receiver, sequence, message)?;
+        frame[8..16].copy_from_slice(&sequence.to_be_bytes());
         if let Err(error) = self
             .writer
             .write_all(&frame)
@@ -1876,6 +1907,7 @@ mod tests {
                 | IpcMessage::CloseConnection { .. }
                 | IpcMessage::SendControl { .. }
                 | IpcMessage::ReplyControl { .. }
+                | IpcMessage::ReplyDirect { .. }
                 | IpcMessage::SendBulk { .. }
                 | IpcMessage::ReplyBulk { .. }
                 | IpcMessage::SetAddressPolicy { .. }

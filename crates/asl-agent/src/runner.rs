@@ -107,6 +107,12 @@ pub struct FallbackReply {
     pub model_status: ErrorCode,
 }
 
+impl FallbackReply {
+    pub fn permit(&self) -> Option<&Permit> {
+        self.permit.as_ref()
+    }
+}
+
 #[derive(Default)]
 pub struct InboundRunner {
     mode: InboundMode,

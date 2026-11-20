@@ -282,6 +282,22 @@ impl NetworkBridge {
                     .map_err(|error| error_code(&error))?;
                 Ok(false)
             }
+            IpcMessage::ReplyDirect {
+                connection_id,
+                response_id,
+                expires_at_ms,
+                response,
+            } => {
+                let now = crate::supervisor::unix_time_ms()
+                    .map_err(|_| NetworkErrorCode::InvalidCommand)?;
+                if now < expires_at_ms
+                    && matches!(&response, WireFrame::Answer(_) | WireFrame::Offer(_))
+                {
+                    self.reply_control(connection_id, response_id, response)
+                        .map_err(|error| error_code(&error))?;
+                }
+                Ok(false)
+            }
             IpcMessage::SendBulk {
                 connection_id,
                 request,
@@ -530,6 +546,9 @@ impl NetworkBridge {
             .ok_or(io::ErrorKind::NotFound)?;
         if entry.connection_id != connection_id || entry.protocol != NetworkProtocol::Control {
             return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if entry.expires_at <= Instant::now() {
+            return Err(io::ErrorKind::TimedOut.into());
         }
         let connection = self
             .connections
@@ -872,7 +891,9 @@ mod tests {
     use super::*;
     use asl_net::transport::TransportKind;
     use asl_types::ids::{Id128, PeerId};
-    use asl_types::protocol::{Ack, WireFrame};
+    use asl_types::protocol::{
+        Answer, AnswerStatus, ConceptRef, Intent, Query, ResultShape, ResultStatus, WireFrame,
+    };
     use libp2p_identity::Keypair;
     use std::{
         io::Cursor,
@@ -969,9 +990,17 @@ mod tests {
             event => panic!("unexpected bridge event: {event:?}"),
         };
 
-        let request = WireFrame::Ack(Ack {
+        let now = crate::supervisor::unix_time_ms().unwrap();
+        let request = WireFrame::Query(Query {
             message_id: Id128([61; 16]),
-            received_id: Id128([62; 16]),
+            root_task_id: Id128([62; 16]),
+            created_at_ms: now,
+            expires_at_ms: now + 5_000,
+            intent_id: Intent::FindEvidence,
+            topics: vec![ConceptRef::RUST],
+            constraints: vec![],
+            result_shape: ResultShape::Claims,
+            budget: 1,
         });
         let request_id = [64; 16];
         let mut ignored_output = Vec::new();
@@ -1024,28 +1053,40 @@ mod tests {
         };
 
         let mut ignored_output = Vec::new();
+        let now = crate::supervisor::unix_time_ms().unwrap();
+        let response = WireFrame::Answer(Answer {
+            message_id: Id128([63; 16]),
+            root_task_id: Id128([62; 16]),
+            created_at_ms: now,
+            expires_at_ms: now + 5_000,
+            status: AnswerStatus::NoMatch,
+            claims: vec![],
+            evidence_ids: vec![],
+            result_status: ResultStatus::Unverified,
+        });
         {
             let mut writer = FrameWriter::new(&mut ignored_output, IpcRole::Net, IpcRole::Core);
+            let command = |expires_at_ms| IpcMessage::ReplyDirect {
+                connection_id,
+                response_id,
+                expires_at_ms,
+                response: response.clone(),
+            };
+            let expired = command(now.saturating_sub(1));
+            assert!(!listener.handle_command(expired, &mut writer).unwrap());
+            assert!(listener.responses.contains_key(&response_id));
+            let live = command(now + 5_000);
+            let bytes = super::super::encode_frame(IpcRole::Core, IpcRole::Net, 1, &live).unwrap();
+            let decoded =
+                super::super::decode_frame(&bytes, IpcRole::Core, IpcRole::Net, 1).unwrap();
+            assert_eq!(decoded.message, live);
             assert!(
                 !listener
-                    .handle_command(
-                        IpcMessage::ReplyControl {
-                            connection_id,
-                            response_id,
-                            response: WireFrame::Ack(Ack {
-                                message_id: Id128([63; 16]),
-                                received_id: Id128([61; 16]),
-                            }),
-                        },
-                        &mut writer,
-                    )
+                    .handle_command(decoded.message, &mut writer)
                     .unwrap()
             );
+            assert!(!listener.responses.contains_key(&response_id));
         }
-        let response = WireFrame::Ack(Ack {
-            message_id: Id128([63; 16]),
-            received_id: Id128([61; 16]),
-        });
 
         let response_event = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

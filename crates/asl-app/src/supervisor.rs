@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 use std::env;
-use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,18 +23,20 @@ use asl_policy::{
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
+    protocol::WireFrame,
     task::ProviderId,
 };
 use rand::{TryRng, rngs::SysRng};
 
 use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
+use crate::direct_inbound::{self, DirectInbound};
 use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
 use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
     MAX_IPC_EXTRACTOR_INPUT_BYTES, MAX_IPC_TASK_PAYLOAD_BYTES, NetworkErrorCode, TaskStatus,
-    WorkerOperation, write_device_identity_prelude,
+    WorkerOperation, encode_frame, write_device_identity_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
@@ -49,6 +50,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_NETWORK_EVENTS: usize = 64;
+const MAX_PENDING_NET_WRITES: usize = 8;
 const NETWORK_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -62,6 +64,7 @@ pub struct Supervisor {
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
     chain_refresh: Option<ChainRefreshWorker>,
+    state_database: PathBuf,
 }
 
 impl Supervisor {
@@ -101,6 +104,7 @@ impl Supervisor {
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
+            state_database: paths.state().join("asl.sqlite3"),
         };
         supervisor.apply_network_settings(&network_settings)?;
         Ok(supervisor)
@@ -204,11 +208,7 @@ impl Supervisor {
     pub fn ping_net(&mut self) -> Result<(), AslError> {
         let nonce = self.net.next_nonce;
         self.net.next_nonce = nonce.checked_add(1).ok_or(AslError::InvalidMessage)?;
-        self.net
-            .writer
-            .as_mut()
-            .ok_or(AslError::SandboxUnavailable)?
-            .send(&IpcMessage::Ping { nonce })?;
+        self.net.send(&IpcMessage::Ping { nonce })?;
         self.net.wait_for_pong(nonce, NET_PING_TIMEOUT)
     }
 
@@ -246,7 +246,60 @@ impl Supervisor {
     }
 
     pub fn run(self) -> Result<(), AslError> {
-        self.run_with_network_handler(|_| Vec::new())
+        let mut inbound = DirectInbound::open(&self.state_database)?;
+        self.run_loop(
+            |supervisor, event| supervisor.handle_direct_inbound(&mut inbound, event),
+            |_| {},
+        )
+    }
+
+    fn handle_direct_inbound(
+        &mut self,
+        inbound: &mut DirectInbound,
+        event: AdmittedNetworkEvent,
+    ) -> Result<(), AslError> {
+        let AdmittedNetworkEvent::ControlRequest {
+            connection_id,
+            agent_id,
+            response_id,
+            request: request @ WireFrame::Query(_),
+        } = event
+        else {
+            return Ok(());
+        };
+        let now_ms = unix_time_ms()?;
+        let Some(requester) = self
+            .admission
+            .as_ref()
+            .and_then(|admission| admission.direct_requester(connection_id, agent_id))
+        else {
+            return Ok(());
+        };
+        let Ok(Some(reply)) = inbound.prepare(requester, request, now_ms) else {
+            return Ok(());
+        };
+        inbound.enqueue(reply, |response, expires_at_ms| {
+            let now_ms = unix_time_ms()?;
+            let Some(admission) = self.admission.as_mut() else {
+                return Ok(());
+            };
+            // This rechecks chain admission before the original Net response handle is used.
+            let Ok(NetworkCommand::ReplyControl { response, .. }) =
+                admission.authorize_control_reply(connection_id, response_id, response, now_ms)
+            else {
+                return Ok(());
+            };
+            // This is the nonblocking authorization handoff. A full queue
+            // drops the reply instead of stalling revocation or the event pump.
+            self.net
+                .try_send(&IpcMessage::ReplyDirect {
+                    connection_id,
+                    response_id,
+                    expires_at_ms,
+                    response,
+                })
+                .map(|_| ())
+        })
     }
 
     /// Runs the authenticated network event pump. The handler sees only
@@ -262,8 +315,24 @@ impl Supervisor {
     /// Passes local discovery observations to a read-only callback, separate from
     /// the identity-admitted Agent event handler.
     pub fn run_with_network_observers(
-        mut self,
+        self,
         mut handler: impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+        observer: impl FnMut(LocalNetworkObservation),
+    ) -> Result<(), AslError> {
+        self.run_loop(
+            |supervisor, event| {
+                for command in handler(event) {
+                    supervisor.send_admitted_network_command(command, unix_time_ms()?)?;
+                }
+                Ok(())
+            },
+            observer,
+        )
+    }
+
+    fn run_loop(
+        mut self,
+        mut handler: impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
         mut observer: impl FnMut(LocalNetworkObservation),
     ) -> Result<(), AslError> {
         let mut next_health_check = Instant::now();
@@ -277,7 +346,7 @@ impl Supervisor {
                     .as_mut()
                     .map(|admission| admission.poll(now_ms))
                     .unwrap_or_default();
-                self.dispatch_admission_batch(batch, now_ms, &mut handler)?;
+                self.dispatch_admission_batch(batch, &mut handler)?;
             }
             let now = Instant::now();
             if now >= next_health_check {
@@ -323,23 +392,20 @@ impl Supervisor {
                     None => reject_unadmitted_event(event),
                 }
             };
-            self.dispatch_admission_batch(batch, now_ms, &mut handler)?;
+            self.dispatch_admission_batch(batch, &mut handler)?;
         }
     }
 
     fn dispatch_admission_batch(
         &mut self,
         batch: AdmissionBatch,
-        now_ms: u64,
-        handler: &mut impl FnMut(AdmittedNetworkEvent) -> Vec<NetworkCommand>,
+        handler: &mut impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         for command in batch.commands {
             self.send_network_command(command)?;
         }
         for event in batch.events {
-            for command in handler(event) {
-                self.send_admitted_network_command(command, now_ms)?;
-            }
+            handler(self, event)?;
         }
         Ok(())
     }
@@ -399,7 +465,8 @@ impl Supervisor {
 
 struct NetRuntime {
     child: Option<SandboxChild>,
-    writer: Option<FrameWriter<File>>,
+    writer: Option<SyncSender<Vec<u8>>>,
+    writer_thread: Option<JoinHandle<()>>,
     events: Option<Receiver<Result<IpcFrame, AslError>>>,
     reader_thread: Option<JoinHandle<()>>,
     next_nonce: u64,
@@ -438,9 +505,22 @@ impl NetRuntime {
                 )
             })
             .map_err(|_| AslError::SandboxUnavailable)?;
+        let (writer, outgoing) = mpsc::sync_channel(MAX_PENDING_NET_WRITES);
+        let writer_thread = thread::Builder::new()
+            .name("asl-net-ipc-writer".into())
+            .spawn(move || {
+                let mut pipe = FrameWriter::new(pipes.input, IpcRole::Core, IpcRole::Net);
+                while let Ok(frame) = outgoing.recv() {
+                    if pipe.send_prepared(frame).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| AslError::SandboxUnavailable)?;
         let mut runtime = Self {
             child: Some(child),
-            writer: Some(FrameWriter::new(pipes.input, IpcRole::Core, IpcRole::Net)),
+            writer: Some(writer),
+            writer_thread: Some(writer_thread),
             events: Some(receiver),
             reader_thread: Some(reader_thread),
             next_nonce: 1,
@@ -519,10 +599,19 @@ impl NetRuntime {
     }
 
     fn send(&mut self, message: &IpcMessage) -> Result<(), AslError> {
-        self.writer
-            .as_mut()
-            .ok_or(AslError::SandboxUnavailable)?
-            .send(message)
+        self.try_send(message)?
+            .then_some(())
+            .ok_or(AslError::SandboxUnavailable)
+    }
+
+    fn try_send(&self, message: &IpcMessage) -> Result<bool, AslError> {
+        let writer = self.writer.as_ref().ok_or(AslError::SandboxUnavailable)?;
+        let bytes = encode_frame(IpcRole::Core, IpcRole::Net, 1, message)?;
+        match writer.try_send(bytes) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Disconnected(_)) => Err(AslError::SandboxUnavailable),
+        }
     }
 
     fn start_ping(&mut self, now: Instant) -> Result<(), AslError> {
@@ -605,6 +694,9 @@ impl NetRuntime {
         self.events.take();
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
+        }
+        if let Some(writer_thread) = self.writer_thread.take() {
+            let _ = writer_thread.join();
         }
     }
 }
@@ -709,7 +801,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
     }
 }
 
-fn unix_time_ms() -> Result<u64, AslError> {
+pub(crate) fn unix_time_ms() -> Result<u64, AslError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -892,6 +984,12 @@ pub fn run_from_environment() -> Result<(), AslError> {
     Supervisor::start(paths)?.run()
 }
 
+pub fn set_direct_inbound_from_environment(mode: &str) -> Result<(), AslError> {
+    let root = configured_root(env::var_os("ASL_HOME"))?;
+    let paths = AppPaths::open(&root)?;
+    direct_inbound::configure(&paths.state().join("asl.sqlite3"), mode)
+}
+
 fn configured_root(value: Option<std::ffi::OsString>) -> Result<PathBuf, AslError> {
     value.map(PathBuf::from).ok_or(AslError::InvalidStorageRoot)
 }
@@ -983,6 +1081,7 @@ mod tests {
         let mut runtime = NetRuntime {
             child: None,
             writer: None,
+            writer_thread: None,
             events: Some(receiver),
             reader_thread: None,
             next_nonce: 1,
@@ -1038,6 +1137,7 @@ mod tests {
         let mut runtime = NetRuntime {
             child: None,
             writer: None,
+            writer_thread: None,
             events: Some(receiver),
             reader_thread: None,
             next_nonce: 1,
@@ -1064,6 +1164,7 @@ mod tests {
         let mut runtime = NetRuntime {
             child: None,
             writer: None,
+            writer_thread: None,
             events: Some(receiver),
             reader_thread: None,
             next_nonce: 2,

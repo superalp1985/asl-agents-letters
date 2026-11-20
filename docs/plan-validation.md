@@ -463,3 +463,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / E 盘：`cargo test -p asl-agent --all-targets --locked --offline` 共 33 项通过，含 `autonomous_state_machine` 6 项；相同包范围严格 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。
 - 新增用例覆盖浏览时无工作项、确认不启动任务、无模型权限时的类型化回答与资源 offer、去重与第四轮拒绝、同一 AgentId 多设备共享待处理名额、许可跨设备不可复用、回复取出前撤权、模式切换与过期取消。
 - 使用内存路由器和实际策略引擎测试，未使用真实模型、生产 SQLite 检索或模型片段读取、GUI、文件传输或公网；出站自动调研和 Core/Net 联调尚未验收。
+
+### 2026-11-20 T27：生产直连回答接线
+
+- Windows x64 / E 盘：`cargo test -p asl-app -p asl-store -p asl-agent -p asl-policy --all-targets --locked --offline` 为 422 项通过、0 失败、4 项忽略。相同四包的严格 Clippy 与 `cargo fmt --all -- --check` 通过。未运行全 workspace。
+- 真实 SQLite 用例验证默认/只浏览静默、显式回答、仅回传匹配主题、换设备和重启不会重答、联系人/目录授权撤销、本机切换关闭、失效索引历史不挤占检索窗口，以及持久目录序号变更否决旧设备会话。现有本地传输用例验证 kind 43 编解码、过期回复不消耗句柄，以及有效结构化回答沿原连接返回。
+- 独立代码复核后补上持久链目录绑定、非阻塞有界交接与 Net 期限检查。仍未验证真实公网节点或链部署、持续管道背压、GUI、模型、传输及群；会话轮次跨重启和跨 Agent 公平排队仍是待办。

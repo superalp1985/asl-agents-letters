@@ -63,6 +63,8 @@ T24 增加本机 IPC kind 41 `RunExtractorTask`（仅 Core -> Extractor）与 ki
 
 后续接线状态（2026-11-19）：Net 子进程连接表、传输命令/事件及身份证明转发已接通；`CoreAdmission` 在同一 IPC connection handle 上协调 Hello、身份链证明和设备目录核验，并在核验前拦截控制/bulk 业务事件及出站业务命令。准入失败通过 IPC kind 32 `CloseConnection` 关闭对应传输连接。Supervisor 从本机严格版本化信任配置、有效链状态和签名设备目录构造绑定自身根 AgentId 与实际 Net PeerId 的 Hello/准入状态；缺少配置、目录或链上 Active 身份时不开放业务消息。常驻事件泵将已准入事件交给本地 handler 并校验其出站命令；Agent 会话处理尚未接入，默认命令行 handler 静默。启动后的周期同步和首次注册仍未实现；传输目前限 loopback，公网策略与完整 T14 尚未验收。
 
+T27 直连集成（2026-11-20）更新了上面的历史接线状态：常驻命令行入口现在可以在用户本机允许回答后处理已准入的直接 query，缺省仍静默。检索只用结构化词表，回复沿用已定义的 `Answer` 或 `Offer`，不新增公网线字段、文本消息、文件读取或传输能力。本机 IPC kind 43 `ReplyDirect` 仅 Core -> Net，携带原 connection handle、原 response handle、u64 BE 有效期限（毫秒）和既有控制帧；Net 在送交传输前核对期限、回复类型及单次句柄。已通过 Core 授权并交接的回复不会延长有效期。
+
 IPC kind 38 `DiscoveryCandidate` 仅由 Net 发给 Core，正文为 u16 长度加规范 PeerId、传输类型、SocketAddr 和状态枚举（1=Discovered，2=Expired），正文上限 151 字节。它只表示通过本机地址策略筛选的 mDNS 候选元数据，不表示传输连接已建立、Agent 身份已验证或节点在线，也不授予联系人、查询或文件权限。Supervisor 将其转换成不产生网络命令的 `LocalNetworkObservation`，只交给单独的只读观察回调，不进入 Agent 业务 handler；默认事件泵不显示或持久化该观察。
 
 控制与身份证明子流各只承载一个 request-response 帧。接收端先读取 4 字节大端长度，在验证对应通道上限后才分配 payload；读满后要求发送端关闭写半流，不接受尾随帧。控制 codec 只接受 `WireFrame::is_control` 帧，身份证明 codec 只接受方向正确的身份请求/响应。codec 只负责线格式与大小边界，不认证 AgentId、不授权业务操作、不匹配请求 ID，也不证明链状态；这些检查由 Core `DeviceSession`/`CoreAdmission` 执行。任何未经过该身份闸门的调用路径，都不得把控制/bulk 消息交给 Agent 或据此生成业务回复。

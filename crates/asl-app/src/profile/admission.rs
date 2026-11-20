@@ -4,6 +4,7 @@ use std::{
 };
 
 use asl_net::codec::{BulkRequest, BulkResponse};
+use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Id128, PeerId},
@@ -876,6 +877,28 @@ impl CoreAdmission {
     fn require_agent(&mut self, connection_id: [u8; 16], now_ms: u64) -> Result<AgentId, AslError> {
         self.current_agent(connection_id, now_ms)
             .ok_or(AslError::InvalidIdentity)
+    }
+
+    pub(crate) fn direct_requester(
+        &self,
+        connection_id: [u8; 16],
+        agent: AgentId,
+    ) -> Option<DirectRequester> {
+        // The event pump has just admitted this control request. The full
+        // chain check runs again at handoff, not twice on ingress.
+        let peer = self.peers.get(&connection_id)?;
+        if peer.admitted_agent != Some(agent) {
+            return None;
+        }
+        let (registry, session_expires_at_ms) = peer.session.admission_facts()?;
+        Some(DirectRequester {
+            agent,
+            peer: peer.session.peer_id().clone(),
+            session_expires_at_ms,
+            registry_sequence: registry.sequence,
+            directory_commitment: registry.state_commitment,
+            controller: registry.controller,
+        })
     }
 
     fn close(&mut self, connection_id: [u8; 16], batch: &mut AdmissionBatch) {

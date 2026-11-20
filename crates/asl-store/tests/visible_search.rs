@@ -4,7 +4,10 @@ use asl_policy::{
     AccessOperation, Audience, AuthenticatedDevice, GrantPolicy, ModelPolicy, PolicyEngine,
     PolicyRevision, PolicyService, PolicySnapshot, ResourceOrigin, ResourcePolicy,
 };
-use asl_store::{Store, open_store, search::LocalIndexText};
+use asl_store::{
+    Store, open_store,
+    search::{LocalIndexText, direct::DirectRequester},
+};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -230,6 +233,110 @@ fn seed_snapshot(db: &Connection, id: u8, size: i64) {
                 state,created_at_ms) VALUES (?1,?1,?2,1,?3,?4,'ready',0) ON CONFLICT(content_id) DO NOTHING",
         params![content, size, format!("snapshots/{}/{content}.blob", &content[..2]),
             format!("manifests/{}/{content}.mnf", &content[..2])]).unwrap();
+}
+
+#[test]
+fn durable_direct_search_requires_live_audience_at_disclosure() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new(&[PUBLIC, PDF], true);
+    fixture
+        .db
+        .execute_batch(
+            "INSERT INTO chain_state_cache VALUES
+            (1,zeroblob(20),zeroblob(32),0,zeroblob(32),zeroblob(32),zeroblob(32),x'',0);
+         INSERT INTO identity_registry_states SELECT
+            agent_id,1,zeroblob(20),zeroblob(32),1,'active',0,zeroblob(32),0 FROM agents;",
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute(
+            "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<4096)
+         INSERT INTO resources(row_id,resource_key,content_id,grant_id,origin,title,summary,
+            evidence_status,created_at_ms,updated_at_ms,active)
+         SELECT -seq.i,printf('%032x',seq.i+100),r.content_id,r.grant_id,'local','','',
+            'source_backed',0,0,0 FROM seq CROSS JOIN resources r WHERE r.row_id=1",
+            [],
+        )
+        .unwrap();
+    let until = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let requester = |id| DirectRequester {
+        agent: agent(id),
+        peer: peer(id),
+        session_expires_at_ms: until,
+        registry_sequence: 1,
+        directory_commitment: [0; 32],
+        controller: [0; 20],
+    };
+    let stranger = requester(STRANGER);
+    let (snapshot, keys) = fixture.store.direct_search_snapshot(&stranger).unwrap();
+    assert_keys(keys, &[PUBLIC.id]);
+    assert!(snapshot.contacts.is_empty());
+
+    let contact = requester(CONTACT);
+    let (snapshot, keys) = fixture.store.direct_search_snapshot(&contact).unwrap();
+    let revision = snapshot.revision;
+    let engine = PolicyEngine::new(snapshot, 60_000).unwrap();
+    let policy = engine.for_peer(contact.peer.clone());
+    let hits = fixture
+        .store
+        .peer_search(&policy, contact.agent)
+        .search_with_metadata_permits(&keys, &[PRIVATE], 1)
+        .unwrap();
+    let (hit, permit) = &hits[0];
+    assert_eq!(hit.content_id, hash(PDF.content));
+    assert_eq!(permit.file_size(), PDF.body.len() as u64);
+    assert!(
+        fixture
+            .store
+            .with_current_direct_authority(&contact, revision, Some(permit), || Ok(()))
+            .is_ok()
+    );
+    assert!(
+        fixture
+            .store
+            .with_current_direct_authority::<()>(&stranger, revision, Some(permit), || panic!(
+                "wrong device"
+            ))
+            .is_err()
+    );
+    fixture
+        .db
+        .execute(
+            "DELETE FROM authorized_contacts WHERE agent_id=?1",
+            [agent_text(CONTACT)],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .with_current_direct_authority(&contact, revision, Some(permit), || panic!(
+                "revoked contact"
+            )),
+        Err::<(), _>(AslError::NotFound)
+    ));
+    fixture
+        .db
+        .execute(
+            "UPDATE identity_registry_states SET sequence=2 WHERE agent_id=?1",
+            [agent_text(STRANGER)],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.store.direct_search_snapshot(&stranger),
+        Err(AslError::NotFound)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .with_current_direct_authority(&stranger, revision, None, || Ok(())),
+        Err(AslError::NotFound)
+    ));
 }
 
 fn assert_keys(mut actual: Vec<ResourceKey>, expected: &[u8]) {

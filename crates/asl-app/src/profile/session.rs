@@ -394,4 +394,15 @@ impl DeviceSession {
     pub fn close(&mut self) {
         self.state = State::Closed;
     }
+
+    pub(super) fn admission_facts(&self) -> Option<(RegistryStateV1, u64)> {
+        match self.state {
+            State::Admitted {
+                registry,
+                expires_at_ms,
+                ..
+            } => Some((registry, expires_at_ms)),
+            _ => None,
+        }
+    }
 }
