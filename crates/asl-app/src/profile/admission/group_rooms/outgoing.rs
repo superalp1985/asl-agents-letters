@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use asl_groups::{
-    local_state::{RoomBinding, seal},
-    membership::{RoomOrigin, read_group_message, read_key_package},
+    local_state::{RoomBinding, seal_with_history},
+    membership::{RoomOrigin, read_group_message, read_key_package, sync_epoch_binding},
 };
 use asl_store::{
     Store,
     group_state::{
-        MlsInviteResponse, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
-        MlsWelcomeRequest,
+        MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsInviteResponse, MlsJournalEntry,
+        MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, MlsWelcomeRequest,
     },
 };
 use asl_types::{
@@ -115,6 +115,7 @@ impl CoreAdmission {
             Some(MlsInviteResponse::Pending) => candidate.require_room_for_add(&target)?,
             None => return Err(AslError::PolicyDenied),
         }
+        let base = sync_epoch_binding(&candidate.group, candidate.provider.crypto())?;
         let (commit, welcome, _) = candidate
             .group
             .add_members(&candidate.provider, &candidate.signer, &[package])
@@ -161,7 +162,31 @@ impl CoreAdmission {
             .revision
             .checked_add(1)
             .ok_or(AslError::QuotaExceeded)?;
-        let snapshot = seal(&binding, revision, &candidate.group, &candidate.provider)?;
+        let bindings = MlsEpochBindings {
+            base,
+            next: sync_epoch_binding(&candidate.group, candidate.provider.crypto())?,
+        };
+        let expiry = now_ms
+            .checked_add(MLS_SYNC_RETENTION_MS)
+            .ok_or(AslError::ExpiredMessage)?;
+        candidate.history.append(
+            request.epoch,
+            bindings.digest(
+                binding.local_id,
+                wire_id,
+                binding.device,
+                (request.epoch, expiry),
+                &candidate.roster.creator,
+                &commit,
+            ),
+        )?;
+        let snapshot = seal_with_history(
+            &binding,
+            revision,
+            &candidate.group,
+            &candidate.provider,
+            &candidate.history,
+        )?;
         let welcome = welcome.to_bytes().map_err(|_| AslError::InvalidMessage)?;
         let reply = GroupPacket {
             group_id: wire_id,
@@ -185,7 +210,7 @@ impl CoreAdmission {
                 members: &members,
                 event: Some(MlsJournalEntry {
                     sender: &candidate.roster.creator,
-                    kind: MlsJournalKind::Commit,
+                    kind: MlsJournalKind::SyncCommit(bindings),
                     ciphertext: &commit,
                 }),
             },

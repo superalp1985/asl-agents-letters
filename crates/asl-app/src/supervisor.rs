@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
+    atomic::{AtomicUsize, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
 };
 use std::thread::{self, JoinHandle};
@@ -49,12 +50,15 @@ use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::network_settings::NetworkSettingsV1;
 use crate::pairing::{self, PairingAuthorization};
 use crate::paths::AppPaths;
-use crate::profile::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
+use crate::profile::{
+    AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS,
+};
 use crate::providers::DpapiProviderCredentialSource;
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
 use asl_store::open_store;
 
+mod directory;
 #[cfg(windows)]
 mod groups;
 #[cfg(windows)]
@@ -65,6 +69,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NET_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_NETWORK_EVENTS: usize = 64;
 const MAX_PENDING_NET_WRITES: usize = 8;
+const NET_ADMISSION_WRITE_HEADROOM: usize = 2;
 const NETWORK_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -80,6 +85,9 @@ pub struct Supervisor {
     chain_refresh: Option<ChainRefreshWorker>,
     home: PathBuf,
     state_database: PathBuf,
+    directory_reader: Option<directory::DirectoryReader>,
+    directory_removed: bool,
+    pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
     #[cfg(windows)]
@@ -113,6 +121,11 @@ impl Supervisor {
         let libraries = LocalLibraries::open(&paths)?;
         let network_admission =
             load_network_admission(&paths, &agent_identity, device_peer_id.clone())?;
+        let directory_reader = network_admission
+            .refresh_worker
+            .as_ref()
+            .map(|_| directory::DirectoryReader::spawn(paths.signed_device_directory()))
+            .transpose()?;
         let state_database = paths.state().join("asl.sqlite3");
         #[cfg(windows)]
         let groups = network_settings
@@ -140,6 +153,9 @@ impl Supervisor {
             chain_refresh: network_admission.refresh_worker,
             home: paths.dos_root().to_owned(),
             state_database,
+            directory_reader,
+            directory_removed: false,
+            pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
             #[cfg(windows)]
@@ -1023,7 +1039,34 @@ impl Supervisor {
         let mut next_ping = Instant::now();
         let mut next_agent_tick = Instant::now();
         loop {
+            self.check_network_admission_deadline(unix_time_ms()?)?;
             self.process_chain_refresh()?;
+            let now = Instant::now();
+            if let Some(update) = self
+                .directory_reader
+                .as_mut()
+                .and_then(|reader| reader.poll(now))
+            {
+                self.apply_network_directory(update, unix_time_ms()?)?;
+            }
+            self.check_network_admission_deadline(unix_time_ms()?)?;
+            if self
+                .net
+                .pending_pong
+                .is_some_and(|(_, deadline)| now >= deadline)
+            {
+                return Err(AslError::SandboxUnavailable);
+            }
+            if now >= next_ping && self.net.pending_pong.is_none() {
+                if self.net.try_start_ping(now)? {
+                    next_ping = now + HEALTH_CHECK_INTERVAL;
+                } else if now >= next_ping + NET_PING_TIMEOUT {
+                    return Err(AslError::SandboxUnavailable);
+                }
+            }
+            if now < next_ping || self.net.pending_pong.is_some() {
+                self.flush_disconnects()?;
+            }
             if self.network_admission_status == NetworkAdmissionStatus::Active {
                 let now_ms = unix_time_ms()?;
                 let batch = self
@@ -1044,18 +1087,6 @@ impl Supervisor {
                 self.libraries.check_health()?;
                 next_health_check = now + HEALTH_CHECK_INTERVAL;
             }
-            if self
-                .net
-                .pending_pong
-                .is_some_and(|(_, deadline)| now >= deadline)
-            {
-                return Err(AslError::SandboxUnavailable);
-            }
-            if now >= next_ping {
-                self.net.start_ping(now)?;
-                next_ping = now + HEALTH_CHECK_INTERVAL;
-            }
-
             let Some(message) = self
                 .net
                 .receive_runtime_message_optional(NETWORK_EVENT_POLL_INTERVAL)?
@@ -1085,6 +1116,14 @@ impl Supervisor {
         event: NetworkEvent,
         now_ms: u64,
     ) -> Result<AdmissionBatch, AslError> {
+        self.check_network_admission_deadline(now_ms)?;
+        if let NetworkEvent::PeerDisconnected { connection_id } = &event {
+            self.pending_disconnects.remove(*connection_id);
+        } else if event_connection_id(&event)
+            .is_some_and(|id| self.pending_disconnects.contains(id))
+        {
+            return Ok(AdmissionBatch::default());
+        }
         if self.admission.is_none()
             || self.network_admission_status != NetworkAdmissionStatus::Active
         {
@@ -1238,15 +1277,28 @@ impl Supervisor {
             ChainRefreshEvent::Updated(candidate) => {
                 let now_ms = unix_time_ms()?;
                 let result = self.admission.as_mut().map(|admission| {
-                    admission.refresh_local_identity(
-                        candidate.light_client,
-                        &candidate.proof,
-                        now_ms,
-                    )
+                    admission.refresh_local_chain(candidate.light_client, &candidate.proof, now_ms)
                 });
                 match result {
                     Some(Ok(true)) => {
-                        self.network_admission_status = NetworkAdmissionStatus::Active;
+                        if let Some(reader) = &mut self.directory_reader {
+                            reader.request_refresh();
+                        }
+                        if self.directory_removed {
+                            self.suspend_network_admission(
+                                NetworkAdmissionStatus::DeviceDirectoryMissing,
+                            )?;
+                        } else if self
+                            .admission
+                            .as_mut()
+                            .is_some_and(|a| a.check_local_directory(now_ms).is_ok())
+                        {
+                            self.network_admission_status = NetworkAdmissionStatus::Active;
+                        } else {
+                            self.suspend_network_admission(
+                                NetworkAdmissionStatus::DeviceDirectoryUnavailable,
+                            )?;
+                        }
                     }
                     Some(Ok(false)) => {
                         self.suspend_network_admission(
@@ -1265,15 +1317,132 @@ impl Supervisor {
         Ok(())
     }
 
+    fn apply_network_directory(
+        &mut self,
+        update: directory::DirectoryRead,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        self.check_network_admission_deadline(now_ms)?;
+        if matches!(update, Ok(None)) {
+            self.directory_removed = true;
+        }
+        if !matches!(
+            self.network_admission_status,
+            NetworkAdmissionStatus::Active
+                | NetworkAdmissionStatus::DeviceDirectoryUnavailable
+                | NetworkAdmissionStatus::DeviceDirectoryMissing
+        ) {
+            return Ok(());
+        }
+        match update {
+            Ok(Some(bytes)) => {
+                let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+                let changed = admission.renew_local_device_directory(bytes, now_ms);
+                if matches!(changed, Ok(true))
+                    || (matches!(changed, Ok(false))
+                        && self.network_admission_status != NetworkAdmissionStatus::Active
+                        && admission.check_local_directory(now_ms).is_ok())
+                {
+                    self.directory_removed = false;
+                    self.network_admission_status = NetworkAdmissionStatus::Active;
+                }
+            }
+            Ok(None) => {
+                self.suspend_network_admission(NetworkAdmissionStatus::DeviceDirectoryMissing)?;
+            }
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    fn check_network_admission_deadline(&mut self, now_ms: u64) -> Result<(), AslError> {
+        if matches!(
+            self.network_admission_status,
+            NetworkAdmissionStatus::Active
+                | NetworkAdmissionStatus::DeviceDirectoryUnavailable
+                | NetworkAdmissionStatus::DeviceDirectoryMissing
+        ) && self
+            .admission
+            .as_ref()
+            .is_some_and(|admission| !admission.local_chain_is_current(now_ms))
+        {
+            self.suspend_network_admission(NetworkAdmissionStatus::ChainUnavailable)?;
+        } else if self.network_admission_status == NetworkAdmissionStatus::Active
+            && self
+                .admission
+                .as_ref()
+                .is_some_and(|admission| !admission.local_directory_is_current(now_ms))
+        {
+            self.suspend_network_admission(NetworkAdmissionStatus::DeviceDirectoryUnavailable)?;
+        }
+        Ok(())
+    }
+
     fn suspend_network_admission(
         &mut self,
         status: NetworkAdmissionStatus,
     ) -> Result<(), AslError> {
         self.network_admission_status = status;
         if let Some(admission) = self.admission.as_mut() {
-            for command in admission.close_all().commands {
-                self.send_network_command(command)?;
+            if matches!(
+                status,
+                NetworkAdmissionStatus::ChainUnavailable
+                    | NetworkAdmissionStatus::RegistryAnchorMissing
+            ) {
+                admission.clear_local_chain();
             }
+            for command in admission.close_all().commands {
+                if let NetworkCommand::CloseConnection { connection_id } = command {
+                    self.pending_disconnects.insert(connection_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn queue_disconnect(&mut self, connection_id: [u8; 16]) -> Result<(), AslError> {
+        if let Some(admission) = &mut self.admission {
+            admission.invalidate_connection(connection_id);
+        }
+        self.pending_pairing_prompts
+            .remove_connection(connection_id);
+        self.pending_disconnects.insert(connection_id)
+    }
+
+    pub(crate) fn flush_disconnects(&mut self) -> Result<(), AslError> {
+        self.pending_disconnects.flush(&self.net)
+    }
+}
+
+#[derive(Default)]
+struct PendingDisconnects(VecDeque<[u8; 16]>);
+
+impl PendingDisconnects {
+    fn contains(&self, id: [u8; 16]) -> bool {
+        self.0.contains(&id)
+    }
+
+    fn insert(&mut self, id: [u8; 16]) -> Result<(), AslError> {
+        if !self.contains(id) {
+            // An old connection can still have its disconnection in the event queue.
+            if self.0.len() >= MAX_ADMISSION_CONNECTIONS + MAX_PENDING_NETWORK_EVENTS {
+                return Err(AslError::SandboxUnavailable);
+            }
+            self.0.push_back(id);
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, id: [u8; 16]) {
+        self.0.retain(|pending| *pending != id);
+    }
+
+    fn flush(&mut self, net: &NetRuntime) -> Result<(), AslError> {
+        while let Some(connection_id) = self.0.front().copied() {
+            if !net.try_send_close(connection_id)? {
+                break;
+            }
+            self.0.pop_front();
         }
         Ok(())
     }
@@ -1298,13 +1467,40 @@ fn fetch_failure(
 
 struct NetRuntime {
     child: Option<SandboxChild>,
-    writer: Option<SyncSender<Vec<u8>>>,
+    writer: Option<NetWriter>,
     writer_thread: Option<JoinHandle<()>>,
     events: Option<Receiver<Result<IpcFrame, AslError>>>,
     reader_thread: Option<JoinHandle<()>>,
     next_nonce: u64,
     pending_pong: Option<(u64, Instant)>,
     pending_network_events: VecDeque<IpcMessage>,
+}
+
+struct NetWriter {
+    sender: SyncSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl NetWriter {
+    fn channel() -> (Self, Receiver<Vec<u8>>) {
+        let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_NET_WRITES);
+        let queued = Arc::new(AtomicUsize::new(0));
+        (Self { sender, queued }, receiver)
+    }
+
+    fn try_send(&self, bytes: Vec<u8>) -> Result<bool, AslError> {
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        match self.sender.try_send(bytes) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                match error {
+                    TrySendError::Full(_) => Ok(false),
+                    TrySendError::Disconnected(_) => Err(AslError::SandboxUnavailable),
+                }
+            }
+        }
+    }
 }
 
 impl NetRuntime {
@@ -1339,12 +1535,14 @@ impl NetRuntime {
                 )
             })
             .map_err(|_| AslError::SandboxUnavailable)?;
-        let (writer, outgoing) = mpsc::sync_channel(MAX_PENDING_NET_WRITES);
+        let (writer, outgoing) = NetWriter::channel();
+        let queued = Arc::clone(&writer.queued);
         let writer_thread = thread::Builder::new()
             .name("asl-net-ipc-writer".into())
             .spawn(move || {
                 let mut pipe = FrameWriter::new(pipes.input, IpcRole::Core, IpcRole::Net);
                 while let Ok(frame) = outgoing.recv() {
+                    queued.fetch_sub(1, Ordering::Relaxed);
                     if pipe.send_prepared(frame).is_err() {
                         break;
                     }
@@ -1440,23 +1638,32 @@ impl NetRuntime {
 
     fn try_send(&self, message: &IpcMessage) -> Result<bool, AslError> {
         let writer = self.writer.as_ref().ok_or(AslError::SandboxUnavailable)?;
-        let bytes = encode_frame(IpcRole::Core, IpcRole::Net, 1, message)?;
-        match writer.try_send(bytes) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => Err(AslError::SandboxUnavailable),
-        }
+        writer.try_send(encode_frame(IpcRole::Core, IpcRole::Net, 1, message)?)
     }
 
-    fn start_ping(&mut self, now: Instant) -> Result<(), AslError> {
+    fn try_send_close(&self, connection_id: [u8; 16]) -> Result<bool, AslError> {
+        let writer = self.writer.as_ref().ok_or(AslError::SandboxUnavailable)?;
+        // A Hello can enqueue a reply and a proof request in one turn.
+        if writer.queued.load(Ordering::Relaxed)
+            >= MAX_PENDING_NET_WRITES - NET_ADMISSION_WRITE_HEADROOM
+        {
+            return Ok(false);
+        }
+        self.try_send(&IpcMessage::CloseConnection { connection_id })
+    }
+
+    fn try_start_ping(&mut self, now: Instant) -> Result<bool, AslError> {
         if self.pending_pong.is_some() {
             return Err(AslError::InvalidPolicyState);
         }
         let nonce = self.next_nonce;
-        self.next_nonce = nonce.checked_add(1).ok_or(AslError::InvalidMessage)?;
-        self.send(&IpcMessage::Ping { nonce })?;
+        let next_nonce = nonce.checked_add(1).ok_or(AslError::InvalidMessage)?;
+        if !self.try_send(&IpcMessage::Ping { nonce })? {
+            return Ok(false);
+        }
+        self.next_nonce = next_nonce;
         self.pending_pong = Some((nonce, now + NET_PING_TIMEOUT));
-        Ok(())
+        Ok(true)
     }
 
     fn acknowledge_pong(&mut self, nonce: u64) -> Result<(), AslError> {
@@ -1563,7 +1770,7 @@ fn is_network_event(message: &IpcMessage) -> bool {
     )
 }
 
-fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
+pub(crate) fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
     let mut batch = AdmissionBatch::default();
     match event {
         NetworkEvent::OperationAccepted { operation_id } => batch
@@ -2022,6 +2229,83 @@ mod tests {
         assert!(runtime.pending_pong.is_some());
         runtime.acknowledge_pong(41).unwrap();
         assert!(runtime.pending_pong.is_none());
+    }
+
+    #[test]
+    fn disconnects_wait_for_writer_capacity_and_heartbeat_keeps_its_nonce() {
+        let (writer, receiver) = NetWriter::channel();
+        let queued = Arc::clone(&writer.queued);
+        let read = || {
+            let bytes = receiver.try_recv().unwrap();
+            queued.fetch_sub(1, Ordering::Relaxed);
+            bytes
+        };
+        let mut runtime = NetRuntime {
+            child: None,
+            writer: Some(writer),
+            writer_thread: None,
+            events: None,
+            reader_thread: None,
+            next_nonce: 1,
+            pending_pong: None,
+            pending_network_events: VecDeque::new(),
+        };
+        for _ in 0..MAX_PENDING_NET_WRITES {
+            assert!(runtime.try_send(&IpcMessage::Ping { nonce: 9 }).unwrap());
+        }
+        let mut pending = PendingDisconnects::default();
+        for value in 1..=MAX_ADMISSION_CONNECTIONS as u8 {
+            pending.insert([value; 16]).unwrap();
+            pending.insert([value; 16]).unwrap();
+        }
+        assert_eq!(pending.0.len(), MAX_ADMISSION_CONNECTIONS);
+        assert!(!runtime.try_start_ping(Instant::now()).unwrap());
+        pending.flush(&runtime).unwrap();
+        assert_eq!(pending.0.len(), MAX_ADMISSION_CONNECTIONS);
+        assert!(runtime.pending_pong.is_none());
+        for _ in 0..MAX_PENDING_NET_WRITES {
+            read();
+        }
+        let now = Instant::now();
+        assert!(runtime.try_start_ping(now).unwrap());
+        assert_eq!(runtime.pending_pong, Some((1, now + NET_PING_TIMEOUT)));
+        assert_eq!(
+            read(),
+            encode_frame(
+                IpcRole::Core,
+                IpcRole::Net,
+                1,
+                &IpcMessage::Ping { nonce: 1 }
+            )
+            .unwrap()
+        );
+        pending.remove([1; 16]);
+        for chunk in (2..=MAX_ADMISSION_CONNECTIONS as u8)
+            .collect::<Vec<_>>()
+            .chunks(MAX_PENDING_NET_WRITES - NET_ADMISSION_WRITE_HEADROOM)
+        {
+            pending.flush(&runtime).unwrap();
+            for nonce in 10..(10 + NET_ADMISSION_WRITE_HEADROOM as u64) {
+                assert!(runtime.try_send(&IpcMessage::Ping { nonce }).unwrap());
+            }
+            for &value in chunk {
+                let command = IpcMessage::CloseConnection {
+                    connection_id: [value; 16],
+                };
+                assert_eq!(
+                    read(),
+                    encode_frame(IpcRole::Core, IpcRole::Net, 1, &command).unwrap()
+                );
+            }
+            for nonce in 10..(10 + NET_ADMISSION_WRITE_HEADROOM as u64) {
+                assert_eq!(
+                    read(),
+                    encode_frame(IpcRole::Core, IpcRole::Net, 1, &IpcMessage::Ping { nonce })
+                        .unwrap()
+                );
+            }
+        }
+        assert!(pending.0.is_empty());
     }
 
     #[test]

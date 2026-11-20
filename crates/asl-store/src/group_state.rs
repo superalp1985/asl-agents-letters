@@ -10,11 +10,13 @@ mod outgoing_tests;
 mod recovery;
 #[cfg(test)]
 mod recovery_tests;
+mod sync_log;
 mod transition;
 
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
+pub use sync_log::{MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsSyncStoredStep};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
 use std::{path::Path, time::Duration};

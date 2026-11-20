@@ -504,6 +504,101 @@ fn chain_rotation_expiry_or_history_advance_require_a_new_handshake() {
 
 #[cfg(windows)]
 #[test]
+fn live_device_directory_can_replace_an_expired_envelope_without_replacing_hello() {
+    let root = AgentIdentity::generate().unwrap();
+    let peer = DeviceIdentity::generate().unwrap().peer_id();
+    let cert = certificate(&root, &peer, 1);
+    let directory = directory(&root, 7, vec![cert.clone()], vec![]);
+    let payload = RecordPayload::DeviceDirectory(directory.clone());
+    let expiring = sign_record(&root, payload.clone(), 1, NOW, 10).unwrap();
+    let rollback = sign_record(&root, payload.clone(), 1, NOW, LIFETIME).unwrap();
+    let renewed = sign_record(&root, payload, 2, NOW + 10, LIFETIME).unwrap();
+    let (_db, resolver, _) = durable_directory_resolver(&root, &directory);
+    let checkpoint_hash = Hash32(
+        resolver
+            .light_client()
+            .finalized(BOOTSTRAP_TIME)
+            .unwrap()
+            .block_hash(),
+    );
+    let mut core = CoreAdmission::for_local_identity(&root, peer, expiring, resolver, NOW).unwrap();
+
+    assert!(core.local_directory_is_current(NOW + 9));
+    assert!(!core.local_directory_is_current(NOW + 10));
+    assert!(matches!(
+        core.check_local_directory(NOW + 10),
+        Err(AslError::ExpiredMessage)
+    ));
+    assert!(
+        core.renew_local_device_directory(renewed.clone(), NOW + 9)
+            .is_err()
+    );
+    core.renew_local_device_directory(renewed.clone(), NOW + 10)
+        .unwrap();
+    assert!(matches!(
+        core.renew_local_device_directory(rollback, NOW + 10),
+        Err(AslError::PolicyVersionConflict)
+    ));
+    assert!(
+        core.renew_local_device_directory(vec![0], NOW + 10)
+            .is_err()
+    );
+    core.check_local_directory(NOW + 10).unwrap();
+    assert!(core.local_directory_is_current(NOW + 10));
+
+    let connection_id = [89; 16];
+    let remote = DeviceIdentity::generate().unwrap().peer_id();
+    let connected = core.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id,
+            peer_id: remote,
+        },
+        NOW + 10,
+    );
+    assert!(matches!(
+        connected.commands.as_slice(),
+        [NetworkCommand::SendControl { request: WireFrame::Hello(hello), .. }]
+            if hello.device_certificate == cert
+    ));
+    let reply = core.handle_event(
+        NetworkEvent::IdentityProofRequested {
+            connection_id,
+            response_id: [90; 16],
+            request: asl_types::protocol::IdentityProofRequest {
+                request_id: Id128([91; 16]),
+                agent_id: root.agent_id(),
+                checkpoint_hash,
+            },
+        },
+        NOW + 10,
+    );
+    assert!(matches!(
+        reply.commands.as_slice(),
+        [NetworkCommand::ReplyIdentityProof { proof, .. }] if proof.signed_directory == renewed
+    ));
+
+    let stale = NOW + 121_000;
+    assert!(core.local_directory_is_current(stale));
+    assert!(!core.local_chain_is_current(stale));
+    assert!(core.renew_local_device_directory(renewed, stale).is_err());
+    let late_connection = [92; 16];
+    let rejected = core.handle_event(
+        NetworkEvent::TransportConnected {
+            connection_id: late_connection,
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+        },
+        stale,
+    );
+    assert_eq!(
+        rejected.commands,
+        [NetworkCommand::CloseConnection {
+            connection_id: late_connection
+        }]
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn core_admission_only_emits_application_events_after_proof_verification() {
     use asl_types::protocol::{Ack, IdentityProofRequest};
 
@@ -804,8 +899,15 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
             connection_id,
             agent_id: local_root.agent_id(),
             response_id: [98; 16],
-            request: control,
+            request: control.clone(),
         }]
+    );
+    let stale = NOW + 121_000;
+    assert!(admission.local_directory_is_current(stale));
+    assert!(
+        admission
+            .authorize_control_command(connection_id, [93; 16], control, stale)
+            .is_err()
     );
     assert_eq!(
         admission.close_all().commands,

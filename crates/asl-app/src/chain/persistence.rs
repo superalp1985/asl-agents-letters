@@ -89,6 +89,12 @@ pub struct DurableIdentityResolver {
     resolver: EthereumIdentityResolver,
     bundle: ChainBundle,
     storage_healthy: bool,
+    local: Option<LocalIdentity>,
+}
+
+struct LocalIdentity {
+    verified: Box<VerifiedIdentity>,
+    proof: Option<SavedProof>,
 }
 
 impl DurableIdentityResolver {
@@ -150,6 +156,7 @@ impl DurableIdentityResolver {
             resolver: resolver.clone(),
             bundle: bundle.clone(),
             storage_healthy: true,
+            local: None,
         };
         durable.commit(resolver, bundle, now_secs)?;
         Ok(durable)
@@ -199,6 +206,7 @@ impl DurableIdentityResolver {
             resolver,
             bundle,
             storage_healthy: true,
+            local: None,
         })
     }
 
@@ -251,6 +259,7 @@ impl DurableIdentityResolver {
             resolver: candidate.clone(),
             bundle: previous,
             storage_healthy: true,
+            local: None,
         };
         durable.commit(candidate, bundle, now_secs)?;
         Ok(durable)
@@ -262,6 +271,54 @@ impl DurableIdentityResolver {
 
     pub fn deployment(&self) -> RegistryDeploymentV1 {
         self.config.deployment
+    }
+
+    pub(crate) fn retain_local_identity(
+        &mut self,
+        agent: AgentId,
+        controller: Option<[u8; 20]>,
+        now_secs: u64,
+    ) -> Result<bool, ChainError> {
+        self.local = None;
+        let IdentityResolution::Verified(verified) = self.resolver.resolve(agent, now_secs) else {
+            return Ok(false);
+        };
+        if verified.state().status != RegistryStatus::Active
+            || controller.is_some_and(|expected| expected != verified.state().controller)
+            || !self.retained_identity_is_current(&verified, now_secs)
+        {
+            return Ok(false);
+        }
+        let proof = self
+            .bundle
+            .proofs
+            .iter()
+            .find(|row| row.agent_id == agent)
+            .map(|row| decode(&row.proof_cbor))
+            .transpose()?;
+        self.local = Some(LocalIdentity { verified, proof });
+        Ok(true)
+    }
+
+    pub(crate) fn clear_local_identity(&mut self) {
+        self.local = None;
+    }
+
+    pub(crate) fn local_identity_is_current(&self, now_secs: u64) -> bool {
+        self.local
+            .as_ref()
+            .is_some_and(|local| self.retained_identity_is_current(&local.verified, now_secs))
+    }
+
+    /// Recheck a retained local proof without depending on peer LRU entries.
+    fn retained_identity_is_current(&self, identity: &VerifiedIdentity, now_secs: u64) -> bool {
+        self.ensure_storage().is_ok()
+            && identity.deployment() == self.config.deployment
+            && now_secs
+                .checked_sub(identity.finalized().timestamp_secs())
+                .is_some_and(|age| age <= self.config.max_cache_age_secs)
+            && self.light_client().finalized(now_secs).is_ok()
+            && check_observation(&self.bundle, identity).is_ok()
     }
 
     pub fn update_light_client(
@@ -324,24 +381,63 @@ impl DurableIdentityResolver {
         let identity = self
             .resolver
             .verify_fresh_proof(expected_agent, proof, now_secs)?;
-        check_observation(&self.bundle, &identity)?;
+        self.commit_verified_proof(&identity, proof, now_secs, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn accept_local_refresh_proof(
+        &mut self,
+        expected_agent: AgentId,
+        controller: [u8; 20],
+        proof: &IdentityProofV1,
+        now_secs: u64,
+    ) -> Result<bool, ChainError> {
+        self.ensure_storage()?;
+        let identity = self
+            .resolver
+            .verify_fresh_proof(expected_agent, proof, now_secs)?;
+        let proof = self.commit_verified_proof(&identity, proof, now_secs, false)?;
+        let active = identity.state().status == RegistryStatus::Active
+            && identity.state().controller == controller;
+        self.local = active.then(|| LocalIdentity {
+            verified: Box::new(identity),
+            proof,
+        });
+        Ok(active)
+    }
+
+    fn commit_verified_proof(
+        &mut self,
+        identity: &VerifiedIdentity,
+        proof: &IdentityProofV1,
+        now_secs: u64,
+        cache_peer: bool,
+    ) -> Result<Option<SavedProof>, ChainError> {
+        let expected_agent = identity.agent_id();
+        check_observation(&self.bundle, identity)?;
         let mut candidate = self.resolver.clone();
-        candidate.cache_verified(identity.clone(), now_secs)?;
+        if cache_peer {
+            candidate.cache_verified(identity.clone(), now_secs)?;
+        }
         if identity.state().status == RegistryStatus::Unregistered {
             // Negative results expire in memory. Persisting arbitrary absent
             // AgentIds would create permanent parent rows for a transient cache.
             self.resolver = candidate;
-            return Ok(());
+            return Ok(None);
         }
         let mut bundle = self.bundle.clone();
         bundle.proofs.retain(|row| {
             row.expires_at_ms >= now_secs.saturating_mul(1000) && row.agent_id != expected_agent
         });
-        let encoded = encode(&SavedProof {
+        let saved = SavedProof {
             finalized: SavedExecution::capture(identity.finalized()),
             proof: proof.clone(),
-        })?;
-        if encoded.len() <= MAX_CHAIN_PROOF_BYTES {
+        };
+        let encoded = encode(&saved)?;
+        let can_serve = encoded.len() <= MAX_CHAIN_PROOF_BYTES;
+        // Renewal updates the durable observation but does not displace any
+        // peer from the ordinary proof cache, in memory or on disk.
+        if can_serve && (cache_peer || bundle.proofs.len() < self.config.cache_capacity) {
             if bundle.proofs.len() >= self.config.cache_capacity {
                 let index = bundle
                     .proofs
@@ -396,7 +492,8 @@ impl DurableIdentityResolver {
                 bundle.observations.push(observation);
             }
         }
-        self.commit(candidate, bundle, now_secs)
+        self.commit(candidate, bundle, now_secs)?;
+        Ok((!cache_peer && can_serve).then_some(saved))
     }
 
     pub(crate) fn accept_wire_identity_proof(
@@ -422,6 +519,18 @@ impl DurableIdentityResolver {
         let finalized = self.light_client().finalized(now_secs)?;
         if request.checkpoint_hash.0 != finalized.block_hash() {
             return Ok(None);
+        }
+        if let Some(local) = &self.local
+            && local.verified.agent_id() == request.agent_id
+        {
+            return Ok(local
+                .proof
+                .as_ref()
+                .filter(|saved| {
+                    saved.proof.block_hash == finalized.block_hash()
+                        && self.retained_identity_is_current(&local.verified, now_secs)
+                })
+                .map(|saved| saved.proof.clone()));
         }
         let now_ms = millis(now_secs)?;
         let Some(row) = self.bundle.proofs.iter().find(|row| {
@@ -533,6 +642,15 @@ impl IdentityResolver for DurableIdentityResolver {
         if !self.storage_healthy {
             return IdentityResolution::Limited(LimitedReason::ChainUnavailable);
         }
+        if let Some(local) = &self.local
+            && local.verified.agent_id() == agent
+        {
+            return if self.retained_identity_is_current(&local.verified, now_secs) {
+                IdentityResolution::Verified(local.verified.clone())
+            } else {
+                IdentityResolution::Limited(LimitedReason::ChainUnavailable)
+            };
+        }
         if let Some(row) = self
             .bundle
             .proofs
@@ -601,13 +719,13 @@ fn check_saved_execution(
 }
 
 fn check_observation(bundle: &ChainBundle, identity: &VerifiedIdentity) -> Result<(), ChainError> {
-    let Some(row) = bundle
+    let Ok(index) = bundle
         .observations
-        .iter()
-        .find(|row| row.agent_id == identity.agent_id())
+        .binary_search_by_key(&identity.agent_id().0, |row| row.agent_id.0)
     else {
         return Ok(());
     };
+    let row = &bundle.observations[index];
     let state = identity.state();
     if identity.finalized().block_number() < row.finalized_height
         || state.sequence < row.sequence

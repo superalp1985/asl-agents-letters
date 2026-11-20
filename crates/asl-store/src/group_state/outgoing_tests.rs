@@ -8,10 +8,10 @@ use asl_types::{
 use rusqlite::params;
 
 use super::{
-    MlsInviteResponse, MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, MlsWelcomeRequest,
-    PendingMlsRoom, RoomVersion,
+    MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsInviteResponse, MlsJournalEntry, MlsJournalKind,
+    MlsRoomUpdate, MlsSyncStoredStep, MlsWelcomeRequest, PendingMlsRoom, RoomVersion,
     tests::{register_agent_peer, test_peer},
-    transition::peer_text,
+    transition::{commit_candidate, peer_text},
 };
 use crate::{Store, open_store};
 
@@ -21,6 +21,14 @@ const INVITE: Id128 = Id128([3; 16]);
 const TARGET: AgentId = AgentId([2; 32]);
 const NOW: u64 = 1_000;
 const EXPIRES: u64 = 2_000;
+
+fn bindings(epoch: u64) -> MlsEpochBindings {
+    let binding = |epoch: u64| Hash32(*blake3::hash(&epoch.to_be_bytes()).as_bytes());
+    MlsEpochBindings {
+        base: binding(epoch),
+        next: binding(epoch + 1),
+    }
+}
 
 struct Fixture {
     path: PathBuf,
@@ -134,6 +142,17 @@ impl Fixture {
                 ciphertext: commit,
             }),
         }
+    }
+
+    fn sync_change<'a>(
+        &'a self,
+        base: RoomVersion,
+        members: &'a [PeerId],
+        commit: &'a [u8],
+    ) -> MlsRoomUpdate<'a> {
+        let mut update = self.change(base, members, commit);
+        update.event.as_mut().unwrap().kind = MlsJournalKind::SyncCommit(bindings(base.mls_epoch));
+        update
     }
 }
 
@@ -279,7 +298,7 @@ fn failed_welcome_write_rolls_back_commit_and_can_be_retried() {
     let request = f.authenticate(&packet);
     let roster = [f.creator.clone(), f.target.clone()];
     let extra = [f.creator.clone(), f.target.clone(), f.alternate.clone()];
-    let update = || f.change(base, &roster, b"add commit");
+    let update = || f.sync_change(base, &roster, b"add commit");
     let too_large = vec![0; asl_types::protocol::MAX_GROUP_MLS_OBJECT_BYTES + 1];
     assert!(
         store
@@ -317,6 +336,7 @@ fn failed_welcome_write_rolls_back_commit_and_can_be_retried() {
     assert_eq!(room.version, base);
     assert_eq!(room.sealed_snapshot, b"projected");
     assert_eq!(commit_count(&store), 0);
+    assert_eq!(sync_count(&store), 0);
     assert_eq!(
         store.mls_invite_response(&request, NOW).unwrap(),
         Some(MlsInviteResponse::Pending)
@@ -325,10 +345,74 @@ fn failed_welcome_write_rolls_back_commit_and_can_be_retried() {
         .connection
         .execute_batch("DROP TRIGGER reject_welcome")
         .unwrap();
-    store
+    let version = store
         .commit_mls_invite_welcome(&request, update(), b"welcome".to_vec(), NOW)
         .unwrap();
     assert_eq!(commit_count(&store), 1);
+    assert_eq!(sync_count(&store), 1);
+    drop(store);
+
+    let mut store = open_store(&f.path).unwrap();
+    assert_eq!(
+        store.mls_sync_step(WIRE, 0, NOW).unwrap(),
+        Some(MlsSyncStoredStep {
+            local_id: LOCAL,
+            base_epoch: 0,
+            expires_at_ms: NOW + MLS_SYNC_RETENTION_MS,
+            bindings: bindings(0),
+            signer: f.creator.clone(),
+            commit: b"add commit".to_vec(),
+            version,
+        }),
+    );
+    assert!(
+        store
+            .mls_sync_step(WIRE, 0, NOW + MLS_SYNC_RETENTION_MS - 1)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .mls_sync_step(WIRE, 0, NOW + MLS_SYNC_RETENTION_MS)
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.mls_sync_step(WIRE, 0, NOW - 1).unwrap().is_none());
+    store
+        .connection
+        .execute(
+            "UPDATE group_events SET ciphertext=zeroblob(?1)",
+            [asl_types::protocol::MAX_GROUP_MLS_OBJECT_BYTES as i64 + 1],
+        )
+        .unwrap();
+    assert!(store.mls_sync_step(WIRE, 0, NOW).unwrap().is_none());
+    store
+        .prune_mls_invites(NOW + MLS_SYNC_RETENTION_MS)
+        .unwrap();
+    assert_eq!(sync_count(&store), 0);
+    assert_eq!(commit_count(&store), 1);
+}
+
+#[test]
+fn sync_digest_binds_expiry_and_the_exact_step() {
+    let signer = test_peer(1);
+    let local_device = test_peer(2);
+    let bindings = bindings(0);
+    let expiry = NOW + MLS_SYNC_RETENTION_MS;
+    let digest = |epoch_and_expiry, commit: &[u8]| {
+        bindings.digest(
+            &LOCAL,
+            WIRE,
+            &local_device,
+            epoch_and_expiry,
+            &signer,
+            commit,
+        )
+    };
+    let sealed = digest((0, expiry), b"commit");
+    assert_ne!(sealed, digest((0, expiry + 1), b"commit"));
+    assert_ne!(sealed, digest((1, expiry), b"commit"));
+    assert_ne!(sealed, digest((0, expiry), b"commit\0"));
 }
 
 #[test]
@@ -408,15 +492,23 @@ fn commit_count(store: &Store) -> i64 {
         .unwrap()
 }
 
+fn sync_count(store: &Store) -> i64 {
+    store
+        .connection
+        .query_row("SELECT count(*) FROM mls_sync_log", [], |r| r.get(0))
+        .unwrap()
+}
+
 #[test]
 fn upgrading_v13_keeps_the_existing_mls_snapshot() {
     let (f, store, base) = Fixture::new();
     store
         .connection
         .execute_batch(
-            "DROP TABLE mls_outgoing_invites;
+            "DROP TABLE mls_sync_log;
+         DROP TABLE mls_outgoing_invites;
          DROP TABLE mls_consumed_key_packages;
-         DELETE FROM schema_migrations WHERE version=14;",
+         DELETE FROM schema_migrations WHERE version>=14;",
         )
         .unwrap();
     drop(store);
@@ -427,6 +519,87 @@ fn upgrading_v13_keeps_the_existing_mls_snapshot() {
     upgraded
         .issue_mls_invite(&f.creator, &f.invite(), NOW)
         .unwrap();
+}
+
+#[test]
+fn upgrading_v14_does_not_backfill_and_a_legacy_gap_cannot_serve_old_steps() {
+    let (f, mut store, base) = Fixture::new();
+    let members = std::slice::from_ref(&f.creator);
+    let version = store
+        .commit_mls_room_candidate(f.change(base, members, b"pre-v15 commit"))
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE mls_sync_log;
+             DELETE FROM schema_migrations WHERE version=15;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = open_store(&f.path).unwrap();
+    assert_eq!(commit_count(&store), 1);
+    assert_eq!(sync_count(&store), 0);
+    let tx = store.connection.transaction().unwrap();
+    let version = commit_candidate(
+        &tx,
+        f.sync_change(version, members, b"authenticated commit"),
+        None,
+        NOW as i64,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(store.mls_sync_step(WIRE, 0, NOW).unwrap().is_none());
+    assert!(store.mls_sync_step(WIRE, 1, NOW).unwrap().is_some());
+
+    store
+        .commit_mls_room_candidate(f.change(version, members, b"legacy gap"))
+        .unwrap();
+    assert!(store.mls_sync_step(WIRE, 1, NOW).unwrap().is_none());
+    assert!(store.mls_sync_step(WIRE, 2, NOW).unwrap().is_none());
+}
+
+#[test]
+fn sync_lookup_keeps_only_the_latest_256_base_epochs() {
+    let (f, mut store, mut version) = Fixture::new();
+    let members = std::slice::from_ref(&f.creator);
+    let tx = store.connection.transaction().unwrap();
+    for epoch in 0_u64..257 {
+        version = commit_candidate(
+            &tx,
+            f.sync_change(version, members, &epoch.to_be_bytes()),
+            None,
+            NOW as i64,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+
+    assert_eq!(sync_count(&store), 256);
+    assert_eq!(commit_count(&store), 257);
+    assert!(store.mls_sync_step(WIRE, 0, NOW).unwrap().is_none());
+    assert!(store.mls_sync_step(WIRE, 257, NOW).unwrap().is_none());
+    let oldest = store.mls_sync_step(WIRE, 1, NOW).unwrap().unwrap();
+    assert_eq!(oldest.commit, 1_u64.to_be_bytes());
+    assert_eq!(oldest.version, version);
+    assert_eq!(oldest.bindings, bindings(1));
+    assert!(store.mls_sync_step(WIRE, 256, NOW).unwrap().is_some());
+    assert!(
+        store
+            .mls_sync_step(Hash32([9; 32]), 1, NOW)
+            .unwrap()
+            .is_none()
+    );
+
+    store
+        .connection
+        .execute(
+            "UPDATE mls_sync_log SET base_binding=zeroblob(32) WHERE base_epoch=2",
+            [],
+        )
+        .unwrap();
+    assert!(store.mls_sync_step(WIRE, 1, NOW).unwrap().is_none());
+    assert!(store.mls_sync_step(WIRE, 3, NOW).unwrap().is_some());
 }
 
 #[test]

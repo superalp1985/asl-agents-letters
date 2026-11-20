@@ -19,6 +19,7 @@ use crate::{
     identity::{AgentIdentity, verify_device_certificate, verify_root_signature},
 };
 
+pub(crate) use admission::MAX_ADMISSION_CONNECTIONS;
 #[cfg(windows)]
 pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};

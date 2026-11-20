@@ -34,6 +34,7 @@ pub struct NetworkIdentityConfigurationV1 {
 pub enum NetworkAdmissionStatus {
     TrustConfigurationMissing,
     DeviceDirectoryMissing,
+    DeviceDirectoryUnavailable,
     ChainUnavailable,
     RegistryAnchorMissing,
     Active,
@@ -73,8 +74,7 @@ pub(crate) fn load_network_admission(
     else {
         return Ok(setup(NetworkAdmissionStatus::TrustConfigurationMissing));
     };
-    let Some(signed_directory) =
-        read_optional_file(&paths.signed_device_directory(), MAX_RECORD_BYTES as u64)?
+    let Some(signed_directory) = read_signed_device_directory(&paths.signed_device_directory())?
     else {
         return Ok(setup(NetworkAdmissionStatus::DeviceDirectoryMissing));
     };
@@ -147,6 +147,10 @@ pub(crate) fn load_network_admission(
         admission: Some(admission),
         refresh_worker: Some(refresh_worker),
     })
+}
+
+pub(crate) fn read_signed_device_directory(path: &Path) -> Result<Option<Vec<u8>>, AslError> {
+    read_optional_file(path, MAX_RECORD_BYTES as u64)
 }
 
 fn is_active_identity(

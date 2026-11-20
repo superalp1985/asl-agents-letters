@@ -109,7 +109,6 @@ impl RecordHistory {
         Ok(())
     }
 
-    #[cfg(windows)]
     pub(super) fn check(&self, verified: &VerifiedRecord) -> Result<(), AslError> {
         self.clone().observe(verified)
     }

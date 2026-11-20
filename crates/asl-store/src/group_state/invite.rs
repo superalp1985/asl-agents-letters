@@ -457,6 +457,7 @@ impl Store {
         let now = sql_number(now_ms)?;
         prune(&tx, now)?;
         super::outgoing::prune(&tx, now)?;
+        super::sync_log::prune_expired(&tx, now)?;
         tx.commit().map_err(database_error)
     }
 }

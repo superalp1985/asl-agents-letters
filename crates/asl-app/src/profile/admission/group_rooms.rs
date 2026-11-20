@@ -13,7 +13,7 @@ pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use asl_groups::{
-    local_state::{RoomBinding, RoomProvider, restore, seal},
+    local_state::{RoomBinding, RoomProvider, SyncHistory, restore_with_history, seal},
     membership::{GROUP_CIPHERSUITE, RoomOrigin, stage_welcome},
     pending_join,
 };
@@ -90,33 +90,6 @@ impl CoreAdmission {
         if history.observe(record).is_ok() {
             directories.observe(record);
         }
-    }
-
-    /// Replace an expiring local directory only after verifying the current
-    /// registry and the exact existing Hello device. Rotation is not renewal.
-    pub fn renew_local_mls_directory(
-        &mut self,
-        signed_directory: Vec<u8>,
-        now_ms: u64,
-    ) -> Result<(), AslError> {
-        let agent = self.local_hello.agent_id;
-        let verified = verify_record(&signed_directory, agent, now_ms, &mut self.resolver)?;
-        let RecordPayload::DeviceDirectory(directory) = &verified.signed().record.payload else {
-            return Err(AslError::InvalidDeviceCertificate);
-        };
-        if !directory
-            .devices
-            .contains(&self.local_hello.device_certificate)
-        {
-            return Err(AslError::InvalidDeviceCertificate);
-        }
-        check_directory_histories(&self.dht_histories, &self.peers, agent, &verified)?;
-        self.dht_histories
-            .get_mut(&agent)
-            .ok_or(AslError::InvalidPolicyState)?
-            .observe(&verified)?;
-        self.local_signed_directory = signed_directory;
-        Ok(())
     }
 
     /// Create a closed room and register its verified local device in the
@@ -321,6 +294,7 @@ struct LocalRoomCandidate {
     group: MlsGroup,
     signer: SignatureKeyPair,
     roster: VerifiedRoster,
+    history: SyncHistory,
 }
 
 impl RoomEvidence<'_> {
@@ -432,7 +406,7 @@ impl RoomEvidence<'_> {
             wire_id,
             device: &self.local.peer_id,
         };
-        let (provider, group) = restore(&binding, &saved.snapshot)?;
+        let (provider, group, history) = restore_with_history(&binding, &saved.snapshot)?;
         if !group.is_active()
             || group.ciphersuite() != GROUP_CIPHERSUITE
             || group.pending_commit().is_some()
@@ -465,6 +439,7 @@ impl RoomEvidence<'_> {
             group,
             signer,
             roster,
+            history,
         }))
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use asl_groups::{
-    local_state::{RoomBinding, RoomProvider, restore},
+    local_state::{RoomBinding, RoomProvider, restore, restore_with_history},
     membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
 };
@@ -604,7 +604,7 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     );
     let snapshot = creator_store.mls_room_snapshot(wire_id).unwrap().unwrap();
     assert_eq!(snapshot.version, committed);
-    let (provider, creator_room) = restore(
+    let (provider, creator_room, history) = restore_with_history(
         &RoomBinding {
             local_id: &creator_local_id,
             wire_id,
@@ -613,6 +613,40 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         &snapshot,
     )
     .unwrap();
+    let step = creator_store
+        .mls_sync_step(wire_id, 0, NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.version, committed);
+    assert_eq!(step.signer, creator_cert.peer_id);
+    assert_eq!(
+        step.bindings.next,
+        sync_epoch_binding(&creator_room, provider.crypto()).unwrap()
+    );
+    let digest = |bytes: &[u8], expires| {
+        step.bindings.digest(
+            &creator_local_id,
+            wire_id,
+            &creator_cert.peer_id,
+            (0, expires),
+            &step.signer,
+            bytes,
+        )
+    };
+    assert_eq!(
+        history.digest(0),
+        Some(digest(&step.commit, step.expires_at_ms))
+    );
+    assert_ne!(
+        history.digest(0),
+        Some(digest(&step.commit, step.expires_at_ms + 1))
+    );
+    let mut changed_commit = step.commit;
+    changed_commit[0] ^= 1;
+    assert_ne!(
+        history.digest(0),
+        Some(digest(&changed_commit, step.expires_at_ms))
+    );
     let check_send = |expected_connection_id| {
         let request = &request;
         move |command| {
@@ -820,9 +854,11 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         recipient.reconcile_mls_room(&store, wire_id, &dirs, NOW),
         Err(AslError::PolicyVersionConflict)
     ));
-    recipient.renew_local_mls_directory(renewed, NOW).unwrap();
+    recipient
+        .renew_local_device_directory(renewed, NOW)
+        .unwrap();
     assert!(matches!(
-        recipient.renew_local_mls_directory(signed, NOW),
+        recipient.renew_local_device_directory(signed, NOW),
         Err(AslError::PolicyVersionConflict)
     ));
     assert!(

@@ -650,6 +650,9 @@ impl Supervisor {
     /// Commands are Core-only. Control payloads remain untrusted until the
     /// caller's per-connection DeviceSession has admitted the peer.
     pub(crate) fn send_network_command(&mut self, command: NetworkCommand) -> Result<(), AslError> {
+        if let NetworkCommand::CloseConnection { connection_id } = command {
+            return self.queue_disconnect(connection_id);
+        }
         self.send_network_ipc(command.into_ipc()?)
     }
 
@@ -665,6 +668,7 @@ impl Supervisor {
         timeout: Duration,
         now_ms: u64,
     ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
+        self.flush_disconnects()?;
         let event = self.receive_network_event(timeout)?;
         let batch = self.handle_admitted_event(event, now_ms)?;
         for command in batch.commands {

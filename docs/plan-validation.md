@@ -523,3 +523,15 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘离线：首次集中验证 `asl-app`、`asl-net`、`asl-store` 全目标合计 456 项通过、0 失败、3 项按既有标记忽略。独立复核补齐目录历史、已审批状态保护及本机诊断后，定向群用例 25 项与正式 AppContainer Supervisor 用例 1 项全部通过；三包全目标严格 Clippy、Rust 格式与 Git 空白检查通过。
 - 正式进程夹具验证 Net 可通过私有启动前导启用回环模式，且启用后拒绝切至 LAN。三 Core 用例使用合成链证明、真实 MLS/DPAPI/SQLite 和注入的 Net 事件，验证第三成员使用已断线成员的目录成功入群，以及旧目录不能替换已见的较新版本。SQLite 用例验证超限邀请不遗留设备或 peer 行，已批准的加入包不能被拒绝操作删除，本机清单只显示匹配当前设备的记录。
 - 上述证据不是跨正式进程群入组端到端验收；没有实时链 RPC、公网群组、GUI、目录持续续期、同步或权限激活证据。房间仍为 `needs_sync`。未改 P2P CBOR、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：本机签名设备目录热更新
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app --lib --locked --offline profile:: -- --test-threads=1`，54 项通过、0 失败；`asl-app` 全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 合成链证明验证旧封装到期、新封装生效前拒绝、拒绝回退和无效输入；入站身份证明使用新封装，Hello 仍以原设备证书发送。夹具不覆盖外部真实目录发布者、现场 RPC 或公网群组。
+
+### 2026-11-21 T31：本机准入期限与同步历史
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-groups -p asl-net -p asl-store --all-targets --locked --offline -- --test-threads=1`，472 项通过、0 失败、3 项按已有标记忽略。相同四包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 本机合成链证明用例覆盖容量为 1 时同行证明淘汰普通本机缓存但不影响准入或证明回复，以及新鲜目录不能代替过期链证明。IPC 模拟用满写入队列验证断连去重、阻塞后补发及心跳先入队。
+- SQLite v15 与 DPAPI v2 用例覆盖 v14 升级不回填、失败事务回滚、旧快照兼容、日志过期、256 步窗口、断档及密文和期限的摘要绑定。本机真实 MLS/DPAPI/SQLite 夹具核对已密封 Add、持久同步历史及 exporter；链数据仍是夹具。
+- 未改 P2P CBOR 或依赖锁。未验收网络同步、群权限激活、真实链 RPC、跨正式进程入组或公网。

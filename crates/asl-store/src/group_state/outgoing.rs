@@ -300,8 +300,10 @@ impl Store {
             unreachable!("constructed as a Welcome");
         };
         let event = update.event.as_ref().ok_or(AslError::InvalidPolicyState)?;
-        if !matches!(event.kind, MlsJournalKind::Commit)
-            || update.wire_id != reply.group_id
+        if !matches!(
+            event.kind,
+            MlsJournalKind::Commit | MlsJournalKind::SyncCommit(_)
+        ) || update.wire_id != reply.group_id
             || update.expected.mls_epoch != request.packet.epoch
             || update.mls_epoch != reply.epoch
         {

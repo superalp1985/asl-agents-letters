@@ -8,10 +8,8 @@ use asl_types::{
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::{MAX_SEALED_ROOM_BYTES, sql_number};
+use super::{MAX_SEALED_ROOM_BYTES, MLS_SYNC_RETENTION_MS, MlsEpochBindings, sql_number, sync_log};
 use crate::{Store, current_time_ms, database_error};
-
-const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoomVersion {
@@ -26,6 +24,7 @@ pub enum MlsJournalKind {
     /// The message ID inside the authenticated application plaintext.
     Application(Id128),
     Commit,
+    SyncCommit(MlsEpochBindings),
 }
 
 pub struct MlsJournalEntry<'a> {
@@ -116,6 +115,7 @@ pub(super) fn commit_candidate(
         }
     }
     let changed = former != projection;
+    let next_epoch = sql_number(update.mls_epoch)?;
     if let Some(event) = update.event {
         let event_sender = peer_text(event.sender);
         if !former.contains(&event_sender)
@@ -126,7 +126,7 @@ pub(super) fn commit_candidate(
                         || update.mls_epoch != expected.mls_epoch
                         || event.ciphertext.len() > MAX_GROUP_PAYLOAD_BYTES
                 }
-                MlsJournalKind::Commit => {
+                MlsJournalKind::Commit | MlsJournalKind::SyncCommit(_) => {
                     expected.mls_epoch.checked_add(1) != Some(update.mls_epoch)
                         || event.ciphertext.len() > MAX_GROUP_MLS_OBJECT_BYTES
                 }
@@ -143,7 +143,7 @@ pub(super) fn commit_candidate(
                 replay_key.update(event.sender.as_bytes());
                 "application"
             }
-            MlsJournalKind::Commit => {
+            MlsJournalKind::Commit | MlsJournalKind::SyncCommit(_) => {
                 replay_key.update(&[1]);
                 replay_key.update(&expected.mls_epoch.to_be_bytes());
                 replay_key.update(event.ciphertext);
@@ -151,16 +151,34 @@ pub(super) fn commit_candidate(
             }
         };
         let event_id = hex::encode(&replay_key.finalize().as_bytes()[..Id128::LENGTH]);
+        let retention = MLS_SYNC_RETENTION_MS as i64;
+        let expires_at_ms = if matches!(event.kind, MlsJournalKind::SyncCommit(_)) {
+            now.checked_add(retention)
+                .ok_or(AslError::InvalidPolicyState)?
+        } else {
+            now.saturating_add(retention)
+        };
         let inserted = tx.execute(
                 "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,created_at_ms,expires_at_ms)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(event_id) DO NOTHING",
                 params![
                     event_id, room, row.1, event_sender, kind,
-                    event.ciphertext, now, now.saturating_add(RETENTION_MS)
+                    event.ciphertext, now, expires_at_ms
                 ],
             ).map_err(database_error)?;
         if inserted != 1 {
             return Err(AslError::PolicyVersionConflict);
+        }
+        if let MlsJournalKind::SyncCommit(bindings) = event.kind {
+            sync_log::insert(
+                tx,
+                &room,
+                row.1,
+                next_epoch,
+                &event_id,
+                bindings,
+                expires_at_ms,
+            )?;
         }
     } else if expected.revision != 1
         || !former.is_empty()
@@ -202,9 +220,12 @@ pub(super) fn commit_candidate(
     // The projection is still paused, so neither authority version changes.
     tx.execute(
         "UPDATE asl_groups SET mls_epoch=?2,updated_at_ms=?3 WHERE group_id=?1",
-        params![room, sql_number(update.mls_epoch)?, now],
+        params![room, next_epoch, now],
     )
     .map_err(database_error)?;
+    if row.1 != next_epoch {
+        sync_log::trim_room(tx, &room, next_epoch)?;
+    }
     tx.execute(
         "UPDATE mls_room_states SET sealed_snapshot=?2,revision=?3 WHERE local_group_id=?1",
         params![room, update.sealed_snapshot, revision],
