@@ -49,6 +49,7 @@ pub(super) fn register_evidence(
     ).unwrap();
     MlsMemberEvidence {
         certificate,
+        device_key: [0; 32],
         registry_sequence: 1,
         controller: [0; 20],
         directory_commitment: Hash32([0; 32]),

@@ -41,7 +41,7 @@ use crate::identity::{AgentIdentity, DeviceIdentity};
 use crate::ipc::{
     ExtractorOperation, ExtractorStatus, FrameReader, FrameWriter, IpcFrame, IpcMessage, IpcRole,
     MAX_IPC_EXTRACTOR_INPUT_BYTES, MAX_IPC_TASK_PAYLOAD_BYTES, NetworkErrorCode, NetworkProtocol,
-    TaskStatus, WorkerOperation, encode_frame, write_device_identity_prelude,
+    TaskStatus, WorkerOperation, encode_frame, write_net_startup_prelude,
 };
 use crate::libraries::LocalLibraries;
 use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
@@ -54,6 +54,11 @@ use crate::providers::DpapiProviderCredentialSource;
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
 use asl_store::open_store;
+
+#[cfg(windows)]
+mod groups;
+#[cfg(windows)]
+pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -75,6 +80,10 @@ pub struct Supervisor {
     chain_refresh: Option<ChainRefreshWorker>,
     home: PathBuf,
     state_database: PathBuf,
+    #[cfg(windows)]
+    groups: Option<groups::LoopbackGroups>,
+    #[cfg(windows)]
+    group_controls: Option<Receiver<LocalGroupCommand>>,
     pub(crate) pending_pairing_prompts: pairing::PendingPairingPrompts,
 }
 
@@ -104,7 +113,21 @@ impl Supervisor {
         let libraries = LocalLibraries::open(&paths)?;
         let network_admission =
             load_network_admission(&paths, &agent_identity, device_peer_id.clone())?;
-        let net = NetRuntime::start(&launcher, &device_identity)?;
+        let state_database = paths.state().join("asl.sqlite3");
+        #[cfg(windows)]
+        let groups = network_settings
+            .loopback_groups
+            .then(|| groups::LoopbackGroups::open(&state_database, unix_time_ms()?))
+            .transpose()?;
+        #[cfg(not(windows))]
+        if network_settings.loopback_groups {
+            return Err(AslError::PlatformUnavailable);
+        }
+        let net = NetRuntime::start(
+            &launcher,
+            &device_identity,
+            network_settings.loopback_groups,
+        )?;
         let mut supervisor = Self {
             agent_identity,
             device_peer_id,
@@ -116,9 +139,15 @@ impl Supervisor {
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
             home: paths.dos_root().to_owned(),
-            state_database: paths.state().join("asl.sqlite3"),
+            state_database,
+            #[cfg(windows)]
+            groups,
+            #[cfg(windows)]
+            group_controls: None,
             pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
         };
+        #[cfg(windows)]
+        supervisor.configure_group_admission();
         supervisor.apply_network_settings(&network_settings)?;
         Ok(supervisor)
     }
@@ -293,6 +322,8 @@ impl Supervisor {
             now_ms,
         )?;
         self.admission = Some(admission);
+        #[cfg(windows)]
+        self.configure_group_admission();
         self.network_admission_status = NetworkAdmissionStatus::Active;
         Ok(())
     }
@@ -1004,6 +1035,8 @@ impl Supervisor {
             }
             let now = Instant::now();
             if now >= next_agent_tick {
+                #[cfg(windows)]
+                self.poll_local_groups()?;
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
             }
@@ -1042,16 +1075,35 @@ impl Supervisor {
                 continue;
             }
             let now_ms = unix_time_ms()?;
-            let batch = if self.network_admission_status != NetworkAdmissionStatus::Active {
-                reject_unadmitted_event(event)
-            } else {
-                match self.admission.as_mut() {
-                    Some(admission) => admission.handle_event(event, now_ms),
-                    None => reject_unadmitted_event(event),
-                }
-            };
+            let batch = self.handle_admitted_event(event, now_ms)?;
             self.dispatch_admission_batch(batch, &mut handler)?;
         }
+    }
+
+    pub(crate) fn handle_admitted_event(
+        &mut self,
+        event: NetworkEvent,
+        now_ms: u64,
+    ) -> Result<AdmissionBatch, AslError> {
+        if self.admission.is_none()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+        {
+            return Ok(reject_unadmitted_event(event));
+        }
+        #[cfg(windows)]
+        if matches!(
+            event,
+            NetworkEvent::UnverifiedGroupRequest { .. }
+                | NetworkEvent::UnverifiedGroupResponse { .. }
+        ) {
+            self.route_group_event(event, now_ms);
+            return Ok(AdmissionBatch::default());
+        }
+        Ok(self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .handle_event(event, now_ms))
     }
 
     fn poll_direct_outbound(&mut self, outbound: &mut DirectOutbound) -> Result<(), AslError> {
@@ -1259,6 +1311,7 @@ impl NetRuntime {
     fn start(
         launcher: &SandboxLauncher,
         device_identity: &DeviceIdentity,
+        loopback_groups: bool,
     ) -> Result<Self, AslError> {
         let (mut pipes, inherited) = InheritedPipes::new()?;
         let child = launcher.spawn_sandbox(
@@ -1266,7 +1319,7 @@ impl NetRuntime {
             inherited,
             SandboxLimits::for_role(SandboxRole::Net),
         )?;
-        write_device_identity_prelude(&mut pipes.input, device_identity)?;
+        write_net_startup_prelude(&mut pipes.input, device_identity, loopback_groups)?;
         Self::from_child(pipes, child, &device_identity.peer_id())
     }
 
@@ -2157,17 +2210,41 @@ mod tests {
         supervisor.ping_net().unwrap();
         drop(supervisor);
 
+        let paths = AppPaths::open(&home).unwrap();
+        assert!(
+            NetworkSettingsV1::load(&paths.network_settings_configuration())
+                .is_ok_and(|settings| !settings.loopback_groups)
+        );
+        fs::write(
+            paths.network_settings_configuration(),
+            serde_json::to_vec(&NetworkSettingsV1 {
+                loopback_groups: true,
+                ..NetworkSettingsV1::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let broken_worker = Supervisor::start_with_launcher(
-            AppPaths::open(&home).unwrap(),
+            paths,
             SandboxLauncher::new(net.clone(), net.clone(), net).unwrap(),
         )
-        .expect("Net must start independently of the worker executable");
+        .expect("opt-in Net must start independently of the worker executable");
+        assert!(broken_worker.groups.is_some());
         assert!(
             broken_worker
                 .validate_control_frame([10; 16], &[0xff])
                 .is_err()
         );
         let mut broken_worker = broken_worker;
+        assert!(
+            broken_worker
+                .send_startup_network_operation(|operation_id| NetworkCommand::SetAddressPolicy {
+                    operation_id,
+                    policy: asl_net::address_policy::AddressPolicy::LanOnly,
+                })
+                .is_err(),
+            "Net must enforce loopback after receiving the private startup opt-in"
+        );
         broken_worker.ping_net().unwrap();
         drop(broken_worker);
         drop(fixture);

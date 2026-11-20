@@ -19,6 +19,8 @@ use crate::{
     identity::{AgentIdentity, verify_device_certificate, verify_root_signature},
 };
 
+#[cfg(windows)]
+pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 #[cfg(windows)]
 pub use admission::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom};

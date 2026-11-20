@@ -7,7 +7,7 @@ use asl_store::{
 };
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32},
+    ids::{AgentId, Hash32, Id128},
     protocol::{GroupBody, GroupMembership, GroupPacket},
     task::GroupId,
 };
@@ -85,6 +85,22 @@ impl MlsJoinAttempts {
 }
 
 impl CoreAdmission {
+    /// Local diagnostics may identify an invitation only for a live attempt
+    /// on the same IPC handle and authenticated connection.
+    pub(crate) fn mls_reply_invite(&mut self, event: &NetworkEvent, now_ms: u64) -> Option<Id128> {
+        let NetworkEvent::UnverifiedGroupResponse {
+            connection_id,
+            request_handle,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        self.mls_joins.expire(now_ms);
+        let attempt = self.mls_joins.pending.get(request_handle)?;
+        (attempt.connection_id == *connection_id).then_some(attempt.invite.id)
+    }
+
     /// Persist a targeted invitation and enqueue it on the exact admitted
     /// connection. This entry point is for trusted Core callers only.
     pub fn send_targeted_mls_invite(

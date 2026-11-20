@@ -6,7 +6,7 @@ use asl_types::{
 use rusqlite::{Connection, Transaction, params};
 
 use super::{MlsRoomSnapshot, read_mls_room_snapshot, transition::peer_text};
-use crate::{Store, chain::agent_text, database_error};
+use crate::{Store, chain::agent_text, database_error, transfer_peers::DeviceRegistration};
 
 pub struct MlsRoomRecovery {
     pub snapshot: MlsRoomSnapshot,
@@ -18,9 +18,33 @@ pub struct MlsRoomRecovery {
 /// persisted authority; it does not validate the underlying signatures.
 pub struct MlsMemberEvidence {
     pub certificate: DeviceCertificate,
+    pub device_key: [u8; 32],
     pub registry_sequence: u64,
     pub controller: [u8; 20],
     pub directory_commitment: Hash32,
+}
+
+impl MlsMemberEvidence {
+    pub(super) fn register(
+        &self,
+        tx: &Transaction<'_>,
+        chain_id: u64,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        DeviceRegistration {
+            certificate: &self.certificate,
+            device_key: self.device_key,
+            chain_id,
+            registry_sequence: self.registry_sequence,
+            controller: &self.controller,
+            directory_commitment: self.directory_commitment.as_bytes(),
+        }
+        .register(tx, now_ms)
+        .map_err(|error| match error {
+            AslError::InvalidIdentity => AslError::InvalidDeviceCertificate,
+            error => error,
+        })
+    }
 }
 
 impl Store {

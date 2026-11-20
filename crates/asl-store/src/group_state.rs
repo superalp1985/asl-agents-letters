@@ -17,6 +17,8 @@ pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
 pub use transition::{MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion};
 
+use std::{path::Path, time::Duration};
+
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
@@ -27,6 +29,17 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::{Store, current_time_ms, database_error};
 
 pub const MAX_SEALED_ROOM_BYTES: usize = 2 * 1024 * 1024;
+
+/// The dedicated group writer is used on the Net event pump. Its lock wait
+/// must not consume the Core/Net heartbeat budget.
+pub fn open_mls_runtime_store(path: &Path) -> Result<Store, AslError> {
+    let store = crate::open_store(path)?;
+    store
+        .connection
+        .busy_timeout(Duration::from_millis(25))
+        .map_err(database_error)?;
+    Ok(store)
+}
 
 pub struct PendingMlsRoom<'a> {
     pub local_id: &'a GroupId,
@@ -84,7 +97,7 @@ impl Store {
             return Err(AslError::PolicyVersionConflict);
         }
 
-        recovery::require_member(&tx, creator, chain_id, now_ms)?;
+        creator.register(&tx, chain_id, now_ms)?;
         let now = sql_number(now_ms)?;
         insert_mls_room(&tx, &room, now)?;
         tx.execute(
@@ -110,6 +123,20 @@ impl Store {
     /// contents and reconcile the membership projection before use.
     pub fn mls_room_snapshot(&self, wire_id: Hash32) -> Result<Option<MlsRoomSnapshot>, AslError> {
         Ok(read_mls_room_snapshot(&self.connection, wire_id, false)?.map(|(snapshot, _)| snapshot))
+    }
+
+    pub fn mls_room_progress(&self, wire_id: Hash32) -> Result<Option<(String, u64)>, AslError> {
+        self.connection
+            .query_row(
+                "SELECT g.state,g.mls_epoch FROM mls_room_states s
+                 JOIN asl_groups g ON g.group_id=s.local_group_id WHERE s.wire_group_id=?1",
+                [wire_id.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?
+            .map(|(state, epoch)| Ok((state, unsigned(epoch)?)))
+            .transpose()
     }
 }
 

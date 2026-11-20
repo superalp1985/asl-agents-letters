@@ -5,9 +5,18 @@ use asl_types::{
     ids::{AgentId, PeerId},
     protocol::DeviceCertificate,
 };
-use rusqlite::{ErrorCode, TransactionBehavior, params};
+use rusqlite::{Connection, ErrorCode, TransactionBehavior, params};
 
 use crate::{Store, chain::agent_text, database_error, search::direct::DirectRequester};
+
+pub(crate) struct DeviceRegistration<'a> {
+    pub certificate: &'a DeviceCertificate,
+    pub device_key: [u8; 32],
+    pub chain_id: u64,
+    pub registry_sequence: u64,
+    pub controller: &'a [u8; 20],
+    pub directory_commitment: &'a [u8; 32],
+}
 
 impl Store {
     pub(crate) fn has_registered_transfer_peer(
@@ -36,31 +45,47 @@ impl Store {
         if certificate.agent_id != source.agent || certificate.peer_id != source.peer {
             return Err(AslError::InvalidDeviceCertificate);
         }
-        if now_ms < certificate.issued_at_ms
-            || now_ms >= certificate.expires_at_ms
-            || now_ms >= source.session_expires_at_ms
-        {
+        if now_ms >= source.session_expires_at_ms {
             return Err(AslError::ExpiredMessage);
         }
-        let integer = |n| i64::try_from(n).map_err(|_| AslError::InvalidDeviceCertificate);
-        let agent = agent_text(source.agent);
-        let peer = bs58::encode(source.peer.as_bytes()).into_string();
-        let key = hex::encode(device_key);
-        let cbor = certificate.to_canonical_cbor()?;
-        let serial = integer(certificate.serial)?;
-        let expires = integer(certificate.expires_at_ms)?;
-        let now = integer(now_ms)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(registration_error)?;
+        DeviceRegistration {
+            certificate,
+            device_key,
+            chain_id,
+            registry_sequence: source.registry_sequence,
+            controller: &source.controller,
+            directory_commitment: &source.directory_commitment,
+        }
+        .register(&tx, now_ms)?;
+        tx.commit().map_err(registration_error)
+    }
+}
+
+impl DeviceRegistration<'_> {
+    pub(crate) fn register(&self, tx: &Connection, now_ms: u64) -> Result<(), AslError> {
+        let certificate = self.certificate;
+        if !(certificate.issued_at_ms..certificate.expires_at_ms).contains(&now_ms) {
+            return Err(AslError::ExpiredMessage);
+        }
+        let integer = |n| i64::try_from(n).map_err(|_| AslError::InvalidDeviceCertificate);
+        let agent = agent_text(certificate.agent_id);
+        let peer = bs58::encode(certificate.peer_id.as_bytes()).into_string();
+        let key = hex::encode(self.device_key);
+        let cbor = certificate.to_canonical_cbor()?;
+        let serial = integer(certificate.serial)?;
+        let expires = integer(certificate.expires_at_ms)?;
+        let now = integer(now_ms)?;
         let current: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM identity_registry_states r JOIN agents a USING(agent_id)
              WHERE r.agent_id=?1 AND r.chain_id=?2 AND r.status='active' AND r.sequence=?3
                AND r.controller_address=?4 AND r.state_commitment=?5
                AND a.identity_state IN ('pending_anchor','verified'))",
-            params![agent, integer(chain_id)?, integer(source.registry_sequence)?,
-                &source.controller, &source.directory_commitment],
+            params![agent, integer(self.chain_id)?, integer(self.registry_sequence)?,
+                self.controller, self.directory_commitment],
             |r| r.get(0),
         ).map_err(registration_error)?;
         if !current {
@@ -88,7 +113,7 @@ impl Store {
         if matched != 1 {
             return Err(AslError::InvalidDeviceCertificate);
         }
-        tx.commit().map_err(registration_error)
+        Ok(())
     }
 }
 

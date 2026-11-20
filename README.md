@@ -60,7 +60,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Core 支持本机建群、定向邀请、本机同意后发送一次性加入包、入群和重启后的只读对账。成员变更、快照和原 Welcome 原子保存；同一设备重试只取回原回复，每次发送都有新的本地凭据。回环群子流拒绝过期发包、迟到请求和错连接回复，默认关闭。房间仍为 `needs_sync`，生产群网络、GUI 审批、同步和群文件授权尚未开放。[实现与验证范围](docs/group-rooms.md)
+**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 正式 Core/Net 启动链路可显式启用本机回环群子流，默认关闭；本机 `asl-core --groups` 控制台支持建群、定向邀请、同意、拒绝和显式重试。成员变更、快照和原 Welcome 原子保存；同一设备重试只取回原回复。房间仍为 `needs_sync`，不支持公网群组、GUI 审批、群同步或群文件授权。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -167,7 +167,7 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Core can create rooms, handle targeted invitations, send a single-use join package after local approval, join a room, and check stored state after a restart. The member change, snapshot, and original Welcome are saved atomically. A retry from the same device retrieves the original reply, with a new local handle for each send. The loopback group substream rejects expired sends, late requests, and replies on the wrong connection. It is disabled by default. Rooms remain in `needs_sync`; production group networking, GUI approval, synchronization, and group file grants are not enabled. [Implementation and test scope](docs/group-rooms.md)
+**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. The Windows Core and Net processes can opt into loopback-only group networking; it is off by default. The local `asl-core --groups` console supports room creation, targeted invitations, approval, rejection, and explicit retries. The member change, snapshot, and original Welcome are saved atomically; a retry from the same device retrieves the original reply. Rooms remain in `needs_sync`; public-network groups, GUI approval, group synchronization, and group file grants are not available. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 

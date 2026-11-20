@@ -11,7 +11,7 @@ use crate::chain::{ChainError, DurableIdentityResolver, IdentityResolver, Regist
 use asl_net::transport::{AuthenticatedPeer, LocalConnectionId, LocalTransport, RequestToken};
 use rand::{TryRng, rngs::SysRng};
 
-use super::{RecordHistory, resolve_active, verify_record};
+use super::{RecordHistory, VerifiedRecord, resolve_active, verify_record};
 
 enum State {
     AwaitingHello,
@@ -137,6 +137,7 @@ impl DeviceSession {
     ) -> Result<(), AslError> {
         self.consume_hello_attempt()?;
         self.verify_hello(hello, signed_directory, history, resolver, now_ms)
+            .map(drop)
     }
 
     /// Starts exactly one proof exchange, using a checkpoint and request ID
@@ -238,6 +239,7 @@ impl DeviceSession {
             return Err(DeviceAdmissionError::Session(AslError::InvalidIdentity));
         }
         self.finish_proof(*pending, proof, history, resolver, now_ms)
+            .map(drop)
     }
 
     /// Completes a proof response received over IPC. The NetworkBridge has
@@ -250,7 +252,7 @@ impl DeviceSession {
         history: &mut RecordHistory,
         resolver: &mut DurableIdentityResolver,
         now_ms: u64,
-    ) -> Result<(), DeviceAdmissionError> {
+    ) -> Result<VerifiedRecord, DeviceAdmissionError> {
         let State::AwaitingProof(pending) = std::mem::replace(&mut self.state, State::Closed)
         else {
             return Err(DeviceAdmissionError::Session(AslError::InvalidMessage));
@@ -273,7 +275,7 @@ impl DeviceSession {
         history: &mut RecordHistory,
         resolver: &mut DurableIdentityResolver,
         now_ms: u64,
-    ) -> Result<(), DeviceAdmissionError> {
+    ) -> Result<VerifiedRecord, DeviceAdmissionError> {
         if now_ms < pending.started_at_ms {
             return Err(DeviceAdmissionError::Session(AslError::ExpiredMessage));
         }
@@ -309,7 +311,7 @@ impl DeviceSession {
         history: &mut RecordHistory,
         resolver: &mut dyn IdentityResolver,
         now_ms: u64,
-    ) -> Result<(), AslError> {
+    ) -> Result<VerifiedRecord, AslError> {
         self.check_hello(hello, now_ms)?;
         let certificate = &hello.device_certificate;
         let verified = verify_record(signed_directory, hello.agent_id, now_ms, resolver)?;
@@ -329,7 +331,7 @@ impl DeviceSession {
             expires_at_ms: record.expires_at_ms.min(certificate.expires_at_ms),
             last_checked_ms: now_ms,
         };
-        Ok(())
+        Ok(verified)
     }
 
     fn check_hello(&self, hello: &Hello, now_ms: u64) -> Result<(), AslError> {

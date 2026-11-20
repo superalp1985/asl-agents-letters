@@ -666,11 +666,7 @@ impl Supervisor {
         now_ms: u64,
     ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
         let event = self.receive_network_event(timeout)?;
-        let batch = self
-            .admission
-            .as_mut()
-            .ok_or(AslError::InvalidIdentity)?
-            .handle_event(event, now_ms);
+        let batch = self.handle_admitted_event(event, now_ms)?;
         for command in batch.commands {
             self.send_network_command(command)?;
         }

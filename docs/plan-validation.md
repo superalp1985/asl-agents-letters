@@ -517,3 +517,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / E 盘离线：`cargo test -p asl-app -p asl-net --all-targets --locked --offline -- --test-threads=1` 共 328 项通过、0 失败、2 项按既有标记忽略。相同二包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
 - 真实 TCP 回环验证出站过期后才驱动子流时，原请求没有到达对端，同连接的后续请求仍可送达；Net 不给过期入站事件发 IPC 回复句柄，正常往返使用原期限，旧尝试不能完成新的重试。codec 单测覆盖延迟首次读帧和结束发送半边受阻；既有双 Core 测试覆盖过期 KeyPackage 不提交 Add、原 Welcome 重试及单次入群。
 - 独立静态复核后将关闭发送端纳入期限，并明确已完整进入传输层的请求不能靠本机超时撤回。未测真实子流关闭受阻时对端的投递结果，也未开启生产 Supervisor 群路由、GUI、公网或同步。未修改 P2P CBOR、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：正式进程回环接线
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：首次集中验证 `asl-app`、`asl-net`、`asl-store` 全目标合计 456 项通过、0 失败、3 项按既有标记忽略。独立复核补齐目录历史、已审批状态保护及本机诊断后，定向群用例 25 项与正式 AppContainer Supervisor 用例 1 项全部通过；三包全目标严格 Clippy、Rust 格式与 Git 空白检查通过。
+- 正式进程夹具验证 Net 可通过私有启动前导启用回环模式，且启用后拒绝切至 LAN。三 Core 用例使用合成链证明、真实 MLS/DPAPI/SQLite 和注入的 Net 事件，验证第三成员使用已断线成员的目录成功入群，以及旧目录不能替换已见的较新版本。SQLite 用例验证超限邀请不遗留设备或 peer 行，已批准的加入包不能被拒绝操作删除，本机清单只显示匹配当前设备的记录。
+- 上述证据不是跨正式进程群入组端到端验收；没有实时链 RPC、公网群组、GUI、目录持续续期、同步或权限激活证据。房间仍为 `needs_sync`。未改 P2P CBOR、SQLite schema 或依赖锁。

@@ -1,5 +1,8 @@
 #[path = "asl-core/download_control.rs"]
 mod download_control;
+#[cfg(windows)]
+#[path = "asl-core/group_control.rs"]
+mod group_control;
 
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -10,6 +13,8 @@ fn main() {
             .ok_or(asl_types::error::AslError::InvalidMessage)
             .and_then(asl_app::supervisor::set_direct_inbound_from_environment),
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
+        #[cfg(windows)]
+        [flag] if flag == "--groups" => group_control::run(),
         _ => Err(asl_types::error::AslError::InvalidMessage),
     };
     if let Err(error) = result {

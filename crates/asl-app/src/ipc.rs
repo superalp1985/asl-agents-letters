@@ -29,9 +29,10 @@ mod net_runtime;
 pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 const TASK_BODY_HEADER_BYTES: usize = 21;
-const DEVICE_IDENTITY_PRELUDE_MAGIC: [u8; 4] = *b"ASLK";
-const DEVICE_IDENTITY_PRELUDE_VERSION: u16 = 1;
-const DEVICE_IDENTITY_PRELUDE_HEADER_BYTES: usize = 10;
+const NET_STARTUP_PRELUDE_MAGIC: [u8; 4] = *b"ASLK";
+const NET_STARTUP_PRELUDE_VERSION: u16 = 2;
+const NET_STARTUP_PRELUDE_FLAG_OFFSET: usize = 10;
+const NET_STARTUP_PRELUDE_HEADER_BYTES: usize = NET_STARTUP_PRELUDE_FLAG_OFFSET + 1;
 const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
@@ -2050,8 +2051,8 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
 
     let stdin = std::io::stdin();
     if role == IpcRole::Net {
-        let identity = read_device_identity_prelude(&mut stdin.lock())?;
-        return net_runtime::run(identity, stdin, std::io::stdout());
+        let (identity, loopback_groups) = read_net_startup_prelude(&mut stdin.lock())?;
+        return net_runtime::run(identity, loopback_groups, stdin, std::io::stdout());
     }
     let stdout = std::io::stdout();
     let mut reader = FrameReader::new(stdin.lock(), IpcRole::Core, role);
@@ -2109,38 +2110,47 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
     }
 }
 
-pub(crate) fn write_device_identity_prelude<W: Write>(
+pub(crate) fn write_net_startup_prelude<W: Write>(
     writer: &mut W,
     identity: &DeviceIdentity,
+    loopback_groups: bool,
 ) -> Result<(), AslError> {
     let secret = identity.to_ipc_secret()?;
     let length = u32::try_from(secret.len()).map_err(|_| AslError::InvalidIdentity)?;
-    let mut header = [0u8; DEVICE_IDENTITY_PRELUDE_HEADER_BYTES];
-    header[..4].copy_from_slice(&DEVICE_IDENTITY_PRELUDE_MAGIC);
-    header[4..6].copy_from_slice(&DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes());
-    header[6..].copy_from_slice(&length.to_be_bytes());
+    let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
+    header[..4].copy_from_slice(&NET_STARTUP_PRELUDE_MAGIC);
+    header[4..6].copy_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
+    header[6..NET_STARTUP_PRELUDE_FLAG_OFFSET].copy_from_slice(&length.to_be_bytes());
+    header[NET_STARTUP_PRELUDE_FLAG_OFFSET] = u8::from(loopback_groups);
     writer.write_all(&header)?;
     writer.write_all(&secret)?;
     writer.flush()?;
     Ok(())
 }
 
-fn read_device_identity_prelude<R: Read>(reader: &mut R) -> Result<DeviceIdentity, AslError> {
-    let mut header = [0u8; DEVICE_IDENTITY_PRELUDE_HEADER_BYTES];
-    reader.read_exact(&mut header)?;
-    if header[..4] != DEVICE_IDENTITY_PRELUDE_MAGIC {
+fn read_net_startup_prelude<R: Read>(reader: &mut R) -> Result<(DeviceIdentity, bool), AslError> {
+    let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
+    let (prefix, flag) = header.split_at_mut(NET_STARTUP_PRELUDE_FLAG_OFFSET);
+    reader.read_exact(prefix)?;
+    if prefix[..4] != NET_STARTUP_PRELUDE_MAGIC {
         return Err(AslError::InvalidMessage);
     }
-    if header[4..6] != DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes() {
+    if prefix[4..6] != NET_STARTUP_PRELUDE_VERSION.to_be_bytes() {
         return Err(AslError::IncompatibleVersion);
     }
-    let length = u32::from_be_bytes(header[6..10].try_into().unwrap()) as usize;
+    let length = u32::from_be_bytes(prefix[6..].try_into().unwrap()) as usize;
     if length == 0 || length > MAX_DEVICE_IDENTITY_PRELUDE_BYTES {
         return Err(AslError::InvalidMessage);
     }
+    reader.read_exact(flag)?;
+    let loopback_groups = match flag[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(AslError::InvalidMessage),
+    };
     let mut secret = Zeroizing::new(vec![0u8; length]);
     reader.read_exact(&mut secret)?;
-    DeviceIdentity::from_ipc_secret(&secret)
+    Ok((DeviceIdentity::from_ipc_secret(&secret)?, loopback_groups))
 }
 
 #[cfg(test)]
@@ -2645,15 +2655,22 @@ mod tests {
     }
 
     #[test]
-    fn device_identity_startup_prelude_round_trips_over_the_private_stream() {
+    fn net_startup_prelude_round_trips_identity_and_flag_before_the_first_frame() {
         let identity = DeviceIdentity::generate().unwrap();
-        let expected_peer_id = identity.peer_id();
-        let mut bytes = Vec::new();
+        let first_command = IpcMessage::Shutdown;
+        let frame = encode_frame(IpcRole::Core, IpcRole::Net, 1, &first_command).unwrap();
+        for enabled in [false, true] {
+            let mut bytes = Vec::new();
+            write_net_startup_prelude(&mut bytes, &identity, enabled).unwrap();
+            bytes.extend_from_slice(&frame);
+            let mut stream = Cursor::new(bytes);
 
-        write_device_identity_prelude(&mut bytes, &identity).unwrap();
-        let received = read_device_identity_prelude(&mut Cursor::new(bytes)).unwrap();
-
-        assert_eq!(received.peer_id(), expected_peer_id);
+            let (received, loopback_groups) = read_net_startup_prelude(&mut stream).unwrap();
+            assert_eq!(received.peer_id(), identity.peer_id());
+            assert_eq!(loopback_groups, enabled);
+            let mut reader = FrameReader::new(stream, IpcRole::Core, IpcRole::Net);
+            assert_eq!(reader.receive().unwrap().message, first_command);
+        }
     }
 
     #[test]
@@ -2665,41 +2682,48 @@ mod tests {
 
         impl Read for HeaderOnly {
             fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-                if self.bytes.position() >= DEVICE_IDENTITY_PRELUDE_HEADER_BYTES as u64 {
+                if self.bytes.position() >= NET_STARTUP_PRELUDE_HEADER_BYTES as u64 {
                     self.body_read = true;
                 }
                 self.bytes.read(buffer)
             }
         }
 
-        for (magic, version, length) in [
-            (*b"NOPE", DEVICE_IDENTITY_PRELUDE_VERSION, 32_u32),
+        for (magic, version, length, flag) in [
+            (*b"NOPE", NET_STARTUP_PRELUDE_VERSION, 32_u32, 0),
+            (NET_STARTUP_PRELUDE_MAGIC, 1_u16, 32, 0),
+            (NET_STARTUP_PRELUDE_MAGIC, NET_STARTUP_PRELUDE_VERSION, 0, 0),
             (
-                DEVICE_IDENTITY_PRELUDE_MAGIC,
-                DEVICE_IDENTITY_PRELUDE_VERSION + 1,
-                32,
-            ),
-            (
-                DEVICE_IDENTITY_PRELUDE_MAGIC,
-                DEVICE_IDENTITY_PRELUDE_VERSION,
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                (MAX_DEVICE_IDENTITY_PRELUDE_BYTES + 1) as u32,
                 0,
             ),
             (
-                DEVICE_IDENTITY_PRELUDE_MAGIC,
-                DEVICE_IDENTITY_PRELUDE_VERSION,
-                (MAX_DEVICE_IDENTITY_PRELUDE_BYTES + 1) as u32,
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                32,
+                2,
             ),
         ] {
             let mut header = Vec::new();
             header.extend_from_slice(&magic);
             header.extend_from_slice(&version.to_be_bytes());
             header.extend_from_slice(&length.to_be_bytes());
+            if version == NET_STARTUP_PRELUDE_VERSION {
+                header.push(flag);
+            }
             let mut reader = HeaderOnly {
                 bytes: Cursor::new(header),
                 body_read: false,
             };
 
-            assert!(read_device_identity_prelude(&mut reader).is_err());
+            let result = read_net_startup_prelude(&mut reader);
+            if version == NET_STARTUP_PRELUDE_VERSION {
+                assert!(matches!(result, Err(AslError::InvalidMessage)));
+            } else {
+                assert!(matches!(result, Err(AslError::IncompatibleVersion)));
+            }
             assert!(!reader.body_read);
         }
     }
@@ -2708,11 +2732,12 @@ mod tests {
     fn invalid_or_truncated_device_key_payloads_are_rejected() {
         for (length, payload) in [(1_u32, &[0xff][..]), (2, &[0x08][..])] {
             let mut bytes = Vec::new();
-            bytes.extend_from_slice(&DEVICE_IDENTITY_PRELUDE_MAGIC);
-            bytes.extend_from_slice(&DEVICE_IDENTITY_PRELUDE_VERSION.to_be_bytes());
+            bytes.extend_from_slice(&NET_STARTUP_PRELUDE_MAGIC);
+            bytes.extend_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
             bytes.extend_from_slice(&length.to_be_bytes());
+            bytes.push(0);
             bytes.extend_from_slice(payload);
-            assert!(read_device_identity_prelude(&mut Cursor::new(bytes)).is_err());
+            assert!(read_net_startup_prelude(&mut Cursor::new(bytes)).is_err());
         }
     }
 

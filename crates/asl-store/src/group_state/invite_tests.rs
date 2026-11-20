@@ -5,8 +5,8 @@ use asl_types::{
 };
 
 use super::{
-    MlsIncomingInvite, MlsJoinKey, MlsJoinedRoom, MlsMemberEvidence, PendingMlsRoom,
-    recovery_tests::register_evidence, tests,
+    MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom, MlsMemberEvidence,
+    PendingMlsRoom, recovery_tests::register_evidence, tests,
 };
 
 #[test]
@@ -110,6 +110,7 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
             .save_mls_join_package(&invite, key, b"replacement", 100_002)
             .unwrap()
     );
+    assert!(!store.reject_mls_invite(&invite, 100_002).unwrap());
     assert!(
         !store
             .save_mls_join_package(&competing, competing_key, b"alternate join", 100_002)
@@ -201,7 +202,92 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
 }
 
 #[test]
-fn inbound_invites_bound_prompts_across_devices_and_restarts() {
+fn pending_invites_list_only_live_prompts_for_the_exact_local_device() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = crate::open_store(&root.path().join("pending.sqlite3")).unwrap();
+    let recipient = tests::test_peer(100);
+    let recipient_agent = AgentId([100; 32]);
+    tests::register_agent_peer(&store, recipient_agent, &recipient, 1);
+    let start = 100_000;
+    let end = start + 1_000;
+    let invites: [_; 5] = std::array::from_fn(|index| {
+        let seed = index as u8 + 1;
+        let inviter = AgentId([seed; 32]);
+        let inviter_device = tests::test_peer(seed);
+        tests::register_agent_peer(&store, inviter, &inviter_device, 1);
+        let invite = MlsIncomingInvite {
+            id: Id128([seed; 16]),
+            wire_id: Hash32([seed; 32]),
+            base_epoch: 0,
+            inviter,
+            inviter_device,
+            recipient: recipient_agent,
+            recipient_device: recipient.clone(),
+            expires_at_ms: if index == 2 { end } else { end + 1 },
+        };
+        assert!(store.receive_mls_invite(&invite, start).unwrap());
+        invite
+    });
+    let [pending, approved, _, closed, joined] = &invites;
+    assert!(
+        store
+            .save_mls_join_package(
+                approved,
+                MlsJoinKey {
+                    request_id: Id128([11; 16]),
+                    package_ref: Hash32([12; 32]),
+                },
+                b"sealed",
+                start,
+            )
+            .unwrap()
+    );
+    assert!(store.reject_mls_invite(closed, start).unwrap());
+    store
+        .stage_mls_room(PendingMlsRoom {
+            local_id: &GroupId(Id128([13; 16])),
+            wire_id: joined.wire_id,
+            creator: &joined.inviter_device,
+            local_name: "Existing room",
+            mls_epoch: 0,
+            sealed_snapshot: b"sealed",
+        })
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_pending_mls_invites(recipient_agent, &recipient, end)
+            .unwrap(),
+        std::slice::from_ref(pending),
+    );
+    assert!(
+        store
+            .list_pending_mls_invites(approved.inviter, &recipient, end)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_pending_mls_invites(recipient_agent, &approved.inviter_device, end)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_pending_mls_invites(recipient_agent, &recipient, start - 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .recover_mls_joins(recipient_agent, &recipient, end)
+            .unwrap(),
+        std::slice::from_ref(approved),
+    );
+}
+
+#[test]
+fn inbound_invites_bound_prompts_across_devices_and_restarts_without_registering_limited_devices() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("budget.sqlite3");
     let mut store = crate::open_store(&path).unwrap();
@@ -209,30 +295,73 @@ fn inbound_invites_bound_prompts_across_devices_and_restarts() {
     let inviter = tests::test_peer(101);
     let other_device = tests::test_peer(102);
     let recipient_agent = AgentId([100; 32]);
-    tests::register_peer(&store, &inviter, 1);
-    tests::register_peer(&store, &other_device, 2);
-    tests::register_agent_peer(&store, recipient_agent, &recipient, 1);
+    let inviter_agent = AgentId([1; 32]);
+    let inviter_evidence = register_evidence(&store, inviter_agent, &inviter, 105_000);
+    let recipient_evidence = register_evidence(&store, recipient_agent, &recipient, 105_000);
     let invite = MlsIncomingInvite {
         id: Id128([1; 16]),
         wire_id: Hash32([2; 32]),
         base_epoch: 0,
-        inviter: AgentId([1; 32]),
+        inviter: inviter_agent,
         inviter_device: inviter,
         recipient: recipient_agent,
         recipient_device: recipient,
         expires_at_ms: 100_010,
     };
-    assert!(store.receive_mls_invite(&invite, 100_000).unwrap());
+    assert!(
+        store
+            .receive_verified_mls_invite(
+                &invite,
+                MlsInviteEndpoints {
+                    inviter: &inviter_evidence,
+                    recipient: &recipient_evidence,
+                    chain_id: 1,
+                },
+                100_000,
+            )
+            .unwrap()
+    );
     assert!(store.reject_mls_invite(&invite, 100_001).unwrap());
     assert!(!store.reject_mls_invite(&invite, 100_001).unwrap());
     drop(store);
     let mut store = crate::open_store(&path).unwrap();
+    let mut other_evidence = inviter_evidence;
+    other_evidence.certificate.peer_id = other_device.clone();
+    other_evidence.certificate.serial = 2;
+    other_evidence.device_key = libp2p_identity::Keypair::ed25519_from_bytes([102; 32])
+        .unwrap()
+        .public()
+        .try_into_ed25519()
+        .unwrap()
+        .to_bytes();
     let changed = MlsIncomingInvite {
-        inviter_device: other_device,
+        inviter_device: other_device.clone(),
         id: Id128([4; 16]),
         ..invite.clone()
     };
-    assert!(!store.receive_mls_invite(&changed, 100_002).unwrap());
+    assert!(
+        !store
+            .receive_verified_mls_invite(
+                &changed,
+                MlsInviteEndpoints {
+                    inviter: &other_evidence,
+                    recipient: &recipient_evidence,
+                    chain_id: 1,
+                },
+                100_002,
+            )
+            .unwrap()
+    );
+    let registered: bool = store
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM device_identities WHERE peer_id=?1)
+                 OR EXISTS(SELECT 1 FROM peers WHERE peer_id=?1)",
+            [bs58::encode(other_device.as_bytes()).into_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!registered);
     assert!(
         !store
             .save_mls_join_package(
@@ -277,6 +406,12 @@ fn invite_prompt_slots_expire_without_releasing_the_hourly_budget() {
                 .unwrap()
         );
     }
+    assert_eq!(
+        store
+            .list_pending_mls_invites(recipient_agent, &recipient, start)
+            .unwrap(),
+        (0..5).map(|index| invite(index, start)).collect::<Vec<_>>(),
+    );
     let key = MlsJoinKey {
         request_id: Id128([99; 16]),
         package_ref: Hash32([99; 32]),

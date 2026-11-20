@@ -1,10 +1,12 @@
 //! Core boundary for attested MLS rooms. None of these operations activates
 //! a room, enables a transport or grants access to files.
 
+mod directories;
 mod incoming;
 mod network;
 mod outgoing;
 
+pub(super) use directories::GroupDirectoryCache;
 pub(super) use network::MlsJoinAttempts;
 pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};
 
@@ -43,7 +45,7 @@ use crate::{
     },
 };
 
-use super::{CoreAdmission, PeerAdmission};
+use super::{CoreAdmission, PeerAdmission, transport_ed25519_key};
 
 /// Only a local consistency result. The room remains `needs_sync` and
 /// future operations must recheck the versions and authorization evidence.
@@ -66,6 +68,30 @@ struct ApprovedMlsWelcome<'a> {
 }
 
 impl CoreAdmission {
+    pub(crate) fn enable_loopback_mls_directories(&mut self) {
+        self.group_directories.get_or_insert_with(Default::default);
+    }
+
+    pub(super) fn observe_admitted_mls_directory(&mut self, record: &VerifiedRecord) {
+        let Some(directories) = &mut self.group_directories else {
+            return;
+        };
+        let agent = record.signed().record.payload.agent_id();
+        if !self.dht_histories.contains_key(&agent)
+            && self.dht_histories.len() >= super::MAX_DHT_RECORD_OWNERS
+        {
+            return;
+        }
+        let history = self.dht_histories.entry(agent).or_insert_with(|| {
+            RecordHistory::new(agent, super::MAX_DEVICE_OBSERVATIONS)
+                .expect("fixed record history limit is valid")
+        });
+        // The owner watermark survives eviction of the cached directory bytes.
+        if history.observe(record).is_ok() {
+            directories.observe(record);
+        }
+    }
+
     /// Replace an expiring local directory only after verifying the current
     /// registry and the exact existing Hello device. Rotation is not renewal.
     pub fn renew_local_mls_directory(
@@ -93,8 +119,8 @@ impl CoreAdmission {
         Ok(())
     }
 
-    /// Create a closed room from the local identity. The local device must
-    /// already be durably registered against a verified device directory.
+    /// Create a closed room and register its verified local device in the
+    /// same transaction.
     pub fn create_local_mls_room(
         &mut self,
         store: &mut Store,
@@ -248,6 +274,7 @@ impl CoreAdmission {
             local: &self.local_hello.device_certificate,
             local_directory: &self.local_signed_directory,
             directories,
+            observed_directories: self.group_directories.as_ref(),
             histories: &self.dht_histories,
             peers: &self.peers,
             resolver: &mut self.resolver,
@@ -280,6 +307,7 @@ struct RoomEvidence<'a> {
     local: &'a DeviceCertificate,
     local_directory: &'a [u8],
     directories: &'a HashMap<AgentId, Vec<u8>>,
+    observed_directories: Option<&'a GroupDirectoryCache>,
     histories: &'a HashMap<AgentId, RecordHistory>,
     peers: &'a HashMap<[u8; 16], PeerAdmission>,
     resolver: &'a mut dyn IdentityResolver,
@@ -302,6 +330,8 @@ impl RoomEvidence<'_> {
         } else {
             self.directories
                 .get(&agent)
+                .map(Vec::as_slice)
+                .or_else(|| self.observed_directories.and_then(|cache| cache.get(agent)))
                 .ok_or(AslError::InvalidIdentity)?
         };
         let record = verify_record(bytes, agent, self.now_ms, self.resolver)?;
@@ -320,7 +350,7 @@ impl RoomEvidence<'_> {
         if !directory.devices.contains(&certificate) {
             return Err(AslError::InvalidDeviceCertificate);
         }
-        Ok(member_evidence(certificate, &record))
+        member_evidence(certificate, &record)
     }
 
     fn verify_roster(
@@ -356,7 +386,7 @@ impl RoomEvidence<'_> {
             if member.index == own_index {
                 local_signature_key = Some(member.signature_key);
             }
-            roster.push(member_evidence(cert, directory));
+            roster.push(member_evidence(cert, directory)?);
         }
         let (creator, creator_index) = creator.ok_or(AslError::PolicyDenied)?;
         Ok(VerifiedRoster {
@@ -439,13 +469,17 @@ impl RoomEvidence<'_> {
     }
 }
 
-fn member_evidence(certificate: DeviceCertificate, record: &VerifiedRecord) -> MlsMemberEvidence {
-    MlsMemberEvidence {
+fn member_evidence(
+    certificate: DeviceCertificate,
+    record: &VerifiedRecord,
+) -> Result<MlsMemberEvidence, AslError> {
+    Ok(MlsMemberEvidence {
+        device_key: transport_ed25519_key(&certificate.peer_id)?,
         certificate,
         registry_sequence: record.registry_state.sequence,
         controller: record.registry_state.controller,
         directory_commitment: Hash32(record.registry_state.state_commitment),
-    }
+    })
 }
 
 fn check_directory_histories(

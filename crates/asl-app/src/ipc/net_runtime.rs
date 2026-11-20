@@ -31,17 +31,32 @@ const RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_millis(RESPONSE_HANDLE
 const PAIRING_RESPONSE_HANDLE_LIFETIME: Duration = Duration::from_secs(3 * 60);
 const RESPONSE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-pub(super) fn run(identity: DeviceIdentity, input: Stdin, output: Stdout) -> Result<(), AslError> {
+pub(super) fn run(
+    identity: DeviceIdentity,
+    loopback_groups: bool,
+    input: Stdin,
+    output: Stdout,
+) -> Result<(), AslError> {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(AslError::Io)?;
-    runtime.block_on(run_async(identity, input, output))
+    runtime.block_on(run_async(identity, loopback_groups, input, output))
 }
 
-async fn run_async(identity: DeviceIdentity, input: Stdin, output: Stdout) -> Result<(), AslError> {
+async fn run_async(
+    identity: DeviceIdentity,
+    loopback_groups: bool,
+    input: Stdin,
+    output: Stdout,
+) -> Result<(), AslError> {
     let peer_id = identity.peer_id();
-    let transport = LocalTransport::new(identity.into_keypair())?;
+    let keypair = identity.into_keypair();
+    let transport = if loopback_groups {
+        LocalTransport::new_with_loopback_groups(keypair)?
+    } else {
+        LocalTransport::new(keypair)?
+    };
     let mut bridge = NetworkBridge::new(transport);
     let mut writer = FrameWriter::new(output, IpcRole::Net, IpcRole::Core);
     writer.send(&IpcMessage::NetReady { peer_id })?;

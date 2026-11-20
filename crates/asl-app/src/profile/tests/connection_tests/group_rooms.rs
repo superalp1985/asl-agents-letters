@@ -5,17 +5,200 @@ use asl_groups::{
     membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
 };
-use asl_store::{Store, group_state::MlsIncomingInvite, search::direct::DirectRequester};
+use asl_store::group_state::MlsIncomingInvite;
 use asl_types::protocol::{GroupBody, GroupMembership, GroupPacket};
 use openmls::prelude::{GroupId as MlsGroupId, MlsGroup, MlsGroupCreateConfig, OpenMlsProvider};
 use openmls_basic_credential::SignatureKeyPair;
 
+use crate::chain::test_support::proof_fixtures_for_agents;
 use crate::profile::{
-    MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, admission::transport_ed25519_key,
-    group_credential::issue_group_credential,
+    MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, group_credential::issue_group_credential,
 };
 
 use super::*;
+
+#[test]
+fn third_member_can_join_using_a_verified_directory_after_its_peer_disconnects() {
+    let roots: [AgentIdentity; 3] = std::array::from_fn(|_| AgentIdentity::generate().unwrap());
+    let certs = roots
+        .each_ref()
+        .map(|root| certificate(root, &DeviceIdentity::generate().unwrap().peer_id(), 1));
+    let dirs =
+        std::array::from_fn::<_, 3, _>(|i| directory(&roots[i], 7, vec![certs[i].clone()], vec![]));
+    let claims = std::array::from_fn::<_, 3, _>(|i| {
+        let mut values = [[0; 32]; 3];
+        values[0][12..].copy_from_slice(&roots[i].controller_address());
+        values[1] = device_directory_commitment(&dirs[i]).unwrap().0;
+        values[2][23] = 1;
+        values[2][24..].copy_from_slice(&dirs[i].registry_sequence.to_be_bytes());
+        (certs[i].agent_id, values)
+    });
+    let (deployment, finalized, proofs) = proof_fixtures_for_agents(&claims, 8);
+    let signed = std::array::from_fn::<_, 3, _>(|i| signed_directory(&roots[i], &dirs[i], 1));
+    let node = |i: usize| {
+        let db = TestChainDatabase::new();
+        let store = db.open();
+        let mut resolver = DurableIdentityResolver::create(
+            db.open(),
+            DurableResolverConfigV1 {
+                consensus: consensus_config(),
+                deployment,
+                max_cache_age_secs: 120,
+                cache_capacity: 8,
+            },
+            bootstrapped().with_test_execution(finalized.clone()),
+            BOOTSTRAP_TIME,
+        )
+        .unwrap();
+        resolver
+            .accept_proof(certs[i].agent_id, &proofs[i], BOOTSTRAP_TIME)
+            .unwrap();
+        let mut core = CoreAdmission::for_local_identity(
+            &roots[i],
+            certs[i].peer_id.clone(),
+            signed[i].clone(),
+            resolver,
+            NOW,
+        )
+        .unwrap();
+        core.enable_loopback_mls_directories();
+        (db, store, core)
+    };
+
+    let (_creator_db, mut creator_store, mut creator) = node(0);
+    let (wire_id, _) = creator
+        .create_local_mls_room(
+            &mut creator_store,
+            &roots[0],
+            &GroupId(Id128([64; 16])),
+            "Room",
+            NOW,
+        )
+        .unwrap();
+    let no_imports = HashMap::new();
+    let mut join = |recipient: &mut CoreAdmission, store: &mut asl_store::Store, i: usize| {
+        let connection = [i as u8; 16];
+        admit(
+            &mut creator,
+            connection,
+            &certs[i],
+            proofs[i].clone(),
+            &signed[i],
+        );
+        admit(
+            recipient,
+            connection,
+            &certs[0],
+            proofs[0].clone(),
+            &signed[0],
+        );
+        let packet = creator
+            .issue_targeted_mls_invite(
+                &mut creator_store,
+                connection,
+                wire_id,
+                NOW + 60_000,
+                &no_imports,
+                NOW,
+            )
+            .unwrap();
+        let invite = recipient
+            .receive_targeted_mls_invite(store, connection, &packet, &no_imports, NOW)
+            .unwrap()
+            .unwrap();
+        assert!(
+            recipient
+                .approve_targeted_mls_invite(
+                    store,
+                    &roots[i],
+                    connection,
+                    &invite,
+                    &no_imports,
+                    NOW
+                )
+                .unwrap()
+        );
+        let mut outgoing = None;
+        let request_handle = recipient
+            .send_approved_mls_join(
+                store,
+                MlsJoinSend {
+                    connection_id: connection,
+                    invite: &invite,
+                    local_id: &GroupId(Id128([65 + i as u8; 16])),
+                    local_name: "Room",
+                },
+                &no_imports,
+                NOW,
+                |command| {
+                    outgoing = Some(command);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let Some(NetworkCommand::SendGroup { request, .. }) = outgoing else {
+            panic!("expected a KeyPackage request");
+        };
+        let response = creator
+            .answer_mls_key_package(&mut creator_store, connection, &request, &no_imports, NOW)
+            .unwrap();
+        assert!(matches!(
+            recipient.handle_mls_network_event(
+                store,
+                NetworkEvent::UnverifiedGroupResponse {
+                    connection_id: connection, request_handle, response,
+                },
+                &no_imports,
+                NOW,
+                |_| panic!("Welcome has no reply handle"),
+            ),
+            Ok(Some(MlsNetworkOutcome::Joined { version, .. })) if version.mls_epoch == i as u64
+        ));
+        creator.handle_event(
+            NetworkEvent::PeerDisconnected {
+                connection_id: connection,
+            },
+            NOW,
+        );
+    };
+    let (_first_db, mut first_store, mut first) = node(1);
+    join(&mut first, &mut first_store, 1);
+    let (_second_db, mut second_store, mut second) = node(2);
+    let prior_connection = [9; 16];
+    let refreshed = signed_directory(&roots[1], &dirs[1], 2);
+    admit(
+        &mut second,
+        prior_connection,
+        &certs[1],
+        proofs[1].clone(),
+        &refreshed,
+    );
+    second.handle_event(
+        NetworkEvent::PeerDisconnected {
+            connection_id: prior_connection,
+        },
+        NOW,
+    );
+    let candidate_id = [44; 16];
+    let key =
+        asl_net::dht::identity_record_key(certs[1].agent_id, RecordKind::DeviceDirectory).unwrap();
+    let old_directory = second.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id,
+            key: key.as_ref().try_into().unwrap(),
+            value: signed[1].clone(),
+        },
+        NOW,
+    );
+    assert_eq!(
+        old_directory.commands,
+        [NetworkCommand::DecideDhtRecord {
+            candidate_id,
+            accept: false
+        }],
+    );
+    join(&mut second, &mut second_store, 2);
+}
 
 #[test]
 fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
@@ -40,18 +223,6 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     .unwrap();
     let mut creator_store = creator_db.open();
     let creator_local_id = GroupId(Id128([1; 16]));
-    assert!(
-        creator
-            .create_local_mls_room(
-                &mut creator_store,
-                &root,
-                &creator_local_id,
-                "Creator room",
-                NOW,
-            )
-            .is_err()
-    );
-    register_devices(&mut creator_store, &root, &dir);
     let (wire_id, version) = creator
         .create_local_mls_room(
             &mut creator_store,
@@ -79,7 +250,6 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
     )
     .unwrap();
     let mut store = local_db.open();
-    register_devices(&mut store, &root, &dir);
     let connection_id = [4; 16];
     assert!(
         creator
@@ -122,6 +292,12 @@ fn group_add_and_welcome_require_authority_and_reconcile_after_restart() {
         ),
         Err(AslError::InvalidDeviceCertificate)
     ));
+    let registered: i64 = creator_sql
+        .query_row("SELECT count(*) FROM device_identities", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(registered, 1);
     creator_sql
         .execute("UPDATE identity_registry_states SET sequence=7", [])
         .unwrap();
@@ -718,27 +894,6 @@ fn admit(
         admitted.events.as_slice(),
         [AdmittedNetworkEvent::PeerAdmitted { .. }]
     ));
-}
-
-fn register_devices(store: &mut Store, root: &AgentIdentity, directory: &DeviceDirectory) {
-    for cert in &directory.devices {
-        store
-            .register_transfer_peer(
-                &DirectRequester {
-                    agent: cert.agent_id,
-                    peer: cert.peer_id.clone(),
-                    session_expires_at_ms: NOW + LIFETIME,
-                    registry_sequence: directory.registry_sequence,
-                    directory_commitment: device_directory_commitment(directory).unwrap().0,
-                    controller: root.controller_address(),
-                },
-                consensus_config().chain_id,
-                cert,
-                transport_ed25519_key(&cert.peer_id).unwrap(),
-                NOW,
-            )
-            .unwrap();
-    }
 }
 
 fn welcome_from(

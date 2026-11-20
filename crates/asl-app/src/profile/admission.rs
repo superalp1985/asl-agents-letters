@@ -46,6 +46,8 @@ pub struct CoreAdmission {
     proof_budget: ProofVerificationBudget,
     #[cfg(windows)]
     mls_joins: group_rooms::MlsJoinAttempts,
+    #[cfg(windows)]
+    group_directories: Option<group_rooms::GroupDirectoryCache>,
 }
 
 struct PeerAdmission {
@@ -282,6 +284,8 @@ impl CoreAdmission {
             proof_budget: ProofVerificationBudget::new(Instant::now()),
             #[cfg(windows)]
             mls_joins: group_rooms::MlsJoinAttempts::default(),
+            #[cfg(windows)]
+            group_directories: None,
         })
     }
 
@@ -694,6 +698,10 @@ impl CoreAdmission {
             return;
         }
 
+        #[cfg(windows)]
+        if let Some(directories) = &mut self.group_directories {
+            directories.observe(&verified);
+        }
         batch.commands.push(NetworkCommand::DecideDhtRecord {
             candidate_id,
             accept: true,
@@ -945,23 +953,21 @@ impl CoreAdmission {
         now_ms: u64,
         batch: &mut AdmissionBatch,
     ) {
-        let proof_succeeded = self.peers.get_mut(&connection_id).is_some_and(|peer| {
-            peer.history.as_mut().is_some_and(|history| {
-                peer.session
-                    .finish_network_hello_ipc(
-                        connection_id,
-                        &proof,
-                        history,
-                        &mut self.resolver,
-                        now_ms,
-                    )
-                    .is_ok()
-            })
+        let verified = self.peers.get_mut(&connection_id).and_then(|peer| {
+            peer.session
+                .finish_network_hello_ipc(
+                    connection_id,
+                    &proof,
+                    peer.history.as_mut()?,
+                    &mut self.resolver,
+                    now_ms,
+                )
+                .ok()
         });
-        if !proof_succeeded {
+        let Some(_verified) = verified else {
             self.close(connection_id, batch);
             return;
-        }
+        };
         let admitted = self.peers.get_mut(&connection_id).and_then(|peer| {
             peer.pending_proof_id = None;
             let agent_id = peer
@@ -975,6 +981,8 @@ impl CoreAdmission {
                 if let Some(peer) = self.peers.get_mut(&connection_id) {
                     peer.admitted_agent = Some(agent_id);
                 }
+                #[cfg(windows)]
+                self.observe_admitted_mls_directory(&_verified);
                 batch.events.push(AdmittedNetworkEvent::PeerAdmitted {
                     connection_id,
                     peer_id,
@@ -1198,7 +1206,7 @@ fn mark_hello_response_seen(
     true
 }
 
-fn fresh_id() -> Result<[u8; 16], AslError> {
+pub(crate) fn fresh_id() -> Result<[u8; 16], AslError> {
     for _ in 0..8 {
         let mut id = [0; 16];
         SysRng

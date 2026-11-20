@@ -102,6 +102,14 @@ impl Store {
                 return Err(AslError::PolicyVersionConflict);
             }
             require_room_version(&tx, packet.group_id, *expected)?;
+            let target = members
+                .members
+                .iter()
+                .find(|member| {
+                    member.certificate.agent_id == *agent && &member.certificate.peer_id == device
+                })
+                .ok_or(AslError::InvalidDeviceCertificate)?;
+            target.register(&tx, members.chain_id, now_ms)?;
             members.require(&tx, creator, (*agent, device), None, now_ms)?;
         }
         prune(&tx, now)?;
