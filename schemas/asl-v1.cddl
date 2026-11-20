@@ -8,6 +8,8 @@ control-frame = hello / query / answer / offer / fetch-request /
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
+; Authenticated plaintext inside an MLS application message, not an outer frame.
+group-application = query / answer / offer
 
 id128 = bstr .size 16
 hash32 = bstr .size 32

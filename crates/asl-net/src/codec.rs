@@ -9,7 +9,9 @@ use asl_types::protocol::{
 };
 
 mod bulk;
+mod group;
 pub use bulk::{BULK_PROTOCOL, BulkCodec, BulkOperation, BulkRequest, BulkResponse, BulkStatus};
+pub use group::{GROUP_PROTOCOL, GroupCodec};
 use libp2p::{
     StreamProtocol,
     futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},

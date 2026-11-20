@@ -6,4 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asl-types = { path = "../asl-types" }
 openmls.workspace = true
+
+[dev-dependencies]
+openmls_basic_credential = "=0.6.0"
+openmls_rust_crypto = "=0.6.0"

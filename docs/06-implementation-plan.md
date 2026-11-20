@@ -692,6 +692,8 @@ cargo test -p asl-app --lib mcp_offer_and_approved_tcp_chunks_publish_to_authori
 
 验收：邀请仅定向到指定 PeerId；加入前不接收群帧；非成员、伪造 credential、过期或重复消息、未授权成员变更和超预算 catch-up 均拒绝。并发/陈旧 commit 可恢复或明确进入 `needs_sync`，不静默分叉。离线成员消息尽力投递、不承诺必达；状态可从获准成员同步有限 commit，超预算后需重新邀请。验证成员退出/移除后的新消息不可解密，并说明旧消息无法远程删除。
 
+T31 初始编解码切片（2026-11-20）：新增独立群子流 codec，复用冻结的 `GroupEnvelope`；MLS 应用明文只接受规范 Query、Answer、Offer。OpenMLS 0.9.2 集成夹具验证真实入组、应用消息及移除后新消息无法解密。此阶段未开放群子流，不包含生产链身份绑定、持久化、邀请、fan-out 或同步。线上/本机群 ID 的映射与 SQLite provider 兼容性已专项核对，待实施项见 [群组接线记录](group-rooms.md)。
+
 ### T32 — 群策略、浏览/回答与传输确认
 
 依赖 T07、T20、T27、T31。创建确定性策略与 Agent 群事件适配。添加 `browse_enabled`、`answer_enabled`；回答关闭时保留群消息浏览但模型调用/回答数为零。群回复不能触发新回复；按 group/message ID 去重并沿用单轮预算。

@@ -1,6 +1,9 @@
 use std::io::ErrorKind;
 
-use asl_net::codec::{CONTROL_PROTOCOL, ControlCodec, IDENTITY_PROOF_PROTOCOL, IdentityProofCodec};
+use asl_net::codec::{
+    CONTROL_PROTOCOL, ControlCodec, GROUP_PROTOCOL, GroupCodec, IDENTITY_PROOF_PROTOCOL,
+    IdentityProofCodec,
+};
 use asl_types::protocol::{WireFrame, decode_control, decode_frame};
 use libp2p::{futures::io::Cursor, request_response::Codec};
 
@@ -95,10 +98,66 @@ async fn identity_proof_matches_the_fixed_request_and_response_vectors() {
 }
 
 #[tokio::test]
+async fn group_codec_preserves_the_frozen_envelope_in_both_directions() {
+    let payload = fixture(include_str!(
+        "../../../schemas/vectors/group-envelope-v1.hex"
+    ));
+    let WireFrame::GroupEnvelope(envelope) = decode_frame(&payload).unwrap() else {
+        panic!("wrong group fixture");
+    };
+    let mut sent = Vec::new();
+    GroupCodec
+        .write_request(&GROUP_PROTOCOL, &mut sent, envelope.clone())
+        .await
+        .unwrap();
+    assert_eq!(sent, prefixed(&payload));
+    assert_eq!(
+        GroupCodec
+            .read_request(&GROUP_PROTOCOL, &mut Cursor::new(&sent))
+            .await
+            .unwrap(),
+        envelope
+    );
+    let mut returned = Vec::new();
+    GroupCodec
+        .write_response(&GROUP_PROTOCOL, &mut returned, envelope.clone())
+        .await
+        .unwrap();
+    assert_eq!(returned, sent);
+    assert_eq!(
+        GroupCodec
+            .read_response(&GROUP_PROTOCOL, &mut Cursor::new(returned))
+            .await
+            .unwrap(),
+        envelope
+    );
+    assert!(
+        GroupCodec
+            .read_request(&CONTROL_PROTOCOL, &mut Cursor::new(&sent))
+            .await
+            .is_err()
+    );
+    assert!(
+        ControlCodec
+            .read_request(&CONTROL_PROTOCOL, &mut Cursor::new(sent))
+            .await
+            .is_err()
+    );
+    let ack = fixture(include_str!("../../../schemas/vectors/ack-v1.hex"));
+    assert!(
+        GroupCodec
+            .read_response(&GROUP_PROTOCOL, &mut Cursor::new(prefixed(&ack)))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn channel_limits_reject_the_header_without_reading_a_body() {
     let mut oversized_control = Cursor::new(65_537_u32.to_be_bytes());
     let mut oversized_request = Cursor::new(94_u32.to_be_bytes());
     let mut oversized_proof = Cursor::new(262_145_u32.to_be_bytes());
+    let mut oversized_group = Cursor::new(262_145_u32.to_be_bytes());
     assert_eq!(
         ControlCodec
             .read_request(&CONTROL_PROTOCOL, &mut oversized_control)
@@ -126,6 +185,15 @@ async fn channel_limits_reject_the_header_without_reading_a_body() {
     assert_eq!(oversized_control.position(), 4);
     assert_eq!(oversized_request.position(), 4);
     assert_eq!(oversized_proof.position(), 4);
+    assert_eq!(
+        GroupCodec
+            .read_request(&GROUP_PROTOCOL, &mut oversized_group)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(oversized_group.position(), 4);
 }
 
 #[tokio::test]
