@@ -550,6 +550,10 @@ T23 下载来源登记（2026-11-20）：本机发起的 Fetch 收到相符清�
 
 ### T24 — Inline、PDF 与头像 helper
 
+直连小文件接收接口（2026-11-20）：本机 handler 可把**已经获准并开始**的下载任务及其已验证来源传给 `LocalDownloads::prepare_inline`，得到走原有准入通道的一次请求与只在内存中的接收凭据。`InlineDownload::receive` 按原请求、AgentId、PeerId、连接及有效期接收匹配的响应；不匹配的响应不消费凭据，匹配响应只能处理一次。复用 Store 的块校验、同步、整文件校验和不覆盖重命名。空文件不制造虚拟块；超过 32 KiB 必须使用分块路径，不回退到 inline。无独立种子文件，不根据 Offer 自动落盘。
+
+Windows x64 定向验收：`cargo +1.100.0 test -p asl-app --lib downloads:: --locked --offline -- --test-threads=1` 通过 8 项，其中 3 项新增覆盖 0 / 32 KiB、错连接或 lease 后仍能接收正确响应、重放、损坏、过期、撤权和超限；`asl-app` 全目标严格 Clippy 通过。本轮使用本机真实 SQLite、NTFS 和已登记证书的测试夹具；未跑两台机器或公网联调。默认后台尚未接入此 handler，不能视为大文件调度或公网下载验收。
+
 依赖 T23、T09。创建 transfer inline、app helper roles、受限头像重编码。
 
 验收：32KiB inline 上限、未经请求的附件不落盘；PDF 提取 10 秒/512MiB 限制、超页数/输出长度拒绝；解压炸弹/巨大像素/恶意 SVG 拒绝。PDF 输入不落盘且限制在 IPC 4 MiB 帧内；PNG/JPEG/静态 WebP 头像重编码≤128×128、≤64KiB；不能自动执行或打开任何收到的文件。

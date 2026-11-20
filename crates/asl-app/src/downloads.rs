@@ -1,6 +1,7 @@
 //! Core-local entry point for [`AdmittedNetworkEvent::FetchManifestReceived`].
 //! The caller supplies an existing inbox grant and a filename chosen locally.
-//! Nothing here accepts offers, enrolls devices, or schedules chunk requests.
+//! Nothing here accepts offers or enrolls devices. Small files can be requested
+//! explicitly over the admitted bulk channel after the download has started.
 //!
 //! [`AdmittedNetworkEvent::FetchManifestReceived`]: crate::profile::AdmittedNetworkEvent::FetchManifestReceived
 
@@ -16,6 +17,9 @@ use asl_types::{
 };
 
 use crate::{VerifiedFetchManifest, paths::AppPaths, supervisor::unix_time_ms};
+
+mod inline;
+pub use inline::InlineDownload;
 
 pub struct LocalDownloads {
     broker: DownloadBroker,
