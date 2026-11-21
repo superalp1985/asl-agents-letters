@@ -147,3 +147,5 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 ```
 
 脚本不写死盘符，会使用 `ASL_DEV_ROOT`，或在仓库上级目录中查找现有 `dev-cache`。
+
+测试会打印三个节点的 PeerId、Core 进程号、TCP 监听端口和每次拨号的目标。真实容器的状态轮询超时时，测试会在清理临时程序前查询 Windows Filtering Platform，按本次 `asl-net.exe`、TCP 和 IPv4 回环地址筛选。成功导出的 `netevents.xml` 和 `filters.xml` 位于开发根的 `work/tmp/asl-group-wfp-*` 下，控制台会给出路径。用拨号端口匹配丢弃事件，再用事件的 `filterId` 查过滤规则。若事件为空，阻断原因仍待确认。[Windows 网络隔离排查](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)

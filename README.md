@@ -92,6 +92,8 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 ## 实施与验证状态
 
+Windows 三节点群组最近一次管理员测试已到达 TCP 监听阶段，在连接准入前失败。Net 的容器网络权限登记已修正，真实容器互通待复测。[验证记录](docs/plan-validation.md#2026-11-22-t31-网络容器权限登记)
+
 **加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。三 Core 回环用例覆盖群成员变化、收发限制和资源流程。真实 AppContainer 群互通、公网/中继及真实链 RPC 仍未验收；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
@@ -244,6 +246,8 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 - Set `ASL_HOME` for application data. Choose the development root with `scripts/dev-env.ps1 -Root` or `ASL_DEV_ROOT`. Startup fails when the configured path is unavailable.
 
 ### Implementation Status
+
+In the most recent Windows three-node group test, all three network processes reached TCP listen readiness, but peer admission failed. The launcher now registers the network capabilities on each Net AppContainer profile. The change awaits an elevated end-to-end run. [Validation notes](docs/plan-validation.md#2026-11-22-t31-网络容器权限登记)
 
 **Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. Three-Core loopback scenarios cover membership changes, constrained delivery, and resource flows. Actual AppContainer group connectivity, public/relay networking, and live chain RPC remain unverified; other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
 

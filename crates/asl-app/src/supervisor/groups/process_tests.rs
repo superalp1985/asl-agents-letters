@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
     net::{Ipv4Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
@@ -378,8 +378,12 @@ fn group_core_child() {
     });
     let result = supervisor.run_loop(
         |_, event| {
-            if let AdmittedNetworkEvent::OperationFailed { code, .. } = event {
-                eprintln!("Group fixture Net operation failed: {code:?}");
+            if let AdmittedNetworkEvent::OperationFailed { code, operation_id } = event {
+                eprintln!(
+                    "Group fixture Core {} Net operation {} failed: {code:?}",
+                    std::process::id(),
+                    alloy_primitives::hex::encode(operation_id)
+                );
             }
             Ok(())
         },
@@ -453,6 +457,7 @@ fn parse_hex<const N: usize>(value: &Value) -> [u8; N] {
 
 struct CoreProcess {
     node: String,
+    net_program: Option<PathBuf>,
     child: Child,
     input: Option<ChildStdin>,
     output: Receiver<io::Result<Value>>,
@@ -516,11 +521,20 @@ impl CoreProcess {
         thread::spawn(move || forward_replies(BufReader::new(stdout), output));
         let mut core = Self {
             node: home.file_name().unwrap().to_string_lossy().into_owned(),
+            net_program: loopback_fixture
+                .then(|| home.parent().unwrap().join("bin").join("asl-net.exe")),
             child,
             input,
             output: messages,
         };
         let ready = core.receive("startup / listening");
+        eprintln!(
+            "Group fixture {} (Core {}): peer={} tcp={}",
+            core.node,
+            core.child.id(),
+            ready["peer"],
+            ready["tcp"]
+        );
         (core, ready)
     }
 
@@ -554,6 +568,10 @@ impl CoreProcess {
         let endpoint: SocketAddr = ready["tcp"].as_str().unwrap().parse().unwrap();
         assert!(endpoint.ip().is_loopback());
         assert_ne!(endpoint.port(), 0);
+        eprintln!(
+            "Group fixture {} dialing {} at {endpoint}",
+            self.node, ready["peer"]
+        );
         assert_eq!(
             self.ok(Action::Dial(endpoint, expected.as_bytes().to_vec()))["queued"],
             true
@@ -636,7 +654,12 @@ impl CoreProcess {
             if done(&reply) {
                 return reply;
             }
-            assert!(Instant::now() < deadline, "{stage}: {reply}");
+            if Instant::now() >= deadline {
+                if let Some(program) = &self.net_program {
+                    report_loopback_filters(program);
+                }
+                panic!("Core {} during {stage}: {reply}", self.node);
+            }
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -648,6 +671,58 @@ impl CoreProcess {
             Err(RecvTimeoutError::Disconnected)
         ));
         assert!(self.child.wait().unwrap().success());
+    }
+}
+
+// Capture while the executable and its temporary per-profile filters still exist.
+fn report_loopback_filters(program: &Path) {
+    let Some(windows) = std::env::var_os("SystemRoot") else {
+        eprintln!("WFP diagnostics unavailable: missing SystemRoot");
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "asl-group-wfp-{}-{}",
+        std::process::id(),
+        unix_time_ms().unwrap_or_default()
+    ));
+    if let Err(error) = fs::create_dir(&directory) {
+        eprintln!("WFP diagnostics directory: {error}");
+        return;
+    }
+    let netsh = Path::new(&windows).join("System32/netsh.exe");
+    for report in ["netevents", "filters"] {
+        let destination = directory.join(format!("{report}.xml"));
+        let result = Command::new(&netsh)
+            .args(["wfp", "show", report])
+            .arg(format!("file={}", destination.display()))
+            .arg(format!("appid={}", program.display()))
+            .args(["protocol=6", "localaddr=127.0.0.1", "remoteaddr=127.0.0.1"])
+            .stdin(Stdio::null())
+            .spawn()
+            .and_then(wait_for_report);
+        match result {
+            Ok(status) if status.success() && destination.is_file() => {
+                eprintln!("WFP {report}: {}", destination.display())
+            }
+            other => eprintln!("WFP {report} unavailable: {other:?}"),
+        }
+    }
+}
+
+fn wait_for_report(mut child: Child) -> io::Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            result => {
+                if child.kill().is_ok() {
+                    let _ = child.wait();
+                }
+                result?;
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+        }
     }
 }
 

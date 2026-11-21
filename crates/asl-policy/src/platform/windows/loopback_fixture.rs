@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     os::windows::io::AsRawHandle,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -73,6 +74,18 @@ impl LoopbackFixture {
 
     pub(super) fn remove(mut self) -> Result<(), AslError> {
         let listener = self.listener.take().map(|(job, mut child)| {
+            let state = match child.try_wait() {
+                Ok(None) => "running".into(),
+                Ok(Some(status)) => format!("already exited ({status})"),
+                Err(error) => format!("status unavailable ({error})"),
+            };
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Loopback fixture Core {} {}: -is helper {} {state} before cleanup",
+                std::process::id(),
+                self.sid_argument,
+                child.id()
+            );
             drop(job);
             child.wait()
         });

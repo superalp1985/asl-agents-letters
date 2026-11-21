@@ -119,10 +119,11 @@ struct Profile {
 }
 
 impl Profile {
-    fn create(_role: SandboxRole) -> Result<Self, AslError> {
+    fn create(_role: SandboxRole, capabilities: &[SID_AND_ATTRIBUTES]) -> Result<Self, AslError> {
         let name_text = format!("asl.{}", rand::random::<u128>());
         let name = HSTRING::from(&name_text);
-        let sid = unsafe { CreateAppContainerProfile(&name, &name, &name, None) }
+        let requested = (!capabilities.is_empty()).then_some(capabilities);
+        let sid = unsafe { CreateAppContainerProfile(&name, &name, &name, requested) }
             .map_err(|error| setup_error("create_appcontainer", error))?;
         let profile = Self {
             name,
@@ -263,8 +264,6 @@ pub(crate) fn spawn(
     limits: SandboxLimits,
 ) -> Result<Child, AslError> {
     let pin = pin_executable(program).map_err(|_| AslError::SandboxUnavailable)?;
-    let profile = Profile::create(role)?;
-    let grant = ExecutableGrant::new(pin, profile.sid)?;
     let job = Arc::new(Job::create(
         usize::try_from(limits.memory_bytes).map_err(|_| AslError::SandboxUnavailable)?,
         limits.cpu_time_ms.map(|value| (value * 10_000) as i64),
@@ -286,6 +285,9 @@ pub(crate) fn spawn(
             Attributes: SE_GROUP_ENABLED as u32,
         })
         .collect();
+    // Register the same role capabilities that we put in the process token.
+    let profile = Profile::create(role, &capabilities)?;
+    let grant = ExecutableGrant::new(pin, profile.sid)?;
     let security = SECURITY_CAPABILITIES {
         AppContainerSid: profile.sid,
         Capabilities: if capabilities.is_empty() {

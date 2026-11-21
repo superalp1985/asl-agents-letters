@@ -678,3 +678,9 @@ Windows 上通过窗口的正常关闭请求退出独立演示资料的 `asl-ui`
 旧测试同步等待入站回环调试程序退出，导致程序运行期间 Net 无法启动。测试现为每个 Net 的调试程序分配独立管道，并用 Windows Job 管理其生命周期。父进程会报告节点、请求阶段和输出读取错误。
 
 本机普通权限验证通过三项，分别覆盖三 Core 协议互通、带非 UTF-8 行的回复读取、持有者关闭后 Windows 回收仍在运行的辅助进程。正式 Net、Worker、Extractor 构建成功。`asl-app` 与 `asl-policy` 的库及测试目标严格 Clippy 通过。修正后的真实 AppContainer 三节点互通待管理员复跑。
+
+### 2026-11-22 T31 网络容器权限登记
+
+随后一次管理员运行中，三个 Net 均返回 TCP 监听端点。拨号报告 `Transport`，等待身份准入时连接列表为空，用例在 23.04 秒后失败。01:55 这次运行的 Windows 防火墙事件 2097 记录了三个临时容器各自入站、出站阻止规则的创建，2052 记录规则清理。两类事件都记录配置变化。此次拨号缺少可对应的丢包记录。
+
+启动器原先只把 Net 的两项网络能力交给进程 token。现用同一份能力列表创建 Windows profile 和进程 token，Worker 与 Extractor 的列表均为空。修改后运行 `asl-policy --test sandbox_probe`，16 项通过，两个需外部 TCP/UDP 端点的用例按标记跳过。同一运行时段的 Windows 日志出现 ASL profile 的 Internet 与 Intranet 入站、出站允许规则。三 Core 宿主线程协议用例和测试输出读取用例均通过。`asl-app` 和 `asl-policy` 的库和测试目标通过严格 Clippy。修正后的真实 AppContainer 三节点群消息仍待管理员复测。
