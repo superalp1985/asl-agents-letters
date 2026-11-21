@@ -32,6 +32,13 @@ pub struct MlsSyncAddAuthority<'a> {
     pub chain_id: u64,
 }
 
+pub struct MlsRemoveAuthority<'a> {
+    pub source: &'a PeerId,
+    pub removed: &'a PeerId,
+    pub survivors: &'a [MlsMemberEvidence],
+    pub chain_id: u64,
+}
+
 impl Store {
     pub fn next_mls_sync_room(
         &self,
@@ -177,9 +184,69 @@ impl Store {
         tx.commit().map_err(database_error)?;
         Ok(version)
     }
+
+    /// Persist a single Remove by the room creator. The removed leaf's
+    /// authority may have expired; it is never used as a source or survivor.
+    pub fn commit_verified_mls_remove(
+        &mut self,
+        update: MlsRoomUpdate<'_>,
+        authority: MlsRemoveAuthority<'_>,
+        recorded_at_ms: u64,
+        mut current_time: impl FnMut() -> Result<u64, AslError>,
+    ) -> Result<RoomVersion, AslError> {
+        let MlsRemoveAuthority {
+            source,
+            removed,
+            survivors,
+            chain_id,
+        } = authority;
+        let event = update.event.as_ref().ok_or(AslError::InvalidPolicyState)?;
+        let projection = member_ids(survivors)?;
+        if !matches!(event.kind, MlsJournalKind::SyncCommit(_))
+            || removed == source
+            || removed == event.sender
+            || projection != update.members.iter().map(peer_text).collect()
+        {
+            return Err(AslError::InvalidPolicyState);
+        }
+        let recorded_at = sql_number(recorded_at_ms)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if room_version(&tx, update.wire_id, event.sender)? != update.expected {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        let former = active_members(&tx, update.wire_id, event.sender)?;
+        if !former.contains(source)
+            || !former.contains(removed)
+            || projection
+                != former
+                    .iter()
+                    .filter(|p| *p != removed)
+                    .map(peer_text)
+                    .collect()
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let now_ms = current_time()?;
+        for member in survivors {
+            require_member(&tx, member, chain_id, now_ms)?;
+        }
+        let version = commit_candidate(&tx, update, None, recorded_at)?;
+        let now_ms = current_time()?;
+        if survivors
+            .iter()
+            .any(|m| now_ms >= m.certificate.expires_at_ms)
+        {
+            return Err(AslError::ExpiredMessage);
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(version)
+    }
 }
 
-fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslError> {
+pub(super) fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslError> {
     if members.len() > MAX_GROUP_MEMBERS {
         return Err(AslError::QuotaExceeded);
     }
@@ -193,7 +260,7 @@ fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslErro
     Ok(ids)
 }
 
-fn room_version(
+pub(super) fn room_version(
     connection: &Connection,
     wire_id: Hash32,
     creator: &PeerId,

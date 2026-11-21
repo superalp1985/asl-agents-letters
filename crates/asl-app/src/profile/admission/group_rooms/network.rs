@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Instant};
 
+use asl_groups::GroupApplication;
 use asl_net::transport::REQUEST_TIMEOUT;
 use asl_store::{
     Store,
@@ -7,7 +8,7 @@ use asl_store::{
 };
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32, Id128},
+    ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{GroupBody, GroupMembership, GroupPacket},
     task::GroupId,
 };
@@ -51,6 +52,12 @@ pub enum MlsNetworkOutcome {
     SyncStopped {
         wire_id: Hash32,
     },
+    ApplicationReceived {
+        wire_id: Hash32,
+        epoch: u64,
+        sender: PeerId,
+        application: Box<GroupApplication>,
+    },
 }
 
 #[derive(Default)]
@@ -64,6 +71,7 @@ struct PendingJoin {
     request: GroupPacket,
     local_id: GroupId,
     local_name: String,
+    rejoin_base: Option<RoomVersion>,
     expires_at_ms: u64,
     deadline: Instant,
 }
@@ -170,6 +178,15 @@ impl CoreAdmission {
             directories,
             now_ms,
         )?;
+        // Take the old snapshot version before sending. A Welcome cannot
+        // switch a new join into a rejoin or overwrite a concurrent advance.
+        let (local_id, rejoin_base) = match store.mls_room_snapshot(send.invite.wire_id)? {
+            Some(saved) if send.invite.base_epoch > saved.version.mls_epoch => {
+                (saved.local_id, Some(saved.version))
+            }
+            Some(_) => return Err(AslError::PolicyVersionConflict),
+            None => (send.local_id.clone(), None),
+        };
         let request_handle = fresh_id()?;
         if self.mls_joins.pending.contains_key(&request_handle) {
             return Err(AslError::QuotaExceeded);
@@ -188,8 +205,9 @@ impl CoreAdmission {
                 connection_id: send.connection_id,
                 invite: send.invite.clone(),
                 request,
-                local_id: send.local_id.clone(),
+                local_id,
                 local_name: send.local_name.to_owned(),
+                rejoin_base,
                 expires_at_ms: deadline_ms,
                 deadline,
             },
@@ -208,6 +226,7 @@ impl CoreAdmission {
         now_ms: u64,
         enqueue: impl FnOnce(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<Option<MlsNetworkOutcome>, AslError> {
+        let started = Instant::now();
         self.mls_joins.expire(now_ms);
         match event {
             NetworkEvent::UnverifiedGroupRequest {
@@ -218,6 +237,32 @@ impl CoreAdmission {
             } => {
                 if now_ms >= deadline_ms {
                     return Err(AslError::ExpiredMessage);
+                }
+                if matches!(&request.body, GroupBody::Application(_)) {
+                    let (sender, application) = self.receive_loopback_mls_application(
+                        store,
+                        connection_id,
+                        &request,
+                        deadline_ms,
+                        now_ms,
+                    )?;
+                    let response = GroupPacket {
+                        body: GroupBody::Membership(GroupMembership::Receipt),
+                        ..request
+                    };
+                    let outcome = MlsNetworkOutcome::ApplicationReceived {
+                        wire_id: response.group_id,
+                        epoch: response.epoch,
+                        sender,
+                        application: Box::new(application),
+                    };
+                    // The event is committed even if the receipt cannot be queued.
+                    let _ = enqueue(NetworkCommand::ReplyGroup {
+                        connection_id,
+                        response_id,
+                        response,
+                    });
+                    return Ok(Some(outcome));
                 }
                 if matches!(
                     &request.body,
@@ -264,7 +309,7 @@ impl CoreAdmission {
                         )?,
                         None,
                     ),
-                    // Standalone updates and application frames are not active.
+                    // Standalone membership updates are not accepted.
                     _ => return Err(AslError::PolicyDenied),
                 };
                 self.admitted_peer_identity(connection_id, now_ms)?;
@@ -314,6 +359,8 @@ impl CoreAdmission {
                     .pending
                     .remove(&request_handle)
                     .ok_or(AslError::InvalidPolicyState)?;
+                let clock =
+                    SyncClock::response(now_ms, started, attempt.expires_at_ms, attempt.deadline);
                 let version = self.finish_approved_mls_welcome(
                     store,
                     ApprovedMlsWelcome {
@@ -322,10 +369,14 @@ impl CoreAdmission {
                         reply: &response,
                         local_id: &attempt.local_id,
                         local_name: &attempt.local_name,
+                        rejoin_base: attempt.rejoin_base,
                         directories,
                     },
-                    now_ms,
+                    &clock,
                 )?;
+                if attempt.rejoin_base.is_some() {
+                    self.mls_sync.forget_room(response.group_id);
+                }
                 Ok(Some(MlsNetworkOutcome::Joined {
                     local_id: attempt.local_id,
                     version,

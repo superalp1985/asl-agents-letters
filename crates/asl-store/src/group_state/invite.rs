@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use super::{
     MAX_SEALED_ROOM_BYTES, MlsMemberEvidence, PendingMlsRoom, RoomVersion, insert_mls_room,
-    recovery::require_member, sql_number,
+    recovery::require_member, sql_number, transition::peer_text,
 };
 use crate::{Store, database_error};
 
@@ -121,12 +121,17 @@ impl Store {
         }
         let now = sql_number(now_ms)?;
         let agent = bs58::encode(invite.inviter.as_bytes()).into_string();
-        let inviter = bs58::encode(invite.inviter_device.as_bytes()).into_string();
+        let inviter = peer_text(&invite.inviter_device);
         let tx = immediate(&mut self.connection)?;
         prune(&tx, now)?;
         let can_prompt = tx
             .query_row(
-                "SELECT NOT EXISTS (SELECT 1 FROM mls_room_states WHERE wire_group_id=?2)
+                "SELECT NOT EXISTS (
+                       SELECT 1 FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+                       WHERE s.wire_group_id=?2 AND (
+                           g.state<>'needs_sync' OR g.creator_peer_id<>?8 OR g.mls_epoch>=?9
+                       )
+                   )
                    AND NOT EXISTS (
                        SELECT 1 FROM mls_incoming_invites
                        WHERE invite_id=?1 OR (inviter_agent_id=?3 AND shown_at_ms>?4)
@@ -141,6 +146,8 @@ impl Store {
                     now - GLOBAL_WINDOW_MS,
                     MAX_HOURLY_INVITES,
                     MAX_OPEN_INVITES,
+                    inviter,
+                    sql_number(invite.base_epoch)?,
                 ],
                 |row| row.get::<_, bool>(0),
             )
@@ -360,13 +367,35 @@ impl Store {
     pub fn finish_mls_join(
         &mut self,
         join: MlsJoinedRoom<'_>,
-        now_ms: u64,
+        current_time: impl FnMut() -> Result<u64, AslError>,
+    ) -> Result<RoomVersion, AslError> {
+        self.finish_mls_admission(join, None, current_time)
+    }
+
+    /// Replace the paused room with an independently approved, forward Welcome.
+    /// Core must supply a fresh sealed snapshot at `expected.revision + 1`,
+    /// without the previous MLS ratchet, sync history, or sync budget.
+    pub fn finish_mls_rejoin(
+        &mut self,
+        join: MlsJoinedRoom<'_>,
+        expected: RoomVersion,
+        current_time: impl FnMut() -> Result<u64, AslError>,
+    ) -> Result<RoomVersion, AslError> {
+        self.finish_mls_admission(join, Some(expected), current_time)
+    }
+
+    fn finish_mls_admission(
+        &mut self,
+        join: MlsJoinedRoom<'_>,
+        expected: Option<RoomVersion>,
+        mut current_time: impl FnMut() -> Result<u64, AslError>,
     ) -> Result<RoomVersion, AslError> {
         let invite = join.invite;
         let roster = join.members;
         if join.room.wire_id != invite.wire_id
             || join.room.creator != &invite.inviter_device
             || invite.base_epoch.checked_add(1) != Some(join.room.mls_epoch)
+            || !(1..=MAX_SEALED_ROOM_BYTES).contains(&join.room.sealed_snapshot.len())
             || roster.len() > MAX_GROUP_MEMBERS
             || !roster.iter().any(|member| {
                 member.certificate.peer_id == invite.recipient_device
@@ -386,6 +415,7 @@ impl Store {
             return Err(AslError::InvalidPolicyState);
         }
         let tx = immediate(&mut self.connection)?;
+        let now_ms = current_time()?;
         let revision = tx
             .query_row(
                 "SELECT revision FROM policy_state WHERE singleton=1",
@@ -394,6 +424,8 @@ impl Store {
             )
             .map_err(database_error)?;
         if revision != sql_number(join.expected_policy_revision)?
+            || expected
+                .is_some_and(|version| version.policy_revision != join.expected_policy_revision)
             || !matches_invite(&tx, invite, now_ms)?
         {
             return Err(AslError::PolicyVersionConflict);
@@ -416,14 +448,18 @@ impl Store {
             member.register(&tx, join.chain_id, now_ms)?;
         }
         let now = sql_number(now_ms)?;
-        insert_mls_room(&tx, &join.room, now)?;
-        tx.execute(
-            "UPDATE mls_incoming_invites SET state='closed', sealed_package=NULL
-             WHERE wire_group_id=?1 AND state<>'closed'",
-            [invite.wire_id.as_bytes()],
-        )
-        .map_err(database_error)?;
         let local_id = hex::encode(join.room.local_id.0.as_bytes());
+        let version = if let Some(expected) = expected {
+            replace_paused_room(&tx, &join, &local_id, expected, now)?
+        } else {
+            insert_mls_room(&tx, &join.room, now)?;
+            RoomVersion {
+                revision: 1,
+                mls_epoch: join.room.mls_epoch,
+                membership_epoch: 1,
+                policy_revision: join.expected_policy_revision,
+            }
+        };
         {
             let mut stmt = tx
                 .prepare(
@@ -433,7 +469,7 @@ impl Store {
                 .map_err(database_error)?;
             for member in roster {
                 let device = &member.certificate.peer_id;
-                let peer = bs58::encode(device.as_bytes()).into_string();
+                let peer = peer_text(device);
                 let role = if device == &invite.inviter_device {
                     "creator"
                 } else {
@@ -443,13 +479,16 @@ impl Store {
                     .map_err(database_error)?;
             }
         }
+        let final_time = current_time()?;
+        if final_time >= invite.expires_at_ms
+            || roster
+                .iter()
+                .any(|member| final_time >= member.certificate.expires_at_ms)
+        {
+            return Err(AslError::ExpiredMessage);
+        }
         tx.commit().map_err(database_error)?;
-        Ok(RoomVersion {
-            revision: 1,
-            mls_epoch: join.room.mls_epoch,
-            membership_epoch: 1,
-            policy_revision: join.expected_policy_revision,
-        })
+        Ok(version)
     }
 
     pub fn prune_mls_expired(&mut self, now_ms: u64) -> Result<(), AslError> {
@@ -460,6 +499,75 @@ impl Store {
         super::transition::prune_expired_events(&tx, now)?;
         tx.commit().map_err(database_error)
     }
+}
+
+fn replace_paused_room(
+    tx: &Transaction<'_>,
+    join: &MlsJoinedRoom<'_>,
+    local_id: &str,
+    expected: RoomVersion,
+    now: i64,
+) -> Result<RoomVersion, AslError> {
+    let revision = sql_number(expected.revision)?;
+    let next_revision = revision.checked_add(1).ok_or(AslError::QuotaExceeded)?;
+    let updated = tx
+        .execute(
+            "UPDATE mls_room_states SET sealed_snapshot=?3,revision=?4
+             WHERE local_group_id=?1 AND wire_group_id=?2 AND revision=?5 AND EXISTS (
+                 SELECT 1 FROM asl_groups WHERE group_id=?1 AND state='needs_sync'
+                   AND creator_peer_id=?6 AND mls_epoch=?7 AND membership_epoch=?8
+                   AND mls_epoch<?9
+             )",
+            params![
+                local_id,
+                join.room.wire_id.as_bytes(),
+                join.room.sealed_snapshot,
+                next_revision,
+                revision,
+                peer_text(join.room.creator),
+                sql_number(expected.mls_epoch)?,
+                sql_number(expected.membership_epoch)?,
+                sql_number(join.invite.base_epoch)?,
+            ],
+        )
+        .map_err(database_error)?;
+    if updated != 1 {
+        return Err(AslError::PolicyVersionConflict);
+    }
+    // The room remains paused. Preserve its local label and all authority versions.
+    tx.execute(
+        "UPDATE asl_groups SET mls_epoch=?2,updated_at_ms=?3 WHERE group_id=?1",
+        params![local_id, sql_number(join.room.mls_epoch)?, now],
+    )
+    .map_err(database_error)?;
+    tx.execute("DELETE FROM group_members WHERE group_id=?1", [local_id])
+        .map_err(database_error)?;
+    tx.execute("DELETE FROM mls_sync_log WHERE room_id=?1", [local_id])
+        .map_err(database_error)?;
+    // Preserve replay markers and package consumption, not old branch replies.
+    tx.execute(
+        "UPDATE mls_outgoing_invites SET welcome=NULL WHERE wire_group_id=?1 AND welcome IS NOT NULL",
+        [join.room.wire_id.as_bytes()],
+    )
+    .map_err(database_error)?;
+    close_room_invites(tx, join.room.wire_id)?;
+    Ok(RoomVersion {
+        revision: next_revision as u64,
+        mls_epoch: join.room.mls_epoch,
+        ..expected
+    })
+}
+
+/// Close approvals from the previous room state without freeing prompt quota.
+/// Room creation must also call this to prevent a new-room approval becoming a rejoin.
+pub(super) fn close_room_invites(tx: &Transaction<'_>, wire_id: Hash32) -> Result<(), AslError> {
+    tx.execute(
+        "UPDATE mls_incoming_invites SET state='closed', sealed_package=NULL
+         WHERE wire_group_id=?1 AND state<>'closed'",
+        [wire_id.as_bytes()],
+    )
+    .map_err(database_error)?;
+    Ok(())
 }
 
 fn immediate(connection: &mut Connection) -> Result<Transaction<'_>, AslError> {
@@ -483,13 +591,17 @@ fn list_invites(
 ) -> Result<Vec<MlsIncomingInvite>, AslError> {
     let mut stmt = connection
         .prepare(
-            "SELECT invite_id,wire_group_id,base_epoch,inviter_agent_id,inviter_peer_id,expires_at_ms
+            "SELECT i.invite_id,i.wire_group_id,i.base_epoch,i.inviter_agent_id,i.inviter_peer_id,i.expires_at_ms
              FROM mls_incoming_invites AS i
-             WHERE recipient_agent_id=?1 AND recipient_peer_id=?2 AND state=?4
-               AND shown_at_ms<=?3 AND expires_at_ms>?3 AND NOT EXISTS (
-                   SELECT 1 FROM mls_room_states AS s WHERE s.wire_group_id=i.wire_group_id
+             LEFT JOIN mls_room_states s ON s.wire_group_id=i.wire_group_id
+             LEFT JOIN asl_groups g ON g.group_id=s.local_group_id
+             WHERE i.recipient_agent_id=?1 AND i.recipient_peer_id=?2 AND i.state=?4
+               AND i.shown_at_ms<=?3 AND i.expires_at_ms>?3 AND (
+                   s.wire_group_id IS NULL OR (
+                       g.state='needs_sync' AND g.creator_peer_id=i.inviter_peer_id AND g.mls_epoch<i.base_epoch
+                   )
                )
-             ORDER BY shown_at_ms,invite_id LIMIT ?5",
+             ORDER BY i.shown_at_ms,i.invite_id LIMIT ?5",
         )
         .map_err(database_error)?;
     let mut rows = stmt
@@ -534,12 +646,17 @@ fn matches_invite(
     connection
         .query_row(
             "SELECT EXISTS(
-            SELECT 1 FROM mls_incoming_invites
-            WHERE invite_id=?1 AND wire_group_id=?2 AND base_epoch=?3
-              AND inviter_agent_id=?4 AND inviter_peer_id=?5 AND recipient_agent_id=?6
-              AND recipient_peer_id=?7 AND expires_at_ms=?8 AND shown_at_ms<=?9 AND expires_at_ms>?9
-              AND state<>'closed'
-              AND NOT EXISTS (SELECT 1 FROM mls_room_states WHERE wire_group_id=?2)
+            SELECT 1 FROM mls_incoming_invites i
+            LEFT JOIN mls_room_states s ON s.wire_group_id=i.wire_group_id
+            LEFT JOIN asl_groups g ON g.group_id=s.local_group_id
+            WHERE i.invite_id=?1 AND i.wire_group_id=?2 AND i.base_epoch=?3
+              AND i.inviter_agent_id=?4 AND i.inviter_peer_id=?5 AND i.recipient_agent_id=?6
+              AND i.recipient_peer_id=?7 AND i.expires_at_ms=?8 AND i.shown_at_ms<=?9 AND i.expires_at_ms>?9
+              AND i.state<>'closed' AND (
+                  s.wire_group_id IS NULL OR (
+                      g.state='needs_sync' AND g.creator_peer_id=i.inviter_peer_id AND g.mls_epoch<i.base_epoch
+                  )
+              )
          )",
             params![
                 invite.id.as_bytes(),

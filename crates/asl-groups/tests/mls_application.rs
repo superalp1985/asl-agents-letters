@@ -1,18 +1,20 @@
 use asl_groups::{
-    GroupApplication,
+    GroupApplication, encrypt_application,
     membership::{
         GROUP_CIPHERSUITE as SUITE, read_group_message, read_key_package, read_sync_commit,
         stage_welcome, sync_epoch_binding,
     },
+    open_application,
 };
 use asl_types::{
+    error::AslError,
     ids::{Hash32, Id128},
     protocol::{GroupBody, GroupMembership, GroupPacket},
 };
 use openmls::prelude::{
-    BasicCredential, CredentialWithKey, GroupId, KeyPackage, MlsGroup, MlsGroupCreateConfig,
-    MlsMessageIn, MlsMessageOut, OpenMlsProvider, ProcessedMessageContent, ProtocolMessage, Sender,
-    tls_codec::Deserialize as _,
+    BasicCredential, CredentialWithKey, GroupId, KeyPackage, LeafNodeParameters, MlsGroup,
+    MlsGroupCreateConfig, MlsGroupJoinConfig, MlsMessageOut, OpenMlsProvider,
+    ProcessedMessageContent,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -57,12 +59,14 @@ fn fixture_room(
     .unwrap()
 }
 
-fn read_wire(message: MlsMessageOut) -> MlsMessageIn {
-    MlsMessageIn::tls_deserialize_exact(message.to_bytes().unwrap()).unwrap()
-}
-
-fn protocol(message: MlsMessageOut) -> ProtocolMessage {
-    read_wire(message).try_into_protocol_message().unwrap()
+fn fork_room(provider: &OpenMlsRustCrypto, group: &MlsGroup) -> (OpenMlsRustCrypto, MlsGroup) {
+    let candidate = OpenMlsRustCrypto::default();
+    *candidate.storage().values.write().unwrap() =
+        provider.storage().values.read().unwrap().clone();
+    let copy = MlsGroup::load(candidate.storage(), group.group_id())
+        .unwrap()
+        .unwrap();
+    (candidate, copy)
 }
 
 #[cfg(windows)]
@@ -181,7 +185,7 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
     let creator = OpenMlsRustCrypto::default();
     let (creator_credential, creator_signer) = fixture_member(1);
     let (joiner_credential, joiner_signer) = fixture_member(2);
-    let mut room = fixture_room(&creator, &creator_signer, creator_credential.clone());
+    let mut room = fixture_room(&creator, &creator_signer, creator_credential);
     let invite = Id128([7; 16]);
     let (request, joiner, local_ref) = join_request(invite, joiner_credential, &joiner_signer);
     let (verified, reference) = read_key_package(&request, creator.crypto()).unwrap();
@@ -241,29 +245,106 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
         .map(|byte| u8::from_str_radix(byte, 16).unwrap())
         .collect();
     let query = GroupApplication::decode(&bytes).unwrap();
-    let encoded = query.clone().encode().unwrap();
-    for (plaintext, expected) in [(&encoded[..], Some(query)), (b"free text", None)] {
-        let message = room
-            .create_message(&creator, &creator_signer, plaintext)
-            .unwrap();
-        let packet = packet(
-            1,
-            room.epoch().as_u64(),
-            GroupBody::Application(message.to_bytes().unwrap()),
-        );
-        let received = joined
-            .process_message(&joiner, read_group_message(&packet).unwrap())
-            .unwrap();
-        assert_eq!(received.sender(), &Sender::Member(room.own_leaf_index()));
-        assert_eq!(received.credential(), &creator_credential.credential);
-        let ProcessedMessageContent::ApplicationMessage(message) = received.into_content() else {
-            panic!("expected authenticated MLS application plaintext");
-        };
-        assert_eq!(
-            GroupApplication::decode(&message.into_bytes()).ok(),
-            expected
-        );
-    }
+    assert!(matches!(
+        encrypt_application(
+            &mut room,
+            &creator,
+            &joiner_signer,
+            Id128([97; 16]),
+            query.clone()
+        ),
+        Err(AslError::InvalidPolicyState)
+    ));
+    let sent = encrypt_application(
+        &mut room,
+        &creator,
+        &creator_signer,
+        Id128([99; 16]),
+        query.clone(),
+    )
+    .unwrap();
+    assert_eq!(sent.group_id, WIRE_ID);
+    assert_ne!(sent.message_id, query.message_id());
+    let (discarded_provider, mut discarded) = fork_room(&joiner, &joined);
+    let wrong_author = joined.own_leaf_index();
+    assert!(matches!(
+        open_application(&mut discarded, &discarded_provider, wrong_author, &sent),
+        Err(AslError::PolicyDenied)
+    ));
+    let author = room.own_leaf_index();
+
+    // Advance a separate receiver that deliberately retains old secrets.
+    // Its OpenMLS instance can read this frame, but the ASL adapter must not.
+    let (next_creator, mut next_room) = fork_room(&creator, &room);
+    let (next_joiner, mut next_joined) = fork_room(&joiner, &joined);
+    next_joined
+        .set_configuration(
+            next_joiner.storage(),
+            &MlsGroupJoinConfig::builder().max_past_epochs(1).build(),
+        )
+        .unwrap();
+    let next_commit = next_room
+        .self_update(
+            &next_creator,
+            &creator_signer,
+            LeafNodeParameters::default(),
+        )
+        .unwrap()
+        .into_commit();
+    let next_commit = packet(
+        2,
+        sent.epoch,
+        GroupBody::Membership(GroupMembership::Commit(next_commit.to_bytes().unwrap())),
+    );
+    let message = next_joined
+        .process_message(&next_joiner, read_group_message(&next_commit).unwrap())
+        .unwrap();
+    let ProcessedMessageContent::StagedCommitMessage(update) = message.into_content() else {
+        panic!("expected an MLS update commit");
+    };
+    next_joined
+        .merge_staged_commit(&next_joiner, *update)
+        .unwrap();
+    assert_eq!(next_joined.epoch().as_u64(), sent.epoch + 1);
+    let (raw_provider, mut raw_receiver) = fork_room(&next_joiner, &next_joined);
+    assert!(
+        raw_receiver
+            .process_message(&raw_provider, read_group_message(&sent).unwrap())
+            .is_ok()
+    );
+    assert!(matches!(
+        open_application(&mut next_joined, &next_joiner, author, &sent),
+        Err(AslError::InvalidMessage)
+    ));
+
+    assert_eq!(
+        open_application(&mut joined, &joiner, author, &sent).unwrap(),
+        query
+    );
+
+    let (discarded_provider, mut discarded) = fork_room(&joiner, &joined);
+    let replay = GroupPacket {
+        message_id: Id128([98; 16]),
+        ..sent.clone()
+    };
+    assert!(open_application(&mut discarded, &discarded_provider, author, &replay).is_err());
+    let (discarded_provider, mut discarded) = fork_room(&joiner, &joined);
+    let other_epoch = GroupPacket {
+        epoch: sent.epoch + 1,
+        ..sent.clone()
+    };
+    assert!(open_application(&mut discarded, &discarded_provider, author, &other_epoch).is_err());
+
+    let unstructured = room
+        .create_message(&creator, &creator_signer, b"free text")
+        .unwrap();
+    let unstructured = packet(
+        1,
+        sent.epoch,
+        GroupBody::Application(unstructured.to_bytes().unwrap()),
+    );
+    let (discarded_provider, mut discarded) = fork_room(&joiner, &joined);
+    assert!(open_application(&mut discarded, &discarded_provider, author, &unstructured).is_err());
 
     let base_epoch = room.epoch().as_u64();
     let epoch_binding = sync_epoch_binding(&room, creator.crypto()).unwrap();
@@ -318,10 +399,19 @@ fn mls_members_receive_structured_application_data_and_removal_blocks_new_messag
     };
     joined.merge_staged_commit(&joiner, *commit).unwrap();
     assert!(!joined.is_active());
-    let next = room
-        .create_message(&creator, &creator_signer, &encoded)
-        .unwrap();
-    assert!(joined.process_message(&joiner, protocol(next)).is_err());
+    let next = encrypt_application(
+        &mut room,
+        &creator,
+        &creator_signer,
+        Id128([100; 16]),
+        query,
+    )
+    .unwrap();
+    assert!(
+        joined
+            .process_message(&joiner, read_group_message(&next).unwrap())
+            .is_err()
+    );
 }
 
 #[cfg(windows)]

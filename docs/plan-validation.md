@@ -552,3 +552,39 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 
 - Windows x64 / E 盘离线：`asl-store` 的 `group_state::` 用例 18 项及 `asl-app` 的群相关库用例 13 项全部通过。两包全目标严格 Clippy、Rust 格式和 Git 空白检查通过；本切片未重跑五包全量。
 - SQLite 用例验证每次最多删除 256 项、下一批清掉剩余到期项，同时移除关联同步记录并保留未到期的最新提交和房间版本。未模拟实际 30 秒计时、磁盘安全擦除或公网。
+
+### 2026-11-21 T31：移除与同房间重入
+
+- Windows x64 / Rust 1.100.0 / E 盘：锁定、离线、串行全目标测试最终覆盖五包。最后一次修正 Core 的后续同步时钟后重跑 `asl-app` 全目标，275 项通过、1 项按既有标记忽略；未再修改的 `asl-groups`、`asl-net`、`asl-store`、`asl-types` 在同一轮验证共 258 项通过、2 项按既有标记忽略。五包全目标严格 Clippy、Rust 格式与 Git 空白检查通过。
+- Core 夹具验证创建者移除、非创建者拒绝、已撤销目标不阻塞保留成员的补齐、已被移除设备不能从更新后的节点拉取提交。重入须新的本机审批；保存后的房间 ID 不变，真实 OpenMLS 两端的 exporter 一致，重复 Welcome 不推进。SQLite 用例覆盖旧 Welcome 作废、过期批准与写入失败回滚、旧快照版本拒绝、重开后状态一致、旧同步记录清除。独立复核后，事务提交前复核当前证据和请求期限。
+- 房间始终保持 `needs_sync`。Core 群测试使用合成链证明、真实 OpenMLS/DPAPI/SQLite 和注入的 Net 事件；不是跨正式进程的群组收发验收，未开启公网、LAN、中继、GUI 审批、群应用投递或文件权限。未修改 P2P CBOR、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：结构化群应用的 MLS 封装
+
+- Windows x64 / E 盘：`cargo test -p asl-groups --all-targets --locked --offline -- --test-threads=1`，12 项通过、0 失败。该包全目标严格 Clippy、Rust 格式和 Git 空白检查通过。
+- 真实 OpenMLS 夹具验证成员能获取结构化明文、不匹配的本机签名密钥和对端叶子被拒、改外层 ID 无法绕过密文重放检查、自由文本拒绝，以及移除后不能读取新消息。另验证即使底层保留了旧 epoch 的解密密钥，ASL 也拒绝原样的旧 epoch 帧。未接线 Core 收发、授权或公网，也未修改 CBOR 格式、SQLite schema 或依赖锁。
+
+### 2026-11-21 T31：Core 群应用本机事务
+
+- Windows x64 / E 盘：`asl-app`、`asl-groups`、`asl-store`、`asl-types`、`asl-net` 五包锁定离线全目标测试，533 项通过、0 失败、3 项按已有标记忽略，不重复计入由测试启动的子进程。相同五包全目标严格 Clippy 与 Rust 格式检查通过。
+- 三节点 Core 夹具使用真实 OpenMLS、DPAPI、SQLite 和合成链证明。覆盖定向验证的设备错配、已移除设备、旧 epoch、过期请求、未来时间戳、旧版本、改外层 ID 的重放，以及同内层 ID 的重新加密重放。注入 SQLite 快照写入失败，确认事件与 ratchet 都回滚，原合法消息随后仍可提交。独立复核后补齐最终时点的证书、会话和链新鲜度检查。
+- 未更改 P2P CBOR、SQLite schema 或依赖锁。未接入生产群应用收发，未验收跨正式进程群应用、真实链 RPC 或公网；仍不激活房间或授予文件权限。
+
+### 2026-11-21 T31：受限回环群消息投递
+
+- Windows x64 / E 盘：`asl-app`、`asl-groups`、`asl-store`、`asl-types`、`asl-net` 锁定离线全目标测试，533 项通过、0 失败、3 项按已有标记忽略，不重复计入测试子进程。随后仅调整一个测试断言的写法并定向复验；五包全目标严格 Clippy、格式检查通过。
+- 三节点夹具使用真实 OpenMLS、DPAPI、SQLite、合成链证明和注入的 Net 事件。覆盖同一密文向两个不同设备入队、独立请求句柄、普通成员只选创建者、回执入队失败仍返回已提交的收件事件，以及移除后创建者只向保留成员入队。网络投递与身份绑定路径经独立工程复核。
+- 正式 Supervisor 收方已接线，发方仍须可信 Core 调用；未验收跨正式进程的群应用收发。未启用普通成员互发、Agent 自动行为、群文件授权、公网、LAN 或中继；未运行真实链 RPC。线上 CBOR、SQLite schema 和依赖锁不变。
+
+### 2026-11-21 T31：可信发送与跨进程验收
+
+- Windows x64 / E 盘：`cargo test -p asl-app --all-targets --locked --offline -- --test-threads=1`，275 项通过、0 失败、3 项忽略（既有 30 秒重扫测试、群子进程入口、跨进程场景）。`asl-app` 全目标严格 Clippy 和 Rust 格式检查通过。未重跑其他包。
+- 跨进程场景单独运行时，两个测试宿主实际启动生产 Supervisor 和 AppContainer Net，并从 Net IPC 取得动态回环 TCP 监听地址。拨号经 IPC 入队，随后 Net 返回 `Transport`；临时 libp2p 诊断记录为 `Transport(... Timeout)`。未进入 ASL 身份准入，因而不计为群消息送达或移除验收。未修改系统网络规则或沙箱，临时诊断代码未保留。
+- 测试宿主通过仅在测试中编译的合成最终性接入生产身份验证，不调用链 RPC。独立工程复核检查了本机发送入口、协议边界和测试清理。未改线上 CBOR、SQLite schema 或依赖锁。房间保持 `needs_sync`，无群文件权限或自动 Agent 行为。
+
+### 2026-11-21 T31：三 Core 协议验收
+
+- Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-app --all-targets --locked --offline -- --test-threads=1`，276 项通过、0 失败、3 项忽略（30 秒定时重扫、群测试子进程入口、真实 AppContainer 群互通）。`asl-app` 全目标严格 Clippy、Rust 格式及 Git 空白检查通过；未重跑其他包。
+- 三个独立 Core 测试进程经生产 Net 驱动、真实匿名管道、生产 IPC 和 libp2p TCP 回环通信。链最终性为合成夹具，实际校验状态证明、签名证书与设备目录，并运行 DPAPI、SQLite 和 OpenMLS。覆盖定向邀请与本机审批、Welcome、Add／Remove 补齐、创建者投递到两名成员、普通成员只向创建者回发，以及移除后在线设备被排除、保留成员补齐后可继续接收。移除后先检查在线设备的投递名单，再等待同步，避免把空闲断线算作移除生效。
+- 独立工程复核检查了三节点场景、测试清理和生产启动边界。测试用 Net 线程只在测试构建中启用，正式启动仍使用 AppContainer；本轮未重跑真实沙箱互通场景。未改沙箱、系统网络规则、线上 CBOR、SQLite schema 或依赖锁。未验收真实链 RPC、LAN、公网、中继或 GUI。房间仍为 `needs_sync`，无群文件权限或 Agent 自动收发。
+- 后续只调整测试清理：Core 退出后显式 join 同进程 Net 驱动线程。定向三节点测试复跑通过 1 项；`asl-app` 全目标严格 Clippy、格式检查及 `git diff --check` 通过。

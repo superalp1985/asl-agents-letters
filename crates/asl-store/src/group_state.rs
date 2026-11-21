@@ -1,6 +1,7 @@
 //! Durable MLS state and member projection. A saved room does not authorize
 //! access until Core reconciles it with live chain and policy state.
 
+mod application;
 mod invite;
 #[cfg(test)]
 mod invite_tests;
@@ -14,10 +15,11 @@ mod sync_authority;
 mod sync_log;
 mod transition;
 
+pub use application::MlsApplicationAuthority;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
-pub use sync_authority::{MlsSyncAddAuthority, MlsSyncReadAuthority};
+pub use sync_authority::{MlsRemoveAuthority, MlsSyncAddAuthority, MlsSyncReadAuthority};
 pub use sync_log::{
     MLS_SYNC_MAX_STEPS, MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsSyncStoredStep,
 };
@@ -220,6 +222,7 @@ fn insert_mls_room(
         params![local_id, room.wire_id.as_bytes(), room.sealed_snapshot],
     )
     .map_err(database_error)?;
+    invite::close_room_invites(tx, room.wire_id)?;
     Ok(())
 }
 

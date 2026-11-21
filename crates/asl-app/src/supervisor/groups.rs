@@ -7,6 +7,7 @@ use std::{
 };
 
 use alloy_primitives::hex;
+use asl_groups::GroupApplication;
 use asl_store::{
     Store,
     group_state::{MlsIncomingInvite, open_mls_runtime_store},
@@ -28,10 +29,14 @@ use super::{
     unix_time_ms,
 };
 
+#[cfg(test)]
+mod process_tests;
+
 const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const SYNC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_JOIN_DIAGNOSTICS: usize = 5;
+const MAX_RECENT_ROOMS: usize = 32;
 
 pub enum LocalGroupAction {
     List,
@@ -44,6 +49,15 @@ pub enum LocalGroupAction {
     Invite {
         room: Hash32,
         connection_id: [u8; 16],
+    },
+    Remove {
+        room: Hash32,
+        peer: PeerId,
+    },
+    /// Trusted in-process callers only; not parsed by the local console.
+    SendApplication {
+        room: Hash32,
+        application: Box<GroupApplication>,
     },
     Dial {
         address: SocketAddr,
@@ -63,8 +77,17 @@ pub(super) struct LoopbackGroups {
     next_prune: Instant,
     cleanup_failed: bool,
     join_diagnostics: VecDeque<(Id128, &'static str)>,
+    recent_applications: VecDeque<ReceivedApplication>,
     next_sync_probe: Instant,
     sync_cursor: Option<(Hash32, PeerId)>,
+}
+
+struct ReceivedApplication {
+    room: Hash32,
+    epoch: u64,
+    sender: PeerId,
+    message: Id128,
+    kind: &'static str,
 }
 
 impl LoopbackGroups {
@@ -76,6 +99,7 @@ impl LoopbackGroups {
             next_prune: Instant::now() + PRUNE_INTERVAL,
             cleanup_failed: false,
             join_diagnostics: VecDeque::new(),
+            recent_applications: VecDeque::new(),
             next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
             sync_cursor: None,
         })
@@ -117,15 +141,41 @@ impl Supervisor {
             now_ms,
             |command| enqueue(net, command),
         );
+        if let Ok(Some(MlsNetworkOutcome::ApplicationReceived {
+            wire_id,
+            epoch,
+            sender,
+            application,
+        })) = &result
+        {
+            groups
+                .recent_applications
+                .retain(|entry| entry.room != *wire_id);
+            if groups.recent_applications.len() == MAX_RECENT_ROOMS {
+                groups.recent_applications.pop_front();
+            }
+            groups.recent_applications.push_back(ReceivedApplication {
+                room: *wire_id,
+                epoch: *epoch,
+                sender: sender.clone(),
+                message: application.message_id(),
+                kind: match application.as_ref() {
+                    GroupApplication::Query(_) => "query",
+                    GroupApplication::Answer(_) => "answer",
+                    GroupApplication::Offer(_) => "offer",
+                },
+            });
+        }
         if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
             && let Some((connection_id, wire_id)) = joined_route
+            && let Ok(sync_now_ms) = unix_time_ms()
         {
             let _ = admission.start_mls_sync(
                 &groups.store,
                 connection_id,
                 wire_id,
                 &HashMap::new(),
-                now_ms,
+                sync_now_ms,
                 |command| enqueue(net, command),
             );
         }
@@ -200,7 +250,7 @@ impl Supervisor {
                 let approved = approved(store)?
                     .iter()
                     .map(|invite| {
-                        let mut view = invite_view(invite);
+                        let mut view = invite_view(store, invite)?;
                         if let Some((_, reason)) = groups
                             .join_diagnostics
                             .iter()
@@ -208,21 +258,42 @@ impl Supervisor {
                         {
                             view["last_result"] = json!(reason);
                         }
-                        view
+                        Ok(view)
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, AslError>>()?;
+                let pending = pending(store)?
+                    .iter()
+                    .map(|invite| invite_view(store, invite))
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Ok(json!({
-                    "pending": pending(store)?.iter().map(invite_view).collect::<Vec<_>>(),
+                    "pending": pending,
                     "approved": approved
                 }));
             }
             LocalGroupAction::Room(id) => {
                 let (state, epoch) = store.mls_room_progress(id)?.ok_or(AslError::NotFound)?;
-                return Ok(json!({
+                let mut view = json!({
                     "room": hex::encode(id.0),
                     "state": state,
                     "mls_epoch": epoch
-                }));
+                });
+                if let Some(saved) = store.mls_room_for_reconciliation(id)? {
+                    view["creator"] = json!(peer_text(&saved.creator));
+                    view["stored_members"] =
+                        json!(saved.members.iter().map(peer_text).collect::<Vec<_>>());
+                }
+                if let Some(entry) = groups
+                    .recent_applications
+                    .iter()
+                    .find(|entry| entry.room == id && entry.epoch == epoch)
+                {
+                    view["last_received"] = json!({
+                        "sender": peer_text(&entry.sender),
+                        "message_id": hex::encode(entry.message.0),
+                        "kind": entry.kind
+                    });
+                }
+                return Ok(view);
             }
             LocalGroupAction::Reject(id) => {
                 let invite = select_invite(pending(store)?, id)?;
@@ -341,6 +412,30 @@ impl Supervisor {
                 )?;
                 Ok(json!({"queued": true}))
             }
+            LocalGroupAction::Remove { room, peer } => {
+                let version =
+                    admission.remove_local_mls_member(store, room, &peer, &directories, now_ms)?;
+                Ok(json!({
+                    "room": hex::encode(room.0),
+                    "removed": peer_text(&peer),
+                    "state": "needs_sync",
+                    "mls_epoch": version.mls_epoch
+                }))
+            }
+            LocalGroupAction::SendApplication { room, application } => {
+                let sent = admission.send_loopback_mls_application(
+                    store,
+                    room,
+                    *application,
+                    now_ms,
+                    |command| enqueue(net, command),
+                )?;
+                Ok(json!({
+                    "message_id": hex::encode(sent.message_id.0),
+                    "queued": sent.queued,
+                    "available": sent.available
+                }))
+            }
             LocalGroupAction::Dial { address, peer } => {
                 if !address.ip().is_loopback() {
                     return Err(AslError::PolicyDenied);
@@ -443,14 +538,16 @@ fn peer_text(peer: &PeerId) -> String {
         .map_or_else(|_| hex::encode(peer.as_bytes()), |peer| peer.to_base58())
 }
 
-fn invite_view(invite: &MlsIncomingInvite) -> Value {
-    json!({
+fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslError> {
+    Ok(json!({
         "id": hex::encode(invite.id.0),
         "room": hex::encode(invite.wire_id.0),
         "inviter": hex::encode(invite.inviter.0),
         "device": peer_text(&invite.inviter_device),
+        "kind": if store.mls_room_progress(invite.wire_id)?.is_some() { "rejoin" } else { "join" },
+        "base_epoch": invite.base_epoch,
         "expires_at_ms": invite.expires_at_ms
-    })
+    }))
 }
 
 fn describe_join_failure(error: AslError) -> &'static str {

@@ -25,7 +25,10 @@ use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
 #[cfg(windows)]
 mod group_rooms;
 #[cfg(windows)]
-pub use group_rooms::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom};
+pub use group_rooms::{
+    MlsApplicationDispatch, MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome,
+    ReconciledMlsRoom,
+};
 
 pub(crate) const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
@@ -49,6 +52,8 @@ pub struct CoreAdmission {
     mls_joins: group_rooms::MlsJoinAttempts,
     #[cfg(windows)]
     mls_sync: group_rooms::MlsSyncRuntime,
+    #[cfg(windows)]
+    mls_application_budget: ProofVerificationBudget,
     #[cfg(windows)]
     group_directories: Option<group_rooms::GroupDirectoryCache>,
 }
@@ -333,6 +338,8 @@ impl CoreAdmission {
             mls_joins: group_rooms::MlsJoinAttempts::default(),
             #[cfg(windows)]
             mls_sync: group_rooms::MlsSyncRuntime::default(),
+            #[cfg(windows)]
+            mls_application_budget: ProofVerificationBudget::new(Instant::now()),
             #[cfg(windows)]
             group_directories: None,
         })

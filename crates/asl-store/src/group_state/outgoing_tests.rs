@@ -10,7 +10,9 @@ use rusqlite::params;
 
 use super::{
     MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsInviteResponse, MlsJournalEntry, MlsJournalKind,
-    MlsRoomUpdate, MlsSyncStoredStep, MlsWelcomeRequest, PendingMlsRoom, RoomVersion,
+    MlsMemberEvidence, MlsRemoveAuthority, MlsRoomUpdate, MlsSyncStoredStep, MlsWelcomeRequest,
+    PendingMlsRoom, RoomVersion,
+    recovery_tests::register_evidence,
     tests::{register_agent_peer, test_peer},
     transition::{commit_candidate, peer_text},
 };
@@ -41,6 +43,26 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> (Self, Store, RoomVersion) {
+        let (fixture, store, base, ()) = Self::with_devices(|store, f| {
+            for (peer, agent, serial) in [
+                (&f.creator, AgentId([1; 32]), 1),
+                (&f.target, TARGET, 1),
+                (&f.alternate, TARGET, 2),
+            ] {
+                register_agent_peer(store, agent, peer, serial);
+            }
+            store
+                .connection
+                .execute(
+                    "UPDATE device_identities SET certificate_expires_ms=?1",
+                    [EXPIRES as i64 + 1],
+                )
+                .unwrap();
+        });
+        (fixture, store, base)
+    }
+
+    fn with_devices<T>(register: impl FnOnce(&Store, &Self) -> T) -> (Self, Store, RoomVersion, T) {
         let root = tempfile::tempdir().unwrap();
         let fixture = Self {
             path: root.path().join("outgoing.sqlite3"),
@@ -50,20 +72,7 @@ impl Fixture {
             alternate: test_peer(3),
         };
         let mut store = open_store(&fixture.path).unwrap();
-        for (peer, agent, serial) in [
-            (&fixture.creator, AgentId([1; 32]), 1),
-            (&fixture.target, TARGET, 1),
-            (&fixture.alternate, TARGET, 2),
-        ] {
-            register_agent_peer(&store, agent, peer, serial);
-        }
-        store
-            .connection
-            .execute(
-                "UPDATE device_identities SET certificate_expires_ms=?1",
-                [EXPIRES as i64 + 1],
-            )
-            .unwrap();
+        let devices = register(&store, &fixture);
         store
             .stage_mls_room(PendingMlsRoom {
                 local_id: &LOCAL,
@@ -86,7 +95,7 @@ impl Fixture {
                 event: None,
             })
             .unwrap();
-        (fixture, store, base)
+        (fixture, store, base, devices)
     }
 
     fn invite(&self) -> GroupPacket {
@@ -154,6 +163,28 @@ impl Fixture {
         let mut update = self.change(base, members, commit);
         update.event.as_mut().unwrap().kind = MlsJournalKind::SyncCommit(bindings(base.mls_epoch));
         update
+    }
+
+    fn remove_target(
+        &self,
+        store: &mut Store,
+        expected: RoomVersion,
+        creator: &MlsMemberEvidence,
+        now: u64,
+    ) -> Result<RoomVersion, AslError> {
+        let mut update = self.sync_change(expected, std::slice::from_ref(&self.creator), b"remove");
+        update.sealed_snapshot = b"removed snapshot";
+        store.commit_verified_mls_remove(
+            update,
+            MlsRemoveAuthority {
+                source: &self.creator,
+                removed: &self.target,
+                survivors: std::slice::from_ref(creator),
+                chain_id: 1,
+            },
+            now,
+            || Ok(now),
+        )
     }
 }
 
@@ -480,6 +511,150 @@ fn removed_member_cannot_fetch_an_earlier_welcome_even_after_reentry() {
             .unwrap(),
         0
     );
+}
+
+fn room_with_cached_welcome() -> (
+    Fixture,
+    Store,
+    RoomVersion,
+    [MlsMemberEvidence; 2],
+    GroupPacket,
+) {
+    let (f, mut store, base, evidence) = Fixture::with_devices(|store, f| {
+        [
+            register_evidence(store, AgentId([1; 32]), &f.creator, EXPIRES + 1),
+            register_evidence(store, TARGET, &f.target, EXPIRES + 1),
+        ]
+    });
+    let invite = f.invite();
+    store.issue_mls_invite(&f.creator, &invite, NOW).unwrap();
+    let packet = f.request(&invite);
+    let roster = [f.creator.clone(), f.target.clone()];
+    let added = store
+        .commit_mls_invite_welcome(
+            &f.authenticate(&packet),
+            f.sync_change(base, &roster, b"add"),
+            b"welcome".to_vec(),
+            NOW,
+        )
+        .unwrap();
+    (f, store, added, evidence, packet)
+}
+
+#[test]
+fn verified_remove_invalidates_cached_welcome_for_a_revoked_device() {
+    let (f, mut store, added, [creator, target], packet) = room_with_cached_welcome();
+    let request = f.authenticate(&packet);
+    let now = NOW + 1;
+    assert!(matches!(
+        store.mls_invite_response(&request, now).unwrap(),
+        Some(MlsInviteResponse::Committed(_))
+    ));
+    store.require_mls_member(&target, 1, now).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE device_identities SET revoked_at_ms=?2 WHERE peer_id=?1",
+            params![peer_text(&f.target), now as i64],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.require_mls_member(&target, 1, now),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+
+    // The replay filter already hides revoked devices, so assert on the cached bytes directly.
+    let cached_welcome = |store: &Store| {
+        store
+            .connection
+            .query_row(
+                "SELECT welcome FROM mls_outgoing_invites WHERE invite_id=?1",
+                [INVITE.as_bytes()],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        cached_welcome(&store).as_deref(),
+        Some(b"welcome".as_slice())
+    );
+    let removed = f.remove_target(&mut store, added, &creator, now).unwrap();
+    assert_eq!(
+        removed,
+        RoomVersion {
+            revision: added.revision + 1,
+            mls_epoch: added.mls_epoch + 1,
+            ..added
+        }
+    );
+    drop(store);
+
+    let store = open_store(&f.path).unwrap();
+    let room = store.mls_room_for_reconciliation(WIRE).unwrap().unwrap();
+    assert_eq!(room.snapshot.version, removed);
+    assert_eq!(room.snapshot.sealed_snapshot, b"removed snapshot");
+    assert_eq!(room.members.as_slice(), std::slice::from_ref(&f.creator));
+    let step = store
+        .mls_sync_step(WIRE, added.mls_epoch, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.commit, b"remove");
+    assert_eq!(step.version, removed);
+    assert_eq!(cached_welcome(&store), None);
+    assert!(store.mls_invite_response(&request, now).unwrap().is_none());
+}
+
+#[test]
+fn rejected_verified_remove_retains_cached_welcome_and_room_state() {
+    let (f, mut store, added, [mut creator, _], packet) = room_with_cached_welcome();
+    let request = f.authenticate(&packet);
+    let now = NOW + 1;
+    let welcome = store.mls_invite_response(&request, now).unwrap();
+    assert!(matches!(welcome, Some(MlsInviteResponse::Committed(_))));
+    let assert_unchanged = |store: &Store| {
+        assert_eq!(store.mls_invite_response(&request, now).unwrap(), welcome);
+        let room = store.mls_room_for_reconciliation(WIRE).unwrap().unwrap();
+        assert_eq!(room.snapshot.version, added);
+        assert_eq!(room.snapshot.sealed_snapshot, b"next sealed snapshot");
+        assert_eq!(room.members.len(), 2);
+        assert!(room.members.contains(&f.creator));
+        assert!(room.members.contains(&f.target));
+        assert_eq!(commit_count(store), 1);
+        assert_eq!(sync_count(store), 1);
+    };
+    let current_sequence = creator.registry_sequence;
+    creator.registry_sequence += 1;
+    assert!(matches!(
+        f.remove_target(&mut store, added, &creator, now),
+        Err(AslError::InvalidDeviceCertificate)
+    ));
+    assert_unchanged(&store);
+    creator.registry_sequence = current_sequence;
+
+    let stale = RoomVersion {
+        revision: added.revision - 1,
+        ..added
+    };
+    assert!(matches!(
+        f.remove_target(&mut store, stale, &creator, now),
+        Err(AslError::PolicyVersionConflict)
+    ));
+    assert_unchanged(&store);
+
+    // Fail the final write, after the journal, projection and Welcome changes.
+    store
+        .connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_remove_snapshot BEFORE UPDATE OF sealed_snapshot ON mls_room_states
+             BEGIN SELECT RAISE(ABORT,'test remove rollback'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        f.remove_target(&mut store, added, &creator, now),
+        Err(AslError::Io(error)) if error.to_string().contains("test remove rollback")
+    ));
+    drop(store);
+    assert_unchanged(&open_store(&f.path).unwrap());
 }
 
 fn commit_count(store: &Store) -> i64 {

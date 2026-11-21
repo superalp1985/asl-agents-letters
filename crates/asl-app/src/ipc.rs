@@ -2029,6 +2029,15 @@ pub fn run_net_child() -> Result<(), AslError> {
     run_child_for(&[IpcRole::Net])
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn run_net_pipe_fixture(
+    mut input: std::io::PipeReader,
+    output: std::io::PipeWriter,
+) -> Result<(), AslError> {
+    let (identity, loopback_groups) = read_net_startup_prelude(&mut input)?;
+    net_runtime::run(identity, loopback_groups, input, output)
+}
+
 pub fn run_worker_child() -> Result<(), AslError> {
     run_child_for(&[IpcRole::Worker, IpcRole::Extractor])
 }

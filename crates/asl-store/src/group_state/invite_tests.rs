@@ -3,11 +3,14 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128},
     task::GroupId,
 };
+use rusqlite::params;
 
 use super::{
-    MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom, MlsMemberEvidence,
-    PendingMlsRoom, recovery_tests::register_evidence, tests,
+    MlsEpochBindings, MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom,
+    MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, PendingMlsRoom, RoomVersion,
+    recovery_tests::register_evidence, tests, transition::peer_text,
 };
+use crate::Store;
 
 #[test]
 fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transaction() {
@@ -88,7 +91,7 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
     );
     assert!(
         store
-            .finish_mls_join(join(&members, key, 1), 100_001)
+            .finish_mls_join(join(&members, key, 1), || Ok(100_001))
             .is_err()
     );
     let other_device = MlsIncomingInvite {
@@ -147,15 +150,15 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
     };
     assert!(
         store
-            .finish_mls_join(join(&members, wrong_key, 1), 100_003)
+            .finish_mls_join(join(&members, wrong_key, 1), || Ok(100_003))
             .is_err()
     );
     assert!(matches!(
-        store.finish_mls_join(join(&members, key, 2), 100_003),
+        store.finish_mls_join(join(&members, key, 2), || Ok(100_003)),
         Err(AslError::PolicyVersionConflict)
     ));
     assert!(matches!(
-        store.finish_mls_join(join(&bad_roster, key, 1), 100_004),
+        store.finish_mls_join(join(&bad_roster, key, 1), || Ok(100_004)),
         Err(AslError::InvalidDeviceCertificate)
     ));
     assert!(store.mls_room_snapshot(invite.wire_id).unwrap().is_none());
@@ -167,11 +170,11 @@ fn inbound_join_requires_local_approval_and_consumes_only_with_the_room_transact
     );
 
     let version = store
-        .finish_mls_join(join(&members, key, 1), 100_005)
+        .finish_mls_join(join(&members, key, 1), || Ok(100_005))
         .unwrap();
     assert!(
         store
-            .finish_mls_join(join(&members, key, 1), 100_006)
+            .finish_mls_join(join(&members, key, 1), || Ok(100_006))
             .is_err()
     );
     assert!(
@@ -445,4 +448,391 @@ fn invite_prompt_slots_expire_without_releasing_the_hourly_budget() {
     assert!(!store.receive_mls_invite(&invite(20, now), now).unwrap());
     let later = start + 3_600_000;
     assert!(store.receive_mls_invite(&invite(20, later), later).unwrap());
+}
+
+const REJOIN_NOW: u64 = 100_000;
+const REJOIN_END: u64 = 105_000;
+const REJOIN_ROOM: GroupId = GroupId(Id128([20; 16]));
+const REJOIN_KEY: MlsJoinKey = MlsJoinKey {
+    request_id: Id128([21; 16]),
+    package_ref: Hash32([22; 32]),
+};
+
+fn rejoin_fixture(store: &Store) -> (MlsIncomingInvite, [MlsMemberEvidence; 2]) {
+    let creator = register_evidence(store, AgentId([1; 32]), &tests::test_peer(1), REJOIN_END);
+    let recipient = register_evidence(store, AgentId([2; 32]), &tests::test_peer(2), REJOIN_END);
+    let invite = MlsIncomingInvite {
+        id: Id128([23; 16]),
+        wire_id: Hash32([24; 32]),
+        base_epoch: 8,
+        inviter: creator.certificate.agent_id,
+        inviter_device: creator.certificate.peer_id.clone(),
+        recipient: recipient.certificate.agent_id,
+        recipient_device: recipient.certificate.peer_id.clone(),
+        expires_at_ms: REJOIN_END,
+    };
+    (invite, [creator, recipient])
+}
+
+fn rejoin_candidate<'a>(
+    invite: &'a MlsIncomingInvite,
+    members: &'a [MlsMemberEvidence],
+) -> MlsJoinedRoom<'a> {
+    MlsJoinedRoom {
+        invite,
+        key: REJOIN_KEY,
+        room: PendingMlsRoom {
+            local_id: &REJOIN_ROOM,
+            wire_id: invite.wire_id,
+            creator: &invite.inviter_device,
+            local_name: "Do not replace the original label",
+            mls_epoch: invite.base_epoch + 1,
+            sealed_snapshot: b"fresh state",
+        },
+        members,
+        chain_id: 1,
+        expected_policy_revision: 1,
+    }
+}
+
+fn stage_rejoin_room(store: &mut Store, invite: &MlsIncomingInvite) -> RoomVersion {
+    store
+        .stage_mls_room(PendingMlsRoom {
+            local_id: &REJOIN_ROOM,
+            wire_id: invite.wire_id,
+            creator: &invite.inviter_device,
+            local_name: "Original label",
+            mls_epoch: 5,
+            sealed_snapshot: b"old state",
+        })
+        .unwrap();
+    store
+        .mls_room_snapshot(invite.wire_id)
+        .unwrap()
+        .unwrap()
+        .version
+}
+
+#[test]
+fn rejoin_replaces_only_the_paused_branch_and_preserves_replay_markers() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("rejoin.sqlite3");
+    let mut store = crate::open_store(&path).unwrap();
+    let (invite, members) = rejoin_fixture(&store);
+    let old_member = tests::test_peer(3);
+    let same_agent_other_device = tests::test_peer(4);
+    tests::register_agent_peer(&store, AgentId([3; 32]), &old_member, 1);
+    tests::register_agent_peer(&store, invite.inviter, &same_agent_other_device, 2);
+    let initial = stage_rejoin_room(&mut store, &invite);
+    let old_members = [invite.inviter_device.clone(), old_member.clone()];
+    let projected = store
+        .commit_mls_room_candidate(MlsRoomUpdate {
+            local_id: &REJOIN_ROOM,
+            wire_id: invite.wire_id,
+            expected: initial,
+            mls_epoch: 5,
+            sealed_snapshot: b"old projection",
+            members: &old_members,
+            event: None,
+        })
+        .unwrap();
+    let expected = store
+        .commit_mls_room_candidate(MlsRoomUpdate {
+            local_id: &REJOIN_ROOM,
+            wire_id: invite.wire_id,
+            expected: projected,
+            mls_epoch: 6,
+            sealed_snapshot: b"old head",
+            members: &old_members,
+            event: Some(MlsJournalEntry {
+                sender: &invite.inviter_device,
+                kind: MlsJournalKind::SyncCommit(MlsEpochBindings {
+                    base: Hash32([25; 32]),
+                    next: Hash32([26; 32]),
+                }),
+                ciphertext: b"old commit",
+            }),
+        })
+        .unwrap();
+    let old_package = Hash32([27; 32]);
+    store
+        .connection
+        .execute(
+            "INSERT INTO mls_outgoing_invites
+                (invite_id,wire_group_id,base_epoch,creator_peer_id,recipient_agent_id,
+                 recipient_peer_id,created_at_ms,expires_at_ms,request_id,package_ref,welcome)
+             VALUES (?1,?2,5,?3,?4,?5,100000,105000,?6,?7,X'01')",
+            params![
+                Id128([28; 16]).as_bytes(),
+                invite.wire_id.as_bytes(),
+                peer_text(&invite.inviter_device),
+                bs58::encode([3; 32]).into_string(),
+                peer_text(&old_member),
+                Id128([29; 16]).as_bytes(),
+                old_package.as_bytes(),
+            ],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO mls_consumed_key_packages VALUES (?1,105000)",
+            [old_package.as_bytes()],
+        )
+        .unwrap();
+
+    for denied in [
+        MlsIncomingInvite {
+            base_epoch: 6,
+            ..invite.clone()
+        },
+        MlsIncomingInvite {
+            inviter_device: same_agent_other_device,
+            ..invite.clone()
+        },
+    ] {
+        assert!(!store.receive_mls_invite(&denied, REJOIN_NOW).unwrap());
+    }
+    store
+        .connection
+        .execute("UPDATE asl_groups SET state='active'", [])
+        .unwrap();
+    assert!(!store.receive_mls_invite(&invite, REJOIN_NOW).unwrap());
+    store
+        .connection
+        .execute("UPDATE asl_groups SET state='needs_sync'", [])
+        .unwrap();
+
+    assert!(store.receive_mls_invite(&invite, REJOIN_NOW).unwrap());
+    assert_eq!(
+        store
+            .list_pending_mls_invites(invite.recipient, &invite.recipient_device, REJOIN_NOW)
+            .unwrap(),
+        std::slice::from_ref(&invite),
+    );
+    let candidate = || rejoin_candidate(&invite, &members);
+    assert!(
+        store
+            .finish_mls_rejoin(candidate(), expected, || Ok(REJOIN_NOW))
+            .is_err()
+    );
+    assert!(
+        store
+            .save_mls_join_package(&invite, REJOIN_KEY, b"approved rejoin", REJOIN_NOW)
+            .unwrap()
+    );
+    drop(store);
+
+    let mut store = crate::open_store(&path).unwrap();
+    assert_eq!(
+        store
+            .recover_mls_joins(invite.recipient, &invite.recipient_device, REJOIN_NOW)
+            .unwrap(),
+        std::slice::from_ref(&invite),
+    );
+    assert!(
+        store
+            .finish_mls_join(candidate(), || Ok(REJOIN_NOW))
+            .is_err()
+    );
+    for stale in [
+        RoomVersion {
+            revision: expected.revision - 1,
+            ..expected
+        },
+        RoomVersion {
+            mls_epoch: expected.mls_epoch - 1,
+            ..expected
+        },
+        RoomVersion {
+            membership_epoch: expected.membership_epoch + 1,
+            ..expected
+        },
+        RoomVersion {
+            policy_revision: expected.policy_revision + 1,
+            ..expected
+        },
+    ] {
+        assert!(matches!(
+            store.finish_mls_rejoin(candidate(), stale, || Ok(REJOIN_NOW)),
+            Err(AslError::PolicyVersionConflict)
+        ));
+    }
+    let wrong_id = GroupId(Id128([30; 16]));
+    let mut wrong_room = candidate();
+    wrong_room.room.local_id = &wrong_id;
+    assert!(
+        store
+            .finish_mls_rejoin(wrong_room, expected, || Ok(REJOIN_NOW))
+            .is_err()
+    );
+    store
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER fail_rejoin_projection BEFORE INSERT ON group_members
+         BEGIN SELECT RAISE(ABORT, 'test rollback'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .finish_mls_rejoin(candidate(), expected, || Ok(REJOIN_NOW))
+            .is_err()
+    );
+    assert_eq!(
+        store.pending_mls_join_package(&invite, REJOIN_NOW).unwrap(),
+        Some((REJOIN_KEY, b"approved rejoin".to_vec()))
+    );
+    let history_counts = |store: &Store| {
+        store
+            .connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM mls_sync_log),
+                    (SELECT count(*) FROM group_events),
+                    (SELECT count(*) FROM mls_outgoing_invites WHERE welcome IS NOT NULL),
+                    (SELECT count(*) FROM mls_consumed_key_packages)",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(history_counts(&store), (1, 1, 1, 1));
+    let unchanged = store
+        .mls_room_for_reconciliation(invite.wire_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.snapshot.version, expected);
+    assert_eq!(unchanged.snapshot.sealed_snapshot, b"old head");
+    assert_eq!(unchanged.members.len(), 2);
+    assert!(unchanged.members.contains(&old_member));
+    store
+        .connection
+        .execute_batch("DROP TRIGGER fail_rejoin_projection")
+        .unwrap();
+
+    let mut times = [REJOIN_NOW, invite.expires_at_ms].into_iter();
+    assert!(matches!(
+        store.finish_mls_rejoin(candidate(), expected, || Ok(times.next().unwrap())),
+        Err(AslError::ExpiredMessage)
+    ));
+    assert_eq!(
+        store
+            .mls_room_snapshot(invite.wire_id)
+            .unwrap()
+            .unwrap()
+            .version,
+        expected
+    );
+    assert!(
+        store
+            .pending_mls_join_package(&invite, REJOIN_NOW)
+            .unwrap()
+            .is_some()
+    );
+    let result = store
+        .finish_mls_rejoin(candidate(), expected, || Ok(REJOIN_NOW))
+        .unwrap();
+    assert_eq!(
+        result,
+        RoomVersion {
+            revision: expected.revision + 1,
+            mls_epoch: 9,
+            ..expected
+        }
+    );
+    assert!(
+        store
+            .finish_mls_rejoin(candidate(), result, || Ok(REJOIN_NOW))
+            .is_err()
+    );
+    drop(store);
+    let mut store = crate::open_store(&path).unwrap();
+    let room = store
+        .mls_room_for_reconciliation(invite.wire_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.snapshot.local_id, REJOIN_ROOM);
+    assert_eq!(room.snapshot.version, result);
+    assert_eq!(room.snapshot.sealed_snapshot, b"fresh state");
+    assert_eq!(room.creator, invite.inviter_device);
+    assert_eq!(room.members.len(), 2);
+    assert!(room.members.contains(&invite.recipient_device));
+    assert!(!room.members.contains(&old_member));
+    assert_eq!(history_counts(&store), (0, 1, 0, 1));
+    assert_eq!(
+        store.mls_room_progress(invite.wire_id).unwrap(),
+        Some(("needs_sync".to_owned(), 9))
+    );
+    let label: String = store
+        .connection
+        .query_row("SELECT local_name FROM asl_groups", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(label, "Original label");
+    let relations: (bool, bool, bool) = store
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM peers WHERE peer_id=?1),
+                NOT EXISTS(SELECT 1 FROM pragma_foreign_key_check),
+                NOT EXISTS(SELECT 1 FROM grants)",
+            [peer_text(&old_member)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(relations, (true, true, true));
+    assert!(
+        store
+            .pending_mls_join_package(&invite, REJOIN_NOW)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn newly_staged_room_does_not_inherit_a_new_room_approval() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("stale-invite.sqlite3");
+    let mut store = crate::open_store(&path).unwrap();
+    let (invite, members) = rejoin_fixture(&store);
+    assert!(store.receive_mls_invite(&invite, REJOIN_NOW).unwrap());
+    assert!(
+        store
+            .save_mls_join_package(
+                &invite,
+                REJOIN_KEY,
+                b"approved for initial join",
+                REJOIN_NOW
+            )
+            .unwrap()
+    );
+    let expected = stage_rejoin_room(&mut store, &invite);
+    drop(store);
+
+    let mut store = crate::open_store(&path).unwrap();
+    assert!(
+        store
+            .recover_mls_joins(invite.recipient, &invite.recipient_device, REJOIN_NOW)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .finish_mls_rejoin(rejoin_candidate(&invite, &members), expected, || Ok(
+                REJOIN_NOW
+            ))
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .mls_room_snapshot(invite.wire_id)
+            .unwrap()
+            .unwrap()
+            .version,
+        expected
+    );
 }

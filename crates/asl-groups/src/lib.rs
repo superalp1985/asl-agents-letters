@@ -7,5 +7,5 @@ pub mod membership;
 #[cfg(windows)]
 pub mod pending_join;
 
-pub use application::GroupApplication;
+pub use application::{GroupApplication, encrypt_application, open_application};
 pub use openmls::prelude::ProtocolVersion;

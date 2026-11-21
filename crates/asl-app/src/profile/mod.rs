@@ -24,7 +24,10 @@ pub(crate) use admission::MAX_ADMISSION_CONNECTIONS;
 pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 #[cfg(windows)]
-pub use admission::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom};
+pub use admission::{
+    MlsApplicationDispatch, MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome,
+    ReconciledMlsRoom,
+};
 pub use history::RecordHistory;
 pub use proof_response::serve_local_identity_proof;
 pub use publisher::{AvatarReference, ProfileConfiguration, ProfilePublisher};
