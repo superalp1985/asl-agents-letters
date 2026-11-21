@@ -247,6 +247,7 @@ fn group_core_child() {
         bin.join("asl-extractor.exe"),
     )
     .unwrap();
+    let mut net_thread = None;
     let mut supervisor = match registry.verification {
         Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher).unwrap(),
         Verification::Protocol => {
@@ -254,13 +255,15 @@ fn group_core_child() {
                 let (net_input, mut core_output) = io::pipe()?;
                 let (core_input, net_output) = io::pipe()?;
                 write_net_startup_prelude(&mut core_output, device, groups)?;
-                thread::Builder::new()
-                    .name("asl-net-protocol-fixture".into())
-                    .spawn(move || {
-                        // Closing the Core writer ends this fixture, as it does
-                        // for a child when its private command stream disappears.
-                        let _ = run_net_pipe_fixture(net_input, net_output);
-                    })?;
+                net_thread = Some(
+                    thread::Builder::new()
+                        .name("asl-net-protocol-fixture".into())
+                        .spawn(move || {
+                            // Closing the Core writer ends this fixture, as it does
+                            // for a child when its private command stream disappears.
+                            let _ = run_net_pipe_fixture(net_input, net_output);
+                        })?,
+                );
                 NetRuntime::from_pipes(core_output, core_input, None, &device.peer_id())
             })
             .unwrap()
@@ -322,6 +325,9 @@ fn group_core_child() {
     );
     assert!(matches!(result, Err(AslError::NotFound)), "{result:?}");
     reader.join().unwrap();
+    if let Some(net_thread) = net_thread {
+        net_thread.join().unwrap();
+    }
 }
 
 fn init_node(home: &Path, now_ms: u64) -> (PeerId, RegistryClaim) {

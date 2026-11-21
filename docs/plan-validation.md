@@ -587,3 +587,4 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / Rust 1.100.0 / E 盘：`cargo test -p asl-app --all-targets --locked --offline -- --test-threads=1`，276 项通过、0 失败、3 项忽略（30 秒定时重扫、群测试子进程入口、真实 AppContainer 群互通）。`asl-app` 全目标严格 Clippy、Rust 格式及 Git 空白检查通过；未重跑其他包。
 - 三个独立 Core 测试进程经生产 Net 驱动、真实匿名管道、生产 IPC 和 libp2p TCP 回环通信。链最终性为合成夹具，实际校验状态证明、签名证书与设备目录，并运行 DPAPI、SQLite 和 OpenMLS。覆盖定向邀请与本机审批、Welcome、Add／Remove 补齐、创建者投递到两名成员、普通成员只向创建者回发，以及移除后在线设备被排除、保留成员补齐后可继续接收。移除后先检查在线设备的投递名单，再等待同步，避免把空闲断线算作移除生效。
 - 独立工程复核检查了三节点场景、测试清理和生产启动边界。测试用 Net 线程只在测试构建中启用，正式启动仍使用 AppContainer；本轮未重跑真实沙箱互通场景。未改沙箱、系统网络规则、线上 CBOR、SQLite schema 或依赖锁。未验收真实链 RPC、LAN、公网、中继或 GUI。房间仍为 `needs_sync`，无群文件权限或 Agent 自动收发。
+- 后续只调整测试清理：Core 退出后显式 join 同进程 Net 驱动线程。定向三节点测试复跑通过 1 项；`asl-app` 全目标严格 Clippy、格式检查及 `git diff --check` 通过。
