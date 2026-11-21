@@ -1,3 +1,5 @@
+mod firewall;
+
 use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
@@ -484,6 +486,7 @@ fn parse_hex<const N: usize>(value: &Value) -> [u8; N] {
 struct CoreProcess {
     node: String,
     net_program: Option<PathBuf>,
+    receiver_rule: Option<firewall::ReceiverRule>,
     child: Child,
     input: Option<ChildStdin>,
     output: Receiver<io::Result<Value>>,
@@ -549,6 +552,7 @@ impl CoreProcess {
             node: home.file_name().unwrap().to_string_lossy().into_owned(),
             net_program: loopback_fixture
                 .then(|| home.parent().unwrap().join("bin").join("asl-net.exe")),
+            receiver_rule: None,
             child,
             input,
             output: messages,
@@ -592,6 +596,9 @@ impl CoreProcess {
         let Some(program) = self.net_program.clone() else {
             return;
         };
+        if let Some(mut rule) = self.receiver_rule.take() {
+            rule.close().expect("removing the previous receiver rule");
+        }
         let state = self.fixture_request(FixtureRequest::Inbound(enable), "inbound loopback");
         let sid = state["sid"]
             .as_str()
@@ -602,6 +609,13 @@ impl CoreProcess {
             panic!(
                 "{}: expected inbound permit={enable} for {sid} on {endpoint}: {error}; helper: {health}",
                 self.node
+            );
+        }
+        if enable {
+            self.receiver_rule = Some(
+                firewall::ReceiverRule::open(&program, endpoint, sid).unwrap_or_else(|e| {
+                    panic!("{}: firewall for {sid} on {endpoint}: {e}", self.node)
+                }),
             );
         }
     }

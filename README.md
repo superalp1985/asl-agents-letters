@@ -92,7 +92,7 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 ## 实施与验证状态
 
-Windows 三节点群组的管理员测试捕获到旧测试容器占用入站调试许可。测试现按接收方交接调试程序，并在拨号前核对 Windows 规则。真实容器互通待复测。[验证记录](docs/plan-validation.md#2026-11-22-t31-入站回环许可)
+Windows 三节点群组验收已确认容器允许接收第一次回环拨号，Windows 防火墙随后按默认入站策略丢弃了它。管理员测试现在为当前接收节点的临时程序、容器身份和本机 TCP 端口申请入站许可，接收方交接时撤回。真实容器的群消息投递待复测。[验证记录](docs/plan-validation.md#2026-11-22-t31-接收节点防火墙规则)
 
 **加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。三 Core 回环用例覆盖群成员变化、收发限制和资源流程。真实 AppContainer 群互通、公网/中继及真实链 RPC 仍未验收；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
 
@@ -247,7 +247,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 ### Implementation Status
 
-Windows blocked the three-node group's first connection while an older test profile held the inbound loopback permit. The test now transfers the debugger to the receiving node and checks its Windows filter before dialing. An elevated end-to-end run is pending. [Validation notes](docs/plan-validation.md#2026-11-22-t31-入站回环许可)
+In the three-node group test, AppContainer permitted the first loopback connection, then Windows Firewall dropped it under the default inbound policy. The elevated test now requests an inbound rule for the receiving node's temporary executable, container identity and loopback TCP port. It removes the rule when the receiver changes. Group message delivery between real containers still needs an elevated run. [Validation notes](docs/plan-validation.md#2026-11-22-t31-接收节点防火墙规则)
 
 **Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. Three-Core loopback scenarios cover membership changes, constrained delivery, and resource flows. Actual AppContainer group connectivity, public/relay networking, and live chain RPC remain unverified; other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
 

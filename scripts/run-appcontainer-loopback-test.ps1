@@ -72,16 +72,26 @@ if ($ReleaseOrphanSid) {
     }
 }
 Push-Location $repo
+$previousRun = $env:ASL_GROUP_FIREWALL_RUN
+$runId = [Guid]::NewGuid().ToString('N')
 try {
     & cargo +1.100.0 build -p asl-app --bin asl-net --bin asl-worker --bin asl-extractor --locked --offline
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    $env:ASL_GROUP_FIREWALL_RUN = $runId
     & cargo +1.100.0 test -p asl-app --lib --locked --offline `
         supervisor::groups::process_tests::group_messages_cross_sandboxed_net_processes `
         -- --ignored --exact --nocapture --test-threads=1
     exit $LASTEXITCODE
 }
 finally {
-    Pop-Location
+    try {
+        if ($env:ASL_GROUP_FIREWALL_RUN -eq $runId) {
+            & (Join-Path $PSScriptRoot "group-fixture-firewall.ps1") -RunId $runId -Cleanup
+        }
+    } finally {
+        $env:ASL_GROUP_FIREWALL_RUN = $previousRun
+        Pop-Location
+    }
 }
