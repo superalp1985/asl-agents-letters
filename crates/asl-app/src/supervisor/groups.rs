@@ -7,6 +7,7 @@ use std::{
 };
 
 use alloy_primitives::hex;
+use asl_groups::GroupApplication;
 use asl_store::{
     Store,
     group_state::{MlsIncomingInvite, open_mls_runtime_store},
@@ -32,6 +33,7 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const SYNC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_JOIN_DIAGNOSTICS: usize = 5;
+const MAX_RECENT_ROOMS: usize = 32;
 
 pub enum LocalGroupAction {
     List,
@@ -67,8 +69,17 @@ pub(super) struct LoopbackGroups {
     next_prune: Instant,
     cleanup_failed: bool,
     join_diagnostics: VecDeque<(Id128, &'static str)>,
+    recent_applications: VecDeque<ReceivedApplication>,
     next_sync_probe: Instant,
     sync_cursor: Option<(Hash32, PeerId)>,
+}
+
+struct ReceivedApplication {
+    room: Hash32,
+    epoch: u64,
+    sender: PeerId,
+    message: Id128,
+    kind: &'static str,
 }
 
 impl LoopbackGroups {
@@ -80,6 +91,7 @@ impl LoopbackGroups {
             next_prune: Instant::now() + PRUNE_INTERVAL,
             cleanup_failed: false,
             join_diagnostics: VecDeque::new(),
+            recent_applications: VecDeque::new(),
             next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
             sync_cursor: None,
         })
@@ -121,6 +133,31 @@ impl Supervisor {
             now_ms,
             |command| enqueue(net, command),
         );
+        if let Ok(Some(MlsNetworkOutcome::ApplicationReceived {
+            wire_id,
+            epoch,
+            sender,
+            application,
+        })) = &result
+        {
+            groups
+                .recent_applications
+                .retain(|entry| entry.room != *wire_id);
+            if groups.recent_applications.len() == MAX_RECENT_ROOMS {
+                groups.recent_applications.pop_front();
+            }
+            groups.recent_applications.push_back(ReceivedApplication {
+                room: *wire_id,
+                epoch: *epoch,
+                sender: sender.clone(),
+                message: application.message_id(),
+                kind: match application.as_ref() {
+                    GroupApplication::Query(_) => "query",
+                    GroupApplication::Answer(_) => "answer",
+                    GroupApplication::Offer(_) => "offer",
+                },
+            });
+        }
         if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
             && let Some((connection_id, wire_id)) = joined_route
             && let Ok(sync_now_ms) = unix_time_ms()
@@ -236,6 +273,17 @@ impl Supervisor {
                     view["creator"] = json!(peer_text(&saved.creator));
                     view["stored_members"] =
                         json!(saved.members.iter().map(peer_text).collect::<Vec<_>>());
+                }
+                if let Some(entry) = groups
+                    .recent_applications
+                    .iter()
+                    .find(|entry| entry.room == id && entry.epoch == epoch)
+                {
+                    view["last_received"] = json!({
+                        "sender": peer_text(&entry.sender),
+                        "message_id": hex::encode(entry.message.0),
+                        "kind": entry.kind
+                    });
                 }
                 return Ok(view);
             }

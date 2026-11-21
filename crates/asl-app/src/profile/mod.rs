@@ -25,7 +25,8 @@ pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 #[cfg(windows)]
 pub use admission::{
-    MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom,
+    MlsApplicationDispatch, MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome,
+    ReconciledMlsRoom,
 };
 pub use history::RecordHistory;
 pub use proof_response::serve_local_identity_proof;

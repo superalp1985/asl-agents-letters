@@ -56,6 +56,19 @@ impl CoreAdmission {
         check_application_creation(created, time)?;
         let mut candidate =
             self.load_mls_application_base(store, wire_id, expected, directories, time)?;
+        self.prepare_mls_application(store, &mut candidate, application, &clock)
+            .map(|(packet, _)| packet)
+    }
+
+    pub(super) fn prepare_mls_application(
+        &mut self,
+        store: &mut Store,
+        candidate: &mut LocalRoomCandidate,
+        application: GroupApplication,
+        clock: &SyncClock,
+    ) -> Result<(GroupPacket, RoomVersion), AslError> {
+        let (created, _) = application_times(&application);
+        check_application_creation(created, clock.now_ms()?)?;
         let message_id = application.message_id();
         let packet = encrypt_application(
             &mut candidate.base.group,
@@ -64,10 +77,11 @@ impl CoreAdmission {
             Id128(fresh_id()?),
             application,
         )?;
-        self.persist_mls_application(store, &candidate, &packet, message_id, None, || {
-            clock.now_ms()
-        })?;
-        Ok(packet)
+        let version =
+            self.persist_mls_application(store, candidate, &packet, message_id, None, || {
+                clock.now_ms()
+            })?;
+        Ok((packet, version))
     }
 
     /// Return structured plaintext only after the receive ratchet and replay
@@ -80,8 +94,18 @@ impl CoreAdmission {
         directories: &HashMap<AgentId, Vec<u8>>,
         now_ms: u64,
     ) -> Result<GroupApplication, AslError> {
-        let packet = receive.packet;
         let clock = SyncClock::inbound(now_ms, receive.deadline_ms);
+        self.apply_mls_application(store, receive, directories, &clock)
+    }
+
+    pub(super) fn apply_mls_application(
+        &mut self,
+        store: &mut Store,
+        receive: MlsApplicationReceive<'_>,
+        directories: &HashMap<AgentId, Vec<u8>>,
+        clock: &SyncClock,
+    ) -> Result<GroupApplication, AslError> {
+        let packet = receive.packet;
         let now = clock.now_ms()?;
         packet.validate_request()?;
         if !matches!(packet.body, GroupBody::Application(_))
@@ -135,7 +159,7 @@ impl CoreAdmission {
         Ok(application)
     }
 
-    fn load_mls_application_base(
+    pub(super) fn load_mls_application_base(
         &mut self,
         store: &Store,
         wire_id: Hash32,
@@ -164,7 +188,7 @@ impl CoreAdmission {
         message_id: Id128,
         incoming: Option<ApplicationSource<'_>>,
         current_time: impl Fn() -> Result<u64, AslError>,
-    ) -> Result<(), AslError> {
+    ) -> Result<RoomVersion, AslError> {
         let GroupBody::Application(ciphertext) = &packet.body else {
             return Err(AslError::InvalidMessage);
         };
@@ -249,12 +273,11 @@ impl CoreAdmission {
                 }
                 Err(AslError::ExpiredMessage)
             },
-        )?;
-        Ok(())
+        )
     }
 }
 
-fn application_times(application: &GroupApplication) -> (Option<u64>, u64) {
+pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>, u64) {
     match application {
         GroupApplication::Query(query) => (Some(query.created_at_ms), query.expires_at_ms),
         GroupApplication::Answer(answer) => (Some(answer.created_at_ms), answer.expires_at_ms),

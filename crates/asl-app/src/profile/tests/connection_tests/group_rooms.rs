@@ -167,6 +167,12 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     };
     let (first_db, mut first_store, mut first) = node(1);
     join(&mut first, &mut first_store, 1);
+    first.handle_event(
+        NetworkEvent::PeerDisconnected {
+            connection_id: [1; 16],
+        },
+        NOW,
+    );
     let (_second_db, mut second_store, mut second) = node(2);
     let prior_connection = [9; 16];
     let refreshed = signed_directory(&roots[1], &dirs[1], 2);
@@ -410,6 +416,84 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
         &no_imports,
         probe_now,
     );
+    let removed_connection = [2; 16];
+    admit(
+        &mut creator,
+        removed_connection,
+        &certs[2],
+        proofs[2].clone(),
+        &signed[2],
+    );
+    let (queued, outbound) =
+        dispatch_query(&mut creator, &mut creator_store, wire_id, 71, probe_now());
+    assert_eq!((queued.available, queued.queued), (2, 2));
+    let [
+        (first_route, first_handle, first_packet),
+        (second_route, second_handle, second_packet),
+    ] = outbound.try_into().expect("two current devices");
+    assert!([first_route, second_route].contains(&connection));
+    assert!([first_route, second_route].contains(&removed_connection));
+    assert_ne!(first_handle, second_handle);
+    assert_eq!(first_packet, second_packet);
+    for (node, store, route) in [
+        (&mut first, &mut first_store, connection),
+        (&mut second, &mut second_store, removed_connection),
+    ] {
+        let now = probe_now();
+        let mut enqueued = None;
+        assert!(matches!(
+            node.handle_mls_network_event(
+                store,
+                NetworkEvent::UnverifiedGroupRequest {
+                    connection_id: route,
+                    response_id: [75; 16],
+                    deadline_ms: now + 1_000,
+                    request: first_packet.clone(),
+                },
+                &no_imports,
+                now,
+                |reply| {
+                    enqueued = Some(reply);
+                    Ok(())
+                },
+            ),
+            Ok(Some(MlsNetworkOutcome::ApplicationReceived { sender, application, .. }))
+                if sender == certs[0].peer_id && application.message_id() == queued.message_id
+        ));
+        let Some(NetworkCommand::ReplyGroup {
+            response,
+            response_id,
+            ..
+        }) = enqueued
+        else {
+            panic!("expected a receipt");
+        };
+        assert_eq!(response_id, [75; 16]);
+        first_packet.match_reply(&response).unwrap();
+    }
+    let (queued, mut outbound) =
+        dispatch_query(&mut first, &mut first_store, wire_id, 72, probe_now());
+    assert_eq!((queued.available, queued.queued), (1, 1));
+    let (route, _, request) = outbound.pop().unwrap();
+    assert_eq!(route, connection);
+    let now = probe_now();
+    let event = NetworkEvent::UnverifiedGroupRequest {
+        connection_id: route,
+        response_id: [76; 16],
+        deadline_ms: now + 1_000,
+        request,
+    };
+    assert!(matches!(
+        creator.handle_mls_network_event(
+            &mut creator_store,
+            event,
+            &no_imports,
+            now,
+            |_| Err(AslError::QuotaExceeded)
+        ),
+        Ok(Some(MlsNetworkOutcome::ApplicationReceived { sender, application, .. }))
+            if sender == certs[1].peer_id && application.message_id() == queued.message_id
+    ));
 
     assert!(matches!(
         first.remove_local_mls_member(
@@ -542,14 +626,11 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
             .version,
         room.version
     );
-    let removed_connection = [2; 16];
-    admit(
-        &mut creator,
-        removed_connection,
-        &certs[2],
-        proofs[2].clone(),
-        &signed[2],
-    );
+    let (queued, outbound) =
+        dispatch_query(&mut creator, &mut creator_store, wire_id, 73, probe_now());
+    assert_eq!((queued.available, queued.queued), (1, 1));
+    assert_eq!(outbound[0].0, connection);
+    assert_eq!(outbound[0].2.epoch, 3);
     let mut outgoing = None;
     second
         .start_mls_sync(
@@ -585,6 +666,52 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     ));
 }
 
+type QueuedApplication = ([u8; 16], [u8; 16], GroupPacket);
+
+fn dispatch_query(
+    node: &mut CoreAdmission,
+    store: &mut asl_store::Store,
+    room: Hash32,
+    message_byte: u8,
+    now: u64,
+) -> (
+    crate::profile::MlsApplicationDispatch,
+    Vec<QueuedApplication>,
+) {
+    let mut query = sample_group_query();
+    query.message_id = Id128([message_byte; 16]);
+    query.created_at_ms = now;
+    query.expires_at_ms = now + 5_000;
+    let mut outbound = Vec::new();
+    let result = node
+        .send_loopback_mls_application(store, room, GroupApplication::Query(query), now, |cmd| {
+            let NetworkCommand::SendGroup {
+                connection_id,
+                request_handle,
+                request,
+                ..
+            } = cmd
+            else {
+                panic!("expected an application command");
+            };
+            outbound.push((connection_id, request_handle, request));
+            Ok(())
+        })
+        .unwrap();
+    (result, outbound)
+}
+
+fn sample_group_query() -> asl_types::protocol::Query {
+    let bytes = include_str!("../../../../../../schemas/vectors/query-v1.hex")
+        .split_ascii_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect::<Vec<_>>();
+    let GroupApplication::Query(query) = GroupApplication::decode(&bytes).unwrap() else {
+        panic!("expected a structured query");
+    };
+    query
+}
+
 fn exercise_application_candidate(
     (sender, send_store, sender_device): (&mut CoreAdmission, &mut asl_store::Store, &PeerId),
     (receiver, receive_store, receive_db): (
@@ -597,13 +724,7 @@ fn exercise_application_candidate(
     directories: &HashMap<AgentId, Vec<u8>>,
     now: impl Fn() -> u64,
 ) -> GroupPacket {
-    let sample = include_str!("../../../../../../schemas/vectors/query-v1.hex")
-        .split_ascii_whitespace()
-        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
-        .collect::<Vec<_>>();
-    let GroupApplication::Query(mut query) = GroupApplication::decode(&sample).unwrap() else {
-        panic!("expected a structured query");
-    };
+    let mut query = sample_group_query();
     query.created_at_ms = now();
     query.expires_at_ms = query.created_at_ms + 5_000;
     let deadline = query.created_at_ms + 3_000;

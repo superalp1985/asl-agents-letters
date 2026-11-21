@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Instant};
 
+use asl_groups::GroupApplication;
 use asl_net::transport::REQUEST_TIMEOUT;
 use asl_store::{
     Store,
@@ -7,7 +8,7 @@ use asl_store::{
 };
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32, Id128},
+    ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{GroupBody, GroupMembership, GroupPacket},
     task::GroupId,
 };
@@ -50,6 +51,12 @@ pub enum MlsNetworkOutcome {
     },
     SyncStopped {
         wire_id: Hash32,
+    },
+    ApplicationReceived {
+        wire_id: Hash32,
+        epoch: u64,
+        sender: PeerId,
+        application: Box<GroupApplication>,
     },
 }
 
@@ -231,6 +238,32 @@ impl CoreAdmission {
                 if now_ms >= deadline_ms {
                     return Err(AslError::ExpiredMessage);
                 }
+                if matches!(&request.body, GroupBody::Application(_)) {
+                    let (sender, application) = self.receive_loopback_mls_application(
+                        store,
+                        connection_id,
+                        &request,
+                        deadline_ms,
+                        now_ms,
+                    )?;
+                    let response = GroupPacket {
+                        body: GroupBody::Membership(GroupMembership::Receipt),
+                        ..request
+                    };
+                    let outcome = MlsNetworkOutcome::ApplicationReceived {
+                        wire_id: response.group_id,
+                        epoch: response.epoch,
+                        sender,
+                        application: Box::new(application),
+                    };
+                    // The event is committed even if the receipt cannot be queued.
+                    let _ = enqueue(NetworkCommand::ReplyGroup {
+                        connection_id,
+                        response_id,
+                        response,
+                    });
+                    return Ok(Some(outcome));
+                }
                 if matches!(
                     &request.body,
                     GroupBody::Membership(GroupMembership::SyncRequest { .. })
@@ -276,7 +309,7 @@ impl CoreAdmission {
                         )?,
                         None,
                     ),
-                    // Standalone updates and application frames are not active.
+                    // Standalone membership updates are not accepted.
                     _ => return Err(AslError::PolicyDenied),
                 };
                 self.admitted_peer_identity(connection_id, now_ms)?;

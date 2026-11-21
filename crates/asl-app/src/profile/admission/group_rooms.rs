@@ -2,6 +2,7 @@
 //! a room, enables a transport or grants access to files.
 
 mod application;
+mod delivery;
 mod directories;
 mod incoming;
 mod network;
@@ -10,6 +11,7 @@ mod removal;
 mod sync;
 
 pub use application::MlsApplicationReceive;
+pub use delivery::MlsApplicationDispatch;
 pub(super) use directories::GroupDirectoryCache;
 pub(super) use network::MlsJoinAttempts;
 pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};

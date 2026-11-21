@@ -1,4 +1,7 @@
-use asl_types::{error::AslError, ids::PeerId};
+use asl_types::{
+    error::AslError,
+    ids::{Hash32, PeerId},
+};
 use rusqlite::TransactionBehavior;
 
 use super::{
@@ -17,6 +20,31 @@ pub struct MlsApplicationAuthority<'a> {
 }
 
 impl Store {
+    /// Serialize bounded, nonblocking Core-to-Net enqueue with competing
+    /// room and identity writes. The ratchet must already be committed.
+    pub fn with_mls_application_dispatch<T>(
+        &mut self,
+        wire_id: Hash32,
+        version: RoomVersion,
+        authority: MlsApplicationAuthority<'_>,
+        now_ms: u64,
+        enqueue: impl FnOnce() -> T,
+    ) -> Result<T, AslError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if room_version(&tx, wire_id, authority.creator)? != version {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        for member in authority.members {
+            require_member(&tx, member, authority.chain_id, now_ms)?;
+        }
+        let result = enqueue();
+        drop(tx);
+        Ok(result)
+    }
+
     /// Advance a paused room's ratchet and journal its ciphertext together.
     /// This is not an authorization or delivery operation.
     pub fn commit_verified_mls_application(
