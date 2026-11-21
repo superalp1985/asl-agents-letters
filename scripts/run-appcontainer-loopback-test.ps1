@@ -25,10 +25,9 @@ if (-not $DevRoot) {
 }
 
 . (Join-Path $PSScriptRoot "dev-env.ps1") -Root $DevRoot
-$env:ASL_APPCONTAINER_LOOPBACK_FIXTURE = "1"
 Push-Location $repo
 try {
-    & cargo +1.100.0 test -p asl-app --all-targets --locked --offline --no-run
+    & cargo +1.100.0 build -p asl-app --bin asl-net --bin asl-worker --bin asl-extractor --locked --offline
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

@@ -25,18 +25,7 @@ pub(super) struct Job {
 }
 
 impl Job {
-    pub(super) fn create(
-        memory_bytes: usize,
-        cpu_time_100ns: Option<i64>,
-        cpu_rate_percent: u8,
-    ) -> Result<Self, AslError> {
-        if memory_bytes == 0
-            || cpu_time_100ns.is_some_and(|limit| limit <= 0)
-            || !(1..=100).contains(&cpu_rate_percent)
-        {
-            return Err(AslError::SandboxUnavailable);
-        }
-
+    fn new() -> Result<Self, AslError> {
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
@@ -48,10 +37,37 @@ impl Job {
             .map_err(|_| AslError::SandboxUnavailable)?;
         // SAFETY: CreateJobObjectW returned a valid, uniquely owned handle.
         // Transfer it immediately so every later failure closes the job.
-        let job = Self {
+        Ok(Self {
             handle: unsafe { OwnedHandle::from_raw_handle(handle.0) },
-        };
+        })
+    }
 
+    #[cfg(feature = "appcontainer-loopback-fixture")]
+    pub(super) fn fixture_helper() -> Result<Self, AslError> {
+        let job = Self::new()?;
+        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        job.set_limits(&limits)?;
+        Ok(job)
+    }
+
+    pub(super) fn create(
+        memory_bytes: usize,
+        cpu_time_100ns: Option<i64>,
+        cpu_rate_percent: u8,
+    ) -> Result<Self, AslError> {
+        if memory_bytes == 0
+            || cpu_time_100ns.is_some_and(|limit| limit <= 0)
+            || !(1..=100).contains(&cpu_rate_percent)
+        {
+            return Err(AslError::SandboxUnavailable);
+        }
+        let job = Self::new()?;
         let mut limit_flags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS
             | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
             | JOB_OBJECT_LIMIT_PROCESS_MEMORY
@@ -71,17 +87,7 @@ impl Job {
             JobMemoryLimit: memory_bytes,
             ..Default::default()
         };
-        // SAFETY: The live job handle and repr(C) buffer match the information
-        // class and size; Windows reads the buffer only during this call.
-        unsafe {
-            SetInformationJobObject(
-                job.raw(),
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        }
-        .map_err(|_| AslError::SandboxUnavailable)?;
+        job.set_limits(&limits)?;
 
         let cpu_rate = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
             ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
@@ -124,6 +130,19 @@ impl Job {
         .map_err(|_| AslError::SandboxUnavailable)?;
 
         Ok(job)
+    }
+
+    fn set_limits(&self, limits: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> Result<(), AslError> {
+        // SAFETY: The typed limits buffer stays live for the full call.
+        unsafe {
+            SetInformationJobObject(
+                self.raw(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(|_| AslError::SandboxUnavailable)
     }
 
     pub(super) fn assign(&self, process: HANDLE) -> Result<(), AslError> {

@@ -316,7 +316,8 @@ fn group_core_child() {
     .unwrap();
     let mut net_thread = None;
     let mut supervisor = match registry.verification {
-        Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher).unwrap(),
+        Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher)
+            .expect("starting the Core and its isolated Net process"),
         Verification::Protocol => {
             Supervisor::start_with_net(paths, launcher, |_, device, groups| {
                 let (net_input, mut core_output) = io::pipe()?;
@@ -451,9 +452,48 @@ fn parse_hex<const N: usize>(value: &Value) -> [u8; N] {
 }
 
 struct CoreProcess {
+    node: String,
     child: Child,
     input: Option<ChildStdin>,
-    output: Receiver<Value>,
+    output: Receiver<io::Result<Value>>,
+}
+
+fn forward_replies(mut stdout: impl BufRead, output: mpsc::Sender<io::Result<Value>>) {
+    let prefix = RESULT_PREFIX.as_bytes();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match stdout.read_until(b'\n', &mut line) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) => {
+                let _ = output.send(Err(error));
+                return;
+            }
+        }
+        // libtest can put its test name before the marker on the same line.
+        if let Some(start) = line.windows(prefix.len()).position(|part| part == prefix) {
+            let result = serde_json::from_slice(&line[start + prefix.len()..])
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+            if output.send(result).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[test]
+fn fixture_reader_skips_localized_output_and_reports_broken_replies() {
+    let (sender, messages) = mpsc::channel();
+    forward_replies(
+        &b"\xff\xfe\r\ntest ... ASL_GROUP_FIXTURE:{\"ready\":true}\r\nASL_GROUP_FIXTURE:!\n"[..],
+        sender,
+    );
+    assert_eq!(messages.recv().unwrap().unwrap(), json!({"ready": true}));
+    assert_eq!(
+        messages.recv().unwrap().unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
 }
 
 impl CoreProcess {
@@ -464,7 +504,8 @@ impl CoreProcess {
             .env("ASL_GROUP_FIXTURE_HOME", home)
             .env("ASL_GROUP_FIXTURE_REGISTRY", registry)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
         if loopback_fixture {
             command.env("ASL_APPCONTAINER_LOOPBACK_FIXTURE", "1");
         }
@@ -472,44 +513,39 @@ impl CoreProcess {
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (output, messages) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if let Some((_, reply)) = line.split_once(RESULT_PREFIX)
-                    && output.send(serde_json::from_str(reply).unwrap()).is_err()
-                {
-                    break;
-                }
-            }
-        });
+        thread::spawn(move || forward_replies(BufReader::new(stdout), output));
         let mut core = Self {
+            node: home.file_name().unwrap().to_string_lossy().into_owned(),
             child,
             input,
             output: messages,
         };
-        let ready = core.receive();
+        let ready = core.receive("startup / listening");
         (core, ready)
     }
 
-    fn receive(&mut self) -> Value {
+    fn receive(&mut self, stage: &str) -> Value {
         match self.output.recv_timeout(WAIT) {
-            Ok(reply) => reply,
+            Ok(Ok(reply)) => reply,
+            Ok(Err(error)) => panic!("Core {} during {stage}: {error}", self.node),
             Err(error) => panic!(
-                "Core fixture output: {error:?}, child: {:?}",
+                "Core {} (pid {}) during {stage}: {error:?}, child: {:?}",
+                self.node,
+                self.child.id(),
                 self.child.try_wait().unwrap()
             ),
         }
     }
 
-    fn request(&mut self, action: Action) -> Value {
+    fn request(&mut self, action: Action, stage: &str) -> Value {
         let input = self.input.as_mut().unwrap();
         serde_json::to_writer(&mut *input, &action).unwrap();
         writeln!(input).unwrap();
-        self.receive()
+        self.receive(stage)
     }
 
     fn ok(&mut self, action: Action) -> Value {
-        let value = self.request(action);
+        let value = self.request(action, "local group command");
         assert!(value.get("error").is_none(), "{value}");
         value
     }
@@ -596,7 +632,7 @@ impl CoreProcess {
     ) -> Value {
         let deadline = Instant::now() + wait;
         loop {
-            let reply = self.request(action());
+            let reply = self.request(action(), stage);
             if done(&reply) {
                 return reply;
             }
@@ -607,10 +643,10 @@ impl CoreProcess {
 
     fn close(mut self) {
         drop(self.input.take());
-        assert_eq!(
+        assert!(matches!(
             self.output.recv_timeout(WAIT),
             Err(RecvTimeoutError::Disconnected)
-        );
+        ));
         assert!(self.child.wait().unwrap().success());
     }
 }

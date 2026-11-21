@@ -3,8 +3,6 @@ use std::fs::File;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
-#[cfg(feature = "appcontainer-loopback-fixture")]
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -121,20 +119,28 @@ struct Profile {
 }
 
 impl Profile {
-    fn create() -> Result<Self, AslError> {
+    fn create(_role: SandboxRole) -> Result<Self, AslError> {
         let name_text = format!("asl.{}", rand::random::<u128>());
         let name = HSTRING::from(&name_text);
         let sid = unsafe { CreateAppContainerProfile(&name, &name, &name, None) }
             .map_err(|error| setup_error("create_appcontainer", error))?;
-        #[cfg(feature = "appcontainer-loopback-fixture")]
-        let loopback_fixture = LoopbackFixture::enable(&sid_text(sid)?)?;
-        Ok(Self {
+        let profile = Self {
             name,
             sid,
             present: true,
             #[cfg(feature = "appcontainer-loopback-fixture")]
-            loopback_fixture,
-        })
+            loopback_fixture: None,
+        };
+        #[cfg(feature = "appcontainer-loopback-fixture")]
+        if _role == SandboxRole::Net
+            && std::env::var_os("ASL_APPCONTAINER_LOOPBACK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            let mut profile = profile;
+            profile.loopback_fixture = Some(LoopbackFixture::enable(sid_text(sid)?)?);
+            return Ok(profile);
+        }
+        Ok(profile)
     }
 
     fn remove(&mut self) -> Result<(), AslError> {
@@ -164,53 +170,10 @@ impl Drop for Profile {
 }
 
 #[cfg(feature = "appcontainer-loopback-fixture")]
-const LOOPBACK_FIXTURE_ENV: &str = "ASL_APPCONTAINER_LOOPBACK_FIXTURE";
-
+#[path = "loopback_fixture.rs"]
+mod loopback_fixture;
 #[cfg(feature = "appcontainer-loopback-fixture")]
-struct LoopbackFixture {
-    sid: String,
-}
-
-#[cfg(feature = "appcontainer-loopback-fixture")]
-impl LoopbackFixture {
-    fn enable(sid: &str) -> Result<Option<Self>, AslError> {
-        if std::env::var_os(LOOPBACK_FIXTURE_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
-            return Ok(None);
-        }
-        let fixture = Self {
-            sid: sid.to_owned(),
-        };
-        fixture.run("-a")?;
-        if let Err(error) = fixture.run("-is") {
-            let _ = fixture.run("-d");
-            return Err(error);
-        }
-        Ok(Some(fixture))
-    }
-
-    fn remove(self) -> Result<(), AslError> {
-        self.run("-d")
-    }
-
-    fn run(&self, operation: &str) -> Result<(), AslError> {
-        let system = system_directory()?;
-        let status = Command::new(Path::new(&system).join("CheckNetIsolation.exe"))
-            .args(["LoopbackExempt", operation, &format!("-p={}", self.sid)])
-            .status()
-            .map_err(|_| AslError::SandboxSetupFailed {
-                stage: "check_net_isolation",
-                code: 0,
-            })?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(AslError::SandboxSetupFailed {
-                stage: "check_net_isolation",
-                code: status.code().unwrap_or(-1),
-            })
-        }
-    }
-}
+use loopback_fixture::LoopbackFixture;
 
 #[cfg(feature = "appcontainer-loopback-fixture")]
 fn sid_text(sid: PSID) -> Result<String, AslError> {
@@ -300,7 +263,7 @@ pub(crate) fn spawn(
     limits: SandboxLimits,
 ) -> Result<Child, AslError> {
     let pin = pin_executable(program).map_err(|_| AslError::SandboxUnavailable)?;
-    let profile = Profile::create()?;
+    let profile = Profile::create(role)?;
     let grant = ExecutableGrant::new(pin, profile.sid)?;
     let job = Arc::new(Job::create(
         usize::try_from(limits.memory_bytes).map_err(|_| AslError::SandboxUnavailable)?,
