@@ -180,6 +180,11 @@ impl SandboxChild {
 
 #[cfg(windows)]
 impl SandboxChild {
+    #[cfg(feature = "appcontainer-loopback-fixture")]
+    pub fn fixture_inbound(&mut self, enable: bool) -> Result<&str, AslError> {
+        self.inner.fixture_inbound(enable)
+    }
+
     pub fn id(&self) -> u32 {
         self.inner.id()
     }

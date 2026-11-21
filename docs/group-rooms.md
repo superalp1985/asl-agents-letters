@@ -138,7 +138,7 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 - **三 Core 协议验收已通过。** 三个独立测试进程分别运行生产 Supervisor 和 Net 驱动；仅在测试构建中，Net 驱动运行在各自宿主的线程里，通过真实匿名管道交换生产 IPC 帧，节点间通过 libp2p TCP 回环通信，端口由系统分配。根和设备密钥用 DPAPI 保存，链最终性使用合成夹具，仍运行实际的身份状态证明、证书、目录、SQLite 和 OpenMLS 校验。测试覆盖定向邀请与本机审批、Welcome、Add／Remove 补齐、创建者向两名在线成员投递结构化 Query、普通成员只向创建者发送，以及被移除设备在网络身份仍获准时不再进入投递名单。
 - **真实 AppContainer 互通已改走 Windows 官方调试路径。** 测试构建从系统目录取得 `CheckNetIsolation.exe`，用本次临时 profile 的 SID 执行 `LoopbackExempt -a -p=<SID>` 和 `-is -p=<SID>`，退出时以 `-d -p=<SID>` 清理；该能力只在 `appcontainer-loopback-fixture` feature 和显式子进程环境变量同时启用时生效，正式 Core 启动不设置豁免、不扩大沙箱权限，也不回退到宿主线程。Windows 要求修改该列表时使用提升权限的终端。[Microsoft 回环排查步骤](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)明确说明两个同机 AppContainer 必须通过该路径启用回环。
 
-入站调试程序 `-is` 随接收节点持续运行。测试为每个 Net 单独管理该子进程及其输入输出，退出时先回收子进程，再移除该 SID 的出站配置。[Microsoft 入站回环调试说明](https://learn.microsoft.com/en-us/windows/iot-core/develop-your-app/loopback)
+每个 Net 有独立的临时 profile 和出站配置。测试一次只为当前接收端运行一个 `-is`。两名成员先通过真实连接交换签名目录，随后入站调试程序交接给创建者，两名成员分别连接创建者。每次交接后，测试先在 WFP 入站授权层核对目标 SID 的回环允许规则，再开始拨号。测试结束时清理各自的配置。[Microsoft 入站回环调试说明](https://learn.microsoft.com/en-us/windows/iot-core/develop-your-app/loopback)
 
 在提升权限的 PowerShell 中运行仓库脚本。它会构建正式 Net、Worker 和 Extractor，再执行真实 AppContainer 的定向测试。
 
@@ -147,5 +147,7 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 ```
 
 脚本不写死盘符，会使用 `ASL_DEV_ROOT`，或在仓库上级目录中查找现有 `dev-cache`。
+
+若捕获的 `Allow inbound AppContainer loopback` 规则属于旧测试 SID，可在上述命令后加 `-ReleaseOrphanSid '<旧测试 SID>'`。脚本核对 profile、进程所有者、系统程序路径、调试参数和父进程状态，再显示会话信息。确认是已结束的 ASL 测试后输入 `Y`，脚本会移除该 SID 的出站调试豁免并关闭遗留程序。
 
 测试会打印三个节点的 PeerId、Core 进程号、TCP 监听端口和每次拨号的目标。真实容器的状态轮询超时时，测试会在清理临时程序前查询 Windows Filtering Platform，按本次 `asl-net.exe`、TCP 和 IPv4 回环地址筛选。成功导出的 `netevents.xml` 和 `filters.xml` 位于开发根的 `work/tmp/asl-group-wfp-*` 下，控制台会给出路径。用拨号端口匹配丢弃事件，再用事件的 `filterId` 查过滤规则。若事件为空，阻断原因仍待确认。[Windows 网络隔离排查](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)

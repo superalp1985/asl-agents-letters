@@ -428,6 +428,15 @@ pub(crate) fn spawn(
 }
 
 impl Child {
+    #[cfg(feature = "appcontainer-loopback-fixture")]
+    pub(crate) fn fixture_inbound(&mut self, enable: bool) -> Result<&str, AslError> {
+        self.profile
+            .as_mut()
+            .and_then(|profile| profile.loopback_fixture.as_mut())
+            .ok_or(AslError::PolicyDenied)?
+            .inbound(enable)
+    }
+
     pub(crate) fn id(&self) -> u32 {
         self.id
     }

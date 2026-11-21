@@ -55,6 +55,12 @@ struct RegistryFixture {
 }
 
 #[derive(Serialize, Deserialize)]
+enum FixtureRequest {
+    Group(Action),
+    Inbound(bool),
+}
+
+#[derive(Serialize, Deserialize)]
 enum Action {
     Peers,
     Create,
@@ -162,6 +168,14 @@ fn verify_group_delivery(verification: Verification) {
     let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path, loopback_fixture);
     let (mut second, second_ready) =
         CoreProcess::start(second_home, &registry_path, loopback_fixture);
+    // Exchange signed directories first, then leave the inbound debugger on
+    // the creator for both member dials and the rest of the room scenario.
+    first.inbound(true, &first_ready);
+    second.dial(&first_ready, first_peer);
+    second.connection(&first_ready["peer"]);
+    first.connection(&second_ready["peer"]);
+    first.inbound(false, &first_ready);
+    creator.inbound(true, &creator_ready);
     first.dial(&creator_ready, creator_peer);
     first.connection(&creator_ready["peer"]);
     let first_connection = creator.connection(&first_ready["peer"]);
@@ -171,11 +185,6 @@ fn verify_group_delivery(verification: Verification) {
     second.dial(&creator_ready, creator_peer);
     second.connection(&creator_ready["peer"]);
     let second_connection = creator.connection(&second_ready["peer"]);
-    // Exchange signed directories so both members can verify the other's
-    // leaf in Welcome or Add through the usual connection admission.
-    second.dial(&first_ready, first_peer);
-    second.connection(&first_ready["peer"]);
-    first.connection(&second_ready["peer"]);
     creator.invite(room, second_connection, &mut second, 2);
     first.wait_epoch(room, 2);
 
@@ -270,6 +279,7 @@ fn verify_group_delivery(verification: Verification) {
     let after = creator.ok(Action::Room(room));
     assert_eq!(after["state"], "active");
 
+    creator.inbound(false, &creator_ready);
     creator.close();
     first.close();
     second.close();
@@ -360,13 +370,19 @@ fn group_core_child() {
     emit(json!({"tcp": address, "peer": super::peer_text(&supervisor.device_peer_id)}));
 
     let (input, commands) = mpsc::sync_channel(1);
+    let (inbound, receiver) = mpsc::sync_channel(1);
     supervisor.group_controls = Some(commands);
     let reader = thread::spawn(move || {
         for line in io::stdin().lock().lines() {
-            let action: Action = serde_json::from_str(&line.unwrap()).unwrap();
-            let action = action.into_local(unix_time_ms().unwrap()).unwrap();
             let (reply, response) = mpsc::sync_channel(1);
-            if input.send(LocalGroupCommand { action, reply }).is_err() {
+            let sent = match serde_json::from_str(&line.unwrap()).unwrap() {
+                FixtureRequest::Group(action) => {
+                    let action = action.into_local(unix_time_ms().unwrap()).unwrap();
+                    input.send(LocalGroupCommand { action, reply }).is_ok()
+                }
+                FixtureRequest::Inbound(enable) => inbound.send((enable, reply)).is_ok(),
+            };
+            if !sent {
                 break;
             }
             let Ok(result) = response.recv() else { break };
@@ -389,6 +405,16 @@ fn group_core_child() {
         },
         |_, _| Ok(()),
         |core| {
+            if let Ok((enable, reply)) = receiver.try_recv() {
+                let result = core
+                    .net
+                    .child
+                    .as_mut()
+                    .ok_or(AslError::SandboxUnavailable)
+                    .and_then(|child| child.fixture_inbound(enable))
+                    .map(|sid| json!({"sid": sid}));
+                let _ = reply.send(result);
+            }
             if core.group_controls.is_none() {
                 return Err(AslError::NotFound);
             }
@@ -552,10 +578,32 @@ impl CoreProcess {
     }
 
     fn request(&mut self, action: Action, stage: &str) -> Value {
+        self.fixture_request(FixtureRequest::Group(action), stage)
+    }
+
+    fn fixture_request(&mut self, action: FixtureRequest, stage: &str) -> Value {
         let input = self.input.as_mut().unwrap();
         serde_json::to_writer(&mut *input, &action).unwrap();
         writeln!(input).unwrap();
         self.receive(stage)
+    }
+
+    fn inbound(&mut self, enable: bool, ready: &Value) {
+        let Some(program) = self.net_program.clone() else {
+            return;
+        };
+        let state = self.fixture_request(FixtureRequest::Inbound(enable), "inbound loopback");
+        let sid = state["sid"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}: {state}", self.node));
+        let endpoint: SocketAddr = ready["tcp"].as_str().unwrap().parse().unwrap();
+        if let Err(error) = wait_for_receiver_rule(&program, endpoint, sid, enable) {
+            let health = self.fixture_request(FixtureRequest::Inbound(false), "inbound cleanup");
+            panic!(
+                "{}: expected inbound permit={enable} for {sid} on {endpoint}: {error}; helper: {health}",
+                self.node
+            );
+        }
     }
 
     fn ok(&mut self, action: Action) -> Value {
@@ -705,6 +753,59 @@ fn report_loopback_filters(program: &Path) {
                 eprintln!("WFP {report}: {}", destination.display())
             }
             other => eprintln!("WFP {report} unavailable: {other:?}"),
+        }
+    }
+}
+
+fn wait_for_receiver_rule(
+    program: &Path,
+    endpoint: SocketAddr,
+    sid: &str,
+    enable: bool,
+) -> io::Result<()> {
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let report = program.with_file_name("receiver-filter.xml");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/check-appcontainer-receiver.ps1");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let child = Command::new(system.join("netsh.exe"))
+            .args([
+                "wfp",
+                "show",
+                "filters",
+                "dir=in",
+                "protocol=6",
+                "localaddr=127.0.0.1",
+                "remoteaddr=127.0.0.1",
+            ])
+            .arg(format!("localport={}", endpoint.port()))
+            .arg(format!("appid={}", program.display()))
+            .arg(format!("file={}", report.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()?;
+        if !wait_for_report(child)?.success() {
+            return Err(io::Error::other("failed to read WFP filters"));
+        }
+        let child = Command::new(system.join("WindowsPowerShell/v1.0/powershell.exe"))
+            .args(["-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .args([
+                "-Sid",
+                sid,
+                "-Expect",
+                if enable { "Present" } else { "Absent" },
+            ])
+            .arg("-Report")
+            .arg(&report)
+            .stdin(Stdio::null())
+            .spawn()?;
+        match wait_for_report(child)?.code() {
+            Some(0) => return Ok(()),
+            Some(3) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            Some(3) => return Err(io::ErrorKind::TimedOut.into()),
+            _ => return Err(io::Error::other("failed to inspect the WFP filter report")),
         }
     }
 }

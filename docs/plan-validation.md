@@ -684,3 +684,9 @@ Windows 上通过窗口的正常关闭请求退出独立演示资料的 `asl-ui`
 随后一次管理员运行中，三个 Net 均返回 TCP 监听端点。拨号报告 `Transport`，等待身份准入时连接列表为空，用例在 23.04 秒后失败。01:55 这次运行的 Windows 防火墙事件 2097 记录了三个临时容器各自入站、出站阻止规则的创建，2052 记录规则清理。两类事件都记录配置变化。此次拨号缺少可对应的丢包记录。
 
 启动器原先只把 Net 的两项网络能力交给进程 token。现用同一份能力列表创建 Windows profile 和进程 token，Worker 与 Extractor 的列表均为空。修改后运行 `asl-policy --test sandbox_probe`，16 项通过，两个需外部 TCP/UDP 端点的用例按标记跳过。同一运行时段的 Windows 日志出现 ASL profile 的 Internet 与 Intranet 入站、出站允许规则。三 Core 宿主线程协议用例和测试输出读取用例均通过。`asl-app` 和 `asl-policy` 的库和测试目标通过严格 Clippy。修正后的真实 AppContainer 三节点群消息仍待管理员复测。
+
+### 2026-11-22 T31 入站回环许可
+
+02:08 的管理员运行用时 23.70 秒。`first` 向 `second` 拨号时，WFP 在接收端 `55195` 记录三次来自 `55196` 的入站丢弃。三条事件都指向 `filterId=138225`，规则名为 `AppContainerLoopback`，所在层为 `ALE_AUTH_RECV_ACCEPT_V4`。事件带有两项预期网络能力。捕获中入站回环允许规则 `138030` 仅匹配一个更早的 ASL 测试 profile。三个新入站调试程序均退出，错误为 `0x80320009`（`FWP_E_ALREADY_EXISTS`）。此次拨号止于 TCP 入站授权，尚未进入群组身份握手。
+
+验收程序现按两阶段交接入站调试程序。两个成员先交换身份目录，再分别连接创建者；每个 Net 继续使用自己的独立 profile。按新顺序运行的三 Core 宿主线程协议和输出读取用例通过。使用本次捕获的 `filters.xml` 回放，检查器正确识别旧 SID 的入站许可，并拒绝本轮接收 SID。真实 AppContainer 交接和后续群投递待管理员运行。
