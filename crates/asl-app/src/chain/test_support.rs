@@ -85,6 +85,22 @@ pub fn bootstrapped() -> EthereumLightClient {
     EthereumLightClient::bootstrap(consensus_config(), BOOTSTRAP, BOOTSTRAP_TIME).unwrap()
 }
 
+#[cfg(windows)]
+pub fn process_fixture_client(
+    mut finalized: FinalizedExecution,
+    now_secs: u64,
+) -> (ConsensusConfigV1, EthereumLightClient) {
+    let mut config = consensus_config();
+    // Production supervisors use wall-clock time. Shift only the test fixture's
+    // timeline; historical consensus evidence cannot authenticate this trie.
+    config.genesis_time_secs += now_secs - BOOTSTRAP_TIME;
+    finalized.timestamp_secs = now_secs;
+    let client = EthereumLightClient::bootstrap(config.clone(), BOOTSTRAP, now_secs)
+        .unwrap()
+        .with_test_execution(finalized);
+    (config, client)
+}
+
 pub fn synced() -> EthereumLightClient {
     let mut client =
         EthereumLightClient::bootstrap(consensus_config(), BOOTSTRAP, FINALITY_NOW).unwrap();

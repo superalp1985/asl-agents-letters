@@ -29,6 +29,9 @@ use super::{
     unix_time_ms,
 };
 
+#[cfg(test)]
+mod process_tests;
+
 const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const SYNC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
@@ -50,6 +53,11 @@ pub enum LocalGroupAction {
     Remove {
         room: Hash32,
         peer: PeerId,
+    },
+    /// Trusted in-process callers only; not parsed by the local console.
+    SendApplication {
+        room: Hash32,
+        application: Box<GroupApplication>,
     },
     Dial {
         address: SocketAddr,
@@ -412,6 +420,20 @@ impl Supervisor {
                     "removed": peer_text(&peer),
                     "state": "needs_sync",
                     "mls_epoch": version.mls_epoch
+                }))
+            }
+            LocalGroupAction::SendApplication { room, application } => {
+                let sent = admission.send_loopback_mls_application(
+                    store,
+                    room,
+                    *application,
+                    now_ms,
+                    |command| enqueue(net, command),
+                )?;
+                Ok(json!({
+                    "message_id": hex::encode(sent.message_id.0),
+                    "queued": sent.queued,
+                    "available": sent.available
                 }))
             }
             LocalGroupAction::Dial { address, peer } => {

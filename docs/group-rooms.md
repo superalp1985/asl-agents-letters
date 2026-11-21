@@ -121,4 +121,15 @@ Core 在独立候选中收发准备，要求调用方指定精确房间版本；
 
 发方只加密一次，密文和发送状态落盘后再入队。SQLite 写锁保护版本及身份检查和入队边界，较新的成员变更已落盘时不按旧名单入队。同一密文的各条请求使用独立的本机传输凭据。离线不补发，不自动重试；入队不表示送达。已经入队或已发送的旧消息不能召回，接收方只处理自己的当前 epoch。
 
-正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识，不展示内容，不把消息交给普通 Agent。发方仍是可信 Core 接口，尚无自动触发。回环默认关闭，房间仍为 `needs_sync`；普通成员互发、群权限激活、Agent 浏览/自动回答、GUI、公网、LAN 和中继均未开放。
+正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识，不展示内容，不把消息交给普通 Agent。发方可在可信 Core 的本机类型化控制通道提交 Query、Answer 或 Offer，只报告本机入队结果，不暴露终端、MCP、Worker 或远端发送命令。回环默认关闭，房间仍为 `needs_sync`；普通成员互发、群权限激活、Agent 浏览/自动回答、GUI、公网、LAN 和中继均未开放。
+
+### 跨进程验收状态
+
+测试启动两个独立的 Core 测试宿主，运行生产 Supervisor 和真实 AppContainer Net 子进程。身份根和设备密钥走 DPAPI，链最终性使用合成夹具，仍跑实际的身份状态证明与目录核验代码。两个 Net 都绑定了系统分配的 TCP 端口，但在本机 Windows 环境中，沙箱间回环拨号超时，未进入 ASL 身份准入。没有设置回环豁免、关闭沙箱或回退到其他地址。跨进程建群、双向群消息和移除后的投递排除仍未通过验收。[验证记录](plan-validation.md#2026-11-21-t31可信发送与跨进程验收)
+
+可在有可用沙箱间回环路由的 Windows 验收环境中运行；先构建 `asl-app` 全测试目标，以确保真实 Net 等辅助程序存在：
+
+```powershell
+cargo test -p asl-app --all-targets --locked --offline --no-run
+cargo test -p asl-app --lib --locked --offline supervisor::groups::process_tests::group_messages_cross_sandboxed_net_processes -- --ignored --exact --nocapture
+```

@@ -575,3 +575,9 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 - Windows x64 / E 盘：`asl-app`、`asl-groups`、`asl-store`、`asl-types`、`asl-net` 锁定离线全目标测试，533 项通过、0 失败、3 项按已有标记忽略，不重复计入测试子进程。随后仅调整一个测试断言的写法并定向复验；五包全目标严格 Clippy、格式检查通过。
 - 三节点夹具使用真实 OpenMLS、DPAPI、SQLite、合成链证明和注入的 Net 事件。覆盖同一密文向两个不同设备入队、独立请求句柄、普通成员只选创建者、回执入队失败仍返回已提交的收件事件，以及移除后创建者只向保留成员入队。网络投递与身份绑定路径经独立工程复核。
 - 正式 Supervisor 收方已接线，发方仍须可信 Core 调用；未验收跨正式进程的群应用收发。未启用普通成员互发、Agent 自动行为、群文件授权、公网、LAN 或中继；未运行真实链 RPC。线上 CBOR、SQLite schema 和依赖锁不变。
+
+### 2026-11-21 T31：可信发送与跨进程验收
+
+- Windows x64 / E 盘：`cargo test -p asl-app --all-targets --locked --offline -- --test-threads=1`，275 项通过、0 失败、3 项忽略（既有 30 秒重扫测试、群子进程入口、跨进程场景）。`asl-app` 全目标严格 Clippy 和 Rust 格式检查通过。未重跑其他包。
+- 跨进程场景单独运行时，两个测试宿主实际启动生产 Supervisor 和 AppContainer Net，并从 Net IPC 取得动态回环 TCP 监听地址。拨号经 IPC 入队，随后 Net 返回 `Transport`；临时 libp2p 诊断记录为 `Transport(... Timeout)`。未进入 ASL 身份准入，因而不计为群消息送达或移除验收。未修改系统网络规则或沙箱，临时诊断代码未保留。
+- 测试宿主通过仅在测试中编译的合成最终性接入生产身份验证，不调用链 RPC。独立工程复核检查了本机发送入口、协议边界和测试清理。未改线上 CBOR、SQLite schema 或依赖锁。房间保持 `needs_sync`，无群文件权限或自动 Agent 行为。
