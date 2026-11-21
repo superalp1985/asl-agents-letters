@@ -12,6 +12,7 @@ pub mod conversation;
 pub mod evidence;
 pub mod group_state;
 pub mod paired_contacts;
+mod publication;
 pub mod resources;
 pub mod search;
 mod transfer_peers;

@@ -4,23 +4,25 @@ use std::{
 };
 
 use asl_net::codec::{BulkRequest, BulkResponse};
+use asl_store::Store;
 use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{Hello, IdentityProof, PairingExchange, PairingInvite, WireFrame},
-    record::{RecordKind, RecordPayload, decode_record},
+    record::{MAX_RECORD_LIFETIME_MS, RecordKind, RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
 
 use crate::{
     chain::{DurableIdentityResolver, IdentityResolution, IdentityResolver, RegistryStatus},
+    identity::AgentIdentity,
     network::{NetworkCommand, NetworkEvent},
     pairing::verify_incoming_invite,
     transfer::{MatchedBulkResponse, VerifiedFetchManifest},
 };
 
-use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
+use super::{DeviceSession, RecordHistory, serve_local_identity_proof, sign_record};
 
 #[cfg(windows)]
 mod group_rooms;
@@ -33,6 +35,7 @@ pub use group_rooms::{
 pub(crate) const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
 const MAX_DHT_RECORD_OWNERS: usize = 10_000;
+const DEVICE_DIRECTORY_RENEWAL_MS: u64 = 5 * 60 * 1_000;
 const MAX_PENDING_PROOFS: usize = MAX_ADMISSION_CONNECTIONS;
 const PROOF_BUDGET_CAPACITY: u8 = 2;
 const PROOF_BUDGET_REFILL: Duration = Duration::from_millis(500);
@@ -73,6 +76,8 @@ struct DirectoryLease {
     hash: blake3::Hash,
     issued_at_ms: u64,
     expires_at_ms: u64,
+    record_sequence: u64,
+    record_issued_at_ms: u64,
 }
 
 impl DirectoryLease {
@@ -97,6 +102,8 @@ impl DirectoryLease {
             hash: blake3::hash(record.bytes()),
             issued_at_ms,
             expires_at_ms,
+            record_sequence: signed.sequence,
+            record_issued_at_ms: signed.issued_at_ms,
         })
     }
 }
@@ -444,6 +451,111 @@ impl CoreAdmission {
                 .dht_histories
                 .get(&agent)
                 .is_some_and(|history| history.matches_directory(agent, lease.hash))
+    }
+
+    pub(crate) fn local_directory_renewal_due(&self, now_ms: u64) -> bool {
+        self.local_directory_lease
+            .record_issued_at_ms
+            .checked_add(DEVICE_DIRECTORY_RENEWAL_MS)
+            .is_none_or(|deadline| now_ms >= deadline)
+    }
+
+    pub(crate) fn update_local_device_directory_source(
+        &mut self,
+        signed_source: Vec<u8>,
+        identity: &AgentIdentity,
+        store: &mut Store,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        if !self.local_chain_is_current(now_ms) || identity.agent_id() != self.local_hello.agent_id
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let source = decode_record(&signed_source)?;
+        let RecordPayload::DeviceDirectory(source_directory) = &source.record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if source_directory.agent_id != self.local_hello.agent_id {
+            return Err(AslError::InvalidIdentity);
+        }
+        let current = decode_record(&self.local_signed_directory)?;
+        let current_sequence = self.local_directory_lease.record_sequence;
+        if source.record.sequence <= current_sequence
+            && source.record.payload == current.record.payload
+        {
+            return Ok(false);
+        }
+
+        let verified = super::verify_record(
+            &signed_source,
+            self.local_hello.agent_id,
+            now_ms,
+            &mut self.resolver,
+        )?;
+        let replacement = if source.record.sequence > current_sequence {
+            signed_source
+        } else {
+            if self.verified_controller(self.local_hello.agent_id, now_ms)?
+                != identity.controller_address()
+            {
+                return Err(AslError::InvalidIdentity);
+            }
+            let minimum = source
+                .record
+                .sequence
+                .max(current_sequence)
+                .checked_add(1)
+                .ok_or(AslError::PolicyVersionConflict)?;
+            let sequence =
+                store.reserve_device_directory_sequence(self.local_hello.agent_id, minimum)?;
+            sign_record(
+                identity,
+                verified.signed().record.payload.clone(),
+                sequence,
+                now_ms,
+                MAX_RECORD_LIFETIME_MS,
+            )?
+        };
+        self.renew_local_device_directory(replacement, now_ms)
+    }
+
+    pub(crate) fn renew_local_device_directory_if_due(
+        &mut self,
+        identity: &AgentIdentity,
+        store: &mut Store,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        if !self.local_directory_renewal_due(now_ms) {
+            return Ok(false);
+        }
+        if !self.local_chain_is_current(now_ms) {
+            return Err(AslError::InvalidIdentity);
+        }
+        let current = decode_record(&self.local_signed_directory)?;
+        let RecordPayload::DeviceDirectory(directory) = current.record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if directory.agent_id != self.local_hello.agent_id
+            || identity.agent_id() != self.local_hello.agent_id
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let minimum = current
+            .record
+            .sequence
+            .max(self.local_directory_lease.record_sequence)
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        let sequence =
+            store.reserve_device_directory_sequence(self.local_hello.agent_id, minimum)?;
+        let renewed = sign_record(
+            identity,
+            RecordPayload::DeviceDirectory(directory),
+            sequence,
+            now_ms,
+            MAX_RECORD_LIFETIME_MS,
+        )?;
+        self.renew_local_device_directory(renewed, now_ms)
     }
 
     /// Reload the signed envelope without changing the device or Hello.

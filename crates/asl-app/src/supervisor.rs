@@ -72,6 +72,7 @@ const MAX_PENDING_NET_WRITES: usize = 8;
 const NET_ADMISSION_WRITE_HEADROOM: usize = 2;
 const NETWORK_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const DIRECTORY_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct Supervisor {
     agent_identity: AgentIdentity,
@@ -87,6 +88,7 @@ pub struct Supervisor {
     state_database: PathBuf,
     directory_reader: Option<directory::DirectoryReader>,
     directory_removed: bool,
+    directory_renewal_retry_at: Instant,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -163,6 +165,7 @@ impl Supervisor {
             state_database,
             directory_reader,
             directory_removed: false,
+            directory_renewal_retry_at: Instant::now(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -1047,6 +1050,7 @@ impl Supervisor {
         let mut next_ping = Instant::now();
         let mut next_agent_tick = Instant::now();
         loop {
+            self.renew_local_directory_if_due(unix_time_ms()?);
             self.check_network_admission_deadline(unix_time_ms()?)?;
             self.process_chain_refresh()?;
             let now = Instant::now();
@@ -1344,8 +1348,16 @@ impl Supervisor {
         }
         match update {
             Ok(Some(bytes)) => {
+                let Ok(mut store) = open_store(&self.state_database) else {
+                    return Ok(());
+                };
                 let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
-                let changed = admission.renew_local_device_directory(bytes, now_ms);
+                let changed = admission.update_local_device_directory_source(
+                    bytes,
+                    &self.agent_identity,
+                    &mut store,
+                    now_ms,
+                );
                 if matches!(changed, Ok(true))
                     || (matches!(changed, Ok(false))
                         && self.network_admission_status != NetworkAdmissionStatus::Active
@@ -1361,6 +1373,39 @@ impl Supervisor {
             Err(_) => {}
         }
         Ok(())
+    }
+
+    fn renew_local_directory_if_due(&mut self, now_ms: u64) {
+        if Instant::now() < self.directory_renewal_retry_at
+            || self.directory_removed
+            || !matches!(
+                self.network_admission_status,
+                NetworkAdmissionStatus::Active
+                    | NetworkAdmissionStatus::DeviceDirectoryUnavailable
+                    | NetworkAdmissionStatus::DeviceDirectoryMissing
+            )
+            || !self
+                .admission
+                .as_ref()
+                .is_some_and(|admission| admission.local_directory_renewal_due(now_ms))
+        {
+            return;
+        }
+        self.directory_renewal_retry_at = Instant::now() + DIRECTORY_RENEWAL_RETRY_INTERVAL;
+        let Ok(mut store) = open_store(&self.state_database) else {
+            return;
+        };
+        let Some(admission) = &mut self.admission else {
+            return;
+        };
+        if matches!(
+            admission
+                .renew_local_device_directory_if_due(&self.agent_identity, &mut store, now_ms,),
+            Ok(true)
+        ) {
+            self.directory_removed = false;
+            self.network_admission_status = NetworkAdmissionStatus::Active;
+        }
     }
 
     fn check_network_admission_deadline(&mut self, now_ms: u64) -> Result<(), AslError> {

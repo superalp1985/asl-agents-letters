@@ -26,6 +26,15 @@ fn durable_directory_resolver(
     root: &AgentIdentity,
     directory: &DeviceDirectory,
 ) -> (TestChainDatabase, DurableIdentityResolver, IdentityProofV1) {
+    durable_directory_resolver_with_cache_age(root, directory, 120)
+}
+
+#[cfg(windows)]
+fn durable_directory_resolver_with_cache_age(
+    root: &AgentIdentity,
+    directory: &DeviceDirectory,
+    max_cache_age_secs: u64,
+) -> (TestChainDatabase, DurableIdentityResolver, IdentityProofV1) {
     let commitment = device_directory_commitment(directory).unwrap();
     let mut values = [[0; 32]; 3];
     values[0][12..].copy_from_slice(&root.controller_address());
@@ -37,7 +46,7 @@ fn durable_directory_resolver(
     let config = DurableResolverConfigV1 {
         consensus: consensus_config(),
         deployment,
-        max_cache_age_secs: 120,
+        max_cache_age_secs,
         cache_capacity: 8,
     };
     let mut resolver = DurableIdentityResolver::create(
@@ -594,6 +603,40 @@ fn live_device_directory_can_replace_an_expired_envelope_without_replacing_hello
         [NetworkCommand::CloseConnection {
             connection_id: late_connection
         }]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn local_device_directory_renews_after_five_minutes_with_persistent_sequence() {
+    let root = AgentIdentity::generate().unwrap();
+    let peer = DeviceIdentity::generate().unwrap().peer_id();
+    let directory = directory(&root, 7, vec![certificate(&root, &peer, 1)], vec![]);
+    let signed = signed_directory(&root, &directory, 1);
+    let (database, resolver, _) = durable_directory_resolver_with_cache_age(&root, &directory, 900);
+    let mut core =
+        CoreAdmission::for_local_identity(&root, peer, signed.clone(), resolver, NOW).unwrap();
+    let mut store = database.open();
+
+    assert!(!core.local_directory_renewal_due(NOW + RENEWAL - 1));
+    assert!(core.local_directory_renewal_due(NOW + RENEWAL));
+    assert!(
+        core.renew_local_device_directory_if_due(&root, &mut store, NOW + RENEWAL)
+            .unwrap()
+    );
+    core.check_local_directory(NOW + RENEWAL).unwrap();
+    assert!(
+        !core
+            .update_local_device_directory_source(signed, &root, &mut store, NOW + RENEWAL)
+            .unwrap()
+    );
+    assert!(!core.local_directory_renewal_due(NOW + RENEWAL));
+    assert!(core.local_directory_renewal_due(NOW + RENEWAL * 2));
+    assert_eq!(
+        store
+            .reserve_device_directory_sequence(root.agent_id(), 0)
+            .unwrap(),
+        3
     );
 }
 
