@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, Stdin, Stdout, Write},
+    io::{self, Read, Write},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -34,8 +34,8 @@ const RESPONSE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) fn run(
     identity: DeviceIdentity,
     loopback_groups: bool,
-    input: Stdin,
-    output: Stdout,
+    input: impl Read + Send + 'static,
+    output: impl Write,
 ) -> Result<(), AslError> {
     let runtime = Builder::new_current_thread()
         .enable_all()
@@ -47,8 +47,8 @@ pub(super) fn run(
 async fn run_async(
     identity: DeviceIdentity,
     loopback_groups: bool,
-    input: Stdin,
-    output: Stdout,
+    input: impl Read + Send + 'static,
+    output: impl Write,
 ) -> Result<(), AslError> {
     let peer_id = identity.peer_id();
     let keypair = identity.into_keypair();

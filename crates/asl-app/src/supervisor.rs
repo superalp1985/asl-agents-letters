@@ -107,6 +107,14 @@ impl Supervisor {
     }
 
     fn start_with_launcher(paths: AppPaths, launcher: SandboxLauncher) -> Result<Self, AslError> {
+        Self::start_with_net(paths, launcher, NetRuntime::start)
+    }
+
+    fn start_with_net(
+        paths: AppPaths,
+        launcher: SandboxLauncher,
+        start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
+    ) -> Result<Self, AslError> {
         let network_settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
         let providers = ProviderRegistryV1::load(&paths.model_provider_configuration())
             .map_err(|_| AslError::InvalidIdentity)?;
@@ -136,7 +144,7 @@ impl Supervisor {
         if network_settings.loopback_groups {
             return Err(AslError::PlatformUnavailable);
         }
-        let net = NetRuntime::start(
+        let net = start_net(
             &launcher,
             &device_identity,
             network_settings.loopback_groups,
@@ -1525,12 +1533,21 @@ impl NetRuntime {
         expected_peer_id: &PeerId,
     ) -> Result<Self, AslError> {
         drop(pipes.error);
+        Self::from_pipes(pipes.input, pipes.output, Some(child), expected_peer_id)
+    }
+
+    fn from_pipes(
+        input: impl std::io::Write + Send + 'static,
+        output: impl Read + Send + 'static,
+        child: Option<SandboxChild>,
+        expected_peer_id: &PeerId,
+    ) -> Result<Self, AslError> {
         let (sender, receiver) = mpsc::sync_channel(8);
         let reader_thread = thread::Builder::new()
             .name("asl-net-ipc".into())
             .spawn(move || {
                 forward_net_events(
-                    FrameReader::new(pipes.output, IpcRole::Net, IpcRole::Core),
+                    FrameReader::new(output, IpcRole::Net, IpcRole::Core),
                     sender,
                 )
             })
@@ -1540,7 +1557,7 @@ impl NetRuntime {
         let writer_thread = thread::Builder::new()
             .name("asl-net-ipc-writer".into())
             .spawn(move || {
-                let mut pipe = FrameWriter::new(pipes.input, IpcRole::Core, IpcRole::Net);
+                let mut pipe = FrameWriter::new(input, IpcRole::Core, IpcRole::Net);
                 while let Ok(frame) = outgoing.recv() {
                     queued.fetch_sub(1, Ordering::Relaxed);
                     if pipe.send_prepared(frame).is_err() {
@@ -1550,7 +1567,7 @@ impl NetRuntime {
             })
             .map_err(|_| AslError::SandboxUnavailable)?;
         let mut runtime = Self {
-            child: Some(child),
+            child,
             writer: Some(writer),
             writer_thread: Some(writer_thread),
             events: Some(receiver),

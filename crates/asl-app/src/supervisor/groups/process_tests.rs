@@ -23,11 +23,11 @@ use crate::{
         test_support::{process_fixture_client, proof_fixtures_for_agents},
     },
     identity::{AgentIdentity, DeviceIdentity},
-    ipc::IpcMessage,
+    ipc::{IpcMessage, run_net_pipe_fixture, write_net_startup_prelude},
     network::NetworkCommand,
     network_settings::NetworkSettingsV1,
     profile::{AdmittedNetworkEvent, fresh_id, sign_record},
-    supervisor::{sibling_binary_directory, unix_time_ms},
+    supervisor::{NetRuntime, sibling_binary_directory, unix_time_ms},
     transfer::tests::Fixture,
 };
 
@@ -41,10 +41,17 @@ const RESULT_PREFIX: &str = "ASL_GROUP_FIXTURE:";
 const WAIT: Duration = Duration::from_secs(15);
 type RegistryClaim = (AgentId, [[u8; 32]; 3]);
 
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+enum Verification {
+    Protocol,
+    AppContainer,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RegistryFixture {
     now_ms: u64,
-    claims: [RegistryClaim; 2],
+    claims: [RegistryClaim; 3],
+    verification: Verification,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,129 +106,106 @@ impl Action {
 }
 
 #[test]
+fn group_messages_cross_core_processes_over_framed_ipc_and_tcp() {
+    verify_group_delivery(Verification::Protocol);
+}
+
+#[test]
 #[ignore = "requires a working TCP loopback route between separate Net AppContainers"]
 fn group_messages_cross_sandboxed_net_processes() {
+    verify_group_delivery(Verification::AppContainer);
+}
+
+fn verify_group_delivery(verification: Verification) {
     let fixture = Fixture::new();
-    let bin = fixture.path().join("bin");
-    fs::create_dir(&bin).unwrap();
-    for executable in ["asl-net.exe", "asl-worker.exe", "asl-extractor.exe"] {
-        fs::copy(
-            sibling_binary_directory().unwrap().join(executable),
-            bin.join(executable),
-        )
-        .unwrap();
+    if verification == Verification::AppContainer {
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let source = sibling_binary_directory().unwrap();
+        for executable in ["asl-net.exe", "asl-worker.exe", "asl-extractor.exe"] {
+            fs::copy(source.join(executable), bin.join(executable)).unwrap();
+        }
     }
 
     let now_ms = unix_time_ms().unwrap();
-    let homes = ["creator", "member"].map(|name| fixture.path().join(name));
-    let nodes = homes.each_ref().map(|home| init_node(home, now_ms));
+    let mut nodes = ["first", "second", "third"].map(|name| {
+        let home = fixture.path().join(name);
+        let (peer, claim) = init_node(&home, now_ms);
+        (peer, home, claim)
+    });
+    // Probe order is by PeerId. Put the creator first so a new sync round
+    // can obtain its commits before consulting another member's older head.
+    nodes.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let registry = RegistryFixture {
         now_ms,
-        claims: nodes.each_ref().map(|(_, claim)| *claim),
+        claims: nodes.each_ref().map(|(_, _, claim)| *claim),
+        verification,
     };
     let registry_path = fixture.path().join("registry.json");
     fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
 
-    let (mut creator, ready) = CoreProcess::start(&homes[0], &registry_path);
-    let (mut member, member_ready) = CoreProcess::start(&homes[1], &registry_path);
-    let creator_peer = &nodes[0].0;
-    let member_peer = &nodes[1].0;
-    let endpoint: SocketAddr = ready["tcp"].as_str().unwrap().parse().unwrap();
-    assert!(endpoint.ip().is_loopback());
-    assert_ne!(endpoint.port(), 0);
-    assert_eq!(
-        member.ok(Action::Dial(endpoint, creator_peer.as_bytes().to_vec()))["queued"],
-        true
-    );
-    let connection = creator.until(
-        "creator admission",
-        || Action::Peers,
-        |value| {
-            value["connections"]
-                .as_array()
-                .is_some_and(|list| list.len() == 1)
-        },
-    );
-    let connection_id = parse_hex(&connection["connections"][0]["connection"]);
-    member.until(
-        "member admission",
-        || Action::Peers,
-        |value| {
-            value["connections"]
-                .as_array()
-                .is_some_and(|list| list.len() == 1)
-        },
-    );
-
+    let [
+        (creator_peer, creator_home, _),
+        (first_peer, first_home, _),
+        (second_peer, second_home, _),
+    ] = &nodes;
+    let (mut creator, creator_ready) = CoreProcess::start(creator_home, &registry_path);
+    let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path);
+    let (mut second, second_ready) = CoreProcess::start(second_home, &registry_path);
+    first.dial(&creator_ready, creator_peer);
+    first.connection(&creator_ready["peer"]);
+    let first_connection = creator.connection(&first_ready["peer"]);
     let room = Hash32(parse_hex(&creator.ok(Action::Create)["room"]));
-    assert_eq!(
-        creator.ok(Action::Invite(room, connection_id))["queued"],
-        true
-    );
-    let pending = member.until(
-        "targeted invite",
-        || Action::List,
-        |value| {
-            value["pending"]
-                .as_array()
-                .is_some_and(|list| list.len() == 1)
-        },
-    );
-    assert_eq!(
-        pending["pending"][0]["room"],
-        alloy_primitives::hex::encode(room.0)
-    );
-    let invite = Id128(parse_hex(&pending["pending"][0]["id"]));
-    assert_eq!(member.ok(Action::Approve(invite))["queued"], true);
-    let joined = member.until(
-        "durable Welcome",
-        || Action::Room(room),
-        |value| value["mls_epoch"] == 1,
-    );
-    assert_eq!(joined["state"], "needs_sync");
+    creator.invite(room, first_connection, &mut first, 1);
 
+    second.dial(&creator_ready, creator_peer);
+    second.connection(&creator_ready["peer"]);
+    let second_connection = creator.connection(&second_ready["peer"]);
+    // Exchange signed directories so both members can verify the other's
+    // leaf in Welcome or Add through the usual connection admission.
+    second.dial(&first_ready, first_peer);
+    second.connection(&first_ready["peer"]);
+    first.connection(&second_ready["peer"]);
+    creator.invite(room, second_connection, &mut second, 2);
+    first.wait_epoch(room, 2);
+
+    let sent = creator.ok(Action::Send(room));
+    assert_eq!(sent["available"], 2);
+    assert_eq!(sent["queued"], 2);
+    first.receive_query(room, &sent, &creator_ready["peer"]);
+    let second_received = second.receive_query(room, &sent, &creator_ready["peer"]);
+
+    let sent = first.ok(Action::Send(room));
+    assert_eq!(sent["available"], 1);
+    assert_eq!(sent["queued"], 1);
+    creator.receive_query(room, &sent, &first_ready["peer"]);
+
+    assert_eq!(
+        creator.ok(Action::Remove(room, second_peer.as_bytes().to_vec()))["mls_epoch"],
+        3
+    );
+    // Check fan-out before idle timeouts can hide an incorrectly retained
+    // recipient. The remaining member may not have applied Remove yet.
+    assert_eq!(creator.connection(&second_ready["peer"]), second_connection);
     let sent = creator.ok(Action::Send(room));
     assert_eq!(sent["available"], 1);
     assert_eq!(sent["queued"], 1);
-    let received = member.until(
-        "creator message",
-        || Action::Room(room),
-        |value| value["last_received"]["message_id"] == sent["message_id"],
-    );
-    assert_eq!(received["last_received"]["sender"], ready["peer"]);
-    assert_eq!(received["last_received"]["kind"], "query");
 
-    let sent = member.ok(Action::Send(room));
+    first.wait_epoch(room, 3);
+    let sent = creator.ok(Action::Send(room));
+    assert_eq!(sent["available"], 1);
     assert_eq!(sent["queued"], 1);
-    let received = creator.until(
-        "member message",
-        || Action::Room(room),
-        |value| value["last_received"]["message_id"] == sent["message_id"],
-    );
-    assert_eq!(received["last_received"]["sender"], member_ready["peer"]);
-    assert_eq!(received["last_received"]["kind"], "query");
-
+    first.receive_query(room, &sent, &creator_ready["peer"]);
     assert_eq!(
-        creator.ok(Action::Remove(room, member_peer.as_bytes().to_vec()))["mls_epoch"],
-        2
-    );
-    assert_eq!(
-        creator.ok(Action::Peers)["connections"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        creator.request(Action::Send(room)),
-        json!({"error": AslError::NotFound.to_string()})
+        second.ok(Action::Room(room))["last_received"],
+        second_received
     );
     let after = creator.ok(Action::Room(room));
-    assert_eq!(after["stored_members"], json!([ready["peer"]]));
     assert_eq!(after["state"], "needs_sync");
 
     creator.close();
-    member.close();
+    first.close();
+    second.close();
 }
 
 #[test]
@@ -263,7 +247,25 @@ fn group_core_child() {
         bin.join("asl-extractor.exe"),
     )
     .unwrap();
-    let mut supervisor = Supervisor::start_with_launcher(paths, launcher).unwrap();
+    let mut supervisor = match registry.verification {
+        Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher).unwrap(),
+        Verification::Protocol => {
+            Supervisor::start_with_net(paths, launcher, |_, device, groups| {
+                let (net_input, mut core_output) = io::pipe()?;
+                let (core_input, net_output) = io::pipe()?;
+                write_net_startup_prelude(&mut core_output, device, groups)?;
+                thread::Builder::new()
+                    .name("asl-net-protocol-fixture".into())
+                    .spawn(move || {
+                        // Closing the Core writer ends this fixture, as it does
+                        // for a child when its private command stream disappears.
+                        let _ = run_net_pipe_fixture(net_input, net_output);
+                    })?;
+                NetRuntime::from_pipes(core_output, core_input, None, &device.peer_id())
+            })
+            .unwrap()
+        }
+    };
     supervisor
         .activate_network_admission(signed, resolver, unix_time_ms().unwrap())
         .unwrap();
@@ -273,7 +275,7 @@ fn group_core_child() {
             kind: TransportKind::Tcp,
             address: (Ipv4Addr::LOCALHOST, 0).into(),
         })
-        .expect("sandboxed Net must accept an ephemeral loopback listener");
+        .expect("Net must accept an ephemeral loopback listener");
     let IpcMessage::Listening {
         address,
         kind: TransportKind::Tcp,
@@ -436,13 +438,87 @@ impl CoreProcess {
         value
     }
 
+    fn dial(&mut self, ready: &Value, expected: &PeerId) {
+        let endpoint: SocketAddr = ready["tcp"].as_str().unwrap().parse().unwrap();
+        assert!(endpoint.ip().is_loopback());
+        assert_ne!(endpoint.port(), 0);
+        assert_eq!(
+            self.ok(Action::Dial(endpoint, expected.as_bytes().to_vec()))["queued"],
+            true
+        );
+    }
+
+    fn connection(&mut self, peer: &Value) -> [u8; 16] {
+        let find = |status: &Value| {
+            status["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| &entry["peer"] == peer)
+                .map(|entry| parse_hex(&entry["connection"]))
+        };
+        let status = self.until(
+            &format!("admission of {peer}"),
+            || Action::Peers,
+            |v| find(v).is_some(),
+        );
+        find(&status).unwrap()
+    }
+
+    fn invite(&mut self, room: Hash32, connection: [u8; 16], member: &mut Self, epoch: u64) {
+        assert_eq!(self.ok(Action::Invite(room, connection))["queued"], true);
+        let pending = member.until(
+            "targeted invite",
+            || Action::List,
+            |v| v["pending"].as_array().is_some_and(|list| list.len() == 1),
+        );
+        assert_eq!(
+            pending["pending"][0]["room"],
+            alloy_primitives::hex::encode(room.0)
+        );
+        let invite = Id128(parse_hex(&pending["pending"][0]["id"]));
+        assert_eq!(member.ok(Action::Approve(invite))["queued"], true);
+        member.wait_epoch(room, epoch);
+    }
+
+    fn wait_epoch(&mut self, room: Hash32, epoch: u64) {
+        let state = self.until_for(
+            Duration::from_secs(52),
+            "durable epoch",
+            || Action::Room(room),
+            |v| v["mls_epoch"] == epoch,
+        );
+        assert_eq!(state["state"], "needs_sync");
+    }
+
+    fn receive_query(&mut self, room: Hash32, sent: &Value, sender: &Value) -> Value {
+        let view = self.until(
+            "group message",
+            || Action::Room(room),
+            |v| v["last_received"]["message_id"] == sent["message_id"],
+        );
+        let received = &view["last_received"];
+        assert_eq!(&received["sender"], sender);
+        assert_eq!(received["kind"], "query");
+        received.clone()
+    }
+
     fn until(
         &mut self,
         stage: &str,
         action: impl Fn() -> Action,
         done: impl Fn(&Value) -> bool,
     ) -> Value {
-        let deadline = Instant::now() + WAIT;
+        self.until_for(WAIT, stage, action, done)
+    }
+
+    fn until_for(
+        &mut self,
+        wait: Duration,
+        stage: &str,
+        action: impl Fn() -> Action,
+        done: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + wait;
         loop {
             let reply = self.request(action());
             if done(&reply) {

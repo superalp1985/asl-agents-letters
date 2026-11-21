@@ -732,6 +732,8 @@ T31 受限回环群消息投递（2026-11-21）：可信 Core 发方、正式 Su
 
 T31 可信发送与跨进程验收（2026-11-21）：正式 Supervisor 接入本机类型化发送动作，不新增用户终端、Agent 或网络命令。双 Core 测试宿主均启动真实 AppContainer Net 并动态绑定 TCP 端口；本机沙箱间拨号超时，未进入身份准入，因此未验收跨进程群消息。验收保留为显式测试，不更改沙箱或系统网络规则。当前仍为 `needs_sync`，不关闭 T31。详见 [验证记录](plan-validation.md#2026-11-21-t31可信发送与跨进程验收)。
 
+T31 三 Core 协议验收（2026-11-21）：三个独立测试宿主经真实匿名管道、生产 IPC 和 libp2p TCP 回环验证定向邀请与本机审批、Welcome、Add／Remove 补齐、结构化 Query 双向投递和移除后的收件范围。链最终性为合成夹具，状态证明、证书、SQLite、DPAPI 与 OpenMLS 走实际实现。仅测试构建将生产 Net 驱动放到宿主线程；不改变正式 AppContainer 启动。真实沙箱互通仍未验收，房间保持 `needs_sync`，不关闭 T31 或启动 T32。详见 [验证记录](plan-validation.md#2026-11-21-t31三-core-协议验收)。
+
 ### T32 — 群策略、浏览/回答与传输确认
 
 依赖 T07、T20、T27、T31。创建确定性策略与 Agent 群事件适配。添加 `browse_enabled`、`answer_enabled`；回答关闭时保留群消息浏览但模型调用/回答数为零。群回复不能触发新回复；按 group/message ID 去重并沿用单轮预算。
