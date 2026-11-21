@@ -8,7 +8,7 @@ use asl_store::{
     Store,
     group_state::{
         MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsInviteResponse, MlsJournalEntry,
-        MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, MlsWelcomeRequest,
+        MlsJournalKind, MlsMemberEvidence, MlsRoomActivation, MlsRoomUpdate, MlsWelcomeRequest,
     },
 };
 use asl_types::{
@@ -201,7 +201,7 @@ impl CoreAdmission {
             }),
         };
         request.match_reply(&reply)?;
-        store.commit_verified_mls_invite_welcome(
+        let version = store.commit_verified_mls_invite_welcome(
             &lookup,
             MlsRoomUpdate {
                 local_id: &candidate.local_id,
@@ -221,6 +221,15 @@ impl CoreAdmission {
             chain_id,
             now_ms,
         )?;
+        store.activate_mls_room_at_creator_head(MlsRoomActivation {
+            wire_id,
+            expected: version,
+            creator: &candidate.roster.creator,
+            creator_device: &self.local_hello.peer_id,
+            members: &roster.members,
+            chain_id,
+            now_ms,
+        })?;
         Ok(reply)
     }
 

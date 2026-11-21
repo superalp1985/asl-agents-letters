@@ -2,7 +2,8 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     protocol::{
-        Answer, GroupBody, GroupPacket, Offer, Query, WireFrame, decode_control, encode_control,
+        Answer, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupPacket, Offer,
+        ProtocolError, Query, WireFrame, decode_control, encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -16,14 +17,34 @@ pub enum GroupApplication {
     Query(Query),
     Answer(Answer),
     Offer(Offer),
+    FetchRequest(FetchRequest),
+    FetchGrant(FetchGrant),
+    FetchPending(FetchPending),
+    Error(ProtocolError),
 }
 
 impl GroupApplication {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Query(_) => "query",
+            Self::Answer(_) => "answer",
+            Self::Offer(_) => "offer",
+            Self::FetchRequest(_) => "fetch_request",
+            Self::FetchGrant(_) => "fetch_grant",
+            Self::FetchPending(_) => "fetch_pending",
+            Self::Error(_) => "error",
+        }
+    }
+
     pub fn message_id(&self) -> Id128 {
         match self {
             Self::Query(query) => query.message_id,
             Self::Answer(answer) => answer.message_id,
             Self::Offer(offer) => offer.message_id,
+            Self::FetchRequest(request) => request.message_id,
+            Self::FetchGrant(grant) => grant.message_id,
+            Self::FetchPending(pending) => pending.message_id,
+            Self::Error(error) => error.message_id,
         }
     }
 
@@ -32,6 +53,10 @@ impl GroupApplication {
             WireFrame::Query(query) => Ok(Self::Query(query)),
             WireFrame::Answer(answer) => Ok(Self::Answer(answer)),
             WireFrame::Offer(offer) => Ok(Self::Offer(offer)),
+            WireFrame::FetchRequest(request) => Ok(Self::FetchRequest(request)),
+            WireFrame::FetchGrant(grant) => Ok(Self::FetchGrant(grant)),
+            WireFrame::FetchPending(pending) => Ok(Self::FetchPending(pending)),
+            WireFrame::Error(error) => Ok(Self::Error(error)),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -41,6 +66,10 @@ impl GroupApplication {
             Self::Query(query) => WireFrame::Query(query),
             Self::Answer(answer) => WireFrame::Answer(answer),
             Self::Offer(offer) => WireFrame::Offer(offer),
+            Self::FetchRequest(request) => WireFrame::FetchRequest(request),
+            Self::FetchGrant(grant) => WireFrame::FetchGrant(grant),
+            Self::FetchPending(pending) => WireFrame::FetchPending(pending),
+            Self::Error(error) => WireFrame::Error(error),
         })
     }
 }
@@ -131,6 +160,10 @@ mod tests {
             include_str!("../../../schemas/vectors/query-v1.hex"),
             include_str!("../../../schemas/vectors/answer-v1.hex"),
             include_str!("../../../schemas/vectors/offer-v1.hex"),
+            include_str!("../../../schemas/vectors/fetch-request-v1.hex"),
+            include_str!("../../../schemas/vectors/fetch-grant-v1.hex"),
+            include_str!("../../../schemas/vectors/fetch-pending-v1.hex"),
+            include_str!("../../../schemas/vectors/error-v1.hex"),
         ]
         .into_iter()
         .enumerate()
@@ -142,14 +175,15 @@ mod tests {
                 (GroupApplication::Query(_), 0)
                     | (GroupApplication::Answer(_), 1)
                     | (GroupApplication::Offer(_), 2)
+                    | (GroupApplication::FetchRequest(_), 3)
+                    | (GroupApplication::FetchGrant(_), 4)
+                    | (GroupApplication::FetchPending(_), 5)
+                    | (GroupApplication::Error(_), 6)
             ));
             assert_eq!(message.encode().unwrap(), bytes);
         }
         for bytes in [
             fixture(include_str!("../../../schemas/vectors/ack-v1.hex")),
-            fixture(include_str!(
-                "../../../schemas/vectors/fetch-request-v1.hex"
-            )),
             fixture(include_str!(
                 "../../../schemas/vectors/group-envelope-v1.hex"
             )),

@@ -85,6 +85,7 @@ fn local_cli_can_review_and_decide_while_the_download_broker_stays_open() {
         write_grant_id: grant,
         destination_relative: "one.bin".into(),
         sources: vec![],
+        group: None,
     };
     for (action, decision) in [("deny", false), ("approve", true)] {
         let DownloadStart::Pending {

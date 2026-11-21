@@ -13,6 +13,7 @@ use std::{
 
 use asl_net::{codec::BulkRequest, transport::REQUEST_TIMEOUT};
 use asl_policy::WriteGrant;
+use asl_store::transfers::GroupTransferBinding;
 use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
     error::AslError,
@@ -47,6 +48,7 @@ pub struct DownloadSelection {
     pub inbox_grant: Id128,
     pub filename: String,
     pub sources: Vec<DownloadSource>,
+    pub group: Option<GroupTransferBinding>,
 }
 
 #[derive(Debug)]
@@ -156,6 +158,7 @@ fn recv<T>(receiver: &Receiver<T>) -> Result<Option<T>, AslError> {
 pub(crate) enum WorkerRequest {
     Fetch {
         source: DownloadSource,
+        group: Option<GroupTransferBinding>,
         request: FetchRequest,
     },
     Bulk {

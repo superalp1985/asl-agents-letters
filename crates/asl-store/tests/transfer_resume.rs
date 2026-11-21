@@ -1,16 +1,26 @@
 #![cfg(windows)]
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use asl_policy::Audience;
 use asl_store::{
+    dashboard::Dashboard,
+    open_store,
     resources::SnapshotBroker,
-    transfers::{DownloadBroker, DownloadMode, DownloadRequest, DownloadStart},
+    transfers::{
+        DownloadBroker, DownloadMode, DownloadRequest, DownloadStart, GroupTransferBinding,
+        UploadAdmission, UploadBinding, UploadMode,
+    },
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    manifest::{Manifest, encode_manifest},
-    task::TransferId,
+    manifest::{Manifest, content_id, encode_manifest},
+    task::{GroupId, TransferId},
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -100,8 +110,29 @@ impl Fixture {
             write_grant_id: self.write_grant,
             destination_relative: PathBuf::from("item.bin"),
             sources: vec![self.peer.clone()],
+            group: None,
         }
     }
+}
+
+#[test]
+fn dashboard_shows_downloads_that_are_not_local_snapshots() {
+    let fixture = Fixture::new();
+    let mut broker = fixture.open();
+    let bytes = b"download in progress";
+    let info = broker
+        .begin_download(&fixture.valid_request(bytes))
+        .unwrap();
+
+    let dashboard = Dashboard::load(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    let [row] = dashboard.transfers.as_slice() else {
+        panic!("expected one projected download");
+    };
+    assert_eq!(row.transfer_id, hex::encode(info.transfer_id.0.as_bytes()));
+    assert_eq!(
+        (row.durable_bytes, row.file_size, row.source_count),
+        (0, bytes.len() as u64, 1)
+    );
 }
 
 #[test]
@@ -126,6 +157,68 @@ fn a_second_download_broker_cannot_recover_while_the_owner_is_live() {
     assert!(f.home.join("state/download-worker.lock").is_file());
     let reopened = f.open();
     assert_eq!(reopened.info(&info.transfer_id).unwrap().state, "complete");
+}
+
+#[test]
+fn group_epoch_change_invalidates_transfer_chunks() {
+    let f = Fixture::new();
+    let group = seed_group(&f, 1);
+    let bytes = b"group-scoped chunk";
+    let mut request = f.request(bytes, *blake3::hash(bytes).as_bytes());
+    request.group = Some(GroupTransferBinding {
+        group_id: group.clone(),
+        membership_epoch: 1,
+    });
+    let mut broker = f.open_with_mode(DownloadMode::Automatic);
+    let info = broker.begin_download(&request).unwrap();
+    broker
+        .assign_chunk(info.transfer_id.clone(), &f.peer, 0)
+        .unwrap();
+    f.db()
+        .execute(
+            "UPDATE asl_groups
+             SET state='needs_sync',membership_epoch=2,updated_at_ms=updated_at_ms+1
+             WHERE group_id=?1",
+            [hex::encode(group.0.as_bytes())],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        broker.write_chunk(info.transfer_id, &f.peer, 0, bytes),
+        Err(AslError::PolicyDenied)
+    ));
+}
+
+#[test]
+fn group_epoch_change_hides_pending_download_consent() {
+    let f = Fixture::new();
+    let group = seed_group(&f, 1);
+    let bytes = b"group consent";
+    let mut request = f.request(bytes, *blake3::hash(bytes).as_bytes());
+    request.group = Some(GroupTransferBinding {
+        group_id: group.clone(),
+        membership_epoch: 1,
+    });
+    let mut broker = f.open_with_mode(DownloadMode::Ask);
+    let DownloadStart::Pending { approval_id, .. } = broker.request_download(&request).unwrap()
+    else {
+        panic!("ask mode must create a consent");
+    };
+    assert_eq!(broker.download_consents().unwrap().len(), 1);
+    f.db()
+        .execute(
+            "UPDATE asl_groups
+             SET state='needs_sync',membership_epoch=2,updated_at_ms=updated_at_ms+1
+             WHERE group_id=?1",
+            [hex::encode(group.0.as_bytes())],
+        )
+        .unwrap();
+
+    assert!(broker.download_consents().unwrap().is_empty());
+    assert!(matches!(
+        broker.decide_download(approval_id, true),
+        Err(AslError::PolicyDenied)
+    ));
 }
 
 #[test]
@@ -733,6 +826,170 @@ fn a_mode_change_during_reservation_prevents_part_creation_and_releases_quota() 
     assert_eq!(released, 1);
 }
 
+#[test]
+fn upload_approval_binds_device_content_and_source_epoch() {
+    let f = Fixture::new();
+    let source = f._temp.path().join("shared");
+    fs::create_dir_all(&source).unwrap();
+    let bytes = b"authorized upload source";
+    fs::write(source.join("note.md"), bytes).unwrap();
+    let mut snapshots = SnapshotBroker::open(&f.home).unwrap();
+    let source_grant = snapshots
+        .authorize_directory(&source, &["md".into()], &Audience::Public, 1 << 20)
+        .unwrap();
+    snapshots
+        .import_source(&source_grant, std::path::Path::new("note.md"))
+        .unwrap();
+    drop(snapshots);
+
+    let manifest = encode_manifest(&Manifest {
+        file_size: bytes.len() as u64,
+        file_hash: *blake3::hash(bytes).as_bytes(),
+        chunk_hashes: vec![*blake3::hash(bytes).as_bytes()],
+    })
+    .unwrap();
+    let content_id = Hash32(content_id(&manifest));
+    let binding = UploadBinding {
+        source_grant_id: source_grant.0,
+        grant_epoch: 1,
+        content_id,
+        target_agent_id: Some(AgentId([3; 32])),
+        target_peer_id: f.peer.clone(),
+        group: None,
+        file_size: bytes.len() as u64,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    f.db()
+        .execute(
+            "UPDATE device_identities SET certificate_expires_ms=?1 WHERE peer_id=?2",
+            rusqlite::params![i64::MAX, bs58::encode(f.peer.as_bytes()).into_string()],
+        )
+        .unwrap();
+    let mut store = open_store(&f.home.join("state/asl.sqlite3")).unwrap();
+    store.set_upload_mode(UploadMode::Ask).unwrap();
+
+    let UploadAdmission::Pending {
+        approval_id,
+        expires_at_ms,
+    } = store.admit_upload(&binding, now).unwrap()
+    else {
+        panic!("ask mode must not grant access before local approval");
+    };
+    assert!(expires_at_ms > now);
+    assert_eq!(
+        store.admit_upload(&binding, now + 1).unwrap(),
+        UploadAdmission::Pending {
+            approval_id,
+            expires_at_ms
+        }
+    );
+    let consent = store.upload_consents().unwrap().pop().unwrap();
+    assert_eq!(consent.approval_id, approval_id);
+    assert_eq!(consent.content_id, content_id);
+    assert_eq!(consent.source_grant_id, source_grant.0);
+    assert_eq!(consent.target_agent_id, binding.target_agent_id);
+    assert_eq!(consent.target_peer_id, f.peer);
+    assert_eq!(consent.filename, "note.md");
+    assert_eq!(consent.file_size, bytes.len() as u64);
+    assert!(!consent.approved);
+
+    store.decide_upload(approval_id, true).unwrap();
+    assert_eq!(
+        store.admit_upload(&binding, now + 2).unwrap(),
+        UploadAdmission::Allowed(Some(approval_id))
+    );
+    store.consume_upload_approval(approval_id, now + 2).unwrap();
+    assert!(store.consume_upload_approval(approval_id, now + 3).is_err());
+    assert_eq!(
+        store.admit_upload(&binding, now + 3).unwrap(),
+        UploadAdmission::Denied
+    );
+    let UploadAdmission::Pending {
+        approval_id: renewed_approval,
+        ..
+    } = store.admit_upload(&binding, now + 300_001).unwrap()
+    else {
+        panic!("an expired one-time approval should require a fresh local decision");
+    };
+    assert_ne!(renewed_approval, approval_id);
+    store.decide_upload(renewed_approval, false).unwrap();
+    assert_eq!(
+        store.admit_upload(&binding, now + 300_002).unwrap(),
+        UploadAdmission::Denied
+    );
+
+    let revoked_peer = peer_with_key([9; 32]);
+    let db = f.db();
+    seed_peer(&db, &revoked_peer, 9);
+    db.execute(
+        "UPDATE device_identities SET certificate_expires_ms=?1 WHERE peer_id=?2",
+        rusqlite::params![
+            i64::MAX,
+            bs58::encode(revoked_peer.as_bytes()).into_string()
+        ],
+    )
+    .unwrap();
+    drop(db);
+    let revoked_binding = UploadBinding {
+        target_agent_id: Some(AgentId([9; 32])),
+        target_peer_id: revoked_peer.clone(),
+        ..binding.clone()
+    };
+    let UploadAdmission::Pending {
+        approval_id: revoked_approval,
+        ..
+    } = store.admit_upload(&revoked_binding, now + 4).unwrap()
+    else {
+        panic!("active target device should create a local approval");
+    };
+    f.db()
+        .execute(
+            "UPDATE device_identities SET revoked_at_ms=?1 WHERE peer_id=?2",
+            rusqlite::params![
+                i64::try_from(now + 5).unwrap(),
+                bs58::encode(revoked_peer.as_bytes()).into_string()
+            ],
+        )
+        .unwrap();
+    assert!(store.upload_consents().unwrap().is_empty());
+    assert!(store.decide_upload(revoked_approval, true).is_err());
+    assert!(store.admit_upload(&revoked_binding, now + 5).is_err());
+
+    let group_id = seed_group(&f, 1);
+    let group_binding = UploadBinding {
+        target_agent_id: None,
+        group: Some(GroupTransferBinding {
+            group_id: group_id.clone(),
+            membership_epoch: 1,
+        }),
+        ..binding
+    };
+    let UploadAdmission::Pending {
+        approval_id: group_approval,
+        ..
+    } = store.admit_upload(&group_binding, now + 300_003).unwrap()
+    else {
+        panic!("group upload must request its own local approval");
+    };
+    f.db()
+        .execute(
+            "UPDATE asl_groups SET membership_epoch=2 WHERE group_id=?1",
+            [hex::encode(group_id.0.as_bytes())],
+        )
+        .unwrap();
+    assert!(store.upload_consents().unwrap().is_empty());
+    assert!(store.decide_upload(group_approval, true).is_err());
+    assert!(matches!(
+        store.admit_upload(&group_binding, now + 300_004),
+        Err(AslError::PolicyDenied)
+    ));
+}
+
 fn peer() -> PeerId {
     peer_with_key([1; 32])
 }
@@ -754,8 +1011,8 @@ fn seed_peer(db: &Connection, peer: &PeerId, agent_seed: u8) {
     db.execute(
         "INSERT INTO device_identities(peer_id,agent_id,public_key_hex,certificate_cbor,
          certificate_serial,certificate_expires_ms,created_at_ms)
-         VALUES (?1,?2,?3,?4,1,999999999,0)",
-        rusqlite::params![peer, agent, "11".repeat(32), vec![0_u8]],
+         VALUES (?1,?2,?3,?4,1,?5,0)",
+        rusqlite::params![peer, agent, "11".repeat(32), vec![0_u8], i64::MAX],
     )
     .unwrap();
     db.execute(
@@ -763,4 +1020,26 @@ fn seed_peer(db: &Connection, peer: &PeerId, agent_seed: u8) {
         rusqlite::params![peer, agent],
     )
     .unwrap();
+}
+
+fn seed_group(fixture: &Fixture, membership_epoch: u64) -> GroupId {
+    let group = GroupId(Id128([21; 16]));
+    let group_text = hex::encode(group.0.as_bytes());
+    let peer_text = bs58::encode(fixture.peer.as_bytes()).into_string();
+    let db = fixture.db();
+    db.execute(
+        "INSERT INTO asl_groups(
+             group_id,creator_peer_id,local_name,mls_epoch,membership_epoch,state,
+             created_at_ms,updated_at_ms)
+         VALUES (?1,?2,'fixture',1,?3,'active',0,0)",
+        rusqlite::params![group_text, peer_text, membership_epoch as i64],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO group_members(group_id,peer_id,role,state,joined_at_ms)
+         VALUES (?1,?2,'creator','active',0)",
+        rusqlite::params![group_text, peer_text],
+    )
+    .unwrap();
+    group
 }

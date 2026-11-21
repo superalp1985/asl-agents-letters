@@ -64,6 +64,7 @@ enum Action {
     Approve(Id128),
     Room(Hash32),
     Send(Hash32),
+    ConfigureInbound(bool, bool),
     Remove(Hash32, Vec<u8>),
 }
 
@@ -83,6 +84,12 @@ impl Action {
             Self::List => LocalGroupAction::List,
             Self::Approve(invite) => LocalGroupAction::Approve(invite),
             Self::Room(room) => LocalGroupAction::Room(room),
+            Self::ConfigureInbound(browse_enabled, answer_enabled) => {
+                LocalGroupAction::ConfigureInbound {
+                    browse_enabled,
+                    answer_enabled,
+                }
+            }
             Self::Remove(room, peer) => LocalGroupAction::Remove {
                 room,
                 peer: PeerId::from_bytes(peer).map_err(|_| AslError::InvalidIdentity)?,
@@ -111,7 +118,7 @@ fn group_messages_cross_core_processes_over_framed_ipc_and_tcp() {
 }
 
 #[test]
-#[ignore = "requires a working TCP loopback route between separate Net AppContainers"]
+#[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_messages_cross_sandboxed_net_processes() {
     verify_group_delivery(Verification::AppContainer);
 }
@@ -149,9 +156,12 @@ fn verify_group_delivery(verification: Verification) {
         (first_peer, first_home, _),
         (second_peer, second_home, _),
     ] = &nodes;
-    let (mut creator, creator_ready) = CoreProcess::start(creator_home, &registry_path);
-    let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path);
-    let (mut second, second_ready) = CoreProcess::start(second_home, &registry_path);
+    let loopback_fixture = verification == Verification::AppContainer;
+    let (mut creator, creator_ready) =
+        CoreProcess::start(creator_home, &registry_path, loopback_fixture);
+    let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path, loopback_fixture);
+    let (mut second, second_ready) =
+        CoreProcess::start(second_home, &registry_path, loopback_fixture);
     first.dial(&creator_ready, creator_peer);
     first.connection(&creator_ready["peer"]);
     let first_connection = creator.connection(&first_ready["peer"]);
@@ -173,12 +183,72 @@ fn verify_group_delivery(verification: Verification) {
     assert_eq!(sent["available"], 2);
     assert_eq!(sent["queued"], 2);
     first.receive_query(room, &sent, &creator_ready["peer"]);
-    let second_received = second.receive_query(room, &sent, &creator_ready["peer"]);
+    second.receive_query(room, &sent, &creator_ready["peer"]);
 
     let sent = first.ok(Action::Send(room));
     assert_eq!(sent["available"], 1);
     assert_eq!(sent["queued"], 1);
     creator.receive_query(room, &sent, &first_ready["peer"]);
+
+    let first_path = AppPaths::open_existing(first_home)
+        .unwrap()
+        .state()
+        .join("asl.sqlite3");
+    let mut control = asl_store::open_store(&first_path).unwrap();
+    asl_store::group_state::GroupInboundPolicy::set_switch(
+        &mut control,
+        asl_store::group_state::GroupInboundSwitch::Answer,
+        true,
+    )
+    .unwrap();
+    assert_eq!(first.ok(Action::Room(room))["answer_enabled"], true);
+    let sent = creator.ok(Action::Send(room));
+    assert_eq!(sent["queued"], 2);
+    first.receive_query(room, &sent, &creator_ready["peer"]);
+    creator.until(
+        "group query answer",
+        || Action::Room(room),
+        |view| {
+            view["last_received"]["kind"] == "answer"
+                && view["last_received"]["sender"] == first_ready["peer"]
+        },
+    );
+
+    let second_path = AppPaths::open_existing(second_home)
+        .unwrap()
+        .state()
+        .join("asl.sqlite3");
+    let browsed_queries = || {
+        asl_store::dashboard::Dashboard::load(&second_path)
+            .unwrap()
+            .activity
+            .into_iter()
+            .filter(|row| row.scope == "group" && row.kind == "query")
+            .count()
+    };
+    second.ok(Action::ConfigureInbound(false, false));
+    let before_disable = browsed_queries();
+    assert!(before_disable > 0);
+    let previous = second.ok(Action::Room(room))["last_received"].clone();
+    let sent = creator.ok(Action::Send(room));
+    first.receive_query(room, &sent, &creator_ready["peer"]);
+    creator.until(
+        "second group query answer",
+        || Action::Room(room),
+        |view| {
+            view["last_received"]["kind"] == "answer"
+                && view["last_received"]["sender"] == first_ready["peer"]
+        },
+    );
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(second.ok(Action::Room(room))["last_received"], previous);
+    second.ok(Action::ConfigureInbound(true, false));
+    assert_eq!(
+        browsed_queries(),
+        before_disable,
+        "re-enabling browse must not backfill hidden requests"
+    );
+    second.ok(Action::ConfigureInbound(false, false));
 
     assert_eq!(
         creator.ok(Action::Remove(room, second_peer.as_bytes().to_vec()))["mls_epoch"],
@@ -196,12 +266,9 @@ fn verify_group_delivery(verification: Verification) {
     assert_eq!(sent["available"], 1);
     assert_eq!(sent["queued"], 1);
     first.receive_query(room, &sent, &creator_ready["peer"]);
-    assert_eq!(
-        second.ok(Action::Room(room))["last_received"],
-        second_received
-    );
+    assert_eq!(second.ok(Action::Room(room))["last_received"], previous);
     let after = creator.ok(Action::Room(room));
-    assert_eq!(after["state"], "needs_sync");
+    assert_eq!(after["state"], "active");
 
     creator.close();
     first.close();
@@ -315,7 +382,7 @@ fn group_core_child() {
             }
             Ok(())
         },
-        |_| Ok(()),
+        |_, _| Ok(()),
         |core| {
             if core.group_controls.is_none() {
                 return Err(AslError::NotFound);
@@ -390,15 +457,18 @@ struct CoreProcess {
 }
 
 impl CoreProcess {
-    fn start(home: &Path, registry: &Path) -> (Self, Value) {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+    fn start(home: &Path, registry: &Path, loopback_fixture: bool) -> (Self, Value) {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--ignored", "--exact", CHILD, "--nocapture"])
             .env("ASL_GROUP_FIXTURE_HOME", home)
             .env("ASL_GROUP_FIXTURE_REGISTRY", registry)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped());
+        if loopback_fixture {
+            command.env("ASL_APPCONTAINER_LOOPBACK_FIXTURE", "1");
+        }
+        let mut child = command.spawn().unwrap();
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (output, messages) = mpsc::channel();
@@ -491,9 +561,9 @@ impl CoreProcess {
             Duration::from_secs(52),
             "durable epoch",
             || Action::Room(room),
-            |v| v["mls_epoch"] == epoch,
+            |v| v["mls_epoch"] == epoch && v["state"] == "active",
         );
-        assert_eq!(state["state"], "needs_sync");
+        assert_eq!(state["state"], "active");
     }
 
     fn receive_query(&mut self, room: Hash32, sent: &Value, sender: &Value) -> Value {

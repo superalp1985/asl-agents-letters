@@ -1,5 +1,6 @@
 //! Local index and scoped queries. A candidate key is never a read capability.
 pub mod direct;
+pub mod group;
 mod index;
 mod page;
 mod scope;

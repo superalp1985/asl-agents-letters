@@ -345,13 +345,22 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
             .version,
         original
     );
-    assert!(matches!(
-        deliver(&mut first, &mut first_store, request_handle, response.clone()),
-        Ok(Some(MlsNetworkOutcome::SyncAdvanced { wire_id: room, version }))
-            if room == wire_id && version.mls_epoch == 2
-                && version.policy_revision == original.policy_revision
-                && version.membership_epoch == original.membership_epoch
-    ));
+    let advanced = deliver(
+        &mut first,
+        &mut first_store,
+        request_handle,
+        response.clone(),
+    );
+    match advanced {
+        Ok(Some(MlsNetworkOutcome::SyncAdvanced {
+            wire_id: room,
+            version,
+        })) if room == wire_id
+            && version.mls_epoch == 2
+            && version.policy_revision == original.policy_revision
+            && version.membership_epoch == original.membership_epoch + 1 => {}
+        other => panic!("unexpected sync result: {other:?}"),
+    }
     assert!(
         deliver(&mut first, &mut first_store, request_handle, response)
             .unwrap()
@@ -389,7 +398,7 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     ));
     assert_eq!(
         first_store.mls_room_progress(wire_id).unwrap(),
-        Some(("needs_sync".into(), 2))
+        Some(("active".into(), 2))
     );
     let reopened = first_db.open().mls_room_snapshot(wire_id).unwrap().unwrap();
     let binding = RoomBinding {
@@ -573,7 +582,7 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
         Ok(Some(MlsNetworkOutcome::SyncAdvanced { wire_id: room, version }))
             if room == wire_id && version.mls_epoch == 3
                 && version.policy_revision == original.policy_revision
-                && version.membership_epoch == original.membership_epoch
+                && version.membership_epoch == original.membership_epoch + 2
     ));
     let reopened = first_db.open().mls_room_snapshot(wire_id).unwrap().unwrap();
     let (_, _, history) = restore_with_history(&binding, &reopened).unwrap();

@@ -608,7 +608,7 @@ fn read_agent(row: &Row<'_>, index: usize) -> Result<AgentId, AslError> {
     decode_agent_text(text)
 }
 
-fn decode_agent_text(text: &str) -> Result<AgentId, AslError> {
+pub(crate) fn decode_agent_text(text: &str) -> Result<AgentId, AslError> {
     if !(32..=44).contains(&text.len()) {
         return Err(AslError::InvalidDatabase);
     }

@@ -1,6 +1,6 @@
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Id128, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{Query, WireFrame, decode_control, encode_control},
     task::TaskId,
 };
@@ -269,6 +269,27 @@ impl Store {
         Ok(true)
     }
 
+    /// Group messages share the same bounded semantic budget table, but the
+    /// conversation key includes the wire group ID so the same message ID in
+    /// another room cannot consume or suppress this room's request.
+    pub fn claim_group_inbound_query(
+        &mut self,
+        group_id: Hash32,
+        sender: AgentId,
+        root_task_id: Id128,
+        request_id: Id128,
+        now_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, AslError> {
+        self.claim_direct_inbound_query(
+            sender,
+            scoped_group_id(b"root", group_id, root_task_id),
+            scoped_group_id(b"request", group_id, request_id),
+            now_ms,
+            expires_at_ms,
+        )
+    }
+
     pub fn due_outbox(
         &self,
         now_ms: i64,
@@ -508,6 +529,19 @@ impl Store {
     }
 }
 
+pub(crate) fn scoped_group_id(domain: &[u8], group_id: Hash32, id: Id128) -> Id128 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ASL-group-inbound-v1\0");
+    hasher.update(domain);
+    hasher.update(b"\0");
+    hasher.update(group_id.as_bytes());
+    hasher.update(id.as_bytes());
+    let digest = hasher.finalize();
+    let mut scoped = [0_u8; 16];
+    scoped.copy_from_slice(&digest.as_bytes()[..16]);
+    Id128(scoped)
+}
+
 struct MessageWrite<'a> {
     task_id: &'a TaskId,
     peer_id: &'a PeerId,
@@ -532,6 +566,7 @@ fn frame_info(frame: &WireFrame) -> Result<FrameInfo, AslError> {
         WireFrame::Ack(value) => (value.message_id, MessageKind::Ack),
         WireFrame::FetchRequest(_)
         | WireFrame::FetchGrant(_)
+        | WireFrame::FetchPending(_)
         | WireFrame::Hello(_)
         | WireFrame::Profile(_)
         | WireFrame::IdentityProofRequest(_)
@@ -609,4 +644,45 @@ fn parse_peer(value: &str) -> Result<PeerId, AslError> {
 fn immediate(conn: &mut Connection) -> Result<Transaction<'_>, AslError> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)
+}
+
+#[cfg(test)]
+mod group_scope_tests {
+    use super::*;
+    use asl_types::ids::AgentId;
+
+    #[test]
+    fn group_query_replay_scope_includes_the_wire_group_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::open_store(&temp.path().join("asl.sqlite3")).unwrap();
+        let agent = AgentId([1; 32]);
+        let root = Id128([2; 16]);
+        let message = Id128([3; 16]);
+        let first_group = Hash32([4; 32]);
+        let second_group = Hash32([5; 32]);
+
+        store
+            .connection
+            .execute(
+                "INSERT INTO agents(agent_id) VALUES (?1)",
+                [agent_text(agent)],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .claim_group_inbound_query(first_group, agent, root, message, 100, 1_000)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_group_inbound_query(first_group, agent, root, message, 101, 1_000)
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_group_inbound_query(second_group, agent, root, message, 101, 1_000)
+                .unwrap()
+        );
+    }
 }

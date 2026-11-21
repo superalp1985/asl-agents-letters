@@ -1,0 +1,16 @@
+ASL UI asset record
+===================
+
+Pixel product icon and agent mascot
+-----------------------------------
+- Source: crates/asl-app/src/ui/art.rs
+- Creator: ASL project contributors; original pixel patterns authored in this repository
+- Method: hand-authored 16x16 envelope icon and 24x24 chibi mascot, rasterized at runtime from embedded color grids
+- Third-party art, model output, external image URLs, and copied project assets: none
+- License: MIT, under the repository LICENSE
+
+Fonts
+-----
+- UI base fonts: eframe/egui default fonts, supplied by the locked Rust dependency
+- Windows CJK fallback: installed Microsoft YaHei (msyh.ttc), loaded from the Windows Fonts directory when present
+- Font files are not copied into or redistributed by this repository; their owner-set license remains applicable

@@ -4,12 +4,13 @@
 ; non-preferred integers, trailing bytes, and non-deterministic encodings.
 
 control-frame = hello / query / answer / offer / fetch-request /
-                fetch-grant / error / ack / profile
+                fetch-grant / error / ack / profile / fetch-pending
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
 ; Authenticated plaintext inside an MLS application message, not an outer frame.
-group-application = query / answer / offer
+group-application = query / answer / offer / fetch-request /
+                    fetch-grant / fetch-pending / error
 
 id128 = bstr .size 16
 hash32 = bstr .size 32
@@ -127,6 +128,15 @@ fetch-grant = {
   4: hash32,
   5: time-ms,
   6: uint .le 68719476736
+}
+
+fetch-pending = {
+  0: 1,
+  1: 14,
+  2: id128,
+  3: hash32,
+  4: time-ms,
+  5: time-ms
 }
 
 error = {

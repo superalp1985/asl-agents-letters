@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+appcontainer-loopback-fixture = []
+
 [dependencies]
 asl-types = { path = "../asl-types" }
 blake3.workspace = true

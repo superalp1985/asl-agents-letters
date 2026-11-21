@@ -17,6 +17,14 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn open(root: &Path) -> Result<Self, AslError> {
+        Self::open_with(root, true)
+    }
+
+    pub fn open_existing(root: &Path) -> Result<Self, AslError> {
+        Self::open_with(root, false)
+    }
+
+    fn open_with(root: &Path, create: bool) -> Result<Self, AslError> {
         if !root.is_absolute()
             || !is_local_drive(root)
             || root
@@ -28,7 +36,11 @@ impl AppPaths {
 
         validate_storage_root(root)?;
         validate_existing_components(root)?;
-        fs::create_dir_all(root)?;
+        if create {
+            fs::create_dir_all(root)?;
+        } else if !fs::metadata(root)?.is_dir() {
+            return Err(AslError::InvalidStorageRoot);
+        }
 
         // Preserve the checked drive-absolute input for handle-based traversal.
         // canonicalize() returns a verbatim path, a different Windows namespace.
@@ -39,12 +51,13 @@ impl AppPaths {
             return Err(AslError::InvalidStorageRoot);
         }
 
-        let state = create_child(&root, "state")?;
-        let identity = create_child(&root, "identity")?;
-        let provider_credentials = create_child(&root, "credentials")?;
-        let snapshots = create_child(&root, "snapshots")?;
-        let incoming = create_child(&root, "incoming")?;
-        let logs = create_child(&root, "logs")?;
+        let child = if create { create_child } else { existing_child };
+        let state = child(&root, "state")?;
+        let identity = child(&root, "identity")?;
+        let provider_credentials = child(&root, "credentials")?;
+        let snapshots = child(&root, "snapshots")?;
+        let incoming = child(&root, "incoming")?;
+        let logs = child(&root, "logs")?;
 
         Ok(Self {
             root,
@@ -126,6 +139,15 @@ fn create_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
     let path = root.join(name);
     validate_existing_components(&path)?;
     fs::create_dir_all(&path)?;
+    validate_existing_components(&path)?;
+    if !fs::metadata(&path)?.is_dir() {
+        return Err(AslError::InvalidStorageRoot);
+    }
+    Ok(path)
+}
+
+fn existing_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
+    let path = root.join(name);
     validate_existing_components(&path)?;
     if !fs::metadata(&path)?.is_dir() {
         return Err(AslError::InvalidStorageRoot);

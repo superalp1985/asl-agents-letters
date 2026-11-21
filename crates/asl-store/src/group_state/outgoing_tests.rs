@@ -584,6 +584,7 @@ fn verified_remove_invalidates_cached_welcome_for_a_revoked_device() {
         RoomVersion {
             revision: added.revision + 1,
             mls_epoch: added.mls_epoch + 1,
+            membership_epoch: added.membership_epoch + 1,
             ..added
         }
     );
@@ -675,9 +676,41 @@ fn sync_count(store: &Store) -> i64 {
         .unwrap()
 }
 
+fn remove_group_transfer_schema_for_legacy_fixture(store: &Store) {
+    store
+        .connection
+        .execute_batch(
+            "DROP INDEX upload_consent_lookup;
+             ALTER TABLE transfer_consents DROP COLUMN upload_size;
+             ALTER TABLE transfer_consents DROP COLUMN upload_filename;
+             ALTER TABLE transfer_consents DROP COLUMN target_peer_id;
+             DROP INDEX group_download_consent_lookup;
+             DROP INDEX group_transfer_epoch_lookup;
+             ALTER TABLE transfers DROP COLUMN group_epoch;
+             ALTER TABLE transfers DROP COLUMN group_id;",
+        )
+        .unwrap();
+}
+
+fn remove_contact_binding_schema_for_legacy_fixture(store: &Store) {
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE contact_binding_actions;
+             DROP TABLE contact_binding_candidates;
+             DROP TABLE contact_bindings;
+             DROP TABLE direct_inbound_observations;
+             ALTER TABLE group_events DROP COLUMN browse_kind;
+             DELETE FROM settings WHERE key='ui.binding_code_public.v1';",
+        )
+        .unwrap();
+}
+
 #[test]
 fn upgrading_v13_keeps_the_existing_mls_snapshot() {
     let (f, store, base) = Fixture::new();
+    remove_group_transfer_schema_for_legacy_fixture(&store);
+    remove_contact_binding_schema_for_legacy_fixture(&store);
     store
         .connection
         .execute_batch(
@@ -704,11 +737,13 @@ fn upgrading_v14_does_not_backfill_and_a_legacy_gap_cannot_serve_old_steps() {
     let version = store
         .commit_mls_room_candidate(f.change(base, members, b"pre-v15 commit"))
         .unwrap();
+    remove_group_transfer_schema_for_legacy_fixture(&store);
+    remove_contact_binding_schema_for_legacy_fixture(&store);
     store
         .connection
         .execute_batch(
             "DROP TABLE mls_sync_log;
-             DELETE FROM schema_migrations WHERE version=15;",
+             DELETE FROM schema_migrations WHERE version>=15;",
         )
         .unwrap();
     drop(store);

@@ -25,6 +25,7 @@ use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
     protocol::{PairingExchange, PairingInvite, WireFrame},
+    record::short_code,
     task::ProviderId,
 };
 use rand::{TryRng, rngs::SysRng};
@@ -56,8 +57,9 @@ use crate::profile::{
 use crate::providers::DpapiProviderCredentialSource;
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
-use asl_store::open_store;
+use asl_store::{dashboard::LocalIdentityProjection, open_store};
 
+mod bindings;
 mod directory;
 #[cfg(windows)]
 mod groups;
@@ -89,6 +91,7 @@ pub struct Supervisor {
     directory_reader: Option<directory::DirectoryReader>,
     directory_removed: bool,
     directory_renewal_retry_at: Instant,
+    contact_bindings: bindings::ContactBindingRuntime,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -166,6 +169,7 @@ impl Supervisor {
             directory_reader,
             directory_removed: false,
             directory_renewal_retry_at: Instant::now(),
+            contact_bindings: bindings::ContactBindingRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -173,6 +177,7 @@ impl Supervisor {
             group_controls: None,
             pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
         };
+        supervisor.persist_local_identity_projection();
         #[cfg(windows)]
         supervisor.configure_group_admission();
         supervisor.apply_network_settings(&network_settings)?;
@@ -250,86 +255,35 @@ impl Supervisor {
 
     pub fn issue_pairing_invite(
         &mut self,
-        connection_id: [u8; 16],
-        target: AgentId,
-        note: &str,
-        now_ms: u64,
+        _connection_id: [u8; 16],
+        _target: AgentId,
+        _note: &str,
+        _now_ms: u64,
     ) -> Result<PairingInvite, AslError> {
-        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
-        let (remote_agent, _) = admission.admitted_peer_identity(connection_id, now_ms)?;
-        if remote_agent != target {
-            return Err(AslError::InvalidIdentity);
-        }
-        let invite = pairing::issue_signed_invite(&self.agent_identity, target, note, now_ms)?;
-        self.send_network_command(NetworkCommand::RequestPairing {
-            connection_id,
-            request_id: invite.invite_id.0,
-            invite: invite.clone(),
-        })?;
-        Ok(invite)
+        Err(AslError::PolicyDenied)
     }
 
     pub(crate) fn answer_pairing_invite(
         &mut self,
-        connection_id: [u8; 16],
-        response_id: [u8; 16],
-        invite: PairingInvite,
-        authorization: PairingAuthorization,
-        now_ms: u64,
+        _connection_id: [u8; 16],
+        _response_id: [u8; 16],
+        _invite: PairingInvite,
+        _authorization: PairingAuthorization,
+        _now_ms: u64,
     ) -> Result<PairingExchange, AslError> {
-        let mut store = open_store(&self.state_database)?;
-        let exchange = pairing::answer_signed_invite(
-            &self.agent_identity,
-            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
-            &mut store,
-            &self.device_peer_id,
-            connection_id,
-            &invite,
-            authorization,
-            now_ms,
-        )?;
-        self.send_network_command(NetworkCommand::ReplyPairing {
-            connection_id,
-            response_id,
-            exchange: exchange.clone(),
-        })?;
-        Ok(exchange)
+        Err(AslError::PolicyDenied)
     }
 
     pub(crate) fn verify_pairing_response(
         &mut self,
         event: AdmittedNetworkEvent,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
-        let AdmittedNetworkEvent::PairingExchangeReceived {
-            connection_id,
-            agent_id,
-            request_id: _,
-            invite,
-            exchange,
-        } = event
-        else {
+        let AdmittedNetworkEvent::PairingExchangeReceived { connection_id, .. } = event else {
             return Ok(Some(event));
         };
-        let mut store = open_store(&self.state_database)?;
-        let result = pairing::verify_signed_exchange(
-            &self.agent_identity,
-            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
-            &mut store,
-            &self.device_peer_id,
-            connection_id,
-            &invite,
-            &exchange,
-            now_ms,
-        );
-        match result {
-            Ok(true) => Ok(Some(AdmittedNetworkEvent::PairingAccepted { agent_id })),
-            Ok(false) => Ok(Some(AdmittedNetworkEvent::PairingDeclined { agent_id })),
-            Err(_) => {
-                self.send_network_command(NetworkCommand::CloseConnection { connection_id })?;
-                Ok(None)
-            }
-        }
+        self.send_network_command(NetworkCommand::CloseConnection { connection_id })?;
+        Ok(None)
     }
 
     pub fn activate_network_admission(
@@ -351,8 +305,29 @@ impl Supervisor {
         self.admission = Some(admission);
         #[cfg(windows)]
         self.configure_group_admission();
-        self.network_admission_status = NetworkAdmissionStatus::Active;
+        self.set_network_admission_status(NetworkAdmissionStatus::Active);
         Ok(())
+    }
+
+    fn set_network_admission_status(&mut self, status: NetworkAdmissionStatus) {
+        if self.network_admission_status == status {
+            return;
+        }
+        self.network_admission_status = status;
+        self.persist_local_identity_projection();
+    }
+
+    fn persist_local_identity_projection(&self) {
+        let Ok(store) = open_store(&self.state_database) else {
+            return;
+        };
+        let projection = LocalIdentityProjection {
+            agent_id: bs58::encode(self.agent_identity.agent_id().as_bytes()).into_string(),
+            peer_id: bs58::encode(self.device_peer_id.as_bytes()).into_string(),
+            network_state: self.network_admission_status.dashboard_state().to_owned(),
+            binding_code: format!("{:016}", short_code(self.agent_identity.agent_id())),
+        };
+        let _ = store.set_local_identity_projection(&projection);
     }
 
     /// Trusted in-process entry point only; not dispatched from Net or Worker IPC.
@@ -500,18 +475,23 @@ impl Supervisor {
                     )
                 }
             },
-            |observation| match observation {
-                LocalNetworkObservation::DhtProviders { .. } => {
-                    outbound
-                        .borrow_mut()
-                        .handle_local_observation(observation, unix_time_ms()?);
-                    Ok(())
+            |supervisor, observation| {
+                supervisor.observe_contact_binding_network(observation.clone())?;
+                match observation {
+                    LocalNetworkObservation::DhtProviders { .. } => {
+                        outbound
+                            .borrow_mut()
+                            .handle_local_observation(observation, unix_time_ms()?);
+                        Ok(())
+                    }
+                    _ => Ok(()),
                 }
-                _ => Ok(()),
             },
             |supervisor| {
                 supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
                 let mut transfer = transfer.borrow_mut();
+                #[cfg(windows)]
+                supervisor.poll_group_transfers(&mut transfer)?;
                 driver.borrow_mut()(supervisor, &mut transfer, DownloadDriverEvent::Tick)
             },
         )
@@ -524,7 +504,26 @@ impl Supervisor {
     ) -> Result<Option<[u8; 16]>, AslError> {
         let now = unix_time_ms()?;
         let (connection_id, command) = match request {
-            WorkerRequest::Fetch { source, request } => {
+            WorkerRequest::Fetch {
+                source,
+                group: Some(group),
+                request,
+            } => {
+                #[cfg(windows)]
+                {
+                    return self.send_group_fetch(transfer, &source, &group, &request);
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (source, group, request);
+                    return Ok(None);
+                }
+            }
+            WorkerRequest::Fetch {
+                source,
+                group: None,
+                request,
+            } => {
                 let (_, connection_id, _) = self
                     .admission
                     .as_ref()
@@ -639,6 +638,32 @@ impl Supervisor {
         else {
             return Ok(());
         };
+        if let Some(group_requester) =
+            transfers.group_requester_for_lease(request.lease_id, &requester, now_ms)
+        {
+            let prepared =
+                transfers.prepare_group_bulk(&self.libraries, group_requester, request, now_ms);
+            let Some(admission) = self.admission.as_mut() else {
+                return Ok(());
+            };
+            let net = &self.net;
+            return match transfers.finish_group_bulk(prepared, unix_time_ms()?, |response| {
+                let now_ms = unix_time_ms()?;
+                let Ok(command) =
+                    admission.authorize_bulk_reply(connection_id, response_id, response, now_ms)
+                else {
+                    return Ok(());
+                };
+                if net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            }) {
+                Ok(()) | Err(AslError::NotFound | AslError::PolicyVersionConflict) => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
         let prepared = transfers.prepare_bulk(&self.libraries, requester, request, now_ms);
         let Some(admission) = self.admission.as_mut() else {
             return Ok(());
@@ -748,7 +773,8 @@ impl Supervisor {
                 }
                 Ok(())
             },
-            |observation| {
+            |supervisor, observation| {
+                supervisor.observe_contact_binding_network(observation.clone())?;
                 observer(observation);
                 Ok(())
             },
@@ -1043,7 +1069,7 @@ impl Supervisor {
     fn run_loop(
         mut self,
         mut handler: impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
-        mut observer: impl FnMut(LocalNetworkObservation) -> Result<(), AslError>,
+        mut observer: impl FnMut(&mut Self, LocalNetworkObservation) -> Result<(), AslError>,
         mut tick: impl FnMut(&mut Self) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         let mut next_health_check = Instant::now();
@@ -1092,6 +1118,7 @@ impl Supervisor {
             if now >= next_agent_tick {
                 #[cfg(windows)]
                 self.poll_local_groups()?;
+                self.poll_contact_bindings()?;
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
             }
@@ -1114,7 +1141,7 @@ impl Supervisor {
                 _ => return Err(AslError::InvalidMessage),
             };
             if let Some(observation) = event.as_local_observation() {
-                observer(observation)?;
+                observer(&mut self, observation)?;
                 continue;
             }
             let now_ms = unix_time_ms()?;
@@ -1225,45 +1252,18 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
-            let now_ms = unix_time_ms()?;
+            self.observe_contact_binding_event(&event)?;
             match &event {
-                AdmittedNetworkEvent::PairingInviteReceived {
-                    connection_id,
-                    response_id,
-                    agent_id,
-                    invite,
-                } => {
-                    let can_prompt = self.pending_pairing_prompts.can_insert(invite.invite_id.0)
-                        && open_store(&self.state_database)
-                            .and_then(|mut store| {
-                                store.allow_pairing_prompt(*agent_id, invite.invite_id, now_ms)
-                            })
-                            .unwrap_or(false);
-                    if can_prompt {
-                        if !self.pending_pairing_prompts.insert(
-                            *connection_id,
-                            *response_id,
-                            invite.clone(),
-                        ) {
-                            return Err(AslError::InvalidMessage);
-                        }
-                    } else {
-                        let exchange = pairing::decline_rate_limited_invite(
-                            &self.agent_identity,
-                            self.admission.as_mut().ok_or(AslError::InvalidIdentity)?,
-                            &self.device_peer_id,
-                            *connection_id,
-                            invite,
-                            now_ms,
-                        )?;
-                        self.send_network_command(NetworkCommand::ReplyPairing {
-                            connection_id: *connection_id,
-                            response_id: *response_id,
-                            exchange,
-                        })?;
-                        continue;
-                    }
+                AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } => {
+                    self.pending_pairing_prompts
+                        .remove_connection(*connection_id);
+                    self.send_network_command(NetworkCommand::CloseConnection {
+                        connection_id: *connection_id,
+                    })?;
+                    continue;
                 }
+                AdmittedNetworkEvent::PairingAccepted { .. }
+                | AdmittedNetworkEvent::PairingDeclined { .. } => continue,
                 AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
                     self.pending_pairing_prompts
                         .remove_connection(*connection_id);
@@ -1305,7 +1305,7 @@ impl Supervisor {
                             .as_mut()
                             .is_some_and(|a| a.check_local_directory(now_ms).is_ok())
                         {
-                            self.network_admission_status = NetworkAdmissionStatus::Active;
+                            self.set_network_admission_status(NetworkAdmissionStatus::Active);
                         } else {
                             self.suspend_network_admission(
                                 NetworkAdmissionStatus::DeviceDirectoryUnavailable,
@@ -1364,7 +1364,7 @@ impl Supervisor {
                         && admission.check_local_directory(now_ms).is_ok())
                 {
                     self.directory_removed = false;
-                    self.network_admission_status = NetworkAdmissionStatus::Active;
+                    self.set_network_admission_status(NetworkAdmissionStatus::Active);
                 }
             }
             Ok(None) => {
@@ -1404,7 +1404,7 @@ impl Supervisor {
             Ok(true)
         ) {
             self.directory_removed = false;
-            self.network_admission_status = NetworkAdmissionStatus::Active;
+            self.set_network_admission_status(NetworkAdmissionStatus::Active);
         }
     }
 
@@ -1435,7 +1435,7 @@ impl Supervisor {
         &mut self,
         status: NetworkAdmissionStatus,
     ) -> Result<(), AslError> {
-        self.network_admission_status = status;
+        self.set_network_admission_status(status);
         if let Some(admission) = self.admission.as_mut() {
             if matches!(
                 status,

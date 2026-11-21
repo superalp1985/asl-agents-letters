@@ -270,6 +270,51 @@ impl InboundRunner {
         }))
     }
 
+    /// Produces a typed unsupported or no-match reply without consulting model
+    /// or resource policy. Group delivery uses this until group audiences are
+    /// wired into resource search.
+    pub fn finish_no_match(
+        &mut self,
+        work: InboundWork,
+        now_ms: u64,
+    ) -> Result<Option<WireFrame>, AslError> {
+        let Some(task) = self.pending.get(&work.agent_id) else {
+            return Ok(None);
+        };
+        if task.peer_id != work.peer_id || task.message_id != work.query.message_id {
+            return Ok(None);
+        }
+        self.pending.remove(&work.agent_id);
+        if self.mode != InboundMode::Answer
+            || now_ms < work.query.created_at_ms
+            || now_ms >= work.query.expires_at_ms
+        {
+            return Ok(None);
+        }
+        let query = &work.query;
+        let frame = if !query.constraints.is_empty()
+            || !matches!(
+                query.intent_id,
+                Intent::FindEvidence | Intent::LocateResource
+            )
+            || query.result_shape == ResultShape::Agents
+        {
+            answer(
+                query,
+                fresh_id()?,
+                now_ms,
+                AnswerStatus::Unsupported,
+                vec![],
+            )
+        } else {
+            answer(query, fresh_id()?, now_ms, AnswerStatus::NoMatch, vec![])
+        };
+        encode_control(&frame)?;
+        self.conversations
+            .record_outbound(&TaskId(query.root_task_id), &frame, now_ms)?;
+        Ok(Some(frame))
+    }
+
     /// This consumes the reply. Use only when the original connection and response handle are live.
     pub fn take_reply(
         &self,

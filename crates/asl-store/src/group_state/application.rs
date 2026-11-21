@@ -28,6 +28,7 @@ impl Store {
         version: RoomVersion,
         authority: MlsApplicationAuthority<'_>,
         now_ms: u64,
+        automatic_reply: bool,
         enqueue: impl FnOnce() -> T,
     ) -> Result<T, AslError> {
         let tx = self
@@ -36,6 +37,9 @@ impl Store {
             .map_err(database_error)?;
         if room_version(&tx, wire_id, authority.creator)? != version {
             return Err(AslError::PolicyVersionConflict);
+        }
+        if automatic_reply && !super::GroupInboundPolicy::read(&tx)?.answer_enabled {
+            return Err(AslError::PolicyDenied);
         }
         for member in authority.members {
             require_member(&tx, member, authority.chain_id, now_ms)?;
@@ -53,11 +57,12 @@ impl Store {
         authority: MlsApplicationAuthority<'_>,
         mut current_time: impl FnMut() -> Result<u64, AslError>,
     ) -> Result<RoomVersion, AslError> {
-        if !update
-            .event
-            .as_ref()
-            .is_some_and(|event| matches!(event.kind, MlsJournalKind::Application(_)))
-            || member_ids(authority.members)? != update.members.iter().map(peer_text).collect()
+        if !update.event.as_ref().is_some_and(|event| {
+            matches!(
+                event.kind,
+                MlsJournalKind::Application(_) | MlsJournalKind::ReceivedApplication(..)
+            )
+        }) || member_ids(authority.members)? != update.members.iter().map(peer_text).collect()
         {
             return Err(AslError::InvalidPolicyState);
         }

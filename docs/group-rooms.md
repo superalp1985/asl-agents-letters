@@ -6,7 +6,7 @@
 
 `GroupPacket` 对操作 `1` 内的 `group-membership` 进行二次确定性 CBOR 校验，限制请求和回复种类、完全匹配群 ID、请求 ID、预期 epoch 和邀请 ID。网络 codec 只检查外层，传输适配器和 Core 分别检查消息及各自的连接、待决请求绑定。OpenMLS 适配器核验普通 KeyPackage、单收件项 Welcome、解密后的群 ID/epoch/套件及本机叶子，并检查 Application/Commit 是相符的 MLS 私有消息。同步绑定由 MLS exporter 派生，不发送原始 epoch authenticator。完整消息表见 [协议](03-protocol.md#群子流)。
 
-MLS 应用明文通过 `group-application` 校验，只复用既有 Query、Answer、Offer。没有新增自由文本、未知字节载荷、群内 Fetch 或嵌套群 envelope；外层 CBOR 字段和值不变。Agent 应用规则（例如不让群回复触发新回复）仍由后续 T32 实现。
+MLS 应用明文通过 `group-application` 校验，只复用既有 Query、Answer、Offer、FetchRequest 和 FetchGrant。没有自由文本、未知字节载荷或嵌套群 envelope；外层 CBOR 字段和值不变。FetchRequest 只能由当前 `active` 且成员 epoch 精确匹配的房间成员发起；FetchGrant 使用原群应用外层消息 ID 关联请求，内部 Grant 的消息 ID 仍保持独立。
 
 集成夹具使用固定 OpenMLS 0.9.2、RustCrypto 0.6.0 和测试身份，真实执行 KeyPackage、Welcome、应用消息认证与解密、移除提交，检查被移除成员不能读取下一 epoch 的消息。夹具的 BasicCredential 不等于 ASL 链身份；测试并不验收实际群邀请、持久化、成员授权、生产子进程或公网。
 
@@ -65,7 +65,7 @@ Windows Core 启动时经私有前导把 `loopback_groups` 交给 Net。该选�
 
 配置位于 `ASL_HOME` 下的 `state/network-settings-v1.json`。使用 `version: 1`、`address_scope: "loopback_only"`、`loopback_groups: true`、空 `relay_addresses`；需接受连接的节点再启用 `listen_on_interfaces` 并设置自己的 `tcp_port`、`quic_port`。启动 `asl-core --groups` 时必须使用本机交互终端。`peers` 显示本机身份和已准入连接；按需要用 `dial <ip:port> <PeerId>` 连接另一回环节点。`create` 建群，`invite <room-id> <connection-id>` 定向邀请，`list` 显示当前设备的待审批和已审批邀请，`room <room-id>` 查看是否已落盘及当前 epoch。`approve <invite-id>` 持久保存审批并尝试发送一次；失败或重启后由本机操作员用 `retry <invite-id>` 重试。`reject <invite-id>` 只关闭尚未批准的邀请，不能删除已有加入包：对端可能已经提交 Add。查看恢复清单不会发送。双方仍需要可验证的链身份和设备目录。
 
-启用后，Core 至多缓存 128 个 Agent 的已验证签名设备目录，来源限成功的已准入 Hello 证明或已经过签名与链核验的 DHT 目录，不采用 Welcome 自带的材料。缓存可跨断开使用，不跨 Core 重启；每次仍重新核对时效、链状态、目录历史和精确设备证书。尚未观察到某成员的新鲜目录时拒绝 Welcome，保留原审批以便先取得证据、再显式重试。建群、收发受限邀请和提交 Welcome 不再依赖文件传输预先登记设备；设备登记与对应群事务一起写入，不授予联系人或文件访问权限。超出提示额度的邀请不登记设备。尚未接入自动获取缺失目录或 GUI 审批。
+启用后，Core 至多缓存 128 个 Agent 的已验证签名设备目录，来源限成功的已准入 Hello 证明或已经过签名与链核验的 DHT 目录，不采用 Welcome 自带的材料。缓存可跨断开使用，不跨 Core 重启；每次仍重新核对时效、链状态、目录历史和精确设备证书。尚未观察到某成员的新鲜目录时拒绝 Welcome，保留原审批以便先取得证据、再显式重试。建群、收发受限邀请和提交 Welcome 不再依赖文件传输预先登记设备；设备登记与对应群事务一起写入，不授予联系人或文件访问权限。超出提示额度的邀请不登记设备。新房间和成员变化后的房间先进入 `needs_sync`，只有后续状态机证据满足条件才可转为 `active`。
 
 Core 定期以及收到有效链刷新时，由独立线程读取 `ASL_HOME/identity/device-directory.cbor` 中的新签名封装，主进程沿用原 Hello 的精确设备证书。更新必须通过签名、当前链承诺、有效期和已观察版本检查。无效更新不覆盖仍有效的目录；确认文件缺失或目录到期即暂停准入并关闭连接。相同 Agent 的其他设备若提供较新有效目录，已观察到的版本不会随连接关闭而丢失。仅更换文件不能恢复失效的链证据；远端会话仍受原准入期限约束，必要时重新握手。此路径不自动签发目录、不发布到 DHT，也不负责换发设备证书。
 
@@ -81,7 +81,7 @@ SQLite 读取仅返回距离本机 head 不超过 256 个 epoch、未超过本�
 
 DPAPI 快照 v3 在同一候选事务中保存房间累计拉取的提交数，上限 256。断线、换来源、重启、历史窗口滚动或 `AtHead` 都不重置。旧 v2 快照无法区分本地产生和拉取的记录，首个新同步按现有历史长度保守扣除。预算用尽后不会开启新的自动同步；须通过新的定向邀请和本机审批恢复。
 
-`AtHead` 只表示该对端的当前视图一致，不恢复群权限。同步不拉取缺失的设备目录，不处理独立 Update，不开启应用投递；房间和群资源仍为 `needs_sync`。公网、LAN 和中继均未开放。
+`AtHead` 只表示该对端的当前视图一致，不恢复群权限。同步不拉取缺失的设备目录，不处理独立 Update。同步完成本身不赋予权限；状态机必须另行满足 `active` 条件，期间房间和群资源保持 `needs_sync`。公网、LAN 和中继均未开放。
 
 ### 定向入群与有限同步：剩余接线约束
 
@@ -101,7 +101,7 @@ DPAPI 快照 v3 在同一候选事务中保存房间累计拉取的提交数，�
 
 重新入群由原创建者发送更高基础 epoch 的新定向邀请，在 `list` 中标记 `kind: "rejoin"`，仍然受邀请提示限额，须本机再次 `approve`。同一设备若还在创建者的树中，先独立移除，再邀请添加；不同设备使用各自的新 KeyPackage。收方保留本机房间 ID 和名称，从独立 Welcome 安装新快照；不把这个操作当作旧提交链的连续同步。SQLite 比较发送时的快照版本并原子消费审批、替换成员投影、清除旧同步记录。初次入群和重入都在落盘前重新核对原请求期限、邀请、认证连接和成员身份；处理中到期即回滚。只有新的有效 Welcome 可重新开始补齐预算；旧邀请、重复 Welcome 或落后的 epoch 都不行。
 
-房间仍为 `needs_sync`。群应用投递、授权激活及其与移除的联动尚未开放。
+这段移除流程本身只推进成员 epoch 并把房间退回 `needs_sync`，不沿用旧群授权。后续完整同步、创建者激活或已验证 `AtHead` 可按状态机重新进入 `active`；任何旧同意、lease 和块请求仍保持失效。
 
 ## 已实现：结构化群消息的 MLS 加解密封装
 
@@ -121,16 +121,27 @@ Core 在独立候选中收发准备，要求调用方指定精确房间版本；
 
 发方只加密一次，密文和发送状态落盘后再入队。SQLite 写锁保护版本及身份检查和入队边界，较新的成员变更已落盘时不按旧名单入队。同一密文的各条请求使用独立的本机传输凭据。离线不补发，不自动重试；入队不表示送达。已经入队或已发送的旧消息不能召回，接收方只处理自己的当前 epoch。
 
-正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识，不展示内容，不把消息交给普通 Agent。发方可在可信 Core 的本机类型化控制通道提交 Query、Answer 或 Offer，只报告本机入队结果，不暴露终端、MCP、Worker 或远端发送命令。回环默认关闭，房间仍为 `needs_sync`；普通成员互发、群权限激活、Agent 浏览/自动回答、GUI、公网、LAN 和中继均未开放。
+正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识，不展示内容，不把消息交给普通 Agent。发方可在可信 Core 的本机类型化控制通道提交 Query、Answer、Offer、FetchRequest 或 FetchGrant，只报告本机入队结果，不暴露终端、MCP、Worker 或远端发送命令。回环默认关闭；普通成员互发、GUI、公网、LAN 和中继仍未开放。
+
+## 已实现：群内文件传输授权链
+
+客户端只在请求来源仍是当前 `active` 房间成员、设备证书与 Agent 链状态有效、本地群 ID 和成员 epoch 完全匹配时，才把结构化 FetchRequest 加密投递到已认证连接。服务端再次读取本地房间和资源快照，不接受消息内自报的群、成员或权限版本。FetchGrant 只能回到原认证连接；客户端以 MLS 外层消息 ID 关联原请求，再通过同一连接执行既有 Bulk。
+
+SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标写入 grant、grant epoch、内容、文件名、大小及来源集合。v17 为上传同意保存认证目标设备、文件名和大小。群成员增删推进成员 epoch 并关闭旧授权，因此旧同意、旧 lease、旧块请求和重启前未完成的群传输都会失效。上传模式为 `ask` 时，FetchRequest 只得到结构化 `FetchPending`，不创建 lease；本机批准后，相同设备、内容、授权 epoch 和群 epoch 的重试才可签发一次性 FetchGrant。服务端在 FetchGrant 签发、manifest/chunk 分配、写块和完成前继续重验精确群 epoch；群 Bulk lease 不依赖消息内的群 ID，而是由服务端内存中的 lease 绑定确定，进程重启后不会沿用。
+
+房间状态机保持两条路径：创建者只有在本地 MLS 状态、成员投影和当前设备证据一致时，才能把房间推进为 `active`；成员侧只接受创建者设备通过已验证群子流回复给出的 `AtHead`。成员变化先推进 membership epoch 并关闭旧授权。创建者可在已提交并重新核验自己的本地成员变更后激活；其他成员在 `active` 状态也会周期性向当前已认证的创建者连接核对 head，收到提交后回到 `needs_sync`，追到创建者 head 后才重新激活。不会用其他普通成员的旧视图激活房间。信任值和贡献值只参与软排序，不能替代房间成员、epoch、设备证书或本地授权。
+
+成员侧的 head 轮询只选择已连接的房间创建者，并轮转处理房间；创建者离线时不向其他成员询问或猜测最新状态，现有群应用和群文件授权仍受本地活动状态及精确 epoch 限制。
 
 ### 跨进程验收状态
 
 - **三 Core 协议验收已通过。** 三个独立测试进程分别运行生产 Supervisor 和 Net 驱动；仅在测试构建中，Net 驱动运行在各自宿主的线程里，通过真实匿名管道交换生产 IPC 帧，节点间通过 libp2p TCP 回环通信，端口由系统分配。根和设备密钥用 DPAPI 保存，链最终性使用合成夹具，仍运行实际的身份状态证明、证书、目录、SQLite 和 OpenMLS 校验。测试覆盖定向邀请与本机审批、Welcome、Add／Remove 补齐、创建者向两名在线成员投递结构化 Query、普通成员只向创建者发送，以及被移除设备在网络身份仍获准时不再进入投递名单。
-- **真实 AppContainer 互通未通过。** 上次显式测试中，两个独立的 AppContainer Net 均绑定了系统分配的 TCP 端口，但本机沙箱间回环拨号超时，未进入 ASL 身份准入。正式启动仍创建真实 Net 沙箱；未设置回环豁免、改变沙箱或回退到其他地址。[验证记录](plan-validation.md#2026-11-21-t31三-core-协议验收)
+- **真实 AppContainer 互通已改走 Windows 官方调试路径。** 测试构建从系统目录取得 `CheckNetIsolation.exe`，用本次临时 profile 的 SID 执行 `LoopbackExempt -a -p=<SID>` 和 `-is -p=<SID>`，退出时以 `-d -p=<SID>` 清理；该能力只在 `appcontainer-loopback-fixture` feature 和显式子进程环境变量同时启用时生效，正式 Core 启动不设置豁免、不扩大沙箱权限，也不回退到宿主线程。Windows 要求修改该列表时使用提升权限的终端。[Microsoft 回环排查步骤](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)明确说明两个同机 AppContainer 必须通过该路径启用回环。
 
-可在有可用沙箱间回环路由的 Windows 验收环境中运行；先构建 `asl-app` 全测试目标，以确保真实 Net 等辅助程序存在：
+在提升权限的 PowerShell 中运行仓库脚本；它会先构建 `asl-app` 全测试目标，以确保真实 Net 等辅助程序存在，再执行被保留的 AppContainer 测试：
 
 ```powershell
-cargo test -p asl-app --all-targets --locked --offline --no-run
-cargo test -p asl-app --lib --locked --offline supervisor::groups::process_tests::group_messages_cross_sandboxed_net_processes -- --ignored --exact --nocapture
+.\scripts\run-appcontainer-loopback-test.ps1
 ```
+
+脚本不写死盘符，会使用 `ASL_DEV_ROOT`，或在仓库上级目录中查找现有 `dev-cache`。

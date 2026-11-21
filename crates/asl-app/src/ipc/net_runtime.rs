@@ -215,6 +215,24 @@ impl NetworkBridge {
                 self.send_operation_result(lookup_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::StartProviding { operation_id, key } => {
+                let result = self
+                    .transport
+                    .start_providing(
+                        asl_net::dht::RecordKey::new(&key),
+                        asl_net::dht::DhtAudience::Public,
+                    )
+                    .map(|_| ());
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::StopProviding { operation_id, key } => {
+                let result = self
+                    .transport
+                    .stop_providing(asl_net::dht::RecordKey::new(&key));
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;

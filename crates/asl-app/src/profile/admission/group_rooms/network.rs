@@ -53,8 +53,10 @@ pub enum MlsNetworkOutcome {
         wire_id: Hash32,
     },
     ApplicationReceived {
+        connection_id: [u8; 16],
         wire_id: Hash32,
         epoch: u64,
+        envelope_id: Id128,
         sender: PeerId,
         application: Box<GroupApplication>,
     },
@@ -239,20 +241,23 @@ impl CoreAdmission {
                     return Err(AslError::ExpiredMessage);
                 }
                 if matches!(&request.body, GroupBody::Application(_)) {
-                    let (sender, application) = self.receive_loopback_mls_application(
-                        store,
-                        connection_id,
-                        &request,
-                        deadline_ms,
-                        now_ms,
-                    )?;
+                    let (connection_id, sender, application) = self
+                        .receive_loopback_mls_application(
+                            store,
+                            connection_id,
+                            &request,
+                            deadline_ms,
+                            now_ms,
+                        )?;
                     let response = GroupPacket {
                         body: GroupBody::Membership(GroupMembership::Receipt),
                         ..request
                     };
                     let outcome = MlsNetworkOutcome::ApplicationReceived {
+                        connection_id,
                         wire_id: response.group_id,
                         epoch: response.epoch,
+                        envelope_id: response.message_id,
                         sender,
                         application: Box::new(application),
                     };

@@ -6,7 +6,8 @@ use std::{
 };
 
 use asl_net::codec::{BulkOperation, BulkResponse, BulkStatus};
-use asl_types::manifest::CHUNK_SIZE;
+use asl_types::{manifest::CHUNK_SIZE, task::GroupId};
+use rusqlite::Connection;
 
 use super::*;
 use crate::{
@@ -39,6 +40,15 @@ impl Harness {
     }
 
     fn fetch(&self, grant: Id128, standby: Option<&VerifiedFetchManifest>) -> DownloadTicket {
+        self.fetch_with_group(grant, standby, None)
+    }
+
+    fn fetch_with_group(
+        &self,
+        grant: Id128,
+        standby: Option<&VerifiedFetchManifest>,
+        group: Option<GroupTransferBinding>,
+    ) -> DownloadTicket {
         let sources = std::iter::once(&self.source)
             .chain(standby)
             .map(|source| DownloadSource {
@@ -52,6 +62,7 @@ impl Harness {
                 inbox_grant: grant,
                 filename: "received.bin".into(),
                 sources,
+                group,
             }))
             .unwrap()
     }
@@ -140,6 +151,42 @@ impl Harness {
                 agent_id: Some(self.source.agent_id),
             });
     }
+}
+
+#[test]
+fn group_download_carries_its_membership_binding_to_fetch() {
+    let inbox = Inbox::new(b"group runtime fixture");
+    drop(inbox.local);
+    let group_id = GroupId(Id128([31; 16]));
+    let group_text = alloy_primitives::hex::encode(group_id.0.as_bytes());
+    let peer_text = bs58::encode(inbox.event.peer_id.as_bytes()).into_string();
+    let db = Connection::open(inbox.home.join("state/asl.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO asl_groups(
+             group_id,creator_peer_id,local_name,mls_epoch,membership_epoch,state,
+             created_at_ms,updated_at_ms)
+         VALUES (?1,?2,'runtime',1,1,'active',0,0)",
+        rusqlite::params![group_text, peer_text],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO group_members(group_id,peer_id,role,state,joined_at_ms)
+         VALUES (?1,?2,'creator','active',0)",
+        rusqlite::params![group_text, peer_text],
+    )
+    .unwrap();
+    drop(db);
+    let mut harness = Harness::new(&inbox.home, &inbox.event);
+    let binding = GroupTransferBinding {
+        group_id,
+        membership_epoch: 1,
+    };
+    let _ticket = harness.fetch_with_group(inbox.grant, None, Some(binding.clone()));
+
+    let WorkerRequest::Fetch { group, .. } = harness.request() else {
+        panic!("expected Fetch");
+    };
+    assert_eq!(group, Some(binding));
 }
 
 #[test]
@@ -353,6 +400,7 @@ fn download_port_is_bounded_and_rejects_non_filename_destinations() {
                     .unwrap()
                     .peer_id(),
             }],
+            group: None,
         })
     };
     assert!(port.submit(make("outside/item.bin")).is_err());

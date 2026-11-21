@@ -45,8 +45,12 @@ pub(crate) struct PreparedReply {
 
 impl DirectInbound {
     pub(crate) fn open(path: &Path) -> Result<Self, AslError> {
+        let mut store = open_direct_store(path)?;
+        store.prune_direct_inbound_observations(
+            i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidMessage)?,
+        )?;
         Ok(Self {
-            store: open_direct_store(path)?,
+            store,
             runner: InboundRunner::default(),
             next_query: None,
             agent_cooldowns: HashMap::new(),
@@ -59,7 +63,7 @@ impl DirectInbound {
         frame: WireFrame,
         now_ms: u64,
     ) -> Result<Option<PreparedReply>, AslError> {
-        let WireFrame::Query(query) = &frame else {
+        let WireFrame::Query(query) = frame else {
             return Ok(None);
         };
         if now_ms < query.created_at_ms || now_ms >= query.expires_at_ms {
@@ -73,16 +77,32 @@ impl DirectInbound {
             return Ok(None);
         }
         self.next_query = Some(now + MIN_QUERY_GAP);
-        self.runner.set_mode(read_mode(&self.store)?);
-        let Ingress::Work(work) =
-            self.runner
-                .receive(requester.agent, requester.peer.clone(), frame, now_ms)?
-        else {
-            return Ok(None);
+        let mode = read_mode(&self.store)?;
+        self.runner.set_mode(mode);
+        let ingress = self.runner.receive(
+            requester.agent,
+            requester.peer.clone(),
+            WireFrame::Query(query.clone()),
+            now_ms,
+        )?;
+        let work = match ingress {
+            Ingress::Observed if mode == InboundMode::BrowseOnly => {
+                self.store.record_direct_inbound_observation(
+                    requester.agent,
+                    &requester.peer,
+                    &query,
+                    i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?,
+                )?;
+                self.agent_cooldowns
+                    .insert(requester.agent, now + MIN_AGENT_GAP);
+                return Ok(None);
+            }
+            Ingress::Work(work) => *work,
+            _ => return Ok(None),
         };
         self.agent_cooldowns
             .insert(requester.agent, now + MIN_AGENT_GAP);
-        let result = self.prepare_work(&requester, *work, now_ms);
+        let result = self.prepare_work(&requester, work, now_ms);
         if !matches!(result, Ok(Some(_))) {
             self.runner.disconnect(&requester.peer);
         }
@@ -396,6 +416,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn browse_mode_records_structured_request_without_answering() {
+        let fixture = Fixture::new();
+        let now = unix_time_ms().unwrap();
+        let sender = requester(now);
+        configure(&fixture.path(), "browse").unwrap();
+
+        let mut core = DirectInbound::open(&fixture.path()).unwrap();
+        assert!(core.prepare(sender, query(9, now), now).unwrap().is_none());
+        drop(core);
+
+        let dashboard = asl_store::dashboard::Dashboard::load(&fixture.path()).unwrap();
+        assert_eq!(dashboard.direct_observations.len(), 1);
+        let observation = &dashboard.direct_observations[0];
+        assert_eq!(observation.intent, 2);
+        assert_eq!(observation.topic_ids, vec![(1, 101)]);
+        assert_eq!(observation.constraint_count, 0);
+        assert_eq!(observation.result_shape, 2);
     }
 
     #[test]

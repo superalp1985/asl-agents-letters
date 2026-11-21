@@ -20,6 +20,38 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 - 建议 Topics：`rust`、`p2p`、`ai-agents`、`libp2p`、`mcp`、`file-sharing`、`decentralized`、`egui`。
 - ASL 是本项目品牌缩写，不宣称该缩写全球唯一。Rust 包名使用 `asl-*`；公开发布包前仍需检查注册表可用性。
 
+<p align="center">
+  <img src="docs/assets/asl-product-icon.svg" width="96" alt="A信信封图标">
+  <img src="docs/assets/asl-agent-mascot.svg" width="144" alt="A信 Agent 吉祥物">
+</p>
+
+## 桌面实拍
+
+2026-11-22 的 Windows 开发构建（以 `c0e389b` 为基础，含本地桌面改动）。演示资料由 `asl-core` 在独立的数据目录中创建。
+
+![授权页显示三个独立的目录授权](docs/assets/desktop-permissions.jpg)
+
+`Notes` 允许已授权联系人读取符合条件的 `.md` 和 `.pdf`，每个文件最多 8 MiB。`Inbox` 用于接收文件，`Experience` 用于保存本机经验。
+
+![传输页的发送和接收均选中逐次询问](docs/assets/desktop-transfer-approval.jpg)
+
+接收和发送可分别设置。图中两项都选了「逐次询问」，拍摄时待审批队列为空。
+
+## 在 Windows 上运行开发版
+
+在仓库根目录打开 PowerShell。选择本机开发目录，Cargo 缓存、运行文件和本例的独立资料都放在该目录下。首次构建需要 Rust 和 Visual Studio C++ Build Tools。依赖已缓存时可给准备脚本加 `-Offline`。
+
+```powershell
+$devRoot = Read-Host "开发目录的绝对路径"
+. .\scripts\dev-env.ps1 -Root $devRoot
+$bin = .\scripts\prepare-desktop.ps1 -RunDir (Join-Path $devRoot 'work\desktop-bin')
+$env:ASL_HOME = Join-Path $devRoot 'work\desktop-profile'
+$core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassThru
+Start-Process (Join-Path $bin 'asl-ui.exe')
+```
+
+准备脚本将五个可执行文件复制到同一个新目录。再次打开窗口只需在同一 PowerShell 中执行最后一行。关闭窗口后后台仍会处理请求。同一资料只启动一个 Core，结束这次开发运行可执行 `$core | Stop-Process`。重新构建时选择新的运行目录，同一份 `ASL_HOME` 可以继续使用。
+
 ## 阅读顺序
 
 1. `docs/01-product.md`：完整功能、边界、用户授权和验收编号。
@@ -50,7 +82,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 - Agent 间控制协议采用确定性 CBOR/CDDL、整数键和概念词表，不含自然语言字段；本地 GUI 可翻译显示结构化信息。DHT 提供类型化概念/内容的节点发现；各节点做本地检索，不宣称全网全文搜索或全网在线列表。
 - 固定 1 MiB 分块，支持断点恢复、多来源并发与整文件校验。
 - 后台状态机决定权限、路由和限额，模型只产生经校验的结构化语义对象，不获得终端、任意路径或自主改权限的能力。
-- Agent 的“浏览”和“回答”分别授权；默认可浏览但不自动回答。文件上传和下载分别可设为授权内自动执行或每次先询问；确认绑定文件内容、接收方和群成员版本。
+- 直连请求默认关闭。已加入的群组默认允许浏览来信，自动回答须单独开启。文件上传和下载分别可设为授权内自动执行或每次先询问，确认绑定文件内容、接收方和群成员版本。
 - 支持端到端加密群聊和邀请。没有中心群服务器；群创建者负责成员管理，消息尽力实时投递，不承诺离线必达。群组成员身份本身不扩大文件权限。
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
@@ -60,7 +92,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ## 实施与验证状态
 
-**加密群组（T31，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows Core/Net 的回环群子流默认关闭；本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备。现有成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。重新入群需要原创建者的新邀请与本机重新审批。可信 Core 已接入受限收发，创建者只向当前在线成员入队，普通成员只与创建者收发。三个独立 Core 测试进程通过真实匿名管道和 TCP 回环验证了群消息送达、成员同步及移除后的投递范围。该协议测试不在 Net 沙箱内运行；真实沙箱间拨号仍未通过。房间仍为 `needs_sync`，不会授予文件权限；Agent 自动发送、公网群组和 GUI 审批尚未开放。[启用方法与验证范围](docs/group-rooms.md)
+**加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。三 Core 回环用例覆盖群成员变化、收发限制和资源流程。真实 AppContainer 群互通、公网/中继及真实链 RPC 仍未验收；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -72,7 +104,7 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，并将该目录的发布序号持久保存；续签依赖当前链承诺、证书和本机目录文件有效。这只是直连身份材料续签，不等于 DHT 公网发布。资料默认不发布，授权后续发，头像引用需独立公开授权；远端记录历史仍未持久化，实际 DHT 发布待接入，详见 `docs/signed-records.md`。
 
-可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。授权界面与检查点来源选择尚待接入。
+可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。共享/收件/经验目录授权界面已接入本机 Core；检查点来源选择和其他 T34 策略控制仍待实现。
 
 Windows T09 已实现按 Net/Worker/Extractor 分权的 AppContainer 启动、Job Object 资源约束、白名单匿名管道和可执行文件独立 ACL。真实系统探针验证 Worker 不能读授权目录外文件、联网或启动子进程；Net 的 TCP 网络能力、Worker 的拒绝、内存/CPU/期限限制及清理路径均有实测。外部 TCP 仅测连接握手；真实 UDP 回包、libp2p QUIC 及 mDNS 查询/响应尚未验证，因此 T09 仍为部分验收，不能称整个沙箱/网络已完成。
 
@@ -115,7 +147,18 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-应用的真实界面尚未实现，因此这里不放伪造产品截图。短码候选、身份核验、授权、传输、群组和迁移截图将在 GUI 实际完成后，以一次性测试身份生成并放入仓库。
+Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，目录授权操作交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移、检查点、模型服务与网络设置，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+
+直连接收可设为关闭、只浏览或允许回答。只浏览会在活动页显示已认证请求的意图、主题编号、约束数量和结果类型。活动页可将直连浏览记录设为「不保存」或 1 至 7 天，默认 7 天，最多 200 条。缩短期限会立即清理过期记录，选「不保存」会清空已有直连浏览记录。
+
+群组页有两个适用于本机所有群组的开关：「浏览来信」和「允许自动回答」。修改即时生效。活动页仅显示收到时已开启浏览的群来信类型与发送设备。文件传输继续使用单独的目录和收发授权。
+
+当前像素图标和吉祥物是仓库内逐像素绘制的原创资产，来源及系统字体边界记录在 [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt)。
+
+<p align="center">
+  <img src="docs/assets/asl-product-icon.svg" width="96" alt="ASL envelope icon">
+  <img src="docs/assets/asl-agent-mascot.svg" width="144" alt="ASL agent mascot">
+</p>
 
 ## English
 
@@ -155,7 +198,38 @@ flowchart LR
 
 ### Screenshots and Assets
 
-The actual GUI is not implemented yet, so this README does not use mockups as product screenshots. Real screenshots for sessions, short-code candidates, identity verification, permissions, transfers, groups, and migration will be added after those views run in a built application. The product icon and chibi anime-girl agent mascot will be separate assets with source and license records.
+Captured on Windows on November 22, 2026, from a development build based on `c0e389b` with local desktop changes. The local `asl-core` commands created the settings in a separate demonstration profile.
+
+![Permissions view with three independent directory grants](docs/assets/desktop-permissions.jpg)
+
+Authorized contacts can access eligible `.md` and `.pdf` files in `Notes`, up to 8 MiB per file. `Inbox` receives files and `Experience` stores locally derived notes.
+
+![Transfers view with both directions set to ask for approval](docs/assets/desktop-transfer-approval.jpg)
+
+Sending and receiving have separate approval settings. Both were set to ask for each file, and both queues were empty when captured.
+
+### Run the Windows Development Build
+
+Open PowerShell at the repository root. Choose a local development directory for the Cargo cache, runtime and separate profile. The first build requires Rust and Visual Studio C++ Build Tools. Add `-Offline` to the preparation command when the dependencies are cached.
+
+```powershell
+$devRoot = Read-Host "Absolute development directory"
+. .\scripts\dev-env.ps1 -Root $devRoot
+$bin = .\scripts\prepare-desktop.ps1 -RunDir (Join-Path $devRoot 'work\desktop-bin')
+$env:ASL_HOME = Join-Path $devRoot 'work\desktop-profile'
+$core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassThru
+Start-Process (Join-Path $bin 'asl-ui.exe')
+```
+
+The preparation script copies five executables into a new directory. Run just the last line in the same PowerShell session to reopen the window. The background process continues handling requests after the window closes. Start one Core per profile and use `$core | Stop-Process` to end this development run. Choose a fresh runtime directory for a new build and keep the same `ASL_HOME` to reuse the profile.
+
+### Desktop Controls
+
+The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint, model provider and network settings, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+
+The current pixel icon and mascot are original, pixel-by-pixel assets in the repository. Their provenance and system-font boundary are recorded in [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt).
+
+Direct requests are disabled by default. In joined groups, browsing is enabled by default and automatic answers require a separate opt-in. The Groups tab applies both settings across all local groups. Activity shows the message type and sending device for group messages received while browsing was enabled. File transfers use their own permissions.
 
 ### Repository and License
 
@@ -167,7 +241,7 @@ The actual GUI is not implemented yet, so this README does not use mockups as pr
 
 ### Implementation Status
 
-**Encrypted groups (T31, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Loopback-only group networking in Windows Core and Net is off by default. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and device removal by the creator. Members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. Rejoining requires a fresh invitation from the original creator and new local approval. Trusted Core code can queue messages for connected members on the current roster; members send to and receive from the creator only. A three-process protocol test verified delivery, membership catch-up, and recipient selection after removal using real anonymous pipes and loopback TCP. That test ran outside the Net sandboxes; dialing between actual sandboxes remains unverified after a timeout. Rooms remain in `needs_sync` and grant no file access. Automatic Agent sending, public-network groups, and GUI approval are not available. [Setup and test scope](docs/group-rooms.md)
+**Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. Three-Core loopback scenarios cover membership changes, constrained delivery, and resource flows. Actual AppContainer group connectivity, public/relay networking, and live chain RPC remain unverified; other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 
@@ -179,7 +253,7 @@ The pure authorization core implements public/contacts/peers/group audiences, mo
 
 The structured signed-record core covers profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes and persists its publication sequence; renewal requires the current chain commitment, device certificates and local directory file to remain valid. This refreshes direct identity-proof material but does not publish to the public DHT. Profiles remain disabled until explicitly configured, and avatar renewal requires separate public-resource authorization. Remote record history is not durable, and actual DHT publication remains pending; see `docs/signed-records.md`.
 
-An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. The authorization UI and trusted checkpoint-source selection remain pending.
+An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. Checkpoint authorization and trusted checkpoint-source selection remain pending.
 
 The first Windows T09 slice implements per-role AppContainer launch, Job Object limits, an explicit anonymous-pipe allowlist and executable-only ACL access. Real probes verify that Worker cannot read outside files, connect to a test HTTP listener or spawn a child; Net TCP capability, resource deadlines and cleanup are also exercised. The external TCP test proves only connection establishment. UDP echo, libp2p QUIC and an actual mDNS exchange remain unverified, so T09 is only partially accepted.
 

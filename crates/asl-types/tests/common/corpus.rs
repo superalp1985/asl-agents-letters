@@ -16,8 +16,8 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 20;
-pub const ACCEPTED_COUNT: usize = 17;
+pub const VECTOR_COUNT: usize = 21;
+pub const ACCEPTED_COUNT: usize = 18;
 pub const REJECTED_COUNT: usize = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,6 +95,7 @@ pub fn vector_cases() -> Vec<VectorCase> {
                 WireFrame::Offer(_) => ("offer-v1", "offer"),
                 WireFrame::FetchRequest(_) => ("fetch-request-v1", "fetch-request"),
                 WireFrame::FetchGrant(_) => ("fetch-grant-v1", "fetch-grant"),
+                WireFrame::FetchPending(_) => ("fetch-pending-v1", "fetch-pending"),
                 WireFrame::Error(_) => ("error-v1", "error"),
                 WireFrame::Ack(_) => ("ack-v1", "ack"),
                 WireFrame::Profile(_) => ("profile-v1", "profile"),
@@ -215,12 +216,12 @@ pub fn check_case_counts(cases: &[VectorCase]) -> CorpusResult<()> {
     if cases.len() != VECTOR_COUNT
         || accepted != ACCEPTED_COUNT
         || rejected != REJECTED_COUNT
-        || frames != 14
+        || frames != 15
         || records != 3
         || unique_names.len() != cases.len()
     {
         return Err(
-            "expected 20 unique vectors: 14 frames + 3 records accepted, 3 rejected".into(),
+            "expected 21 unique vectors: 15 frames + 3 records accepted, 3 rejected".into(),
         );
     }
     Ok(())

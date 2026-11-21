@@ -254,6 +254,14 @@ pub struct FetchGrant {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchPending {
+    pub message_id: Id128,
+    pub content_id: Hash32,
+    pub retry_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
     pub message_id: Id128,
     pub code: ErrorCode,
@@ -347,6 +355,7 @@ pub enum WireFrame {
     Offer(Offer),
     FetchRequest(FetchRequest),
     FetchGrant(FetchGrant),
+    FetchPending(FetchPending),
     Error(ProtocolError),
     Ack(Ack),
     Profile(Profile),
@@ -367,6 +376,7 @@ impl WireFrame {
                 | Self::Offer(_)
                 | Self::FetchRequest(_)
                 | Self::FetchGrant(_)
+                | Self::FetchPending(_)
                 | Self::Error(_)
                 | Self::Ack(_)
                 | Self::Profile(_)

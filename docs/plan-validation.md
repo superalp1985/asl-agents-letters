@@ -593,3 +593,74 @@ T09 的子进程清理测试验证了 Job Object 关闭的基础机制，但尚�
 
 - Windows x64 / Rust 1.100.0 / E 盘离线：`cargo test -p asl-app -p asl-store --all-targets --locked --offline -- --test-threads=1`，412 项通过、0 失败、4 项按既有标记忽略。`asl-app` 与 `asl-store` 全目标严格 Clippy、Rust 格式检查及 `git diff --check` 通过。
 - 测试覆盖 5 分钟续签边界、Core 续签后忽略陈旧源文件、启动时过期封装重签、SQLite 序号跨重开/外部序号下界/耗尽行为；全目标编译覆盖 Supervisor 目录更新接线。身份链状态为合成 MPT 夹具；未执行真实 RPC、DHT 实际发布、公网、GUI 或真实 AppContainer 互通。目录续签仅更新本机直连身份证明材料，不声称已发布到 DHT。
+
+### 2026-11-21 T32：群资源下载接线
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`asl-store --lib` 71 项通过；`asl-agent --test model_gateway` 定向运行 9 项通过。`asl-agent` 与 `asl-store` 全目标严格 Clippy、工作区 Rust 格式检查和 `git diff --check` 通过。
+- 四包（`asl-app`、`asl-policy`、`asl-store`、`asl-agent`）锁定离线全目标验证未完成：一次在 `asl-store` 的 5 个群状态测试失败，修正旧版本迁移夹具和成员 epoch 预期后，`asl-store --lib` 全部通过；随后全目标运行在 `asl-agent` 的 Mock HTTP 网关用例中失败，且失败用例在不同运行间变化。网关目标单独运行通过，因此本轮不记作四包全目标通过，仍需在后续模块集中验证时查明该不稳定性。
+- 群资源测试覆盖 SQLite v16 下载绑定、成员 epoch 失效、授权 inline Fetch/Bulk，以及三 Core 群文件流程；群成员同步覆盖活动成员追踪创建者 head。未验证公网、中继、真实链 RPC、真实 AppContainer 群互通或完整 GUI。
+
+### 2026-11-21 T32：集中验证续记
+
+- Windows x64 / Rust 1.100.0 / E 盘缓存离线：`cargo +1.100.0 test -p asl-agent -p asl-app -p asl-groups -p asl-net -p asl-policy -p asl-store -p asl-types --all-targets --locked --offline -- --test-threads=1` 全部通过，无失败；原有环境/子进程忽略项保持忽略。此前记录的 Agent Mock HTTP 网关波动在本次全目标运行中未复现。
+- 新增 SQLite 入站查询去重测试通过：相同发送者、根任务和消息在同一群中只领取一次；相同标识出现在另一群仍可领取。群查询使用独立的短生命周期 Agent runner，持久预算键按 wire group ID 做域分离。
+- 七个 crate 全目标严格 Clippy（`-D warnings`）、工作区格式检查及 `git diff --check` 均通过。Cargo 仍提示 `proc-macro-error2 v2.0.1` 未来 Rust 兼容性问题。
+- `group_messages_cross_sandboxed_net_processes` 仍因需要提权的临时 AppContainer 回环豁免而忽略；本轮没有验证真实 AppContainer 群互通、公网/中继、真实链 RPC 或完整 GUI，不能据此关闭 T32。
+
+### 2026-11-21 T33：只读桌面仪表盘切片
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`asl-store` 与启用 `desktop-ui` 的 `asl-app` 全目标测试完成；`asl-app` 共 284 项通过、3 项按既有标记忽略；`asl-store` 共 141 项通过、1 项按既有标记忽略，无失败。测试命令：`cargo +1.100.0 test -p asl-store -p asl-app --features asl-app/desktop-ui --all-targets --locked --offline -- --test-threads=1 --quiet`。
+- Windows 桌面 `asl-ui` 构建成功。`asl-store`、`asl-app`（含桌面目标）严格 Clippy（`-D warnings`）通过，`cargo +1.100.0 fmt --all -- --check` 通过。Cargo 仍提示 `proc-macro-error2 v2.0.1` 的未来兼容性告警。
+- 人工窗口观察确认中文字体、八个导航入口、空数据状态、桌面图标及原创像素吉祥物可见；首次观察发现概览垂直居中留出大块空白，已改为顶部排列。表格在窄窗口下改用横向滚动，尚未完成指定尺寸/DPI 矩阵。
+- GUI 数据读取为 SQLite 只读连接，不迁移、不创建缺失目录/数据库，也不启动 Agent。发现当前 Core 尚无 `local_agent_identity` / `local_device_identity` 投影写入路径，故空白本机身份并非身份密钥丢失；需要后续接线。授权页当前只显示快照，不编辑权限。
+- 未验收窗口关闭后后台持续工作、空闲重绘/RSS、短码/配对/迁移流程、长名称布局、公网/真实 AppContainer 网络或 T32 完整性；不关闭 T33。README 已修正“GUI 尚未实现”的过期陈述，记录当前范围，未放置空白测试画面冒充完整产品截图。像素资产和字体来源及许可边界见 `docs/licenses/asl-ui-assets.txt`。
+
+### 2026-11-21 T34：本机身份绑定子切片
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo +1.100.0 test -p asl-store --lib --locked --offline -- --test-threads=1`，79 项通过。覆盖 v18 本机绑定存储、绑定不授予联系人授权、撤销/遗忘、有限动作队列及 v13/v14 迁移夹具。
+- `cargo +1.100.0 test -p asl-app --all-targets --features desktop-ui --locked --offline -- --test-threads=1`：286 项通过、3 项按既有标记忽略；包含 `asl-core --bindings` 命令解析、IPC DHT 发布/撤销消息的固定角色与编解码，以及 Windows `asl-ui` 目标编译。严格 Clippy（`asl-app`、`asl-store` 全目标，含桌面 feature）、`cargo +1.100.0 fmt --all -- --check` 与 `git diff --check` 通过。
+- 修正旧版数据库测试夹具遗留 v18 表/默认设置的问题；补齐 DHT provider 命令 IPC 最大消息长度白名单。未新增依赖或改变线上 CBOR；`RecordKey` 通过 `asl-net` 暴露给 IPC 适配层。
+- 未端到端运行 Core 的短码发布/发现与候选批准；未验收真实 DHT、公网、真实链 RPC、AppContainer 网络、GUI 窗口布局或迁移/导出。测试中的跨 AppContainer 场景仍因需要提升权限而忽略。T34 其余授权视图和策略写操作未实现，不关闭 T34。
+
+### 2026-11-21 T34：目录授权界面子切片
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`asl-store --lib` 80 项通过。覆盖共享/收件授权的本机 Dashboard 投影、完整路径仅供本机授权页识别、扩展类型、额度和模型策略。
+- `asl-app --all-targets --features desktop-ui` 全目标测试 288 项通过、3 项既有测试忽略。此整套运行早于最后补入的经验保存目录入口；该入口完成后重跑 `asl-core` 二进制测试 8 项通过。`asl-app`、`asl-store` 全目标严格 Clippy（`-D warnings`，含 Windows 桌面目标）通过，确认最终 GUI/Core 代码编译。
+- 授权页可创建/撤销共享、收件和派生经验写目录。共享授权显示 audience、扩展名、单文件上限、模型禁用和派生披露选择；收件与派生写入分别走现有 Store broker API。撤销操作经用户确认，沿用 grant epoch 与 SQLite policy revision；未改线上 CBOR、schema 或依赖。
+- GUI 不自动导入或公告共享目录内容。未做人工窗口布局/DPI验收；未验收真实 DHT、公网、身份迁移或其他 T34 policy/profile/provider/network 控件，因此不关闭 T34。
+
+### 2026-11-21 T34：传输审批界面子切片
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`cargo +1.100.0 test -p asl-store --lib --locked --offline dashboard::tests`，5 项通过。覆盖只读 Dashboard 默认模式、显式询问模式投影及空审批队列。
+- `cargo +1.100.0 check -p asl-app --bin asl-ui --features desktop-ui --locked --offline`、对应桌面目标严格 Clippy，以及 `asl-store --all-targets` 严格 Clippy均通过。`cargo +1.100.0 fmt --all -- --check` 与 `git diff --check` 通过。
+- GUI 复用 Store 现有上传/下载待审批筛选和 Core 命令，提供独立模式切换、批准/拒绝、未消费批准撤销及传输页定时刷新；不启动下载恢复流程，不创建 Permit/lease 或直接传输文件。未新增依赖、SQLite schema 或线上协议字段。
+- 未做人工桌面窗口、布局/DPI或实时双节点审批验收；Cargo 仍提示 `proc-macro-error2 v2.0.1` 未来 Rust 兼容性告警。
+
+### 2026-11-21 T34：直连只浏览活动记录
+
+- Windows x64 / Rust 1.100.0 / E 盘离线：`asl-app` 含 `desktop-ui` 的全目标测试在联合运行中 289 项通过、3 项按既有标记忽略；随后 `asl-store --lib` 最终运行 84 项通过、0 失败。联合运行最初发现两处 v13/v14 迁移夹具降级时未移除 v19 表，已修正夹具后完成存储全量重跑；未重跑 app 测试，其 app 测试目标在首次联合运行中均通过。
+- `asl-app` 与 `asl-store` 含桌面目标的全目标严格 Clippy（`-D warnings`）、工作区 Rust 格式检查和 `git diff --check` 最终通过。Cargo 仍报告 `proc-macro-error2 v2.0.1` 的未来兼容性告警。
+- SQLite v19 新增本机直连观察表：按 AgentId/消息 ID 去重，最多保留 200 条、每条 7 天；Core 启动和每个新请求时清理过期记录。BrowseOnly 仅记录固定结构字段并在活动页显示，不存正文或约束值，不调用检索、不产生回复或传输。测试覆盖迁移、去重、全局上限、到期清理及只浏览请求不返回回复。
+- 未做人工窗口布局/DPI验收、双节点实时浏览验收、AppContainer 或公网测试；群组浏览状态未纳入本切片。
+
+### 2026-11-22 T34 群组浏览与自动回答
+
+- Windows x64、Rust 1.100.0、离线。`group_inbound_settings` 通过，在含空格的临时数据目录调用正式 `asl-core`，验证默认只浏览、独立切换与非法输入处理。
+- `group_messages_cross_core_processes_over_framed_ipc_and_tcp` 通过。三个 Core 进程经本机 TCP 收发结构化群消息。独立连接修改回答授权后，运行中的节点开始回答。关闭浏览期间收到的请求在重新开启后维持隐藏。
+- `asl-store` 全目标测试 151 项通过，1 个子进程入口按标记忽略。`asl-app`、`asl-groups` 和 `asl-store` 含桌面目标的全目标严格 Clippy 通过。应用验证范围为上述两个场景。真实 AppContainer 互通、公网和人工窗口验收仍待执行。
+
+### 2026-11-22 T33 桌面授权与收发审批截图
+
+Windows x64 使用 Rust 1.100.0 离线构建 `asl-ui` 和 `asl-core`（`desktop-ui`）。独立 `ASL_HOME` 通过正式本机命令建立三个空演示目录的授权，上传和下载均选择逐次询问。实际打开概览时可见三项目录授权和只浏览模式，授权页可见各目录的用途、范围及额度，传输页可见两个独立审批设置。中英文 README 引用同两张原生窗口截图。此轮观察使用默认窗口尺寸，公网传输、待审批文件的端到端操作和多 DPI 仍待验收。
+
+### 2026-11-22 T34 浏览期限、选群与联系人反馈
+
+12 项定向测试通过，覆盖直连浏览期限的本机设置与记录清理、授权表单的群组选择及联系人操作反馈。`asl-app` 与 `asl-store` 全目标严格 Clippy 通过，桌面和 Core 构建成功。
+
+### 2026-11-22 T33 关窗后的后台处理
+
+Windows 上通过窗口的正常关闭请求退出独立演示资料的 `asl-ui`。退出前数据库仅有短码尾号 42 的旧请求。确认窗口进程退出后，向同一资料执行 `asl-core --bindings lookup 0000000000000043`，命令回报已排队。随后只读查询 SQLite 发现新增 `action_id=2`，`state=failed`、`result=unavailable`。该演示资料未配置链身份服务。原 Core 和 Net 两个进程均仍在运行。该场景验证后台确实处理了关窗后新提交的工作。公网短码发现及成功建联另行验收。
+
+使用 `scripts/prepare-desktop.ps1 -Offline` 从锁定的 Cargo 构建生成五个独立的可执行文件，在路径含空格的新运行目录和空白资料目录中复现。窗口退出后，后台把短码尾号 44 的第一项请求处理为 `failed/unavailable`。随后结束测试 Core，Windows 同时清理其 Net 子进程。两次运行均使用正式的进程隔离设置。
+
+在第二次运行的默认概览页静置 12 秒，采样末 Core、Net、GUI 工作集分别为 23.5、13.6、109.0 MiB，区间累计 CPU 时间分别约为 125、0、0 毫秒。此数据来自单机、单次、空白资料的调试构建。长期空闲、活跃传输及多个 DPI 下的资源采样仍待执行。

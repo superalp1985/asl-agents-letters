@@ -44,6 +44,19 @@ pub enum NetworkAdmissionStatus {
     Active,
 }
 
+impl NetworkAdmissionStatus {
+    pub(crate) fn dashboard_state(self) -> &'static str {
+        match self {
+            Self::TrustConfigurationMissing => "trust_configuration_missing",
+            Self::DeviceDirectoryMissing => "device_directory_missing",
+            Self::DeviceDirectoryUnavailable => "device_directory_unavailable",
+            Self::ChainUnavailable => "chain_unavailable",
+            Self::RegistryAnchorMissing => "registry_anchor_missing",
+            Self::Active => "network_active",
+        }
+    }
+}
+
 pub(crate) struct NetworkAdmissionSetup {
     pub status: NetworkAdmissionStatus,
     pub admission: Option<CoreAdmission>,
@@ -280,6 +293,34 @@ mod tests {
     use super::*;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn network_admission_states_have_stable_dashboard_labels() {
+        assert_eq!(
+            NetworkAdmissionStatus::TrustConfigurationMissing.dashboard_state(),
+            "trust_configuration_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::DeviceDirectoryMissing.dashboard_state(),
+            "device_directory_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::DeviceDirectoryUnavailable.dashboard_state(),
+            "device_directory_unavailable"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::ChainUnavailable.dashboard_state(),
+            "chain_unavailable"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::RegistryAnchorMissing.dashboard_state(),
+            "registry_anchor_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::Active.dashboard_state(),
+            "network_active"
+        );
+    }
 
     struct TestDirectory(PathBuf);
 

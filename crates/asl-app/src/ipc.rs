@@ -64,7 +64,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54 | 55)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -296,6 +296,14 @@ pub enum IpcMessage {
     },
     FindProviders {
         lookup_id: [u8; 16],
+        key: [u8; 32],
+    },
+    StartProviding {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    StopProviding {
+        operation_id: [u8; 16],
         key: [u8; 32],
     },
     DhtProviders {
@@ -1049,6 +1057,22 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             44
         }
+        IpcMessage::StartProviding { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            54
+        }
+        IpcMessage::StopProviding { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            55
+        }
         IpcMessage::DhtProviders {
             lookup_id,
             status,
@@ -1411,6 +1435,14 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
         }
         44 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::FindProviders {
             lookup_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        54 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::StartProviding {
+            operation_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        55 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::StopProviding {
+            operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
         }),
         45 if body.len() >= 18 && body[..16] != [0; 16] => {
@@ -1924,6 +1956,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         39 => 50 + MAX_DHT_VALUE_BYTES,
         40 => 17,
         44 => 48,
+        54..=55 => 48,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2290,6 +2323,14 @@ mod tests {
                 lookup_id: [32; 16],
                 key: [33; 32],
             },
+            IpcMessage::StartProviding {
+                operation_id: [35; 16],
+                key: [36; 32],
+            },
+            IpcMessage::StopProviding {
+                operation_id: [37; 16],
+                key: [38; 32],
+            },
             IpcMessage::DhtProviders {
                 lookup_id: [34; 16],
                 status: DhtLookupStatus::Completed,
@@ -2453,6 +2494,8 @@ mod tests {
                 | IpcMessage::ReplyGroup { .. }
                 | IpcMessage::SetAddressPolicy { .. }
                 | IpcMessage::FindProviders { .. }
+                | IpcMessage::StartProviding { .. }
+                | IpcMessage::StopProviding { .. }
                 | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)

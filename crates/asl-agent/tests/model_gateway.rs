@@ -396,7 +396,11 @@ fn url_in_prompt_is_never_contacted_as_an_http_target() {
         &policy,
         NOW_MS,
     ));
-    assert!(result.is_ok());
+    assert!(
+        result.is_ok(),
+        "gateway request failed: {:?}",
+        result.as_ref().err()
+    );
     let request = server.join();
     let body: serde_json::Value = serde_json::from_slice(request_body(&request)).unwrap();
     assert_eq!(body["messages"][1]["content"], prompt_text);
@@ -536,7 +540,11 @@ fn local_provider_can_run_without_a_key_but_remote_provider_cannot() {
         &policy,
         NOW_MS,
     ));
-    assert!(result.is_ok());
+    assert!(
+        result.is_ok(),
+        "gateway request failed: {:?}",
+        result.as_ref().err()
+    );
     let request = server.join();
     assert!(get_header(&request, "authorization").is_none());
 

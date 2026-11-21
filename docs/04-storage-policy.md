@@ -34,7 +34,9 @@ data/
 
 ## 2. 数据表
 
-数据库按 `specs/schema-v1.sql` 至 `specs/schema-v15.sql` 连续迁移。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除。v8 增加派生知识的公开继承标记、独立写入目录身份绑定及写入引用表；v9 为资源增加本地来源 AgentId 归因，既有资源默认无归因且不能获得贡献分；v10 将下载 manifest 字节与暂存文件身份绑定持久化，移除依赖 manifest 路径的旧列。v11 为本机直连下载确认补上目标文件名、大小和来源集合；旧的未绑定记录不作放行凭据。v12 增加线上群 ID 与本地房间键的一对一映射和密封状态存储。v13 记录入站群邀请的提示额度、审批后的一次性密封 KeyPackage 和消费状态；提交 Welcome 候选时一并写入新房间和成员投影。v14 增加出站定向邀请，并在发方将 Welcome 与 MLS 快照、成员变更和提交事件一起落盘。v15 增加连续同步提交历史，按每群最多 256 步及 7 天保留；只记录新提交，不回填旧事件。群房间在这些事务后仍为 `needs_sync`，不赋予成员权限或复用旧授权。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。本机准入另在内存保留其已验证证明，不受对端 LRU 淘汰影响，仍受原时效和链观察限制。DDL 的存在不代表所有应用事务都已实现。
+当前版本为 SQLite v20。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`。验证通过的入站群消息在提交密文和接收状态的同一事务内读取本机浏览授权，仅在开启时写入消息类型。活动页根据此字段列出群来信，旧数据保持空值。显示期限沿用对应群事件的到期时间。
+
+数据库按 `specs/schema-v1.sql` 至 `specs/schema-v19.sql` 连续迁移。v2 增加本地导入预留与授权版本绑定；v3 清理失效本地引用的全文索引，在撤权、替换和删除时随事务移除对应索引行，不影响同内容的其他授权。这不是对磁盘或备份的安全擦除。v8 增加派生知识的公开继承标记、独立写入目录身份绑定及写入引用表；v9 为资源增加本地来源 AgentId 归因，既有资源默认无归因且不能获得贡献分；v10 将下载 manifest 字节与暂存文件身份绑定持久化，移除依赖 manifest 路径的旧列。v11 为本机直连下载确认补上目标文件名、大小和来源集合；旧的未绑定记录不作放行凭据。v12 增加线上群 ID 与本地房间键的一对一映射和密封状态存储。v13 记录入站群邀请的提示额度、审批后的一次性密封 KeyPackage 和消费状态；提交 Welcome 候选时一并写入新房间和成员投影。v14 增加出站定向邀请，并在发方将 Welcome 与 MLS 快照、成员变更和提交事件一起落盘。v15 增加连续同步提交历史，按每群最多 256 步及 7 天保留；只记录新提交，不回填旧事件。v16 将下载同意和持久传输绑定到本地群 ID、成员 epoch、目标写入 grant 与 grant epoch；成员增删推进 epoch 后，旧群同意、旧租约和旧块请求不能继续使用。v17 为上传确认保存认证目标设备、文件名和文件大小，并为按内容、授权版本、目标设备和群 epoch 去重查找建立索引。v18 将原有本机 AgentId pin 迁移到 `contact_bindings`，新增已核验的短码候选及有界本机动作队列，并以本机设置记录短码是否允许通过 DHT provider 发布。撤销时原子移除相关联系人授权和旧 pin；绑定本身不创建联系人查询授权、目录读取权限、文件权限或群组权限。v19 增加本机直连观察记录，仅保存 AgentId、设备 PeerId、结构化意图/主题编号、约束数量和结果形状；不保存自由文本或约束值。记录按 AgentId/消息 ID 去重，最多保留 200 条、每条 7 天，到期时在 Core 启动或新请求入站时清理。链证明缓存最多 128 个 Agent proof、合计最多 32 MiB，按 TTL/LRU 清理；单个 proof 最多 256 KiB。本机准入另在内存保留其已验证证明，不受对端 LRU 淘汰影响，仍受原时效和链观察限制。DDL 的存在不代表所有应用事务都已实现。
 
 T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL 字段不变。永久身份观察单独设 10,000 项硬上限；满额拒绝新的观察，不静默删除高水位或撤销记录。DPAPI 保护的本地快照绑定完整链配置与上述行的摘要，恢复先验证完整性与配置，再重验未过期证明。写失败或并发旧快照覆盖失败后停止返回正向链身份。DPAPI 不提供整库历史回滚防护；同一 Windows 用户恶意程序或已被恢复的整份旧数据库不在此完整性机制的保证内。
 
@@ -42,18 +44,21 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 
 | 表组 | 表 | 责任 |
 | --- | --- | --- |
-| 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、授权修订与迁移 |
+| 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、contact_bindings、contact_binding_candidates、contact_binding_actions、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、本机身份 pin、待核验发现候选及受限动作队列 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
 | 群组 | asl_groups、group_members、group_events、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、定向入群邀请与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、本机检索索引和溯源 |
 | 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、CBOR 语义帧、重试与去重 |
+| 本机观察 | direct_inbound_observations | 有界、短期的结构化直连请求浏览记录，不含请求正文或回复 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |
 | 证据 | trust_events、contribution_events、model_calls、security_events | 本地评价、调用状态和脱敏审计 |
 
 T19 已将 `tasks`、`messages`、`outbox` 和 `processed_requests` 接入 `asl-store`：任务预算、消息方向/类型、有限重试和请求去重在 SQLite 事务中持久化，重启后不会仅因内存状态丢失而再次回答旧请求。`messages.body_cbor` 保存已通过现有确定性 CBOR 编解码器的结构化控制帧；这表示本地存储路径已实现，不表示真实 Core/Net handler、完整公网会话或所有协议帧的端到端接入已完成。`fetch_grant`、lease 及其他传输授权不写入聊天消息和 outbox。
 
-T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。发起检索前在一个事务内占用 AgentId/message ID 去重键并推进 AgentId/root-task 的三轮、六条语义消息预算；回答交给 Net 前在当前授权事务内再预留一条语义消息。请求去重和会话预算均跨进程重启和设备迁移保留，过期十分钟。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。
+T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。发起检索前在一个事务内占用 AgentId/message ID 去重键并推进 AgentId/root-task 的三轮、六条语义消息预算；回答交给 Net 前在当前授权事务内再预留一条语义消息。请求去重和会话预算均跨进程重启和设备迁移保留，过期十分钟。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。GUI 概览可将本机模式设为关闭、只浏览或回答；默认关闭，设置通过 `asl-core --direct-inbound` 进入同一 Core 控制路径。
+
+T34 本机身份绑定切片：SQLite v18 将旧 AgentId pin 迁移为绑定状态，最多保留 200 条待确认/忽略的发现候选及 64 条待办本机动作。UI 从只读 Dashboard 投影展示本机 16 位短码、候选和绑定；修改通过相邻 `asl-core --bindings` 子命令排入 Core 动作队列，不由 GUI 直接写库。发布默认为关闭；启用时只发布短码 provider 指针，搜索只用于发现候选。Supervisor 仅在链身份、设备证书与认证 PeerId 全部通过后记录候选；绑定须由本机明确批准，且批准时要求该精确 AgentId/PeerId 仍处于当前已核验连接。批准不触发旧 `/asl/pair/1.0.0` 请求/响应，也不创建 `authorized_contacts`、资源 grant、群组成员或文件权限；撤销会封锁 Agent 并断开现有连接，重启时从本机撤销状态恢复封锁。动作返回值仅表示排队，不表示绑定、发现或网络发布已经完成；DHT 不可达仍会导致查找失败。尚未包含身份迁移包、公开链注册流程或公网 DHT 可达性验收。
 
 T28 实现类型化派生经验记录：只接收已由 `ValidatedDecision` 校验的 claims；本地生成来源、时间和 `derived_unverified` 标签，模型不能指定路径、验证状态或发布策略。写入目录使用独立 `write_grant`，固定目录身份、create-new 文件和字节额度；每个来源都需通过 `WriteDerived`，公开还需每个来源同时通过 `PublishRecord`，否则仅本地私有。记录以 JSON 落盘并进入本地索引；来源或写入授权撤销后，派生记录级联停用并从 FTS 移除。该切片尚不表示经验收集流程已接入后台自主运行或 GUI。
 
@@ -112,6 +117,8 @@ pub trait ReservationRepository {
 
 ## 4. 权限算法
 
+T34 GUI 的目录授权通过受限本机 `asl-core --access` 命令进入 `SnapshotBroker`：共享目录记录固定文件身份、扩展名、audience、单文件上限和派生披露开关；收件目录使用独立的 `write_grants` 与下载授权命令。完整路径只显示于本机授权页，不进入网络消息或远端可控记录。建立共享 grant 不会自动读取目录、导入文件或发布资源；导入、检索、公告和传输仍走各自现有能力及授权判定。撤销共享 grant 在同一事务中推进 grant epoch 与 `policy_revision`、停用其资源引用；后续对外查询按最新 SQLite 授权快照重建/更新 PolicyEngine，块读取继续重验 permit。撤销收件/派生写 grant 同样推进权限版本，写入端必须按当前 grant epoch 重验。纯 `PolicyService` 接口不接受路径，也不代替目录能力管理。
+
 grant 失效、epoch 不符、源引用 inactive、对象不存在时统一拒绝。对外不存在与无权限都映射 not_found，本地审计可区分。
 
 披露允许条件：
@@ -132,11 +139,17 @@ public 允许任何已验证链状态和身份根设备证书的 Agent；contact
 
 `transfer_consents` 的待确认状态不构成 Permit。上传确认绑定源 grant、内容 ID 和目标 PeerId 或 group+epoch；下载确认绑定内容 ID、目标 write grant 和可选 group+epoch。确认过期、授权撤销或绑定变化后必须重新确认；确认之前不得开始源文件读取或目标文件写入。
 
-**已实现的直连收件规则：** 不指定活动 inbox 授权不能接收。SQLite `transfer_approval.download_mode` 缺省或 `"automatic"` 时仅在本机选定的授权目录、文件名和额度内启动；`"ask"` 才逐次询问，未知设置报错。示例 TOML 显式选择询问，不代表运行时会自动加载该样例。收件与上传设置独立，不开放远端审批或群组收件入口。
+**已实现的收件规则：** 不指定活动 inbox 授权不能接收。SQLite `transfer_approval.download_mode` 缺省或 `"automatic"` 时仅在本机选定的授权目录、文件名和额度内启动；`"ask"` 才逐次询问，未知设置报错。直连与群下载共用本机收件模式，群确认还绑定群 ID 和 membership epoch；不开放远端审批入口。示例 TOML 显式选择询问，不代表运行时会自动加载该样例。收件与上传设置独立。
 
 一次同意绑定内容 ID、字节数、本机文件名、写授权 ID/版本及去重排序后的来源 PeerId 集合。待确认时不创建任务、预留或文件；同意与开始分开，消费确认与预留同一事务，创建 `.part` 前再次检查目录身份、授权版本和期限或自动模式。相同申请复用原编号，到期前切换到自动模式也不覆盖已有待处理、拒绝或已消费决定。全机有效窗口内最多 32 项（含拒绝及已消费），本机确认期限缺省 300 秒，可调为 1–300 秒；过期后不可见、不可消费，下一次创建询问时清理。确认不存 lease，不授予获取新数据块的权限。
 
 本机操作针对当前进程 `ASL_HOME` 指定的数据目录。`asl-core --downloads mode` 查看模式；`mode ask` / `mode automatic` 设置后立即供同一目录内的 Core 读取。`asl-core --downloads list` 返回未过期的待决定或已批准项；`asl-core --downloads approve <id>` / `asl-core --downloads deny <id>` 只修改决定。列表不触发下载恢复，命令也不能代为建立目录授权。如果决定时旧清单的 lease 已过期，应用入口需要同一来源、同一内容的新清单；未过期也不表示对端一定在线。
+
+**上传确认：** SQLite `transfer_approval.upload_mode` 缺省或 `"automatic"` 时沿用已授权共享范围内的自动上传；`"ask"` 时每个源授权版本、内容 ID、认证目标设备及可选群 epoch 产生一个本机待决定项。待决定时只返回结构化 `FetchPending`，不签发 lease；因此对端不能读取 manifest 或文件块。拒绝和过期对网络统一表现为 `not_found`。批准只允许同一绑定的 Fetch 重试一次，Core 在发送 grant 前重新核对共享 grant、资源、设备与群成员 epoch，并原子消费批准。块请求不重复弹出确认。
+
+本机通过 `asl-core --uploads mode` 查看模式、`mode ask` / `mode automatic` 设置；`list` 查看未过期的待决定项，`approve <id>` / `deny <id>` 记录决定。命令只操作本地 `ASL_HOME` 下的数据库，不连接远端、不主动传输文件；一次确认不能授权另一个设备、内容版本或群成员 epoch。上传确认与下载确认各自有提示额度，不用信任值或贡献值覆盖授权。
+
+桌面传输页使用同一组只读列表和 Core 命令，分别控制上传/下载模式，并显示待处理及已批准项目。批准仅更新本地决定；下载批准等待相同请求继续，上传批准等待对端重试。面板不创建 Permit、lease 或传输任务，不扩展任何目录、设备或群组授权。
 
 派生资料包含至多 8 个直接来源、展开后至多 32 个 grant 引用、最大溯源深度 4。对 peer 的访问要求所有叶来源都允许该 peer，且远端再利用规则允许；交集为空、循环、超深或不可判定时标私有，不尝试猜测。
 

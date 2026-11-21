@@ -22,6 +22,7 @@ pub(super) struct ActiveJob {
     root: Id128,
     content: Hash32,
     sources: Vec<Source>,
+    group: Option<asl_store::transfers::GroupTransferBinding>,
     state: State,
     events: SyncSender<DownloadEvent>,
 }
@@ -53,6 +54,7 @@ struct Source {
     next_fetch: u64,
     failures: usize,
     inline_failures: usize,
+    approval_wait_until: Option<u64>,
     manifest: Option<VerifiedFetchManifest>,
 }
 
@@ -65,6 +67,18 @@ struct PendingFetch {
 impl ActiveJob {
     pub(super) fn start(queued: QueuedJob, local: &mut LocalDownloads, now: u64) -> Option<Self> {
         let result = (|| {
+            let resume_schedule = match &queued.job {
+                DownloadJob::Resume { transfer_id, .. } => {
+                    Some(local.broker.schedule(transfer_id)?)
+                }
+                DownloadJob::Fetch(_) => None,
+            };
+            let group = match &queued.job {
+                DownloadJob::Fetch(selection) => selection.group.clone(),
+                DownloadJob::Resume { .. } => resume_schedule
+                    .as_ref()
+                    .and_then(|schedule| schedule.group.clone()),
+            };
             let selected = match &queued.job {
                 DownloadJob::Fetch(selection) => {
                     local.broker.ensure_retry_allowed(
@@ -79,9 +93,11 @@ impl ActiveJob {
                 .iter()
                 .cloned()
                 .map(|source| {
-                    let registered = local
-                        .broker
-                        .source_is_registered(source.agent_id, &source.peer_id)?;
+                    let registered = local.broker.source_is_current(
+                        source.agent_id,
+                        &source.peer_id,
+                        group.as_ref(),
+                    )?;
                     Ok(Source::new(source, registered))
                 })
                 .collect::<Result<_, AslError>>()?;
@@ -104,7 +120,7 @@ impl ActiveJob {
                         let _ = queued.events.try_send(DownloadEvent::Completed(info));
                         return Ok(None);
                     }
-                    let schedule = local.broker.schedule(&transfer_id)?;
+                    let schedule = resume_schedule.ok_or(AslError::InvalidPolicyState)?;
                     if sources
                         .iter()
                         .any(|source| !schedule.sources.contains(&source.peer_id))
@@ -120,6 +136,7 @@ impl ActiveJob {
                 root: Id128(rand::random()),
                 content,
                 sources,
+                group,
                 state,
                 events: queued.events.clone(),
             }))
@@ -164,6 +181,7 @@ impl ActiveJob {
         for source in &mut self.sources {
             source.observe(self.root, self.content, event, now);
         }
+        let group = self.group.clone();
         if let State::Selecting {
             grant,
             filename,
@@ -193,7 +211,7 @@ impl ActiveJob {
                 return Ok(None);
             }
             for source in &mut self.sources {
-                source.ensure_manifest(self.root, self.content, now, send)?;
+                source.ensure_manifest(self.root, self.content, group.as_ref(), now, send)?;
             }
             let manifest = self
                 .sources
@@ -201,11 +219,11 @@ impl ActiveJob {
                 .find_map(|source| source.live_manifest(now));
             let all_registered = self.sources.iter().all(|source| source.registered);
             let Some(manifest) = manifest.filter(|_| all_registered) else {
-                if self.sources.iter().all(Source::exhausted)
+                if self.sources.iter().all(|source| source.exhausted(now))
                     || self
                         .sources
                         .iter()
-                        .any(|source| !source.registered && source.exhausted())
+                        .any(|source| !source.registered && source.exhausted(now))
                 {
                     return Err(AslError::NotFound);
                 }
@@ -223,6 +241,7 @@ impl ActiveJob {
                 *grant,
                 filename,
                 approval.as_ref().map(|a| a.id),
+                group.clone(),
             ) {
                 Err(AslError::ExpiredMessage) => return Ok(None),
                 Ok(DownloadStart::Started(info)) => info,
@@ -281,7 +300,13 @@ impl ActiveJob {
                         }
                     } else {
                         source.manifest = None;
-                        source.ensure_manifest(self.root, self.content, now, send)?;
+                        source.ensure_manifest(
+                            self.root,
+                            self.content,
+                            group.as_ref(),
+                            now,
+                            send,
+                        )?;
                     }
                 }
                 let completed = local.poll_chunks(|command| {
@@ -333,7 +358,13 @@ impl ActiveJob {
                         if source.inline_failures > RETRY_MS.len() {
                             continue;
                         }
-                        source.ensure_manifest(self.root, self.content, now, send)?;
+                        source.ensure_manifest(
+                            self.root,
+                            self.content,
+                            group.as_ref(),
+                            now,
+                            send,
+                        )?;
                         if let Some(manifest) = source.live_manifest(now) {
                             let (inline, command) = match local.prepare_inline(transfer, manifest) {
                                 Err(AslError::ExpiredMessage) => {
@@ -450,6 +481,7 @@ impl Source {
             next_fetch: 0,
             failures: 0,
             inline_failures: 0,
+            approval_wait_until: None,
             manifest: None,
         }
     }
@@ -460,8 +492,8 @@ impl Source {
             .filter(|manifest| manifest.expires_at_ms > now)
     }
 
-    fn exhausted(&self) -> bool {
-        self.failures > RETRY_MS.len()
+    fn exhausted(&self, now: u64) -> bool {
+        self.approval_wait_until.is_some_and(|until| until <= now) || self.failures > RETRY_MS.len()
     }
 
     fn failed(&mut self, now: u64) {
@@ -520,8 +552,30 @@ impl Source {
             {
                 self.fetch = None;
                 self.failures = 0;
+                self.approval_wait_until = None;
                 self.registered = true;
                 self.manifest = Some(manifest.clone());
+            }
+            Some(AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                agent_id,
+                request_id,
+                response: WireFrame::FetchPending(pending),
+            }) if *connection_id == fetch.connection
+                && *agent_id == self.identity.agent_id
+                && *request_id == fetch.id.0
+                && pending.content_id == content
+                && pending.expires_at_ms > now
+                && pending.retry_at_ms <= pending.expires_at_ms =>
+            {
+                self.fetch = None;
+                self.manifest = None;
+                self.failures = 0;
+                self.approval_wait_until = Some(pending.expires_at_ms);
+                self.next_fetch = pending
+                    .retry_at_ms
+                    .max(now.saturating_add(1_000))
+                    .min(pending.expires_at_ms);
             }
             Some(AdmittedNetworkEvent::ControlResponse {
                 connection_id,
@@ -560,13 +614,14 @@ impl Source {
         &mut self,
         root: Id128,
         content: Hash32,
+        group: Option<&asl_store::transfers::GroupTransferBinding>,
         now: u64,
         send: &impl Fn(WorkerRequest) -> Receipt,
     ) -> Result<(), AslError> {
         if self.fetch.is_some()
             || self.live_manifest(now).is_some()
             || now < self.next_fetch
-            || self.exhausted()
+            || self.exhausted(now)
         {
             return Ok(());
         }
@@ -578,6 +633,7 @@ impl Source {
         };
         match send(WorkerRequest::Fetch {
             source: self.identity.clone(),
+            group: group.cloned(),
             request,
         }) {
             Ok(Some(connection)) => {
@@ -594,5 +650,122 @@ impl Source {
             Err(error) => return Err(error),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use asl_types::{
+        ids::{AgentId, Hash32, Id128, PeerId},
+        protocol::{FetchPending, WireFrame},
+    };
+
+    use super::*;
+
+    fn source() -> (Source, AgentId, [u8; 16], Id128, Hash32, Id128) {
+        let mut peer_bytes = vec![0, 36, 8, 1, 18, 32];
+        peer_bytes.extend_from_slice(&[7; 32]);
+        let agent = AgentId([1; 32]);
+        let peer = PeerId::from_bytes(peer_bytes).unwrap();
+        let connection = [2; 16];
+        let request = Id128([3; 16]);
+        let content = Hash32([4; 32]);
+        let root = Id128([5; 16]);
+        (
+            Source::new(
+                DownloadSource {
+                    agent_id: agent,
+                    peer_id: peer,
+                },
+                true,
+            ),
+            agent,
+            connection,
+            request,
+            content,
+            root,
+        )
+    }
+
+    #[test]
+    fn fetch_pending_waits_until_retry_time_then_retries_the_same_content() {
+        let (mut source, agent, connection, request, content, root) = source();
+        source.fetch = Some(PendingFetch {
+            id: request,
+            connection,
+            deadline: 10_000,
+        });
+        let event = AdmittedNetworkEvent::ControlResponse {
+            connection_id: connection,
+            agent_id: agent,
+            request_id: request.0,
+            response: WireFrame::FetchPending(FetchPending {
+                message_id: Id128([6; 16]),
+                content_id: content,
+                retry_at_ms: 7_000,
+                expires_at_ms: 12_000,
+            }),
+        };
+        source.observe(root, content, Some(&event), 5_000);
+        assert!(source.fetch.is_none());
+        assert_eq!(source.approval_wait_until, Some(12_000));
+        assert_eq!(source.next_fetch, 7_000);
+        assert!(!source.exhausted(11_999));
+
+        let sends = Cell::new(0);
+        source
+            .ensure_manifest(root, content, None, 6_999, &|_| {
+                sends.set(sends.get() + 1);
+                Ok(Some(connection))
+            })
+            .unwrap();
+        assert_eq!(sends.get(), 0);
+        source
+            .ensure_manifest(root, content, None, 7_000, &|request| {
+                sends.set(sends.get() + 1);
+                let WorkerRequest::Fetch { request, .. } = request else {
+                    panic!("expected a Fetch retry")
+                };
+                assert_eq!(request.content_id, content);
+                assert_eq!(request.root_task_id, root);
+                Ok(Some(connection))
+            })
+            .unwrap();
+        assert_eq!(sends.get(), 1);
+        assert!(source.fetch.is_some());
+    }
+
+    #[test]
+    fn fetch_pending_expiry_stops_further_retries() {
+        let (mut source, agent, connection, request, content, root) = source();
+        source.fetch = Some(PendingFetch {
+            id: request,
+            connection,
+            deadline: 10_000,
+        });
+        let event = AdmittedNetworkEvent::ControlResponse {
+            connection_id: connection,
+            agent_id: agent,
+            request_id: request.0,
+            response: WireFrame::FetchPending(FetchPending {
+                message_id: Id128([6; 16]),
+                content_id: content,
+                retry_at_ms: 7_000,
+                expires_at_ms: 12_000,
+            }),
+        };
+        source.observe(root, content, Some(&event), 5_000);
+        assert!(source.exhausted(12_000));
+
+        let sends = Cell::new(0);
+        source
+            .ensure_manifest(root, content, None, 12_000, &|_| {
+                sends.set(sends.get() + 1);
+                Ok(Some(connection))
+            })
+            .unwrap();
+        assert_eq!(sends.get(), 0);
     }
 }

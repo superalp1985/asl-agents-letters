@@ -168,7 +168,7 @@ impl Store {
              JOIN device_identities d ON d.peer_id=p.peer_id AND d.agent_id=p.agent_id
              JOIN device_identities own ON own.peer_id=g.creator_peer_id
              WHERE s.wire_group_id=?2 AND g.mls_epoch=?3 AND g.creator_peer_id=?4
-               AND g.state='needs_sync' AND c.role='creator' AND c.state='active'
+               AND g.state IN ('needs_sync','active') AND c.role='creator' AND c.state='active'
                AND d.revoked_at_ms IS NULL AND d.certificate_expires_ms>?7
                AND own.revoked_at_ms IS NULL AND own.certificate_expires_ms>?7
                AND NOT EXISTS (SELECT 1 FROM group_members
@@ -414,7 +414,7 @@ fn require_room_version(
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mls_room_states s
              JOIN asl_groups g ON g.group_id=s.local_group_id CROSS JOIN policy_state p
-             WHERE s.wire_group_id=?1 AND g.state='needs_sync' AND p.singleton=1
+             WHERE s.wire_group_id=?1 AND g.state IN ('needs_sync','active') AND p.singleton=1
                AND s.revision=?2 AND g.mls_epoch=?3 AND g.membership_epoch=?4 AND p.revision=?5)",
             params![
                 wire_id.as_bytes(),
@@ -483,7 +483,7 @@ fn lookup(
          WHERE i.invite_id=?1 AND i.wire_group_id=?2 AND i.base_epoch=?3
            AND i.recipient_agent_id=?4 AND i.recipient_peer_id=?5 AND i.creator_peer_id=?9
            AND i.created_at_ms<=?6 AND i.expires_at_ms>?6
-           AND g.state='needs_sync' AND c.role='creator' AND c.state='active'
+           AND g.state IN ('needs_sync','active') AND c.role='creator' AND c.state='active'
            AND d.revoked_at_ms IS NULL AND d.certificate_expires_ms>?6
            AND own.revoked_at_ms IS NULL AND own.certificate_expires_ms>?6
            AND ((i.request_id IS NULL AND m.peer_id IS NULL AND g.mls_epoch=i.base_epoch

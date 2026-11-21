@@ -372,6 +372,7 @@ fn frame_metadata(
         )),
         WireFrame::FetchRequest(_)
         | WireFrame::FetchGrant(_)
+        | WireFrame::FetchPending(_)
         | WireFrame::Hello(_)
         | WireFrame::Profile(_)
         | WireFrame::IdentityProofRequest(_)
