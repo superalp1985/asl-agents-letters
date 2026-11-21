@@ -1,3 +1,5 @@
+mod conversations;
+
 use std::{
     ffi::OsString,
     path::Path,
@@ -160,21 +162,7 @@ impl Page {
                     );
                     ui.add_space(12.0);
                     ui.label(RichText::new("会话活动").strong());
-                    table(
-                        ui,
-                        ["时间", "范围", "类型", "设备 PeerId"],
-                        [1.0, 0.8, 1.0, 2.0],
-                        &data.activity,
-                        "暂无活动",
-                        |row| {
-                            [
-                                age(row.created_at_ms, now),
-                                text(&row.scope).into(),
-                                text(&row.kind).into(),
-                                row.peer_id.clone(),
-                            ]
-                        },
-                    );
+                    conversations::show(ui, data, now);
                 }
                 Self::Nodes => table(
                     ui,

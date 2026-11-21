@@ -151,6 +151,8 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 直连接收可设为关闭、只浏览或允许回答。只浏览会在活动页显示已认证请求的意图、主题编号、约束数量和结果类型。活动页可将直连浏览记录设为「不保存」或 1 至 7 天，默认 7 天，最多 200 条。缩短期限会立即清理过期记录，选「不保存」会清空已有直连浏览记录。
 
+活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型和身份编号。窗口最多列出最近 100 条仍在保留期内的会话事件。
+
 群组页有两个适用于本机所有群组的开关：「浏览来信」和「允许自动回答」。修改即时生效。活动页仅显示收到时已开启浏览的群来信类型与发送设备。文件传输继续使用单独的目录和收发授权。
 
 当前像素图标和吉祥物是仓库内逐像素绘制的原创资产，来源及系统字体边界记录在 [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt)。
@@ -226,6 +228,8 @@ The preparation script copies five executables into a new directory. Run just th
 ### Desktop Controls
 
 The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint, model provider and network settings, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+
+Expand a conversation in Activity to see when each event occurred, its direction, structured message type and participating identities. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events.
 
 The current pixel icon and mascot are original, pixel-by-pixel assets in the repository. Their provenance and system-font boundary are recorded in [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt).
 

@@ -94,6 +94,8 @@ impl Store {
 pub struct ActivityRow {
     pub created_at_ms: i64,
     pub scope: String,
+    pub context_id: String,
+    pub direction: Option<String>,
     pub kind: String,
     pub peer_id: String,
     pub agent_id: Option<String>,
@@ -418,15 +420,17 @@ fn read_binding_code_public(database: &Connection) -> Result<bool, AslError> {
 fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
     let mut statement = database
         .prepare(
-            "SELECT created_at_ms,scope,kind,peer_id,agent_id FROM (
-                 SELECT m.created_at_ms,'direct' AS scope,m.kind,p.peer_id,p.agent_id
+            "SELECT created_at_ms,scope,kind,peer_id,agent_id,context_id,direction FROM (
+                 SELECT m.created_at_ms,'direct' AS scope,m.kind,p.peer_id,p.agent_id,
+                        m.task_id AS context_id,m.direction,m.message_id AS event_id
                  FROM messages m JOIN peers p ON p.peer_id=m.peer_id
                  WHERE m.expires_at_ms>?1
                  UNION ALL
-                 SELECT g.created_at_ms,'group',coalesce(g.browse_kind,g.kind),g.sender_peer_id,p.agent_id
+                 SELECT g.created_at_ms,'group',coalesce(g.browse_kind,g.kind),g.sender_peer_id,p.agent_id,
+                        g.group_id,CASE WHEN g.browse_kind IS NOT NULL THEN 'in' END,g.event_id
                  FROM group_events g JOIN peers p ON p.peer_id=g.sender_peer_id
                  WHERE g.expires_at_ms>?1 AND (g.kind<>'application' OR g.browse_kind IS NOT NULL)
-             ) ORDER BY created_at_ms DESC LIMIT 100",
+             ) ORDER BY created_at_ms DESC,scope,event_id LIMIT 100",
         )
         .map_err(database_error)?;
     statement
@@ -437,6 +441,8 @@ fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
                 kind: row.get(2)?,
                 peer_id: row.get(3)?,
                 agent_id: row.get(4)?,
+                context_id: row.get(5)?,
+                direction: row.get(6)?,
             })
         })
         .map_err(database_error)?

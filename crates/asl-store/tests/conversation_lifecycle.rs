@@ -72,6 +72,85 @@ fn seed_peer(path: &Path, agent: AgentId, peer: &PeerId) {
 }
 
 #[test]
+fn dashboard_keeps_session_context_and_excludes_expired_or_hidden_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("asl.sqlite3");
+    let agent = AgentId([2; 32]);
+    let remote = peer(8);
+    let mut store = open_store(&path).unwrap();
+    seed_peer(&path, agent, &remote);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let task = TaskId(Id128([9; 16]));
+    let initial = query(1, 9, now as u64);
+    store
+        .create_conversation_task(ConversationTaskSpec {
+            task_id: task.clone(),
+            agent_id: agent,
+            peer_id: &remote,
+            direction: TaskDirection::Outgoing,
+            query: Some(&initial),
+            created_at_ms: now,
+            expires_at_ms: now + 600_000,
+        })
+        .unwrap();
+    store
+        .enqueue_outgoing_message(
+            &task,
+            &remote,
+            &WireFrame::Query(initial),
+            now,
+            now + 10_000,
+        )
+        .unwrap();
+    let peer_text = bs58::encode(remote.as_bytes()).into_string();
+    let context = hex::encode(task.0.as_bytes());
+    let db = Connection::open(&path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.execute(
+        "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,state,created_at_ms,updated_at_ms)
+         VALUES (?1,?2,'room','active',0,0)",
+        rusqlite::params![context, peer_text],
+    )
+    .unwrap();
+    for (id, browse, expires) in [
+        (1, Some("query"), now + 600_000),
+        (2, None, now + 600_000),
+        (3, Some("query"), now - 1),
+    ] {
+        db.execute(
+            "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,
+                                      created_at_ms,expires_at_ms,browse_kind)
+             VALUES (?1,?2,1,?3,'application',X'01',?4,?5,?6)",
+            rusqlite::params![
+                hex::encode([id; 16]),
+                context,
+                peer_text,
+                now - 2,
+                expires,
+                browse
+            ],
+        )
+        .unwrap();
+    }
+
+    let rows = asl_store::dashboard::Dashboard::load(&path)
+        .unwrap()
+        .activity;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].scope, "direct");
+    assert_eq!(rows[0].direction.as_deref(), Some("out"));
+    assert_eq!(rows[1].scope, "group");
+    assert_eq!(rows[1].direction.as_deref(), Some("in"));
+    assert!(
+        rows.iter()
+            .all(|row| row.context_id == context && row.peer_id == peer_text)
+    );
+}
+
+#[test]
 fn sqlite_conversation_survives_reopen_and_bounds_outbox() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("asl.sqlite3");
