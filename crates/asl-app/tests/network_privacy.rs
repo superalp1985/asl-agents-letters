@@ -71,5 +71,22 @@ fn local_command_changes_next_start_only_and_keeps_the_configured_addresses() {
             .unwrap(),
         base
     );
+    let pause = |mode| {
+        Command::new(env!("CARGO_BIN_EXE_asl-core"))
+            .args(["--network", "pause", mode])
+            .env("ASL_HOME", &root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(pause("on"));
+    assert!(!pause("maybe"));
+    let dashboard = Dashboard::load(&database).unwrap();
+    assert!(dashboard.network_pause_requested);
+    assert!(dashboard.network_report.is_none());
+    assert!(pause("off"));
+    assert!(!Dashboard::load(&database).unwrap().network_pause_requested);
+    assert_eq!(fs::read(&config).unwrap(), original);
     fs::remove_dir_all(root).unwrap();
 }

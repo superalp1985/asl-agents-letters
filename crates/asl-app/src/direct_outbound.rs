@@ -2,7 +2,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::Path,
-    sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+    },
 };
 
 use asl_agent::{
@@ -31,14 +35,17 @@ const QUERY_EVENT_CHANNEL_CAPACITY: usize = 128;
 const SCOPED_EVENT_CAPACITY: usize = asl_agent::MAX_QUERY_PEERS + 2;
 
 pub struct OutgoingQueryPort {
-    tasks: SyncSender<OutgoingTask>,
+    tasks: SyncSender<QueuedQuery>,
     scoped: SyncSender<ScopedSubmission>,
     events: Receiver<OutgoingQueryEvent>,
+    network_generation: Arc<AtomicU64>,
 }
 
-type ScopedSubmission = (OutgoingTask, SyncSender<OutgoingQueryEvent>);
+type QueuedQuery = (u64, OutgoingTask);
+type ScopedSubmission = (QueuedQuery, SyncSender<OutgoingQueryEvent>);
 
 struct QuerySubmission {
+    generation: u64,
     task: OutgoingTask,
     events: Option<SyncSender<OutgoingQueryEvent>>,
 }
@@ -67,14 +74,14 @@ impl OutgoingQueryTicket {
 impl OutgoingQueryPort {
     pub fn submit(&self, task: OutgoingTask) -> Result<(), AslError> {
         task.validate()?;
-        enqueue(&self.tasks, task)
+        enqueue(&self.tasks, self.tag(task))
     }
 
     /// Submit without publishing this task or its results to the shared stream.
     pub fn submit_scoped(&self, task: OutgoingTask) -> Result<OutgoingQueryTicket, AslError> {
         task.validate()?;
         let (events, receipt) = sync_channel(SCOPED_EVENT_CAPACITY);
-        enqueue(&self.scoped, (task, events))?;
+        enqueue(&self.scoped, (self.tag(task), events))?;
         Ok(OutgoingQueryTicket {
             events: Some(receipt),
         })
@@ -82,6 +89,10 @@ impl OutgoingQueryPort {
 
     pub fn try_recv_event(&self) -> Result<Option<OutgoingQueryEvent>, AslError> {
         try_recv_event(&self.events)
+    }
+
+    fn tag(&self, task: OutgoingTask) -> QueuedQuery {
+        (self.network_generation.load(Ordering::Acquire), task)
     }
 }
 
@@ -104,25 +115,29 @@ fn try_recv_event(
 }
 
 pub struct OutgoingQueryRuntime {
-    tasks: Receiver<OutgoingTask>,
+    tasks: Receiver<QueuedQuery>,
     scoped: Receiver<ScopedSubmission>,
     events: SyncSender<OutgoingQueryEvent>,
+    network_generation: Arc<AtomicU64>,
 }
 
 pub fn outgoing_query_channel() -> (OutgoingQueryPort, OutgoingQueryRuntime) {
     let (task_sender, tasks) = sync_channel(MAX_QUEUED_TASKS);
     let (scoped_sender, scoped) = sync_channel(MAX_QUEUED_TASKS);
     let (events, event_receiver) = sync_channel(QUERY_EVENT_CHANNEL_CAPACITY);
+    let network_generation = Arc::new(AtomicU64::new(0));
     (
         OutgoingQueryPort {
             tasks: task_sender,
             scoped: scoped_sender,
             events: event_receiver,
+            network_generation: Arc::clone(&network_generation),
         },
         OutgoingQueryRuntime {
             tasks,
             scoped,
             events,
+            network_generation,
         },
     )
 }
@@ -181,7 +196,7 @@ struct PendingProviderDial {
 
 pub(crate) struct DirectOutbound {
     store: asl_store::Store,
-    tasks: Receiver<OutgoingTask>,
+    tasks: Receiver<QueuedQuery>,
     scoped: Receiver<ScopedSubmission>,
     prefer_scoped: bool,
     events: SyncSender<OutgoingQueryEvent>,
@@ -195,6 +210,7 @@ pub(crate) struct DirectOutbound {
     pending_provider_dials: HashMap<PeerId, PendingProviderDial>,
     queued_peer_actions: VecDeque<PendingPeerQuery>,
     buffered_events: VecDeque<OutgoingQueryEvent>,
+    network_generation: Arc<AtomicU64>,
 }
 
 impl DirectOutbound {
@@ -215,6 +231,7 @@ impl DirectOutbound {
             pending_provider_dials: HashMap::new(),
             queued_peer_actions: VecDeque::new(),
             buffered_events: VecDeque::new(),
+            network_generation: runtime.network_generation,
         })
     }
 
@@ -232,6 +249,7 @@ impl DirectOutbound {
             bool,
         ) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
+        let current_generation = self.update_generation(false);
         self.flush_events();
         let expired_requests = self
             .pending
@@ -298,9 +316,23 @@ impl DirectOutbound {
             .set_contacts(contacts.iter().map(|(_, _, peer)| peer.clone()));
 
         while self.active_tasks.len() < MAX_ACTIVE_OUTGOING_TASKS {
-            let Some(QuerySubmission { task, events }) = self.next_submission() else {
+            let Some(QuerySubmission {
+                generation,
+                task,
+                events,
+            }) = self.next_submission()
+            else {
                 break;
             };
+            if generation != current_generation {
+                let event = offline_event(&task, now_ms);
+                if let Some(scoped) = events {
+                    let _ = scoped.try_send(event);
+                } else {
+                    self.emit(event);
+                }
+                continue;
+            }
             let scope = task.scope;
             match self.router.start_query(task) {
                 Ok(task_id) => {
@@ -552,13 +584,18 @@ impl DirectOutbound {
             self.tasks
                 .try_recv()
                 .ok()
-                .map(|task| QuerySubmission { task, events: None })
+                .map(|(generation, task)| QuerySubmission {
+                    generation,
+                    task,
+                    events: None,
+                })
         };
         let scoped = || {
             self.scoped
                 .try_recv()
                 .ok()
-                .map(|(task, events)| QuerySubmission {
+                .map(|((generation, task), events)| QuerySubmission {
+                    generation,
                     task,
                     events: Some(events),
                 })
@@ -572,17 +609,57 @@ impl DirectOutbound {
         Some(submission)
     }
 
-    pub(crate) fn poll_offline(&mut self, now_ms: u64) {
+    pub(crate) fn poll_paused(&mut self, now_ms: u64) {
+        self.update_generation(true);
+        for task_id in std::mem::take(&mut self.active_tasks) {
+            let event = OutgoingQueryEvent::TaskFailed {
+                code: ErrorCode::Offline,
+            };
+            if let Some(scoped) = self.scoped_events.remove(&task_id) {
+                let _ = scoped.try_send(event);
+            } else {
+                self.emit(event);
+            }
+        }
+        self.router = QueryRouter::new();
+        self.task_scopes.clear();
+        self.pending.clear();
+        self.pending_lookups.clear();
+        self.provider_routes.clear();
+        self.pending_provider_dials.clear();
+        self.queued_peer_actions.clear();
+        self.poll_offline(now_ms);
+        self.flush_events();
         for _ in 0..MAX_QUEUED_TASKS {
-            let Ok((task, events)) = self.scoped.try_recv() else {
+            if self.buffered_events.len() >= MAX_QUERY_EVENT_BACKLOG {
+                break;
+            }
+            let Ok((_, task)) = self.tasks.try_recv() else {
                 break;
             };
-            let code = if task.expires_at_ms <= now_ms {
-                ErrorCode::Timeout
-            } else {
-                ErrorCode::Offline
+            self.emit(offline_event(&task, now_ms));
+        }
+    }
+
+    fn update_generation(&self, paused: bool) -> u64 {
+        // Odd epochs are paused. A queued request from either side of that
+        // boundary stays stale even when the shared event stream is full.
+        let generation = self.network_generation.load(Ordering::Relaxed);
+        if (generation & 1 != 0) == paused {
+            generation
+        } else {
+            let next = generation.wrapping_add(1);
+            self.network_generation.store(next, Ordering::Release);
+            next
+        }
+    }
+
+    pub(crate) fn poll_offline(&mut self, now_ms: u64) {
+        for _ in 0..MAX_QUEUED_TASKS {
+            let Ok(((_, task), events)) = self.scoped.try_recv() else {
+                break;
             };
-            let _ = events.try_send(OutgoingQueryEvent::TaskFailed { code });
+            let _ = events.try_send(offline_event(&task, now_ms));
         }
         for task_id in self.scoped_events.keys() {
             if self
@@ -955,6 +1032,15 @@ impl DirectOutbound {
     }
 }
 
+fn offline_event(task: &OutgoingTask, now_ms: u64) -> OutgoingQueryEvent {
+    let code = if task.expires_at_ms <= now_ms {
+        ErrorCode::Timeout
+    } else {
+        ErrorCode::Offline
+    };
+    OutgoingQueryEvent::TaskFailed { code }
+}
+
 fn response_matches(pending: &PendingRequest, response: &WireFrame, now_ms: u64) -> bool {
     match response {
         WireFrame::Answer(answer) => {
@@ -1285,6 +1371,89 @@ mod tests {
                 code: ErrorCode::Offline,
             })
         );
+        assert_eq!(port.try_recv_event().unwrap(), None);
+    }
+
+    #[test]
+    fn paused_queries_fail_without_replaying_previous_requests() {
+        let fixture = Fixture::new();
+        let (port, runtime) = outgoing_query_channel();
+        let mut runner = DirectOutbound::open(&fixture.0, runtime).unwrap();
+        let now = 10_000;
+        let mut active = port.submit_scoped(task(now)).unwrap();
+        let connections = [(CONTACT, [1; 16], peer(1))];
+        runner
+            .poll(
+                &connections,
+                &[],
+                now,
+                |_, _, _| Ok(()),
+                |_, _| unreachable!(),
+                |_, _, _, _| unreachable!(),
+            )
+            .unwrap();
+        assert!(matches!(
+            active.try_recv_event().unwrap(),
+            Some(OutgoingQueryEvent::TaskStarted { .. })
+        ));
+
+        let mut waiting = port.submit_scoped(task(now)).unwrap();
+        runner.poll_paused(now + 1);
+        for ticket in [&mut active, &mut waiting] {
+            assert_eq!(
+                ticket.try_recv_event().unwrap(),
+                Some(OutgoingQueryEvent::TaskFailed {
+                    code: ErrorCode::Offline
+                })
+            );
+        }
+        runner
+            .poll(
+                &connections,
+                &[],
+                now + 2,
+                |_, _, _| unreachable!(),
+                |_, _| unreachable!(),
+                |_, _, _, _| unreachable!(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn paused_shared_submissions_do_not_replay_behind_event_backpressure() {
+        let fixture = Fixture::new();
+        let (port, runtime) = outgoing_query_channel();
+        let mut runner = DirectOutbound::open(&fixture.0, runtime).unwrap();
+        let now = 10_000;
+        let offline = OutgoingQueryEvent::TaskFailed {
+            code: ErrorCode::Offline,
+        };
+        for _ in 0..QUERY_EVENT_CHANNEL_CAPACITY {
+            runner.events.try_send(offline.clone()).unwrap();
+        }
+        runner
+            .buffered_events
+            .resize(MAX_QUERY_EVENT_BACKLOG, offline.clone());
+        port.submit(task(now)).unwrap();
+        runner.poll_paused(now + 1);
+        port.submit(task(now + 1)).unwrap();
+        let mut scoped = port.submit_scoped(task(now + 1)).unwrap();
+
+        runner.buffered_events.clear();
+        while port.try_recv_event().unwrap().is_some() {}
+        runner
+            .poll(
+                &[(CONTACT, [1; 16], peer(1))],
+                &[],
+                now + 2,
+                |_, _, _| panic!("stale query must not be sent"),
+                |_, _| panic!("stale query must not start discovery"),
+                |_, _, _, _| panic!("stale query must not dial"),
+            )
+            .unwrap();
+        assert_eq!(scoped.try_recv_event().unwrap(), Some(offline.clone()));
+        assert_eq!(port.try_recv_event().unwrap(), Some(offline.clone()));
+        assert_eq!(port.try_recv_event().unwrap(), Some(offline));
         assert_eq!(port.try_recv_event().unwrap(), None);
     }
 

@@ -491,6 +491,12 @@ impl Supervisor {
         }
     }
 
+    pub(super) fn clear_group_transport(&mut self) {
+        if let Some(groups) = &mut self.groups {
+            groups.pending_transfers.clear();
+        }
+    }
+
     pub(super) fn poll_local_groups(&mut self) -> Result<(), AslError> {
         if let Some(groups) = &mut self.groups {
             let now = Instant::now();
@@ -498,7 +504,8 @@ impl Supervisor {
                 groups.next_prune = now + PRUNE_INTERVAL;
                 groups.cleanup_failed = groups.store.prune_mls_expired(unix_time_ms()?).is_err();
             }
-            if self.network_admission_status == NetworkAdmissionStatus::Active
+            if self.net.is_running()
+                && self.network_admission_status == NetworkAdmissionStatus::Active
                 && !groups.cleanup_failed
                 && let Some(admission) = &mut self.admission
             {

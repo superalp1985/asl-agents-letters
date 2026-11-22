@@ -159,6 +159,8 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 节点页可为下次启动后台启用「仅中继」。需要预先在 `state/network-settings-v1.json` 配置中继地址；启用后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
 
+节点页的「暂停 ASL 对等网络」也可通过 `asl-core --network pause on|off` 设置。暂停关闭节点连接、监听和中继预约，重启后台后仍生效，不会暂停链 RPC 或本机服务。恢复使用当前后台启动时的地址策略和设备身份，对端须重新通过准入；进行中的查询不会自动重发。暂停请求和后台上次报告分开显示。
+
 直连接收可设为关闭、只浏览或允许回答。只浏览会在活动页显示已认证请求的意图、主题编号、约束数量和结果类型。活动页可将直连浏览记录设为「不保存」或 1 至 7 天，默认 7 天，最多 200 条。缩短期限会立即清理过期记录，选「不保存」会清空已有直连浏览记录。
 
 活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型和身份编号。窗口最多列出最近 100 条仍在保留期内的会话事件。直连和群来信的浏览记录可分别保留 0 至 7 天；选择不保存会清空相应浏览记录，不关闭自动回答或删除群同步日志。
@@ -240,6 +242,8 @@ The preparation script copies five executables into a new directory. Run just th
 The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint and model-provider controls, pausing a running network process, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
 
 Nodes can enable relay-only mode for the next Core start. Configure relay addresses in `state/network-settings-v1.json` first. With relay-only enabled, missing or invalid relay settings prevent Core from starting rather than falling back to direct connections. Nodes shows the last reported mode and reservation count, not a live connectivity guarantee.
+
+Pause the ASL peer network in Nodes or with `asl-core --network pause on|off`. Pausing closes peer connections, listeners, and relay reservations and persists across Core restarts. It does not pause chain RPC or local services. Resuming uses the address policy and device identity from the current Core session. Peers must pass admission again, and in-flight queries are not replayed. The saved request and the last report are shown separately.
 
 Expand a conversation in Activity to see when each event occurred, its direction, structured message type and participating identities. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events. Set inbound direct and group browsing history separately to 0–7 days. Zero clears the corresponding browsing history without disabling automatic replies or removing the group synchronization journal.
 

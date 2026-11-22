@@ -20,7 +20,6 @@ use crate::{
 };
 
 pub(crate) use admission::MAX_ADMISSION_CONNECTIONS;
-#[cfg(windows)]
 pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
 #[cfg(windows)]

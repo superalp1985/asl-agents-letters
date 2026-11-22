@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use asl_store::Store;
+use asl_store::{Store, network_privacy::NetworkRuntimeState};
+use asl_types::error::AslError;
 use asl_types::ids::PeerId;
 
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
 
 pub(super) struct NetworkStatus {
     store: Store,
+    runtime: NetworkRuntimeState,
     relay_only: bool,
     configured_relays: usize,
     reserved_relays: HashSet<PeerId>,
@@ -19,10 +21,25 @@ impl NetworkStatus {
     pub(super) fn new(store: Store, settings: &NetworkSettingsV1) -> Self {
         Self {
             store,
+            runtime: NetworkRuntimeState::Unknown,
             relay_only: settings.address_scope == NetworkAddressScopeV1::RelayOnly,
             configured_relays: settings.relay_addresses.len(),
             reserved_relays: HashSet::new(),
         }
+    }
+
+    pub(super) fn pause_requested(&self) -> Result<bool, AslError> {
+        self.store.network_pause_requested()
+    }
+
+    pub(super) fn runtime(&self) -> NetworkRuntimeState {
+        self.runtime
+    }
+
+    pub(super) fn set_runtime(&mut self, runtime: NetworkRuntimeState) {
+        self.runtime = runtime;
+        self.reserved_relays.clear();
+        self.report();
     }
 
     pub(super) fn observe(&mut self, event: &NetworkEvent) {
@@ -42,6 +59,7 @@ impl NetworkStatus {
 
     pub(super) fn report(&self) {
         let _ = self.store.report_network_state(
+            self.runtime,
             self.relay_only,
             self.configured_relays,
             self.reserved_relays.len(),

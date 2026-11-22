@@ -30,6 +30,9 @@ fn main() {
         [flag, key, mode] if flag == "--network" && key == "relay-only" => {
             network_control::set_relay_only(mode)
         }
+        [flag, key, mode] if flag == "--network" && key == "pause" => {
+            network_control::set_pause(mode)
+        }
         #[cfg(windows)]
         [flag, field, value] if flag == "--group-inbound" => {
             group_control::set_inbound(field, value)

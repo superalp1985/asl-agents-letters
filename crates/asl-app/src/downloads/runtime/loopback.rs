@@ -168,7 +168,11 @@ async fn verify_download(scenario: Scenario) {
                         let (connection_id, source) = &peers[&device.peer_id];
                         assert_eq!(device, source);
                         if disconnected.as_ref() == Some(&device.peer_id) {
-                            return Err(AslError::NotFound);
+                            // Match Core before the asynchronous worker consumes the disconnect.
+                            return Err(match request {
+                                WorkerRequest::Fetch { .. } => AslError::NotFound,
+                                WorkerRequest::Bulk { .. } => AslError::InvalidIdentity,
+                            });
                         }
                         let client = &clients[connection_id];
                         match request {

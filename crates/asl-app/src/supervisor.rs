@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::Read;
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ use asl_agent::gateway::{
     AuthorizedPrompt, HttpModelGateway, ModelGateway, ModelGatewayError, ModelText,
     ProviderRegistryV1,
 };
+#[cfg(any(windows, test))]
 use asl_net::transport::TransportKind;
 use asl_policy::{
     PolicyService,
@@ -28,7 +29,6 @@ use asl_types::{
     record::short_code,
     task::ProviderId,
 };
-use rand::{TryRng, rngs::SysRng};
 
 use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
@@ -57,12 +57,14 @@ use crate::profile::{
 use crate::providers::DpapiProviderCredentialSource;
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
+use asl_store::network_privacy::NetworkRuntimeState;
 use asl_store::{dashboard::LocalIdentityProjection, open_store};
 
 mod bindings;
 mod directory;
 #[cfg(windows)]
 mod groups;
+mod network_pause;
 mod network_report;
 #[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
@@ -84,6 +86,9 @@ pub struct Supervisor {
     launcher: SandboxLauncher,
     model_gateway: HttpModelGateway,
     net: NetRuntime,
+    network_settings: NetworkSettingsV1,
+    device_key_path: PathBuf,
+    transport_connections: HashMap<[u8; 16], PeerId>,
     network_report: network_report::NetworkStatus,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
@@ -135,7 +140,8 @@ impl Supervisor {
         let model_gateway = HttpModelGateway::new(providers, model_credentials)
             .map_err(|_| AslError::InvalidIdentity)?;
         let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
-        let device_identity = DeviceIdentity::load_or_create_protected(&paths.device_key())?;
+        let device_key_path = paths.device_key();
+        let device_identity = DeviceIdentity::load_or_create_protected(&device_key_path)?;
         let device_peer_id = device_identity.peer_id();
         let libraries = LocalLibraries::open(&paths)?;
         let network_admission =
@@ -154,11 +160,16 @@ impl Supervisor {
         if network_settings.loopback_groups {
             return Err(AslError::PlatformUnavailable);
         }
-        let net = start_net(
-            &launcher,
-            &device_identity,
-            network_settings.loopback_groups,
-        )?;
+        let paused = network_store.network_pause_requested()?;
+        let net = if paused {
+            NetRuntime::default()
+        } else {
+            start_net(
+                &launcher,
+                &device_identity,
+                network_settings.loopback_groups,
+            )?
+        };
         let mut supervisor = Self {
             agent_identity,
             device_peer_id,
@@ -167,6 +178,9 @@ impl Supervisor {
             model_gateway,
             net,
             network_report: network_report::NetworkStatus::new(network_store, &network_settings),
+            network_settings,
+            device_key_path,
+            transport_connections: HashMap::new(),
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
@@ -186,64 +200,32 @@ impl Supervisor {
         supervisor.persist_local_identity_projection();
         #[cfg(windows)]
         supervisor.configure_group_admission();
-        supervisor.apply_network_settings(&network_settings)?;
-        supervisor.network_report.report();
+        if paused {
+            supervisor
+                .network_report
+                .set_runtime(NetworkRuntimeState::Paused);
+        } else {
+            supervisor
+                .net
+                .apply_settings(&supervisor.network_settings)?;
+            supervisor
+                .network_report
+                .set_runtime(NetworkRuntimeState::Running);
+        }
         Ok(supervisor)
     }
 
-    fn apply_network_settings(&mut self, settings: &NetworkSettingsV1) -> Result<(), AslError> {
-        settings.validate()?;
-        self.send_startup_network_operation(|operation_id| NetworkCommand::SetAddressPolicy {
-            operation_id,
-            policy: settings.address_policy(),
-        })?;
-
-        for address in &settings.relay_addresses {
-            let address = asl_net::relay::relay_endpoint_config(address)?;
-            self.send_startup_network_operation(|operation_id| NetworkCommand::ReserveRelay {
-                operation_id,
-                address,
-            })?;
-        }
-
-        if !settings.listen_on_interfaces {
-            return Ok(());
-        }
-
-        for (kind, port) in [
-            (TransportKind::Tcp, settings.tcp_port),
-            (TransportKind::Quic, settings.quic_port),
-        ] {
-            self.send_startup_network_operation(|operation_id| NetworkCommand::Listen {
-                operation_id,
-                kind,
-                address: settings.listener_address(port),
-            })?;
-        }
-        Ok(())
-    }
-
+    #[cfg(all(test, windows))]
     fn send_startup_network_operation(
         &mut self,
         command: impl FnOnce([u8; 16]) -> NetworkCommand,
     ) -> Result<(), AslError> {
-        let mut operation_id = [0; 16];
-        for _ in 0..8 {
-            SysRng
-                .try_fill_bytes(&mut operation_id)
-                .map_err(|_| AslError::InvalidIdentity)?;
-            if operation_id != [0; 16] {
-                self.send_network_command(command(operation_id))?;
-                return self.net.wait_for_operation(operation_id, STARTUP_TIMEOUT);
-            }
-        }
-        Err(AslError::InvalidIdentity)
+        self.net.send_startup_operation(command)
     }
 
     pub fn agent_id(&self) -> AgentId {
         self.agent_identity.agent_id()
     }
-
     pub async fn complete_model(
         &self,
         provider_id: &ProviderId,
@@ -474,7 +456,9 @@ impl Supervisor {
                     else {
                         return Ok(());
                     };
-                    outbound.borrow_mut().handle_event(&event, now_ms)?;
+                    if supervisor.net.is_running() {
+                        outbound.borrow_mut().handle_event(&event, now_ms)?;
+                    }
                     driver.borrow_mut()(
                         supervisor,
                         &mut transfer,
@@ -511,6 +495,9 @@ impl Supervisor {
         transfer: &mut TransferService,
         request: WorkerRequest,
     ) -> Result<Option<[u8; 16]>, AslError> {
+        if !self.net.is_running() {
+            return Ok(None);
+        }
         let now = unix_time_ms()?;
         let (connection_id, command) = match request {
             WorkerRequest::Fetch {
@@ -770,7 +757,11 @@ impl Supervisor {
                 else {
                     return Ok(());
                 };
-                for command in handler(event) {
+                let commands = handler(event);
+                if !supervisor.net.is_running() {
+                    return Ok(());
+                }
+                for command in commands {
                     let sent = supervisor.try_send_admitted_network_command_with_transfer(
                         &mut transfers,
                         command,
@@ -797,6 +788,9 @@ impl Supervisor {
         command: NetworkCommand,
         now_ms: u64,
     ) -> Result<bool, AslError> {
+        if !self.net.is_running() {
+            return Ok(false);
+        }
         match command {
             NetworkCommand::SendControl {
                 connection_id,
@@ -1100,6 +1094,11 @@ impl Supervisor {
         let mut next_ping = Instant::now();
         let mut next_agent_tick = Instant::now();
         loop {
+            if Instant::now() >= next_agent_tick
+                && self.sync_network_pause(NetRuntime::start, &mut handler)?
+            {
+                next_ping = Instant::now();
+            }
             self.renew_local_directory_if_due(unix_time_ms()?);
             self.check_network_admission_deadline(unix_time_ms()?)?;
             self.process_chain_refresh()?;
@@ -1119,7 +1118,7 @@ impl Supervisor {
             {
                 return Err(AslError::SandboxUnavailable);
             }
-            if now >= next_ping && self.net.pending_pong.is_none() {
+            if self.net.is_running() && now >= next_ping && self.net.pending_pong.is_none() {
                 if self.net.try_start_ping(now)? {
                     next_ping = now + HEALTH_CHECK_INTERVAL;
                 } else if now >= next_ping + NET_PING_TIMEOUT {
@@ -1129,7 +1128,9 @@ impl Supervisor {
             if now < next_ping || self.net.pending_pong.is_some() {
                 self.flush_disconnects()?;
             }
-            if self.network_admission_status == NetworkAdmissionStatus::Active {
+            if self.net.is_running()
+                && self.network_admission_status == NetworkAdmissionStatus::Active
+            {
                 let now_ms = unix_time_ms()?;
                 let batch = self
                     .admission
@@ -1149,6 +1150,10 @@ impl Supervisor {
             if now >= next_health_check {
                 self.libraries.check_health()?;
                 next_health_check = now + HEALTH_CHECK_INTERVAL;
+            }
+            if !self.net.is_running() {
+                thread::sleep(NETWORK_EVENT_POLL_INTERVAL);
+                continue;
             }
             let Some(message) = self
                 .net
@@ -1182,11 +1187,23 @@ impl Supervisor {
         self.network_report.observe(&event);
         self.check_network_admission_deadline(now_ms)?;
         if let NetworkEvent::PeerDisconnected { connection_id } = &event {
+            self.transport_connections.remove(connection_id);
             self.pending_disconnects.remove(*connection_id);
         } else if event_connection_id(&event)
             .is_some_and(|id| self.pending_disconnects.contains(id))
         {
             return Ok(AdmissionBatch::default());
+        }
+        if let NetworkEvent::TransportConnected {
+            connection_id,
+            peer_id,
+        } = &event
+        {
+            if self.transport_connections.len() >= MAX_ADMISSION_CONNECTIONS {
+                return Err(AslError::SandboxUnavailable);
+            }
+            self.transport_connections
+                .insert(*connection_id, peer_id.clone());
         }
         if self.admission.is_none()
             || self.network_admission_status != NetworkAdmissionStatus::Active
@@ -1211,6 +1228,10 @@ impl Supervisor {
 
     fn poll_direct_outbound(&mut self, outbound: &mut DirectOutbound) -> Result<(), AslError> {
         let now_ms = unix_time_ms()?;
+        if !self.net.is_running() {
+            outbound.poll_paused(now_ms);
+            return Ok(());
+        }
         if self.network_admission_status != NetworkAdmissionStatus::Active {
             outbound.poll_offline(now_ms);
             return Ok(());
@@ -1543,6 +1564,7 @@ fn fetch_failure(
     }
 }
 
+#[derive(Default)]
 struct NetRuntime {
     child: Option<SandboxChild>,
     writer: Option<NetWriter>,
