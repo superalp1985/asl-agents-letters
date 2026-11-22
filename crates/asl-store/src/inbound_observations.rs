@@ -10,12 +10,16 @@ use crate::{
 };
 
 const RETENTION_KEY: &str = "activity.direct_observation_days.v1";
-const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+pub(crate) const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_OBSERVATION_DAYS: u8 = 7;
 pub const MAX_DIRECT_INBOUND_OBSERVATIONS: i64 = 200;
 
 pub(crate) fn direct_observation_days(db: &Connection) -> Result<u8, AslError> {
-    match read_setting(db, RETENTION_KEY)? {
+    observation_days(db, RETENTION_KEY)
+}
+
+pub(crate) fn observation_days(db: &Connection, key: &str) -> Result<u8, AslError> {
+    match read_setting(db, key)? {
         None => Ok(MAX_OBSERVATION_DAYS),
         Some(value) => serde_json::from_str::<u8>(&value)
             .ok()

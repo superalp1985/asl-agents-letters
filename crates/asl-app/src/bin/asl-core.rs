@@ -24,9 +24,7 @@ fn main() {
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
         [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
-        [flag, kind, days] if flag == "--retention" && kind == "direct" => {
-            retention_control::set_direct_days(days)
-        }
+        [flag, kind, days] if flag == "--retention" => retention_control::set_days(kind, days),
         #[cfg(windows)]
         [flag, field, value] if flag == "--group-inbound" => {
             group_control::set_inbound(field, value)

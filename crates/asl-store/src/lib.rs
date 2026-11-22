@@ -12,6 +12,7 @@ pub mod contact_bindings;
 pub mod conversation;
 pub mod dashboard;
 pub mod evidence;
+mod group_observations;
 pub mod group_state;
 pub mod inbound_observations;
 pub mod paired_contacts;
@@ -21,7 +22,7 @@ pub mod search;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -42,6 +43,7 @@ const SCHEMA_V17: &str = include_str!("../../../specs/schema-v17.sql");
 const SCHEMA_V18: &str = include_str!("../../../specs/schema-v18.sql");
 const SCHEMA_V19: &str = include_str!("../../../specs/schema-v19.sql");
 const SCHEMA_V20: &str = include_str!("../../../specs/schema-v20.sql");
+const SCHEMA_V21: &str = include_str!("../../../specs/schema-v21.sql");
 
 pub struct Store {
     connection: Connection,
@@ -177,6 +179,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 20 {
             apply_migration_in_transaction(&transaction, SCHEMA_V20, 20, now)?;
+        }
+        if version < 21 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V21, 21, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

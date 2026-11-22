@@ -128,7 +128,7 @@ impl Page {
                     overview(ui, data, mascot, *actions_enabled, action);
                 }
                 Self::Activity => {
-                    retention.show(ui, data.direct_observation_days, *actions_enabled, action);
+                    retention.show(ui, data, *actions_enabled, action);
                     ui.label(RichText::new("近期结构化直连请求").strong());
                     table(
                         ui,

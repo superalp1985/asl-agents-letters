@@ -9,7 +9,7 @@ use asl_types::{
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{MAX_SEALED_ROOM_BYTES, MLS_SYNC_RETENTION_MS, MlsEpochBindings, sql_number, sync_log};
-use crate::{Store, current_time_ms, database_error};
+use crate::{Store, current_time_ms, database_error, group_observations::browse_deadline};
 
 const EXPIRY_PRUNE_BATCH: i64 = 256;
 
@@ -175,20 +175,22 @@ pub(super) fn commit_candidate(
         } else {
             now.saturating_add(retention)
         };
-        let browse_kind = match event.kind {
+        let (browse_kind, browse_expires_at_ms) = match event.kind {
             MlsJournalKind::ReceivedApplication(_, name)
                 if super::GroupInboundPolicy::read(tx)?.browse_enabled =>
             {
-                Some(name)
+                let deadline = browse_deadline(tx, now, expires_at_ms)?;
+                (deadline.map(|_| name), deadline)
             }
-            _ => None,
+            _ => (None, None),
         };
         let inserted = tx.execute(
-                "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,created_at_ms,expires_at_ms,browse_kind)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(event_id) DO NOTHING",
+                "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,
+                                          created_at_ms,expires_at_ms,browse_kind,browse_expires_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(event_id) DO NOTHING",
                 params![
                     event_id, room, row.1, event_sender, kind,
-                    event.ciphertext, now, expires_at_ms, browse_kind
+                    event.ciphertext, now, expires_at_ms, browse_kind, browse_expires_at_ms
                 ],
             ).map_err(database_error)?;
         if inserted != 1 {

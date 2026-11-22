@@ -700,10 +700,132 @@ fn remove_contact_binding_schema_for_legacy_fixture(store: &Store) {
              DROP TABLE contact_binding_candidates;
              DROP TABLE contact_bindings;
              DROP TABLE direct_inbound_observations;
+             ALTER TABLE group_events DROP COLUMN browse_expires_at_ms;
              ALTER TABLE group_events DROP COLUMN browse_kind;
              DELETE FROM settings WHERE key='ui.binding_code_public.v1';",
         )
         .unwrap();
+}
+
+#[test]
+fn group_browse_retention_zero_and_shortening_leave_the_mls_journal_intact() {
+    use crate::{current_time_ms, dashboard::Dashboard};
+    let (f, mut store, mut version) = Fixture::new();
+    let now = current_time_ms();
+    let day = 24 * 60 * 60 * 1000_i64;
+    let append = |store: &mut Store, version: RoomVersion, id, at| {
+        let tx = store.connection.transaction().unwrap();
+        let next = commit_candidate(
+            &tx,
+            MlsRoomUpdate {
+                local_id: &LOCAL,
+                wire_id: WIRE,
+                expected: version,
+                mls_epoch: version.mls_epoch,
+                sealed_snapshot: b"updated",
+                members: std::slice::from_ref(&f.creator),
+                event: Some(MlsJournalEntry {
+                    sender: &f.creator,
+                    kind: MlsJournalKind::ReceivedApplication(Id128([id; 16]), "query"),
+                    ciphertext: b"received fixture",
+                }),
+            },
+            None,
+            at,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        next
+    };
+    version = append(&mut store, version, 1, now - 2 * day);
+    version = append(&mut store, version, 2, now);
+    let activity_count = || Dashboard::load(&f.path).unwrap().activity.len();
+    assert_eq!(activity_count(), 2);
+
+    store.set_group_observation_days(1).unwrap();
+    assert_eq!(activity_count(), 1);
+    store.set_group_observation_days(7).unwrap();
+    version = append(&mut store, version, 3, now + 1);
+    let deadlines = |store: &Store| {
+        store
+            .connection
+            .prepare(
+                "SELECT created_at_ms,expires_at_ms,browse_kind,browse_expires_at_ms,ciphertext
+                 FROM group_events ORDER BY created_at_ms",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                let created = row.get::<_, i64>(0)?;
+                assert_eq!(row.get::<_, i64>(1)?, created + 7 * day);
+                assert_eq!(row.get::<_, Vec<u8>>(4)?, b"received fixture");
+                Ok((
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| {
+                let (kind, deadline) = r.unwrap();
+                assert_eq!(kind.as_deref(), deadline.map(|_| "query"));
+                deadline
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        deadlines(&store),
+        [None, Some(now + day), Some(now + 1 + 7 * day)]
+    );
+    assert_eq!(activity_count(), 2);
+    store.set_group_observation_days(0).unwrap();
+    drop(store);
+    let mut store = open_store(&f.path).unwrap();
+    append(&mut store, version, 4, now + 2);
+    assert_eq!(deadlines(&store), [None; 4]);
+    store.set_group_observation_days(7).unwrap();
+    assert_eq!(activity_count(), 0);
+}
+
+#[test]
+fn upgrading_v20_preserves_which_group_events_were_visible() {
+    let (f, store, _) = Fixture::new();
+    let peer = peer_text(&f.creator);
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE group_events DROP COLUMN browse_expires_at_ms;
+             DELETE FROM schema_migrations WHERE version=21;",
+        )
+        .unwrap();
+    for (id, kind) in [(1, Some("query")), (2, None)] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,
+                                           kind,ciphertext,created_at_ms,expires_at_ms,browse_kind)
+                 VALUES (?1,?2,0,?3,'application',X'01',?4,?5,?6)",
+                params![
+                    hex::encode([id; 16]),
+                    hex::encode(LOCAL.0.0),
+                    peer,
+                    10,
+                    100,
+                    kind
+                ],
+            )
+            .unwrap();
+    }
+    drop(store);
+    let store = open_store(&f.path).unwrap();
+    let mut rows = store
+        .connection
+        .prepare("SELECT browse_expires_at_ms FROM group_events ORDER BY event_id")
+        .unwrap();
+    let deadlines = rows
+        .query_map([], |r| r.get::<_, Option<i64>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(deadlines, [Some(100), None]);
 }
 
 #[test]
