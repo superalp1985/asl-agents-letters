@@ -21,7 +21,8 @@
 | T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
 | T27 Agent 查询 | 入站授权直答、出站联系人直询和公开 DHT provider 查找已接入 | 只接受结构化任务，回复关联原查询并复核身份。MCP 已接入；持久任务历史、GUI、离线投递、MLS 群及公网互通仍未验收 |
 | T30 本机 MCP | 四个工具、Core 启动授权、加密会话和收件授权已接入 | 真实 stdio 子进程到真实 Core 覆盖离线查询和会话隔离；另用实际 MCP 消息处理、认证 TCP 回环、链准入夹具验证 Offer、批准与 NTFS 发布。不是公网或生产跨进程下载全链路。命令与分项结果见[实施计划](06-implementation-plan.md#t30--本机-stdio-mcp) |
-| 完整 P2P 网络、群组与 GUI | 尚未实现或验收 | 已有 loopback 传输切片不代表公网发现/连接、群聊、Agent 自主行为、文件传输或完整 GUI 已实现；按后续任务执行真实系统测试 |
+| T31/T32 三节点群消息 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t31-三节点容器回环验收) | 含邀请审批、结构化问答、浏览开关和剔除在线成员；不含跨容器传文件、真实链 RPC 或跨机网络 |
+| 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
 

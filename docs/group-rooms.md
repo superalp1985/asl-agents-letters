@@ -135,6 +135,8 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 
 ### 跨进程验收状态
 
+**真实 AppContainer：三节点本机回环已通过。** 2026-11-22 的管理员定向测试完成了两次邀请审批、结构化 Query/Answer、运行中切换浏览和回答授权，以及移除在线成员后的投递。仅覆盖同机 TCP 群消息，不含 Fetch/Bulk 文件传输或跨机网络。[本次验证记录](plan-validation.md#2026-11-22-t31-三节点容器回环验收)
+
 - **三 Core 协议验收已通过。** 三个独立测试进程分别运行生产 Supervisor 和 Net 驱动；仅在测试构建中，Net 驱动运行在各自宿主的线程里，通过真实匿名管道交换生产 IPC 帧，节点间通过 libp2p TCP 回环通信，端口由系统分配。根和设备密钥用 DPAPI 保存，链最终性使用合成夹具，仍运行实际的身份状态证明、证书、目录、SQLite 和 OpenMLS 校验。测试覆盖定向邀请与本机审批、Welcome、Add／Remove 补齐、创建者向两名在线成员投递结构化 Query、普通成员只向创建者发送，以及被移除设备在网络身份仍获准时不再进入投递名单。
 - **真实 AppContainer 互通已改走 Windows 官方调试路径。** 测试构建从系统目录取得 `CheckNetIsolation.exe`，用本次临时 profile 的 SID 执行 `LoopbackExempt -a -p=<SID>` 和 `-is -p=<SID>`，退出时以 `-d -p=<SID>` 清理；该能力只在 `appcontainer-loopback-fixture` feature 和显式子进程环境变量同时启用时生效，正式 Core 启动不设置豁免、不扩大沙箱权限，也不回退到宿主线程。Windows 要求修改该列表时使用提升权限的终端。[Microsoft 回环排查步骤](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)明确说明两个同机 AppContainer 必须通过该路径启用回环。
 
