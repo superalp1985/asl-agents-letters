@@ -286,7 +286,47 @@ impl TransferService {
         now_ms: u64,
     ) -> Result<(), AslError> {
         self.incoming_fetches
-            .register(connection_id, requester, request_id, request, now_ms)
+            .register(connection_id, requester, request_id, request, None, now_ms)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn expect_group_fetch_response(
+        &mut self,
+        connection: [u8; 16],
+        requester: &DirectRequester,
+        request: &FetchRequest,
+        group: (Hash32, u64),
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        self.incoming_fetches.register(
+            connection,
+            requester,
+            request.message_id.0,
+            request,
+            Some(group),
+            now_ms,
+        )
+    }
+
+    pub(crate) fn pending_fetch_group(&self, id: [u8; 16]) -> Option<(Hash32, u64)> {
+        self.incoming_fetches.group(id)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_group_reply(
+        &self,
+        request: Id128,
+        connection: [u8; 16],
+        requester: &GroupRequester,
+        now: u64,
+    ) -> bool {
+        self.incoming_fetches.matches_group_reply(
+            request.0,
+            (requester.wire_id, requester.membership_epoch),
+            connection,
+            &requester.direct,
+            now,
+        )
     }
 
     pub(crate) fn prepare_manifest_request(
@@ -1250,6 +1290,37 @@ mod bulk_response_tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn group_fetch_reply_matches_only_its_live_room_epoch_and_source() {
+        let (_, _, fetch, _) = fetch_fixture();
+        let id = fetch.message_id.0;
+        let source = requester(1, 2);
+        let connection = [4; 16];
+        let room = Hash32([42; 32]);
+        let mut tracker = IncomingFetchTracker::default();
+        tracker
+            .register(connection, &source, id, &fetch, Some((room, 7)), 1_000)
+            .unwrap();
+        assert!(!tracker.matches_group_reply(id, (Hash32([0; 32]), 7), connection, &source, 1_001));
+        assert!(!tracker.matches_group_reply(id, (room, 8), connection, &source, 1_001));
+        assert!(!tracker.matches_group_reply(id, (room, 7), [0; 16], &source, 1_001));
+        assert!(!tracker.matches_group_reply(id, (room, 7), connection, &requester(1, 3), 1_001));
+        assert!(!tracker.matches_group_reply(
+            id,
+            (room, 7),
+            connection,
+            &source,
+            super::request_deadline(&source, 1_000)
+        ));
+        assert!(tracker.matches_group_reply(id, (room, 7), connection, &source, 1_001));
+        tracker.fail(connection, source.agent, &source.peer, id);
+        tracker
+            .register(connection, &source, id, &fetch, None, 1_002)
+            .unwrap();
+        assert!(!tracker.matches_group_reply(id, (room, 7), connection, &source, 1_003));
+    }
+
+    #[test]
     fn fetch_manifest_keeps_the_original_control_request_and_root_task() {
         let (manifest, encoded, fetch, grant) = fetch_fixture();
         let source = requester(1, 2);
@@ -1257,7 +1328,7 @@ mod bulk_response_tests {
         let control_id = [6; 16];
         let mut fetches = IncomingFetchTracker::default();
         fetches
-            .register(connection, &source, control_id, &fetch, 1_000)
+            .register(connection, &source, control_id, &fetch, None, 1_000)
             .unwrap();
         for wrong_id in [fetch.message_id.0, grant.message_id.0] {
             assert!(
@@ -1381,7 +1452,7 @@ mod bulk_response_tests {
                 ..grant.clone()
             };
             fetches
-                .register(connection, &source, fetch.message_id.0, &fetch, 1_000)
+                .register(connection, &source, fetch.message_id.0, &fetch, None, 1_000)
                 .unwrap();
             let pending = fetches
                 .accept_grant(connection, &source, fetch.message_id.0, &grant, 1_100)
@@ -1448,7 +1519,7 @@ mod bulk_response_tests {
         ] {
             let mut fetches = IncomingFetchTracker::default();
             fetches
-                .register(connection, &source, fetch.message_id.0, &fetch, 1_000)
+                .register(connection, &source, fetch.message_id.0, &fetch, None, 1_000)
                 .unwrap();
             assert!(
                 fetches
@@ -1466,7 +1537,7 @@ mod bulk_response_tests {
         let mut fetches = IncomingFetchTracker::default();
         let mut bulk = BulkResponseTracker::default();
         fetches
-            .register(connection, &source, fetch.message_id.0, &fetch, 1_000)
+            .register(connection, &source, fetch.message_id.0, &fetch, None, 1_000)
             .unwrap();
         let pending = fetches
             .accept_grant(connection, &source, fetch.message_id.0, &grant, 1_100)

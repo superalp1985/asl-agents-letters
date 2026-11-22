@@ -280,6 +280,11 @@ impl Supervisor {
     pub(super) fn poll_group_transfers(
         &mut self,
         transfers: &mut TransferService,
+        mut deliver: impl FnMut(
+            &mut Self,
+            &mut TransferService,
+            crate::profile::AdmittedNetworkEvent,
+        ) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         loop {
             let Some(pending) = self
@@ -353,72 +358,38 @@ impl Supervisor {
                     }
                     result?;
                 }
-                GroupApplication::FetchGrant(grant) => {
-                    if self
-                        .current_group_requester(
-                            pending.connection_id,
-                            &pending.sender,
-                            pending.wire_id,
-                            pending.epoch,
-                        )
-                        .is_none()
-                    {
+                reply @ (GroupApplication::FetchGrant(_)
+                | GroupApplication::FetchPending(_)
+                | GroupApplication::Error(_)) => {
+                    if !transfers.matches_group_reply(
+                        pending.envelope_id,
+                        pending.connection_id,
+                        &requester,
+                        now_ms,
+                    ) {
                         continue;
                     }
+                    let response = match reply {
+                        GroupApplication::FetchGrant(grant) => WireFrame::FetchGrant(grant),
+                        GroupApplication::FetchPending(wait) => WireFrame::FetchPending(wait),
+                        GroupApplication::Error(error) => WireFrame::Error(error),
+                        _ => unreachable!(),
+                    };
                     let event = crate::profile::AdmittedNetworkEvent::ControlResponse {
                         connection_id: pending.connection_id,
                         agent_id: requester.direct.agent,
                         request_id: pending.envelope_id.0,
-                        response: WireFrame::FetchGrant(grant),
+                        response,
                     };
-                    let _ = Self::route_transfer_with(
+                    if let Some(event) = Self::route_matched_transfer(
                         self.admission.as_mut(),
                         transfers,
                         event,
                         now_ms,
                         |command| self.net.try_send(&command.into_ipc()?),
-                    )?;
-                }
-                GroupApplication::FetchPending(fetch_pending) => {
-                    if self
-                        .current_group_requester(
-                            pending.connection_id,
-                            &pending.sender,
-                            pending.wire_id,
-                            pending.epoch,
-                        )
-                        .is_none()
-                    {
-                        continue;
+                    )? {
+                        deliver(self, transfers, event)?;
                     }
-                    let event = crate::profile::AdmittedNetworkEvent::ControlResponse {
-                        connection_id: pending.connection_id,
-                        agent_id: requester.direct.agent,
-                        request_id: pending.envelope_id.0,
-                        response: WireFrame::FetchPending(fetch_pending),
-                    };
-                    let _ = Self::route_transfer_with(
-                        self.admission.as_mut(),
-                        transfers,
-                        event,
-                        now_ms,
-                        |command| self.net.try_send(&command.into_ipc()?),
-                    )?;
-                }
-                GroupApplication::Error(error) => {
-                    let event = crate::profile::AdmittedNetworkEvent::ControlResponse {
-                        connection_id: pending.connection_id,
-                        agent_id: requester.direct.agent,
-                        request_id: pending.envelope_id.0,
-                        response: WireFrame::Error(error),
-                    };
-                    let _ = Self::route_transfer_with(
-                        self.admission.as_mut(),
-                        transfers,
-                        event,
-                        now_ms,
-                        |command| self.net.try_send(&command.into_ipc()?),
-                    )?;
                 }
                 GroupApplication::Query(_)
                 | GroupApplication::Answer(_)
@@ -441,7 +412,7 @@ impl Supervisor {
         let snapshot = groups.store.mls_room_snapshot(wire_id).ok().flatten()?;
         let (state, _) = groups.store.mls_room_progress(wire_id).ok().flatten()?;
         (state == "active"
-            && snapshot.version.membership_epoch == epoch
+            && snapshot.version.mls_epoch == epoch
             && groups.store.has_mls_sync_member(wire_id, sender).ok()?)
         .then_some(GroupRequester {
             direct,
@@ -487,11 +458,11 @@ impl Supervisor {
         let requester = admission
             .direct_requester(connection_id, agent_id)
             .ok_or(AslError::InvalidIdentity)?;
-        transfers.expect_fetch_response(
+        transfers.expect_group_fetch_response(
             connection_id,
             &requester,
-            request.message_id.0,
             request,
+            (wire_id, group.membership_epoch),
             now_ms,
         )?;
         let net = &self.net;

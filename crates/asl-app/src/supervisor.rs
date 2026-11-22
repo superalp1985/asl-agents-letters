@@ -491,7 +491,9 @@ impl Supervisor {
                 supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
                 let mut transfer = transfer.borrow_mut();
                 #[cfg(windows)]
-                supervisor.poll_group_transfers(&mut transfer)?;
+                supervisor.poll_group_transfers(&mut transfer, |supervisor, transfer, event| {
+                    driver.borrow_mut()(supervisor, transfer, DownloadDriverEvent::Network(&event))
+                })?;
                 driver.borrow_mut()(supervisor, &mut transfer, DownloadDriverEvent::Tick)
             },
         )
@@ -876,6 +878,21 @@ impl Supervisor {
     }
 
     pub(crate) fn route_transfer_with(
+        admission: Option<&mut CoreAdmission>,
+        transfers: &mut TransferService,
+        event: AdmittedNetworkEvent,
+        now_ms: u64,
+        enqueue: impl FnOnce(NetworkCommand) -> Result<bool, AslError>,
+    ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
+        if let AdmittedNetworkEvent::ControlResponse { request_id, .. } = &event
+            && transfers.pending_fetch_group(*request_id).is_some()
+        {
+            return Ok(None);
+        }
+        Self::route_matched_transfer(admission, transfers, event, now_ms, enqueue)
+    }
+
+    fn route_matched_transfer(
         admission: Option<&mut CoreAdmission>,
         transfers: &mut TransferService,
         event: AdmittedNetworkEvent,

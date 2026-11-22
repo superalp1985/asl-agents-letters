@@ -68,6 +68,7 @@ impl fmt::Debug for VerifiedFetchManifest {
 }
 
 struct PendingFetch {
+    group: Option<(Hash32, u64)>,
     generation: u64,
     connection_id: [u8; 16],
     agent_id: AgentId,
@@ -144,6 +145,7 @@ impl IncomingFetchTracker {
         requester: &DirectRequester,
         request_id: [u8; 16],
         request: &FetchRequest,
+        group: Option<(Hash32, u64)>,
         now_ms: u64,
     ) -> Result<(), AslError> {
         self.expire(now_ms);
@@ -161,6 +163,7 @@ impl IncomingFetchTracker {
         self.pending.insert(
             request_id,
             PendingFetch {
+                group,
                 generation: self.generation,
                 connection_id,
                 agent_id: requester.agent,
@@ -171,6 +174,28 @@ impl IncomingFetchTracker {
             },
         );
         Ok(())
+    }
+
+    pub(super) fn group(&self, id: [u8; 16]) -> Option<(Hash32, u64)> {
+        self.pending.get(&id)?.group
+    }
+
+    #[cfg(windows)]
+    pub(super) fn matches_group_reply(
+        &self,
+        id: [u8; 16],
+        group: (Hash32, u64),
+        connection: [u8; 16],
+        requester: &DirectRequester,
+        now: u64,
+    ) -> bool {
+        self.pending.get(&id).is_some_and(|fetch| {
+            fetch.group == Some(group)
+                && fetch.connection_id == connection
+                && fetch.agent_id == requester.agent
+                && fetch.peer_id == requester.peer
+                && fetch.expires_at_ms > now
+        })
     }
 
     pub(super) fn accept_grant(

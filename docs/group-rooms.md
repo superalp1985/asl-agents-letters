@@ -150,6 +150,18 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 
 脚本不写死盘符，会使用 `ASL_DEV_ROOT`，或在仓库上级目录中查找现有 `dev-cache`。
 
+### 群文件验收
+
+在仓库根目录的管理员 PowerShell 中运行以下命令，只执行文件用例，不重跑三节点消息用例：
+
+```powershell
+.\scripts\run-appcontainer-loopback-test.ps1 -Scenario File
+```
+
+两个节点建群并审批入群，发送方只将测试源目录授权给该群。两端均设为逐文件确认：接收端收到 `FetchPending`，发送端批准后才出现下载审批；接收端批准前收件目录为空。最后比较收件文件和原文件的全部字节。普通权限的双 Core 版本已通过；真实 AppContainer 文件版本尚待验收。两种用例均使用合成链证明和本机 TCP。
+
+### 回环故障排查
+
 容器回环许可与 Windows 防火墙入站许可分别检查。测试按当前接收方配置 `asl-net.exe` 完整路径、容器 SID、实际监听端口以及均为 `127.0.0.1` 的本地和远端地址。查到生效策略中的对应规则后才拨号。接收方交接和测试退出都会释放规则，脚本退出时也会按本次运行的随机标识清理。机器策略拒绝本地规则时，测试报告失败。此操作仅在管理员验收用例中执行。[Microsoft 防火墙规则及策略优先级](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules)
 
 若捕获的 `Allow inbound AppContainer loopback` 规则属于旧测试 SID，可在上述命令后加 `-ReleaseOrphanSid '<旧测试 SID>'`。脚本核对 profile、进程所有者、系统程序路径、调试参数和父进程状态，再显示会话信息。确认是已结束的 ASL 测试后输入 `Y`，脚本会移除该 SID 的出站调试豁免并关闭遗留程序。

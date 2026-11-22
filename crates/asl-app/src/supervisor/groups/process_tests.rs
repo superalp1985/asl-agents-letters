@@ -1,3 +1,4 @@
+mod files;
 mod firewall;
 
 use std::{
@@ -54,12 +55,14 @@ struct RegistryFixture {
     now_ms: u64,
     claims: [RegistryClaim; 3],
     verification: Verification,
+    files: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 enum FixtureRequest {
     Group(Action),
     Inbound(bool),
+    File(files::FileAction),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -122,16 +125,27 @@ impl Action {
 
 #[test]
 fn group_messages_cross_core_processes_over_framed_ipc_and_tcp() {
-    verify_group_delivery(Verification::Protocol);
+    verify_group_delivery(Verification::Protocol, false);
 }
 
 #[test]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_messages_cross_sandboxed_net_processes() {
-    verify_group_delivery(Verification::AppContainer);
+    verify_group_delivery(Verification::AppContainer, false);
 }
 
-fn verify_group_delivery(verification: Verification) {
+#[test]
+fn group_file_crosses_core_processes_with_two_approvals() {
+    verify_group_delivery(Verification::Protocol, true);
+}
+
+#[test]
+#[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
+fn group_file_crosses_sandboxed_net_processes_with_two_approvals() {
+    verify_group_delivery(Verification::AppContainer, true);
+}
+
+fn verify_group_delivery(verification: Verification, files: bool) {
     let fixture = Fixture::new();
     if verification == Verification::AppContainer {
         let bin = fixture.path().join("bin");
@@ -155,6 +169,7 @@ fn verify_group_delivery(verification: Verification) {
         now_ms,
         claims: nodes.each_ref().map(|(_, _, claim)| *claim),
         verification,
+        files,
     };
     let registry_path = fixture.path().join("registry.json");
     fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
@@ -168,6 +183,26 @@ fn verify_group_delivery(verification: Verification) {
     let (mut creator, creator_ready) =
         CoreProcess::start(creator_home, &registry_path, loopback_fixture);
     let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path, loopback_fixture);
+    if files {
+        creator.inbound(true, &creator_ready);
+        first.dial(&creator_ready, creator_peer);
+        first.connection(&creator_ready["peer"]);
+        let connection = creator.connection(&first_ready["peer"]);
+        let room = Hash32(parse_hex(&creator.ok(Action::Create)["room"]));
+        creator.invite(room, connection, &mut first, 1);
+        files::verify(
+            &mut creator,
+            &mut first,
+            creator_home,
+            first_home,
+            room,
+            creator_peer,
+        );
+        creator.inbound(false, &creator_ready);
+        creator.close();
+        first.close();
+        return;
+    }
     let (mut second, second_ready) =
         CoreProcess::start(second_home, &registry_path, loopback_fixture);
     // Exchange signed directories first, then leave the inbound debugger on
@@ -373,6 +408,7 @@ fn group_core_child() {
 
     let (input, commands) = mpsc::sync_channel(1);
     let (inbound, receiver) = mpsc::sync_channel(1);
+    let (file_input, file_commands) = mpsc::sync_channel(1);
     supervisor.group_controls = Some(commands);
     let reader = thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -383,6 +419,7 @@ fn group_core_child() {
                     input.send(LocalGroupCommand { action, reply }).is_ok()
                 }
                 FixtureRequest::Inbound(enable) => inbound.send((enable, reply)).is_ok(),
+                FixtureRequest::File(action) => file_input.send((action, reply)).is_ok(),
             };
             if !sent {
                 break;
@@ -394,35 +431,40 @@ fn group_core_child() {
             });
         }
     });
-    let result = supervisor.run_loop(
-        |_, event| {
-            if let AdmittedNetworkEvent::OperationFailed { code, operation_id } = event {
-                eprintln!(
-                    "Group fixture Core {} Net operation {} failed: {code:?}",
-                    std::process::id(),
-                    alloy_primitives::hex::encode(operation_id)
-                );
-            }
-            Ok(())
-        },
-        |_, _| Ok(()),
-        |core| {
-            if let Ok((enable, reply)) = receiver.try_recv() {
-                let result = core
-                    .net
-                    .child
-                    .as_mut()
-                    .ok_or(AslError::SandboxUnavailable)
-                    .and_then(|child| child.fixture_inbound(enable))
-                    .map(|sid| json!({"sid": sid}));
-                let _ = reply.send(result);
-            }
-            if core.group_controls.is_none() {
-                return Err(AslError::NotFound);
-            }
-            Ok(())
-        },
-    );
+    let tick = |core: &mut Supervisor| {
+        if let Ok((enable, reply)) = receiver.try_recv() {
+            let result = core
+                .net
+                .child
+                .as_mut()
+                .ok_or(AslError::SandboxUnavailable)
+                .and_then(|child| child.fixture_inbound(enable))
+                .map(|sid| json!({"sid": sid}));
+            let _ = reply.send(result);
+        }
+        if core.group_controls.is_none() {
+            return Err(AslError::NotFound);
+        }
+        Ok(())
+    };
+    let result = if registry.files {
+        files::run(supervisor, file_commands, tick)
+    } else {
+        supervisor.run_loop(
+            |_, event| {
+                if let AdmittedNetworkEvent::OperationFailed { code, operation_id } = event {
+                    eprintln!(
+                        "Group fixture Core {} Net operation {} failed: {code:?}",
+                        std::process::id(),
+                        alloy_primitives::hex::encode(operation_id)
+                    );
+                }
+                Ok(())
+            },
+            |_, _| Ok(()),
+            tick,
+        )
+    };
     assert!(matches!(result, Err(AslError::NotFound)), "{result:?}");
     reader.join().unwrap();
     if let Some(net_thread) = net_thread {
