@@ -190,6 +190,93 @@ fn group_epoch_change_invalidates_transfer_chunks() {
 }
 
 #[test]
+fn recovery_retires_a_stale_group_before_publishing_and_completes_other_work() {
+    let f = Fixture::new();
+    let group = seed_group(&f, 1);
+    let mut broker = f.open_with_mode(DownloadMode::Automatic);
+    let mut stale = f.valid_request(b"group file");
+    stale.group = Some(GroupTransferBinding {
+        group_id: group.clone(),
+        membership_epoch: 1,
+    });
+    let mut valid = f.valid_request(b"independent file");
+    valid.destination_relative = "independent.bin".into();
+    let stale = broker.begin_download(&stale).unwrap();
+    let valid = broker.begin_download(&valid).unwrap();
+    for (transfer, bytes) in [
+        (&stale.transfer_id, b"group file".as_slice()),
+        (&valid.transfer_id, b"independent file".as_slice()),
+    ] {
+        broker.assign_chunk(transfer.clone(), &f.peer, 0).unwrap();
+        broker
+            .write_chunk(transfer.clone(), &f.peer, 0, bytes)
+            .unwrap();
+    }
+    drop(broker);
+    let db = f.db();
+    db.execute(
+        "UPDATE asl_groups SET membership_epoch=membership_epoch+1 WHERE group_id=?1",
+        [hex::encode(group.0.as_bytes())],
+    )
+    .unwrap();
+
+    let broker = f.open();
+    assert!(matches!(
+        broker.schedule(&stale.transfer_id),
+        Err(AslError::PolicyDenied)
+    ));
+    let reservation: String = db
+        .query_row(
+            "SELECT r.state FROM transfers t JOIN reservations r USING(reservation_id)
+         WHERE t.transfer_id=lower(hex(?1))",
+            [stale.transfer_id.0.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reservation, "released");
+    assert!(!stale.part_path.exists());
+    assert!(!stale.destination_path.exists());
+    assert_eq!(broker.info(&valid.transfer_id).unwrap().state, "complete");
+    assert_eq!(
+        fs::read(valid.destination_path).unwrap(),
+        b"independent file"
+    );
+}
+
+#[test]
+fn stale_group_cleanup_leaves_a_revoked_inbox_untouched() {
+    let f = Fixture::new();
+    let group = seed_group(&f, 1);
+    let mut broker = f.open_with_mode(DownloadMode::Automatic);
+    let mut request = f.valid_request(b"retained part");
+    request.group = Some(GroupTransferBinding {
+        group_id: group.clone(),
+        membership_epoch: 1,
+    });
+    let info = broker.begin_download(&request).unwrap();
+    drop(broker);
+    let before = fs::read(&info.part_path).unwrap();
+    f.db()
+        .execute(
+            "UPDATE asl_groups SET membership_epoch=membership_epoch+1 WHERE group_id=?1",
+            [hex::encode(group.0.as_bytes())],
+        )
+        .unwrap();
+    SnapshotBroker::open(&f.home)
+        .unwrap()
+        .revoke_inbox_directory(f.write_grant)
+        .unwrap();
+
+    let broker = f.open();
+    assert!(matches!(
+        broker.schedule(&info.transfer_id),
+        Err(AslError::PolicyDenied)
+    ));
+    assert_eq!(fs::read(info.part_path).unwrap(), before);
+    assert!(!info.destination_path.exists());
+}
+
+#[test]
 fn group_epoch_change_hides_pending_download_consent() {
     let f = Fixture::new();
     let group = seed_group(&f, 1);

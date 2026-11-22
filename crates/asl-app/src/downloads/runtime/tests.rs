@@ -7,7 +7,6 @@ use std::{
 
 use asl_net::codec::{BulkOperation, BulkResponse, BulkStatus};
 use asl_types::{manifest::CHUNK_SIZE, task::GroupId};
-use rusqlite::Connection;
 
 use super::*;
 use crate::{
@@ -153,14 +152,11 @@ impl Harness {
     }
 }
 
-#[test]
-fn group_download_carries_its_membership_binding_to_fetch() {
-    let inbox = Inbox::new(b"group runtime fixture");
-    drop(inbox.local);
-    let group_id = GroupId(Id128([31; 16]));
+fn seed_group(inbox: &Inbox) -> GroupTransferBinding {
+    let group_id = GroupId(Id128(rand::random()));
     let group_text = alloy_primitives::hex::encode(group_id.0.as_bytes());
     let peer_text = bs58::encode(inbox.event.peer_id.as_bytes()).into_string();
-    let db = Connection::open(inbox.home.join("state/asl.sqlite3")).unwrap();
+    let db = Inbox::database(&inbox.home);
     db.execute(
         "INSERT INTO asl_groups(
              group_id,creator_peer_id,local_name,mls_epoch,membership_epoch,state,
@@ -175,18 +171,10 @@ fn group_download_carries_its_membership_binding_to_fetch() {
         rusqlite::params![group_text, peer_text],
     )
     .unwrap();
-    drop(db);
-    let mut harness = Harness::new(&inbox.home, &inbox.event);
-    let binding = GroupTransferBinding {
+    GroupTransferBinding {
         group_id,
         membership_epoch: 1,
-    };
-    let _ticket = harness.fetch_with_group(inbox.grant, None, Some(binding.clone()));
-
-    let WorkerRequest::Fetch { group, .. } = harness.request() else {
-        panic!("expected Fetch");
-    };
-    assert_eq!(group, Some(binding));
+    }
 }
 
 #[test]
@@ -415,37 +403,27 @@ fn download_port_is_bounded_and_rejects_non_filename_destinations() {
 
 #[test]
 fn restarted_worker_can_resume_only_with_previously_authorized_sources() {
+    check_worker_resume(false);
+}
+
+#[test]
+fn restarted_group_download_keeps_its_binding_and_requests_only_the_missing_chunk() {
+    check_worker_resume(true);
+}
+
+fn check_worker_resume(group_download: bool) {
     let bytes = vec![4; CHUNK_SIZE as usize + 23];
     let inbox = Inbox::new(&bytes);
+    let binding = group_download.then(|| seed_group(&inbox));
     let outsider = inbox.new_source();
     drop(inbox.local);
-    let mut h = Harness::new(&inbox.home, &inbox.event);
-    let ticket = h.fetch(inbox.grant, None);
-    let WorkerRequest::Fetch { request, .. } = h.request() else {
-        panic!("expected Fetch");
-    };
-    h.manifest(request);
-    let DownloadEvent::Started(info) = h.event(&ticket) else {
-        panic!("expected start");
-    };
-    let WorkerRequest::Bulk { request: first, .. } = h.request() else {
-        panic!("expected chunk");
-    };
-    assert_eq!(first.chunk_index, 0);
-    let old_lease = first.lease_id;
-    h.respond(first, bytes[..CHUNK_SIZE as usize].to_vec());
-    let db = Inbox::database(&inbox.home);
-    h.until(|_| {
-        let durable: i64 = db
-            .query_row(
-                "SELECT count(*) FROM transfer_chunks WHERE state='durable'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        (durable == 1).then_some(())
-    });
-    drop(h);
+    let (info, old_lease) = interrupt_after_first_chunk(
+        &inbox.home,
+        &inbox.event,
+        inbox.grant,
+        binding.as_ref(),
+        &bytes,
+    );
 
     let mut h = Harness::new(&inbox.home, &inbox.event);
     let denied = h
@@ -478,9 +456,10 @@ fn restarted_worker_can_resume_only_with_previously_authorized_sources() {
         panic!("expected resumable task");
     };
     assert_eq!(info.durable_bytes, CHUNK_SIZE as u64);
-    let WorkerRequest::Fetch { request, .. } = h.request() else {
+    let WorkerRequest::Fetch { request, group, .. } = h.request() else {
         panic!("expected fresh Fetch");
     };
+    assert_eq!(group, binding);
     h.manifest(request);
     let WorkerRequest::Bulk { request, .. } = h.request() else {
         panic!("expected remaining chunk");
@@ -492,4 +471,90 @@ fn restarted_worker_can_resume_only_with_previously_authorized_sources() {
         panic!("expected complete");
     };
     assert_eq!(fs::read(info.destination_path).unwrap(), bytes);
+    assert!(!info.part_path.exists());
+    assert!(recv(&h.output).unwrap().is_none());
+}
+
+fn interrupt_after_first_chunk(
+    home: &Path,
+    source: &VerifiedFetchManifest,
+    grant: Id128,
+    binding: Option<&GroupTransferBinding>,
+    bytes: &[u8],
+) -> (DownloadInfo, Hash32) {
+    let mut h = Harness::new(home, source);
+    let ticket = h.fetch_with_group(grant, None, binding.cloned());
+    let WorkerRequest::Fetch { request, group, .. } = h.request() else {
+        panic!("expected Fetch");
+    };
+    assert_eq!(group.as_ref(), binding);
+    h.manifest(request);
+    let DownloadEvent::Started(info) = h.event(&ticket) else {
+        panic!("expected start");
+    };
+    let WorkerRequest::Bulk { request: first, .. } = h.request() else {
+        panic!("expected chunk");
+    };
+    let WorkerRequest::Bulk {
+        request: second, ..
+    } = h.request()
+    else {
+        panic!("expected outstanding second chunk");
+    };
+    assert_eq!((first.chunk_index, second.chunk_index), (0, 1));
+    let old_lease = first.lease_id;
+    h.respond(first, bytes[..CHUNK_SIZE as usize].to_vec());
+    let db = Inbox::database(home);
+    h.until(|_| {
+        let durable: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfer_chunks
+             WHERE transfer_id=lower(hex(?1)) AND chunk_index=0 AND state='durable')",
+                [info.transfer_id.0.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        durable.then_some(())
+    });
+    assert!(!info.destination_path.exists());
+    (info, old_lease)
+}
+
+#[test]
+fn restarted_group_download_with_obsolete_membership_never_fetches_or_publishes() {
+    let bytes = vec![5; CHUNK_SIZE as usize + 7];
+    let inbox = Inbox::new(&bytes);
+    let binding = seed_group(&inbox);
+    drop(inbox.local);
+    let (info, _) = interrupt_after_first_chunk(
+        &inbox.home,
+        &inbox.event,
+        inbox.grant,
+        Some(&binding),
+        &bytes,
+    );
+    // Model a reconciled, active room where the source is still a member.
+    // The old transfer must not inherit the new membership epoch.
+    assert_eq!(Inbox::database(&inbox.home).execute(
+        "UPDATE asl_groups SET membership_epoch=membership_epoch+1 WHERE group_id=lower(hex(?1))",
+        [binding.group_id.0.as_bytes().as_slice()],
+    ).unwrap(), 1);
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h
+        .port
+        .submit(DownloadJob::Resume {
+            transfer_id: info.transfer_id,
+            sources: vec![DownloadSource {
+                agent_id: h.source.agent_id,
+                peer_id: h.source.peer_id.clone(),
+            }],
+        })
+        .unwrap();
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::PolicyDenied)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
+    assert!(!info.destination_path.exists());
+    assert!(!info.part_path.exists());
 }
