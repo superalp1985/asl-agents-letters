@@ -1,5 +1,6 @@
 mod art;
 mod binding_feedback;
+mod network_privacy;
 mod retention;
 mod views;
 
@@ -11,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asl_app::paths::AppPaths;
+use asl_app::{network_settings::NetworkSettingsV1, paths::AppPaths};
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::dashboard::Dashboard;
 use asl_types::error::AslError;
@@ -43,8 +44,8 @@ pub(super) fn run(home: Option<PathBuf>) -> eframe::Result {
 struct Viewer {
     home: Option<PathBuf>,
     page: Page,
-    snapshot: Option<Dashboard>,
-    loading: Option<Receiver<Result<Dashboard, AslError>>>,
+    snapshot: Option<Snapshot>,
+    loading: Option<Receiver<Result<Snapshot, AslError>>>,
     action: Option<Receiver<bool>>,
     action_success_notice: Option<&'static str>,
     access_form: AccessForm,
@@ -54,6 +55,11 @@ struct Viewer {
     error: Option<&'static str>,
     last_refresh: Instant,
     mascot: egui::TextureHandle,
+}
+
+struct Snapshot {
+    dashboard: Dashboard,
+    network_config: Result<NetworkSettingsV1, AslError>,
 }
 
 impl Viewer {
@@ -117,7 +123,8 @@ impl Viewer {
             "downloads" | "uploads" => "传输审批已更新",
             "direct-inbound" => "直连接收策略已更新",
             "group-inbound" => "群组接收策略已更新",
-            "retention" => "直连浏览记录保留期限已更新",
+            "retention" => "浏览记录保留期限已更新",
+            "network" => "已保存，待后台重新启动",
             _ => "本机授权已更新",
         };
         match std::thread::Builder::new()
@@ -203,7 +210,7 @@ impl eframe::App for Viewer {
         }
         if matches!(
             self.page,
-            Page::Activity | Page::Transfers | Page::Groups | Page::Contacts
+            Page::Activity | Page::Transfers | Page::Groups | Page::Contacts | Page::Nodes
         ) {
             ctx.request_repaint_after(Duration::from_secs(1));
             if self.snapshot.is_some()
@@ -288,10 +295,12 @@ impl eframe::App for Viewer {
                             code_input: &mut self.code_input,
                             access_form: &mut self.access_form,
                             retention: &mut self.retention,
+                            network_config: &snapshot.network_config,
                             actions_enabled: self.action.is_none() && self.loading.is_none(),
                             action: &mut action,
                         };
-                        self.page.show(ui, snapshot, &self.mascot, &mut interaction);
+                        self.page
+                            .show(ui, &snapshot.dashboard, &self.mascot, &mut interaction);
                     }
                     if let Some(action) = action {
                         self.submit_local_action(ui.ctx(), action);
@@ -317,14 +326,17 @@ impl LocalAction {
     }
 }
 
-fn load(home: &Path) -> Result<Dashboard, AslError> {
+fn load(home: &Path) -> Result<Snapshot, AslError> {
     let paths = AppPaths::open_existing(home)?;
     let _pin = PinnedHome::open(home)?;
     let database = paths.state().join("asl.sqlite3");
     if !database.is_file() {
         return Err(AslError::NotFound);
     }
-    Dashboard::load(&database)
+    Ok(Snapshot {
+        dashboard: Dashboard::load(&database)?,
+        network_config: NetworkSettingsV1::load(&paths.network_settings_configuration()),
+    })
 }
 
 fn theme(ctx: &egui::Context) {

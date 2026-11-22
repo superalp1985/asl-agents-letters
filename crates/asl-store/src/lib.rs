@@ -15,6 +15,7 @@ pub mod evidence;
 mod group_observations;
 pub mod group_state;
 pub mod inbound_observations;
+pub mod network_privacy;
 pub mod paired_contacts;
 mod publication;
 pub mod resources;

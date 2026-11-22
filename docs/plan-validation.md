@@ -756,3 +756,9 @@ Windows x64，Rust 1.100.0：`asl-app --lib downloads::runtime::loopback` 的单
 SQLite v21 迁移仅为原本可见的群来信回填浏览期限。实库测试覆盖缩短期限立即隐藏旧记录、延长不恢复或延长已有记录，以及设置为 0 后重启仍不保存新的浏览记录；同时核对 MLS 密文和原事件期限未改变。实际 `asl-core` 命令验证直连与群期限独立，并保留群浏览和自动回答开关。
 
 Windows x64、Rust 1.100.0、`--locked --offline`：`asl-store` 全目标 158 项通过，1 个子进程入口按标记忽略；`asl-app` 的设置命令与桌面目标 4 项通过；三 Core 同机 IPC/TCP 群消息用例 1 项通过。两包含 `desktop-ui` 全目标严格 Clippy 通过。未操作原生 GUI 窗口、复跑管理员 AppContainer 或公网场景。
+
+### 2026-11-22 T34 仅中继设置与预约报告
+
+实际 `asl-core` 命令测试覆盖无中继时拒绝开启、保存限制后禁用直连监听、配置丢失时有效设置生成失败、清除限制后恢复原策略，以及不修改配置文件。Supervisor 投影测试使用 Net 事件夹具，确认预约成功去重、失效扣减，以及已保存的设置不覆盖当前报告。
+
+Windows x64、Rust 1.100.0、`--locked --offline`：`asl-app` 的网络定向测试 20 项、CLI 和桌面目标 3 项、`asl-net --test relay_client` 4 项通过。中继测试使用同机 TCP，覆盖预约、认证电路、分块、重启恢复和备用中继。`asl-app` 与 `asl-store` 含桌面目标的全目标严格 Clippy 通过。未贯通原生窗口、实际 AppContainer 中继或公网链路；状态是最后一次报告，不是在线探测。

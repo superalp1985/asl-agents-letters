@@ -63,6 +63,7 @@ mod bindings;
 mod directory;
 #[cfg(windows)]
 mod groups;
+mod network_report;
 #[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
@@ -83,6 +84,7 @@ pub struct Supervisor {
     launcher: SandboxLauncher,
     model_gateway: HttpModelGateway,
     net: NetRuntime,
+    network_report: network_report::NetworkStatus,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
     chain_refresh: Option<ChainRefreshWorker>,
@@ -120,7 +122,11 @@ impl Supervisor {
         launcher: SandboxLauncher,
         start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
     ) -> Result<Self, AslError> {
-        let network_settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let state_database = paths.state().join("asl.sqlite3");
+        let settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let network_store = open_store(&state_database)?;
+        let network_settings =
+            settings.with_relay_only_override(network_store.force_relay_only()?)?;
         let providers = ProviderRegistryV1::load(&paths.model_provider_configuration())
             .map_err(|_| AslError::InvalidIdentity)?;
         let model_credentials = Arc::new(DpapiProviderCredentialSource::new(
@@ -139,7 +145,6 @@ impl Supervisor {
             .as_ref()
             .map(|_| directory::DirectoryReader::spawn(paths.signed_device_directory()))
             .transpose()?;
-        let state_database = paths.state().join("asl.sqlite3");
         #[cfg(windows)]
         let groups = network_settings
             .loopback_groups
@@ -161,6 +166,7 @@ impl Supervisor {
             launcher,
             model_gateway,
             net,
+            network_report: network_report::NetworkStatus::new(network_store, &network_settings),
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
             chain_refresh: network_admission.refresh_worker,
@@ -181,6 +187,7 @@ impl Supervisor {
         #[cfg(windows)]
         supervisor.configure_group_admission();
         supervisor.apply_network_settings(&network_settings)?;
+        supervisor.network_report.report();
         Ok(supervisor)
     }
 
@@ -1172,6 +1179,7 @@ impl Supervisor {
         event: NetworkEvent,
         now_ms: u64,
     ) -> Result<AdmissionBatch, AslError> {
+        self.network_report.observe(&event);
         self.check_network_admission_deadline(now_ms)?;
         if let NetworkEvent::PeerDisconnected { connection_id } = &event {
             self.pending_disconnects.remove(*connection_id);

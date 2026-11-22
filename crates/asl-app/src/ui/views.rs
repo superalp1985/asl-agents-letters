@@ -49,6 +49,8 @@ pub(super) struct Interaction<'a> {
     pub(super) code_input: &'a mut String,
     pub(super) access_form: &'a mut AccessForm,
     pub(super) retention: &'a mut super::retention::RetentionForm,
+    pub(super) network_config:
+        &'a Result<asl_app::network_settings::NetworkSettingsV1, asl_types::error::AslError>,
     pub(super) actions_enabled: bool,
     pub(super) action: &'a mut Option<super::LocalAction>,
 }
@@ -113,6 +115,7 @@ impl Page {
             code_input,
             access_form,
             retention,
+            network_config,
             actions_enabled,
             action,
         } = interaction;
@@ -164,21 +167,30 @@ impl Page {
                     ui.label(RichText::new("会话活动").strong());
                     conversations::show(ui, data, now);
                 }
-                Self::Nodes => table(
-                    ui,
-                    ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],
-                    [2.0, 2.0, 1.5, 1.0],
-                    &data.nodes,
-                    "暂无节点记录",
-                    |row| {
-                        [
-                            row.agent_id.clone(),
-                            row.peer_id.clone(),
-                            text(&row.identity_state).into(),
-                            age(row.last_seen_ms, now),
-                        ]
-                    },
-                ),
+                Self::Nodes => {
+                    super::network_privacy::show(
+                        ui,
+                        network_config,
+                        data,
+                        *actions_enabled,
+                        action,
+                    );
+                    table(
+                        ui,
+                        ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],
+                        [2.0, 2.0, 1.5, 1.0],
+                        &data.nodes,
+                        "暂无节点记录",
+                        |row| {
+                            [
+                                row.agent_id.clone(),
+                                row.peer_id.clone(),
+                                text(&row.identity_state).into(),
+                                age(row.last_seen_ms, now),
+                            ]
+                        },
+                    );
+                }
                 Self::Contacts => contacts(ui, data, now, code_input, *actions_enabled, action),
                 Self::Groups => {
                     ui.horizontal_wrapped(|ui| {

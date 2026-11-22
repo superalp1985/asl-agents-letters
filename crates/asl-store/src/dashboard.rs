@@ -10,6 +10,7 @@ use crate::group_state::GroupInboundPolicy;
 use crate::inbound_observations::{
     DirectInboundObservation, direct_observation_days, read_recent_direct_inbound_observations,
 };
+use crate::network_privacy::{NetworkReport, force_relay_only, last_network_report};
 use crate::transfers::{DownloadConsent, UploadConsent};
 use crate::{SCHEMA_VERSION, Store, current_time_ms, database_error};
 
@@ -22,6 +23,8 @@ pub struct Dashboard {
     pub direct_observations: Vec<DirectInboundObservation>,
     pub direct_observation_days: u8,
     pub group_observation_days: u8,
+    pub force_relay_only: bool,
+    pub network_report: Option<NetworkReport>,
     pub nodes: Vec<NodeRow>,
     pub contact_bindings: Vec<ContactBindingRow>,
     pub binding_candidates: Vec<BindingCandidateRow>,
@@ -215,6 +218,8 @@ impl Dashboard {
             direct_observations: read_recent_direct_inbound_observations(database)?,
             direct_observation_days: direct_observation_days(database)?,
             group_observation_days: group_observation_days(database)?,
+            force_relay_only: force_relay_only(database)?,
+            network_report: last_network_report(database)?,
             nodes: read_nodes(database)?,
             contact_bindings: read_contact_bindings(database)?,
             binding_candidates: read_binding_candidates(database)?,
