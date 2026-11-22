@@ -55,7 +55,14 @@ struct RegistryFixture {
     now_ms: u64,
     claims: [RegistryClaim; 3],
     verification: Verification,
-    files: bool,
+    scenario: Scenario,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+enum Scenario {
+    Messages,
+    SingleSource,
+    TwoSources,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,27 +132,38 @@ impl Action {
 
 #[test]
 fn group_messages_cross_core_processes_over_framed_ipc_and_tcp() {
-    verify_group_delivery(Verification::Protocol, false);
+    verify_group_delivery(Verification::Protocol, Scenario::Messages);
 }
 
 #[test]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_messages_cross_sandboxed_net_processes() {
-    verify_group_delivery(Verification::AppContainer, false);
+    verify_group_delivery(Verification::AppContainer, Scenario::Messages);
 }
 
 #[test]
 fn group_file_crosses_core_processes_with_two_approvals() {
-    verify_group_delivery(Verification::Protocol, true);
+    verify_group_delivery(Verification::Protocol, Scenario::SingleSource);
 }
 
 #[test]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_file_crosses_sandboxed_net_processes_with_two_approvals() {
-    verify_group_delivery(Verification::AppContainer, true);
+    verify_group_delivery(Verification::AppContainer, Scenario::SingleSource);
 }
 
-fn verify_group_delivery(verification: Verification, files: bool) {
+#[test]
+fn two_group_sources_deliver_distinct_chunks_over_tcp() {
+    verify_group_delivery(Verification::Protocol, Scenario::TwoSources);
+}
+
+#[test]
+#[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
+fn two_group_sources_deliver_distinct_chunks_across_sandboxed_net_processes() {
+    verify_group_delivery(Verification::AppContainer, Scenario::TwoSources);
+}
+
+fn verify_group_delivery(verification: Verification, scenario: Scenario) {
     let fixture = Fixture::new();
     if verification == Verification::AppContainer {
         let bin = fixture.path().join("bin");
@@ -169,7 +187,7 @@ fn verify_group_delivery(verification: Verification, files: bool) {
         now_ms,
         claims: nodes.each_ref().map(|(_, _, claim)| *claim),
         verification,
-        files,
+        scenario,
     };
     let registry_path = fixture.path().join("registry.json");
     fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
@@ -183,7 +201,7 @@ fn verify_group_delivery(verification: Verification, files: bool) {
     let (mut creator, creator_ready) =
         CoreProcess::start(creator_home, &registry_path, loopback_fixture);
     let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path, loopback_fixture);
-    if files {
+    if scenario == Scenario::SingleSource {
         creator.inbound(true, &creator_ready);
         first.dial(&creator_ready, creator_peer);
         first.connection(&creator_ready["peer"]);
@@ -224,6 +242,23 @@ fn verify_group_delivery(verification: Verification, files: bool) {
     let second_connection = creator.connection(&second_ready["peer"]);
     creator.invite(room, second_connection, &mut second, 2);
     first.wait_epoch(room, 2);
+
+    if scenario == Scenario::TwoSources {
+        files::verify_two_sources(
+            &mut creator,
+            creator_home,
+            room,
+            [
+                (&mut first, first_home.as_path(), first_peer),
+                (&mut second, second_home.as_path(), second_peer),
+            ],
+        );
+        creator.inbound(false, &creator_ready);
+        creator.close();
+        first.close();
+        second.close();
+        return;
+    }
 
     let sent = creator.ok(Action::Send(room));
     assert_eq!(sent["available"], 2);
@@ -447,8 +482,8 @@ fn group_core_child() {
         }
         Ok(())
     };
-    let result = if registry.files {
-        files::run(supervisor, file_commands, tick)
+    let result = if registry.scenario != Scenario::Messages {
+        files::run(supervisor, file_commands, tick, registry.scenario)
     } else {
         supervisor.run_loop(
             |_, event| {
