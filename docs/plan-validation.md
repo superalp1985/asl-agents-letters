@@ -712,3 +712,11 @@ PowerShell 模拟检查覆盖规则参数、输入管道关闭后撤回规则、
 两个独立 Core 测试进程通过生产 Net 驱动、IPC 与 TCP 回环运行 OpenMLS 群文件请求和 Bulk 分块传输。源目录仅授权给该群，两端均选逐文件确认。用例明确观察下载驱动收到 `FetchPending`，核对两端审批绑定的内容及各自本地群 ID，验证两次决定前收件目录均为空；批准下载后按接收方选择的文件名发布，两块内容逐字节匹配。待决请求绑定原连接、设备、群和成员授权版本；线上包按 MLS epoch 检查。
 
 `asl-app` 库的 `transfer::`、`downloads::runtime` 和 `group_file_crosses_core_processes_with_two_approvals` 合并定向测试 21 项通过、0 失败，15.64 秒；该包库与测试的严格 Clippy 通过。未重跑上一轮群消息测试、全工作区或真实 AppContainer 文件用例。此次未增加 GUI、MCP 或远程文件选择入口；也未验证公网或多来源并发下载。
+
+### 2026-11-22 T32 跨容器群文件验收
+
+用户在本机管理员 PowerShell 运行 `scripts/run-appcontainer-loopback-test.ps1 -Scenario File`。两个 Core 各自启动真实 AppContainer Net 并通过 TCP 回环连接。定向用例 `group_file_crosses_sandboxed_net_processes_with_two_approvals` 报告 **1 passed，0 failed，0 ignored，252 filtered out，21.20 秒**。这是测试耗时，不是文件传输速度。
+
+仅授权给该群的文件通过两个分块传输。下载端观察到 `FetchPending`；上传批准前无下载审批，上传批准后仍须单独批准下载。两次决定前的收件目录检查均为空。完成后读取本机指定的目标文件，全部字节与源文件一致。
+
+本次使用一个来源、合成链证明和本机审批接口，不经过 GUI；未验证跨机、公网中继、多来源并发或中断续传。未重跑全工作区。Cargo 的 `proc-macro-error2 v2.0.1` 未来兼容性警告不影响此次结果。

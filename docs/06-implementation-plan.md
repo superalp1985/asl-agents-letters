@@ -750,6 +750,8 @@ T31 三节点容器回环验收（2026-11-22）：管理员定向用例已验证
 
 上传确认接线（2026-11-21，集中验证通过）：SQLite schema v17 持久化上传待确认项的目标设备、文件名和大小；`asl-core --uploads` 提供本机模式查看/设置、待确认列表、批准和拒绝。直连和群 Fetch 在 ask 模式下先回复结构化 `FetchPending`，不签发 lease；下载端依照该帧的重试时间重试，确认过期后停止。批准绑定源 grant/epoch、内容、认证设备及可选群 membership epoch，发送 grant 前原子消费并重验现行授权。上传确认、群策略与查询切片按 `docs/plan-validation.md` 记录完成集中验证；群入站预算使用 wire group ID 隔离相同消息标识。此进展尚不代表 T32 完成：GUI 授权界面属于 T34，公网/真实 AppContainer 集成仍待验收。
 
+T32 群文件系统验收（2026-11-22）：两个真实 Windows AppContainer Net 在同机 TCP 上完成群内单来源、双端逐文件审批的分块传输。[验收记录](plan-validation.md#2026-11-22-t32-跨容器群文件验收)仅覆盖这一流程，不关闭完整 T32。
+
 ### T33 — 只读 GUI 与像素资产
 
 依赖 T19、T23、T29、T32。创建 app ui、assets 及授权清单。
