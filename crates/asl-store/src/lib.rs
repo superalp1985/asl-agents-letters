@@ -71,6 +71,17 @@ impl Store {
         read_setting(&self.connection, key)
     }
 
+    pub fn take_setting(&self, key: &str) -> Result<Option<String>, AslError> {
+        self.connection
+            .query_row(
+                "DELETE FROM settings WHERE key = ?1 RETURNING value_json",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
     pub fn set_setting(
         &self,
         key: &str,

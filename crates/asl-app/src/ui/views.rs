@@ -56,6 +56,11 @@ pub(super) struct Interaction<'a> {
         asl_types::error::AslError,
     >,
     pub(super) actions_enabled: bool,
+    pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) checkpoints: &'a Result<
+        Option<asl_app::checkpoint_access::CheckpointStatus>,
+        asl_types::error::AslError,
+    >,
     pub(super) action: &'a mut Option<super::LocalAction>,
 }
 
@@ -121,6 +126,8 @@ impl Page {
             retention,
             network_config,
             model_endpoints,
+            checkpoint_form,
+            checkpoints,
             actions_enabled,
             action,
         } = interaction;
@@ -180,6 +187,9 @@ impl Page {
                         *actions_enabled,
                         action,
                     );
+                    ui.separator();
+                    checkpoint_form.show(ui, checkpoints, *actions_enabled, action);
+                    ui.separator();
                     table(
                         ui,
                         ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],

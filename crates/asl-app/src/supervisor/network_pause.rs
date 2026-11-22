@@ -204,6 +204,15 @@ mod tests {
             panic!("saved pause started Net")
         })
         .unwrap();
+        let second_paths = AppPaths::open_existing(fixture.path()).unwrap();
+        let exe = env::current_exe().unwrap();
+        let second_launcher = SandboxLauncher::new(exe.clone(), exe.clone(), exe).unwrap();
+        assert!(matches!(
+            Supervisor::start_with_net(second_paths, second_launcher, |_, _, _| {
+                panic!("duplicate Core reached Net startup")
+            }),
+            Err(AslError::InvalidPolicyState)
+        ));
         let local_peer = supervisor.device_peer_id.clone();
         let report = || Dashboard::load(&db).unwrap().network_report.unwrap();
         let mut handler = |_: &mut Supervisor, _| Ok(());

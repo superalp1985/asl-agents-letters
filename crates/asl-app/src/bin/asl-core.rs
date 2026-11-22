@@ -2,6 +2,8 @@
 mod access_control;
 #[path = "asl-core/bindings_control.rs"]
 mod bindings_control;
+#[path = "asl-core/checkpoint_control.rs"]
+mod checkpoint_control;
 #[path = "asl-core/download_control.rs"]
 mod download_control;
 #[cfg(windows)]
@@ -27,6 +29,7 @@ fn main() {
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
+        [flag, args @ ..] if flag == "--checkpoint" => checkpoint_control::run(args),
         [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
         [flag, args @ ..] if flag == "--providers" => provider_control::run(args),
         [flag, kind, days] if flag == "--retention" => retention_control::set_days(kind, days),

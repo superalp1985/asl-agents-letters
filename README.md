@@ -112,7 +112,7 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，并将该目录的发布序号持久保存；续签依赖当前链承诺、证书和本机目录文件有效。这只是直连身份材料续签，不等于 DHT 公网发布。资料默认不发布，授权后续发，头像引用需独立公开授权；远端记录历史仍未持久化，实际 DHT 发布待接入，详见 `docs/signed-records.md`。
 
-可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。共享/收件/经验目录授权界面已接入本机 Core；检查点来源选择和其他 T34 策略控制仍待实现。
+可信检查点续期只更换检查点，保留身份序号和撤销观察，并清空短期证明。过期快照不能用于普通恢复；最终性冲突锁不能通过续期清除。
 
 Windows T09 已实现按 Net/Worker/Extractor 分权的 AppContainer 启动、Job Object 资源约束、白名单匿名管道和可执行文件独立 ACL。真实系统探针验证 Worker 不能读授权目录外文件、联网或启动子进程；Net 的 TCP 网络能力、Worker 的拒绝、内存/CPU/期限限制及清理路径均有实测。外部 TCP 仅测连接握手；真实 UDP 回包、libp2p QUIC 及 mDNS 查询/响应尚未验证，因此 T09 仍为部分验收，不能称整个沙箱/网络已完成。
 
@@ -137,7 +137,7 @@ flowchart LR
 
 沙箱与 IPC 阶段的全工作区回归为 284 项通过、2 项外部端点测试忽略。已验证 Net 心跳、Worker 握手中止及新 Worker 接续，尚不代表运行中计算崩溃或 Supervisor 崩溃。外部 UDP 回包与真实 mDNS 仍待验收。完整分轮结果、云机夹具与本次验证范围见 [验证记录](docs/plan-validation.md)。
 
-HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；公网发现与连接、群组、Agent 自主工作流、端到端文件传输、完整 GUI 和发布包仍未整体验收。这些本地检查不代表完整产品或公网已验收。
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；公网发现与连接、群组、Agent 自主工作流、端到端文件传输、完整 GUI 和发布包仍未整体验收。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -155,7 +155,9 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移、检查点界面，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+
+节点页可查看当前链身份检查点，录入并授权从可信来源独立核对的新 slot 和 Beacon root。Core 下次启动只验证一次，验证通过才替换检查点；失败保留原快照。验证开始前可取消，不会自动选取信任源。命令行可用 `asl-core --checkpoint status` 查看状态。
 
 授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
 
@@ -241,7 +243,9 @@ The preparation script copies five executables into a new directory. Run just th
 
 ### Desktop Controls
 
-The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint controls, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+
+Nodes shows the current chain checkpoint and lets you approve a new slot and Beacon root checked against an independent trusted source. Core checks the approved candidate once on its next start. If verification fails, it keeps the previous snapshot. You can cancel before verification starts, and Core does not pick a trusted source for you. `asl-core --checkpoint status` shows the same state at the command line.
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
 
@@ -285,7 +289,7 @@ The pure authorization core implements public/contacts/peers/group audiences, mo
 
 The structured signed-record core covers profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes and persists its publication sequence; renewal requires the current chain commitment, device certificates and local directory file to remain valid. This refreshes direct identity-proof material but does not publish to the public DHT. Profiles remain disabled until explicitly configured, and avatar renewal requires separate public-resource authorization. Remote record history is not durable, and actual DHT publication remains pending; see `docs/signed-records.md`.
 
-An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. Checkpoint authorization and trusted checkpoint-source selection remain pending.
+Explicit checkpoint renewal changes only the checkpoint, retains identity sequence and revocation observations, and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock.
 
 The first Windows T09 slice implements per-role AppContainer launch, Job Object limits, an explicit anonymous-pipe allowlist and executable-only ACL access. Real probes verify that Worker cannot read outside files, connect to a test HTTP listener or spawn a child; Net TCP capability, resource deadlines and cleanup are also exercised. The external TCP test proves only connection establishment. UDP echo, libp2p QUIC and an actual mDNS exchange remain unverified, so T09 is only partially accepted.
 
@@ -310,4 +314,4 @@ flowchart LR
 
 The sandbox/IPC workspace run passed 284 tests with two external endpoint tests ignored. Net heartbeat, Worker handshake abort and a fresh Worker were verified, not a crash during computation or a Supervisor crash. External UDP echo and live mDNS exchange remain open. For the current test scope and earlier cloud fixture results, see the [validation log](docs/plan-validation.md).
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.

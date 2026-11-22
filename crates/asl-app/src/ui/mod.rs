@@ -1,5 +1,6 @@
 mod art;
 mod binding_feedback;
+mod checkpoint;
 mod model_endpoints;
 mod network_privacy;
 mod retention;
@@ -14,6 +15,7 @@ use std::{
 };
 
 use asl_app::{
+    checkpoint_access::{self, CheckpointStatus},
     model_endpoint_access::{ModelEndpointAccess, ModelProviderStatus},
     network_settings::NetworkSettingsV1,
     paths::AppPaths,
@@ -55,6 +57,7 @@ struct Viewer {
     action_success_notice: Option<&'static str>,
     access_form: AccessForm,
     retention: retention::RetentionForm,
+    checkpoint_form: checkpoint::CheckpointForm,
     code_input: String,
     notice: Option<&'static str>,
     error: Option<&'static str>,
@@ -66,6 +69,7 @@ struct Snapshot {
     dashboard: Dashboard,
     network_config: Result<NetworkSettingsV1, AslError>,
     model_endpoints: Result<Vec<ModelProviderStatus>, AslError>,
+    checkpoints: Result<Option<CheckpointStatus>, AslError>,
 }
 
 impl Viewer {
@@ -80,6 +84,7 @@ impl Viewer {
             action_success_notice: None,
             access_form: AccessForm::default(),
             retention: retention::RetentionForm::default(),
+            checkpoint_form: checkpoint::CheckpointForm::default(),
             code_input: String::new(),
             notice: None,
             error: None,
@@ -131,6 +136,7 @@ impl Viewer {
             "group-inbound" => "群组接收策略已更新",
             "retention" => "浏览记录保留期限已更新",
             "providers" => "模型端点授权已更新",
+            "checkpoint" => "检查点请求已更新",
             "network" => "已保存，待后台重新启动",
             _ => "本机授权已更新",
         };
@@ -309,6 +315,8 @@ impl eframe::App for Viewer {
                             retention: &mut self.retention,
                             network_config: &snapshot.network_config,
                             model_endpoints: &snapshot.model_endpoints,
+                            checkpoint_form: &mut self.checkpoint_form,
+                            checkpoints: &snapshot.checkpoints,
                             actions_enabled: self.action.is_none() && self.loading.is_none(),
                             action: &mut action,
                         };
@@ -350,6 +358,7 @@ fn load(home: &Path) -> Result<Snapshot, AslError> {
         dashboard: Dashboard::load(&database)?,
         network_config: NetworkSettingsV1::load(&paths.network_settings_configuration()),
         model_endpoints: ModelEndpointAccess::new(&paths).list(),
+        checkpoints: checkpoint_access::status(&paths),
     })
 }
 

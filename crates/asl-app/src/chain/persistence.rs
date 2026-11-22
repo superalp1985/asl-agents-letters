@@ -219,6 +219,16 @@ impl DurableIdentityResolver {
         replacement: EthereumLightClient,
         now_secs: u64,
     ) -> Result<Self, ChainError> {
+        Self::renew_checkpoint_with_setting(store, previous_config, replacement, now_secs, None)
+    }
+
+    pub(crate) fn renew_checkpoint_with_setting(
+        store: Store,
+        previous_config: DurableResolverConfigV1,
+        replacement: EthereumLightClient,
+        now_secs: u64,
+        setting: Option<(&str, &str)>,
+    ) -> Result<Self, ChainError> {
         let (previous, saved) = authenticated_snapshot(&store, &previous_config, now_secs)?;
         let (previous_slot, previous_execution) = EthereumLightClient::checkpoint_renewal_floor(
             previous_config.consensus.clone(),
@@ -261,7 +271,7 @@ impl DurableIdentityResolver {
             storage_healthy: true,
             local: None,
         };
-        durable.commit(candidate, bundle, now_secs)?;
+        durable.commit_inner(candidate, bundle, now_secs, setting)?;
         Ok(durable)
     }
 
@@ -567,7 +577,7 @@ impl DurableIdentityResolver {
         bundle: ChainBundle,
         now_secs: u64,
     ) -> Result<(), ChainError> {
-        let result = self.commit_inner(candidate, bundle, now_secs);
+        let result = self.commit_inner(candidate, bundle, now_secs, None);
         if result.is_err() {
             self.storage_healthy = false;
         }
@@ -579,6 +589,7 @@ impl DurableIdentityResolver {
         candidate: EthereumIdentityResolver,
         mut bundle: ChainBundle,
         now_secs: u64,
+        setting: Option<(&str, &str)>,
     ) -> Result<(), ChainError> {
         let now_ms = millis(now_secs)?;
         if now_ms < bundle.state.updated_at_ms {
@@ -608,7 +619,11 @@ impl DurableIdentityResolver {
         bundle.state.verified_header_state = sealed;
         let previous = &self.bundle.state.verified_header_state;
         let expected = (!previous.is_empty()).then_some(previous.as_slice());
-        if self.store.save_chain_bundle(&bundle, expected).is_err() {
+        if self
+            .store
+            .save_chain_bundle_with_setting(&bundle, expected, setting)
+            .is_err()
+        {
             self.storage_healthy = false;
             return Err(ChainError::StorageUnavailable);
         }

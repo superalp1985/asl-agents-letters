@@ -20,6 +20,7 @@ use asl_policy::{
     sandbox::{
         BrokerPipes, InheritedPipes, SandboxChild, SandboxLauncher, SandboxLimits, SandboxRole,
     },
+    snapshot_files::ProfileOwner,
 };
 use asl_types::{
     error::AslError,
@@ -104,6 +105,7 @@ pub struct Supervisor {
     #[cfg(windows)]
     group_controls: Option<Receiver<LocalGroupCommand>>,
     pub(crate) pending_pairing_prompts: pairing::PendingPairingPrompts,
+    _owner: ProfileOwner,
 }
 
 impl Supervisor {
@@ -126,6 +128,7 @@ impl Supervisor {
         launcher: SandboxLauncher,
         start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
     ) -> Result<Self, AslError> {
+        let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
         let settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
         let network_store = open_store(&state_database)?;
@@ -190,6 +193,7 @@ impl Supervisor {
             #[cfg(windows)]
             group_controls: None,
             pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
+            _owner: owner,
         };
         supervisor.persist_local_identity_projection();
         #[cfg(windows)]

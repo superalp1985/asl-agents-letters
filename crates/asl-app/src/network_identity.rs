@@ -19,6 +19,7 @@ use crate::{
         IdentityResolution, IdentityResolver, RegistryStatus,
     },
     chain_refresh::ChainRefreshWorker,
+    checkpoint_access,
     identity::AgentIdentity,
     paths::AppPaths,
     profile::{CoreAdmission, sign_record, verify_record},
@@ -86,31 +87,43 @@ pub(crate) fn load_network_admission(
     identity: &AgentIdentity,
     local_peer_id: PeerId,
 ) -> Result<NetworkAdmissionSetup, AslError> {
-    let Some(configuration) =
+    let Some(mut configuration) =
         NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?
     else {
         return Ok(setup(NetworkAdmissionStatus::TrustConfigurationMissing));
-    };
-    let Some(signed_directory) = read_signed_device_directory(&paths.signed_device_directory())?
-    else {
-        return Ok(setup(NetworkAdmissionStatus::DeviceDirectoryMissing));
     };
     let http =
         ChainHttpClient::new(configuration.http.clone()).map_err(|_| AslError::InvalidIdentity)?;
     let database_path = paths.state().join("asl.sqlite3");
     let store = open_store(&database_path)?;
-    let has_saved_state = store
-        .load_chain_bundle(configuration.resolver.consensus.chain_id)?
-        .is_some();
-    let now_secs = unix_time_secs()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| AslError::SandboxUnavailable)?;
+    checkpoint_access::prepare_startup(
+        &mut configuration,
+        &database_path,
+        &store,
+        &http,
+        &runtime,
+    )?;
+    let Some(signed_directory) = read_signed_device_directory(&paths.signed_device_directory())?
+    else {
+        return Ok(setup(NetworkAdmissionStatus::DeviceDirectoryMissing));
+    };
+    let has_saved_state = store
+        .chain_checkpoint_hash(configuration.resolver.consensus.chain_id)?
+        .is_some();
+    let now_secs = unix_time_secs()?;
 
     let mut resolver = if has_saved_state {
-        DurableIdentityResolver::restore(store, configuration.resolver.clone(), now_secs)
-            .map_err(|_| AslError::InvalidIdentity)?
+        match DurableIdentityResolver::restore(store, configuration.resolver.clone(), now_secs) {
+            Ok(resolver) => resolver,
+            Err(crate::chain::ChainError::ExpiredCheckpoint) => {
+                return Ok(setup(NetworkAdmissionStatus::ChainUnavailable));
+            }
+            Err(_) => return Err(AslError::InvalidIdentity),
+        }
     } else {
         let light_client = match runtime
             .block_on(http.bootstrap(configuration.resolver.consensus.clone(), now_secs))

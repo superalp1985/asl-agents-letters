@@ -774,3 +774,9 @@ Windows x64、Rust 1.100.0、`--locked --offline`：`asl-app` 库测试 259 项�
 实际 `asl-core --providers` 命令写入本机 SQLite。同一网关实例、同机模拟 HTTP 覆盖默认拒绝、显式批准后收到预期模型及输入、审批前界面快照指纹失效、同 ID 换模型/地址/模式不继承批准、配置更换期间撤销后旧配置也不能调用，以及空 permit 和过期 permit 拒绝。另在请求准备期间改变授权，确认客户端未连出；Windows DPAPI 测试验证同 ID 换地址不能读取旧凭据。
 
 Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：网关集成 10 项、真实 CLI 端到端 1 项、DPAPI 1 项通过。`asl-agent`、`asl-store`、`asl-app` 含 `desktop-ui` 全目标严格 Clippy、格式检查和差异检查通过。未运行云端或真实模型、原生窗口操作或全工作区测试。撤销阻止尚未通过发送前授权检查的调用，不取消已交给 HTTP 客户端的请求。
+
+### 2026-11-22 T34 本机检查点更新
+
+真实 `asl-core` CLI 子进程覆盖未配置状态、拒绝过时的审批上下文和非递增 slot、保存和取消候选，验证不改写配置文件。启动逻辑测试用合成的已验证执行状态以及真实 SQLite 与 DPAPI，覆盖过期快照更新、重启恢复、旧证明清空、原有身份观察保留、RPC 配置变化后不访问服务、验证失败不改链状态且不自动重试。NTFS 锁测试核对 Core 和下载工作者的独占句柄相互独立；Supervisor 同机 TCP 测试确认重复启动在网络进程启动前拒绝。
+
+Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：定向检查点 28 项、CLI 1 项、独占句柄 1 项、Supervisor 1 项均通过。`asl-app`、`asl-store`、`asl-policy` 含桌面目标的全目标严格 Clippy、格式和差异检查通过。历史 Mainnet 夹具单独覆盖既有公开链共识验证；未验收真实 RPC 端到端续期、原生窗口操作或跨设备迁移。

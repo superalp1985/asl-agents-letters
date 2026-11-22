@@ -36,23 +36,30 @@ impl PinnedHome {
     }
 }
 
-/// Exclusive, cross-process ownership of the download broker for one home.
-#[must_use = "hold the owner until the download database connection is closed"]
-pub struct DownloadOwner {
+/// Exclusive, cross-process ownership of a service for one home.
+#[must_use = "hold the owner for the lifetime of the service"]
+pub struct ProfileOwner {
     #[cfg(windows)]
     _marker: std::fs::File,
     _home: PinnedHome,
 }
 
-impl DownloadOwner {
-    /// Pin the home and acquire its download marker before opening SQLite.
+impl ProfileOwner {
+    pub fn core(home: &Path) -> Result<Self, AslError> {
+        Self::acquire(home, "core-owner.lock")
+    }
+
+    pub fn downloads(home: &Path) -> Result<Self, AslError> {
+        Self::acquire(home, "download-worker.lock")
+    }
+
     /// A sharing conflict returns `InvalidPolicyState`; dropping this guard
     /// releases ownership without removing the marker.
-    pub fn acquire(home: &Path) -> Result<Self, AslError> {
+    fn acquire(home: &Path, marker: &str) -> Result<Self, AslError> {
         #[cfg(windows)]
         {
             let home = PinnedHome::open(home)?;
-            let marker = snapshot::open_download_marker(&home.state)?;
+            let marker = snapshot::open_exclusive_marker(&home.state, marker)?;
             Ok(Self {
                 _marker: marker,
                 _home: home,
@@ -60,7 +67,7 @@ impl DownloadOwner {
         }
         #[cfg(not(windows))]
         {
-            let _ = home;
+            let _ = (home, marker);
             Err(AslError::PlatformUnavailable)
         }
     }
@@ -358,7 +365,7 @@ impl StagedSnapshot {
 
 #[cfg(all(windows, test))]
 mod tests {
-    use super::{ImportOwner, PinnedHome, SnapshotReader, StagedSnapshot};
+    use super::{ImportOwner, PinnedHome, ProfileOwner, SnapshotReader, StagedSnapshot};
     use crate::{AuthorizedFile, SourceGrant, SourceRules, open_authorized_source};
     use asl_types::error::AslError;
     use asl_types::manifest::{Manifest, content_id, encode_manifest};
@@ -425,6 +432,24 @@ mod tests {
         fs::rename(&state, f.home.join("old")).unwrap();
         assert!(PinnedHome::open(&f.home).is_err());
         assert!(PinnedHome::open(Path::new("E:work")).is_err());
+    }
+
+    #[test]
+    fn core_owner_is_exclusive_and_does_not_lock_the_download_worker() {
+        let f = Fixture::new(b"");
+        let core = ProfileOwner::core(&f.home).unwrap();
+        assert!(matches!(
+            ProfileOwner::core(&f.home),
+            Err(AslError::InvalidPolicyState)
+        ));
+        let downloads = ProfileOwner::downloads(&f.home).unwrap();
+        drop(core);
+        let _restarted = ProfileOwner::core(&f.home).unwrap();
+        assert!(matches!(
+            ProfileOwner::downloads(&f.home),
+            Err(AslError::InvalidPolicyState)
+        ));
+        drop(downloads);
     }
 
     #[test]

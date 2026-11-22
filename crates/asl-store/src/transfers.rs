@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::evidence::{TrustDimension, TrustOutcome};
-use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::DownloadOwner};
+use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::ProfileOwner};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
@@ -133,12 +133,12 @@ pub struct RecoveryReport {
 pub struct DownloadBroker {
     store: Store,
     home: PathBuf,
-    _owner: DownloadOwner,
+    _owner: ProfileOwner,
 }
 
 impl DownloadBroker {
     pub fn open(home: &Path) -> Result<Self, AslError> {
-        let owner = DownloadOwner::acquire(home)?;
+        let owner = ProfileOwner::downloads(home)?;
         let store = open_store(&home.join("state").join("asl.sqlite3"))?;
         let mut broker = Self {
             store,
