@@ -642,6 +642,89 @@ fn local_device_directory_renews_after_five_minutes_with_persistent_sequence() {
 
 #[cfg(windows)]
 #[test]
+fn local_profile_signing_checks_chain_and_binds_revocation_to_exact_approval() {
+    let root = AgentIdentity::generate().unwrap();
+    let peer = DeviceIdentity::generate().unwrap().peer_id();
+    let agent = root.agent_id();
+    let directory = directory(&root, 7, vec![certificate(&root, &peer, 1)], vec![]);
+    let signed = signed_directory(&root, &directory, 1);
+    let (database, resolver, _) = durable_directory_resolver_with_cache_age(&root, &directory, 900);
+    let mut core = CoreAdmission::for_local_identity(&root, peer, signed, resolver, NOW).unwrap();
+    let mut store = database.open();
+
+    assert!(store.profile_signing_due(agent, NOW).unwrap().is_none());
+    store
+        .set_profile_signing_approval(agent, vec![104, 101])
+        .unwrap();
+    let approval = store.profile_signing_due(agent, NOW).unwrap().unwrap();
+    let sequence = store.reserve_profile_sequence(agent).unwrap();
+    let bytes = core
+        .prepare_local_profile(&root, &approval, sequence, NOW)
+        .unwrap()
+        .unwrap();
+    let signed = decode_record(&bytes).unwrap();
+    let RecordPayload::Profile(ref profile) = signed.record.payload else {
+        panic!("expected a profile");
+    };
+    assert_eq!(profile.agent_id, agent);
+    assert!(profile.avatar.is_none());
+    assert_eq!(
+        profile
+            .capabilities
+            .iter()
+            .map(|c| c.concept_id)
+            .collect::<Vec<_>>(),
+        [101, 104]
+    );
+    crate::identity::verify_root_signature(
+        &asl_types::record::record_signing_bytes(&signed.record).unwrap(),
+        signed.signature,
+        root.controller_address(),
+    )
+    .unwrap();
+    assert_eq!(signed.record.expires_at_ms - NOW, 30 * 60 * 1_000);
+    assert!(store.observe_profile_candidate(&approval, &bytes).unwrap());
+    assert!(
+        store
+            .profile_signing_due(agent, NOW + RENEWAL - 1)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .profile_signing_due(agent, NOW + RENEWAL)
+            .unwrap()
+            .is_some()
+    );
+    core.clear_local_chain();
+    assert!(
+        core.prepare_local_profile(&root, &approval, sequence, NOW + RENEWAL)
+            .is_err()
+    );
+
+    store.revoke_profile_signing_approval().unwrap();
+    assert!(
+        store
+            .profile_signing_status()
+            .unwrap()
+            .last_candidate
+            .is_none()
+    );
+    store
+        .set_profile_signing_approval(agent, vec![101, 104])
+        .unwrap();
+    assert!(!store.observe_profile_candidate(&approval, &bytes).unwrap());
+    assert!(
+        store
+            .profile_signing_status()
+            .unwrap()
+            .last_candidate
+            .is_none()
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn core_admission_only_emits_application_events_after_proof_verification() {
     use asl_types::protocol::{Ack, IdentityProofRequest};
 

@@ -66,6 +66,7 @@ mod directory;
 mod groups;
 mod network_pause;
 mod network_report;
+mod profile_signing;
 #[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
@@ -90,6 +91,7 @@ pub struct Supervisor {
     device_key_path: PathBuf,
     transport_connections: HashMap<[u8; 16], PeerId>,
     network_report: network_report::NetworkStatus,
+    profile_signing: profile_signing::ProfileSigningRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
     chain_refresh: Option<ChainRefreshWorker>,
@@ -174,6 +176,7 @@ impl Supervisor {
             launcher,
             model_gateway,
             net,
+            profile_signing: profile_signing::ProfileSigningRuntime::open(&state_database)?,
             network_report: network_report::NetworkStatus::new(network_store, &network_settings),
             network_settings,
             device_key_path,
@@ -1142,6 +1145,7 @@ impl Supervisor {
                 #[cfg(windows)]
                 self.poll_local_groups()?;
                 self.poll_contact_bindings()?;
+                self.poll_profile_signing(now, unix_time_ms()?);
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
             }

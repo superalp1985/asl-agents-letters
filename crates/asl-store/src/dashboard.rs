@@ -13,6 +13,7 @@ use crate::inbound_observations::{
 use crate::network_privacy::{
     NetworkReport, force_relay_only, last_network_report, network_pause_requested,
 };
+use crate::public_profile::{ProfileSigningStatus, profile_signing_status};
 use crate::transfers::{DownloadConsent, UploadConsent};
 use crate::{SCHEMA_VERSION, Store, current_time_ms, database_error};
 
@@ -28,6 +29,7 @@ pub struct Dashboard {
     pub force_relay_only: bool,
     pub network_pause_requested: bool,
     pub network_report: Option<NetworkReport>,
+    pub profile_signing: ProfileSigningStatus,
     pub nodes: Vec<NodeRow>,
     pub contact_bindings: Vec<ContactBindingRow>,
     pub binding_candidates: Vec<BindingCandidateRow>,
@@ -224,6 +226,7 @@ impl Dashboard {
             force_relay_only: force_relay_only(database)?,
             network_pause_requested: network_pause_requested(database)?,
             network_report: last_network_report(database)?,
+            profile_signing: profile_signing_status(database)?,
             nodes: read_nodes(database)?,
             contact_bindings: read_contact_bindings(database)?,
             binding_candidates: read_binding_candidates(database)?,

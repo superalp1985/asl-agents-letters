@@ -17,6 +17,7 @@ pub mod group_state;
 pub mod inbound_observations;
 pub mod network_privacy;
 pub mod paired_contacts;
+pub mod public_profile;
 mod publication;
 pub mod resources;
 pub mod search;

@@ -57,6 +57,7 @@ pub(super) struct Interaction<'a> {
     >,
     pub(super) actions_enabled: bool,
     pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
     pub(super) checkpoints: &'a Result<
         Option<asl_app::checkpoint_access::CheckpointStatus>,
         asl_types::error::AslError,
@@ -127,6 +128,7 @@ impl Page {
             network_config,
             model_endpoints,
             checkpoint_form,
+            profile_form,
             checkpoints,
             actions_enabled,
             action,
@@ -189,6 +191,8 @@ impl Page {
                     );
                     ui.separator();
                     checkpoint_form.show(ui, checkpoints, *actions_enabled, action);
+                    ui.separator();
+                    profile_form.show(ui, data, now.max(0) as u64, *actions_enabled, action);
                     ui.separator();
                     table(
                         ui,

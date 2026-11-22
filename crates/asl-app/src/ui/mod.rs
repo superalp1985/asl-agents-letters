@@ -3,6 +3,7 @@ mod binding_feedback;
 mod checkpoint;
 mod model_endpoints;
 mod network_privacy;
+mod profile_signing;
 mod retention;
 mod views;
 
@@ -58,6 +59,7 @@ struct Viewer {
     access_form: AccessForm,
     retention: retention::RetentionForm,
     checkpoint_form: checkpoint::CheckpointForm,
+    profile_form: profile_signing::ProfileForm,
     code_input: String,
     notice: Option<&'static str>,
     error: Option<&'static str>,
@@ -85,6 +87,7 @@ impl Viewer {
             access_form: AccessForm::default(),
             retention: retention::RetentionForm::default(),
             checkpoint_form: checkpoint::CheckpointForm::default(),
+            profile_form: profile_signing::ProfileForm::default(),
             code_input: String::new(),
             notice: None,
             error: None,
@@ -137,6 +140,7 @@ impl Viewer {
             "retention" => "浏览记录保留期限已更新",
             "providers" => "模型端点授权已更新",
             "checkpoint" => "检查点请求已更新",
+            "profile" => "本机资料签名授权已更新",
             "network" => "已保存，待后台重新启动",
             _ => "本机授权已更新",
         };
@@ -316,6 +320,7 @@ impl eframe::App for Viewer {
                             network_config: &snapshot.network_config,
                             model_endpoints: &snapshot.model_endpoints,
                             checkpoint_form: &mut self.checkpoint_form,
+                            profile_form: &mut self.profile_form,
                             checkpoints: &snapshot.checkpoints,
                             actions_enabled: self.action.is_none() && self.loading.is_none(),
                             action: &mut action,

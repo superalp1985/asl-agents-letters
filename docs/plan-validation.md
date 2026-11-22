@@ -780,3 +780,9 @@ Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：网关集成 1
 真实 `asl-core` CLI 子进程覆盖未配置状态、拒绝过时的审批上下文和非递增 slot、保存和取消候选，验证不改写配置文件。启动逻辑测试用合成的已验证执行状态以及真实 SQLite 与 DPAPI，覆盖过期快照更新、重启恢复、旧证明清空、原有身份观察保留、RPC 配置变化后不访问服务、验证失败不改链状态且不自动重试。NTFS 锁测试核对 Core 和下载工作者的独占句柄相互独立；Supervisor 同机 TCP 测试确认重复启动在网络进程启动前拒绝。
 
 Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：定向检查点 28 项、CLI 1 项、独占句柄 1 项、Supervisor 1 项均通过。`asl-app`、`asl-store`、`asl-policy` 含桌面目标的全目标严格 Clippy、格式和差异检查通过。历史 Mainnet 夹具单独覆盖既有公开链共识验证；未验收真实 RPC 端到端续期、原生窗口操作或跨设备迁移。
+
+### 2026-11-22 T34 资料本机签名授权
+
+使用真实 SQLite 和 `asl-core --profile` 子进程核对默认关闭、当前身份核对、主题选择和撤销；只读 Dashboard 与持久游标测试覆盖重启后保留选项、不同 AgentId 不继承、资料序号与设备目录独立。CoreAdmission 使用合成链证据签发 CBOR，独立核对根签名和 30 分钟有效期；撤销并重新批准相同主题后旧候选仍不能写回。
+
+Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：`asl-app` profile 57 项、真实 CLI 1 项、`asl-store` 定向 1 项通过；`asl-app` 和 `asl-store` 含桌面目标的全目标严格 Clippy 通过。未运行原生窗口、真实链 RPC 或 DHT 出站；没有新增网络发布能力、协议字段或依赖。
