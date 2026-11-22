@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, ffi::OsString};
 
-use asl_store::{dashboard::Dashboard, public_profile::ProfileSigningApproval};
+use asl_store::{
+    dashboard::Dashboard,
+    public_profile::{ProfilePublicationResult, ProfileSigningApproval},
+};
 use eframe::egui::{Button, RichText, Ui};
 
 use super::{LocalAction, MUTED};
@@ -22,7 +25,6 @@ impl ProfileForm {
         action: &mut Option<LocalAction>,
     ) {
         ui.label(RichText::new("身份资料").strong());
-        ui.label(RichText::new("网络披露：未发布").color(MUTED));
         let Some(agent) = &data.identity.agent_id else {
             ui.label("未建立本机身份");
             return;
@@ -32,6 +34,17 @@ impl ProfileForm {
             .approval
             .as_ref()
             .filter(|approval| bs58::encode(approval.agent_id.as_bytes()).into_string() == *agent);
+        let disclosure = if approval.is_some_and(|approval| approval.publish) {
+            match status.last_publication {
+                None => "公开已授权 · 尚未提交",
+                Some(ProfilePublicationResult::Submitted) => "上次已提交 Net · 未记录 DHT 应答",
+                Some(ProfilePublicationResult::DhtAcknowledged) => "已收到 DHT 应答",
+                Some(ProfilePublicationResult::NoAcknowledgment) => "未收到 DHT 应答",
+            }
+        } else {
+            "网络公开：关闭"
+        };
+        ui.label(RichText::new(disclosure).color(MUTED));
         if self.agent.as_ref() != Some(agent) || self.approval.as_ref() != approval {
             self.agent = Some(agent.clone());
             self.approval = approval.cloned();
@@ -72,30 +85,48 @@ impl ProfileForm {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
-                    actions_enabled && changed && !self.selected.is_empty(),
+                    actions_enabled
+                        && !self.selected.is_empty()
+                        && (changed || approval.is_some_and(|approval| approval.publish)),
                     Button::new("授权本机签名"),
                 )
                 .clicked()
             {
-                let args = [OsString::from("approve-local-signing"), agent.into()]
-                    .into_iter()
-                    .chain(self.selected.iter().map(|id| id.to_string().into()))
-                    .collect();
-                *action = Some(LocalAction {
-                    command: "profile",
-                    args,
-                });
+                *action = Some(self.approve("approve-local-signing", agent));
+            }
+            if ui
+                .add_enabled(
+                    actions_enabled
+                        && !self.selected.is_empty()
+                        && (changed || approval.is_some_and(|approval| !approval.publish)),
+                    Button::new("授权公开所选主题"),
+                )
+                .on_hover_text("公开 AgentId 和所选主题，不包含头像。已收到的副本无法撤回。")
+                .clicked()
+            {
+                *action = Some(self.approve("approve-publication", agent));
             }
             if ui
                 .add_enabled(
                     actions_enabled && status.approval.is_some(),
-                    Button::new("撤销签名授权"),
+                    Button::new("撤销资料授权"),
                 )
                 .clicked()
             {
                 *action = Some(LocalAction::new("profile", ["revoke".into()]));
             }
         });
+    }
+
+    fn approve(&self, command: &str, agent: &str) -> LocalAction {
+        let args = [OsString::from(command), agent.into()]
+            .into_iter()
+            .chain(self.selected.iter().map(|id| id.to_string().into()))
+            .collect();
+        LocalAction {
+            command: "profile",
+            args,
+        }
     }
 }
 

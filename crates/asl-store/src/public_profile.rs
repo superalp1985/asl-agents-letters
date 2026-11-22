@@ -1,4 +1,4 @@
-//! Local signing permission. This setting does not authorize disclosure.
+//! Local profile signing and separate explicit DHT disclosure permission.
 
 use asl_types::{
     error::AslError,
@@ -9,16 +9,21 @@ use asl_types::{
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::{Store, current_time_ms, database_error, read_setting, write_setting};
+use crate::{
+    Store, current_time_ms, database_error, network_privacy::network_pause_requested, read_setting,
+    write_setting,
+};
 
 const KEY: &str = "identity.profile_signing_v1";
-const RENEWAL_MS: u64 = 5 * 60 * 1_000;
+pub const PROFILE_RENEWAL_MS: u64 = 5 * 60 * 1_000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileSigningApproval {
     pub agent_id: AgentId,
     pub topics: Vec<u32>,
+    #[serde(default)]
+    pub publish: bool,
     revision: u64,
 }
 
@@ -40,6 +45,15 @@ pub struct ProfileCandidateStatus {
 pub struct ProfileSigningStatus {
     pub approval: Option<ProfileSigningApproval>,
     pub last_candidate: Option<ProfileCandidateStatus>,
+    pub last_publication: Option<ProfilePublicationResult>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfilePublicationResult {
+    Submitted,
+    DhtAcknowledged,
+    NoAcknowledgment,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -48,6 +62,8 @@ struct State {
     revision: u64,
     approval: Option<ProfileSigningApproval>,
     candidate: Option<ProfileCandidateStatus>,
+    #[serde(default)]
+    publication: Option<ProfilePublicationResult>,
 }
 
 impl Store {
@@ -56,7 +72,15 @@ impl Store {
         agent_id: AgentId,
         topics: Vec<u32>,
     ) -> Result<(), AslError> {
-        self.update_profile_signing_approval(Some((agent_id, validate_topics(topics)?)))
+        self.update_profile_signing_approval(Some((agent_id, validate_topics(topics)?, false)))
+    }
+
+    pub fn approve_profile_publication(
+        &mut self,
+        agent_id: AgentId,
+        topics: Vec<u32>,
+    ) -> Result<(), AslError> {
+        self.update_profile_signing_approval(Some((agent_id, validate_topics(topics)?, true)))
     }
 
     pub fn revoke_profile_signing_approval(&mut self) -> Result<(), AslError> {
@@ -65,7 +89,7 @@ impl Store {
 
     fn update_profile_signing_approval(
         &mut self,
-        selection: Option<(AgentId, Vec<u32>)>,
+        selection: Option<(AgentId, Vec<u32>, bool)>,
     ) -> Result<(), AslError> {
         let tx = self
             .connection
@@ -78,12 +102,14 @@ impl Store {
             .ok_or(AslError::PolicyVersionConflict)?;
         let state = State {
             revision,
-            approval: selection.map(|(agent_id, topics)| ProfileSigningApproval {
+            approval: selection.map(|(agent_id, topics, publish)| ProfileSigningApproval {
                 agent_id,
                 topics,
+                publish,
                 revision,
             }),
             candidate: None,
+            publication: None,
         };
         write(&tx, &state)?;
         tx.commit().map_err(database_error)
@@ -93,6 +119,51 @@ impl Store {
         profile_signing_status(&self.connection)
     }
 
+    pub fn current_public_profile(
+        &self,
+        agent: AgentId,
+    ) -> Result<Option<ProfileSigningApproval>, AslError> {
+        Ok(read(&self.connection)?
+            .approval
+            .filter(|approval| approval.publish && approval.agent_id == agent))
+    }
+
+    /// Order a nonblocking Net enqueue against local revocation and pause.
+    pub fn with_current_public_profile(
+        &mut self,
+        approval: &ProfileSigningApproval,
+        enqueue: impl FnOnce() -> Result<bool, AslError>,
+    ) -> Result<bool, AslError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if !approval.publish
+            || read(&tx)?.approval.as_ref() != Some(approval)
+            || network_pause_requested(&tx)?
+        {
+            return Ok(false);
+        }
+        enqueue()
+    }
+
+    pub fn observe_profile_publication(
+        &mut self,
+        approval: &ProfileSigningApproval,
+        outcome: ProfilePublicationResult,
+    ) -> Result<(), AslError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let mut state = read(&tx)?;
+        if approval.publish && state.approval.as_ref() == Some(approval) {
+            state.publication = Some(outcome);
+            write(&tx, &state)?;
+        }
+        tx.commit().map_err(database_error)
+    }
+
     pub fn profile_signing_due(
         &self,
         agent_id: AgentId,
@@ -100,10 +171,11 @@ impl Store {
     ) -> Result<Option<ProfileSigningApproval>, AslError> {
         let state = read(&self.connection)?;
         Ok(state.approval.filter(|approval| {
-            approval.agent_id == agent_id
-                && state
-                    .candidate
-                    .is_none_or(|record| now_ms.saturating_sub(record.issued_at_ms) >= RENEWAL_MS)
+            !approval.publish
+                && approval.agent_id == agent_id
+                && state.candidate.is_none_or(|record| {
+                    now_ms.saturating_sub(record.issued_at_ms) >= PROFILE_RENEWAL_MS
+                })
         }))
     }
 
@@ -152,6 +224,7 @@ pub(crate) fn profile_signing_status(db: &Connection) -> Result<ProfileSigningSt
     Ok(ProfileSigningStatus {
         approval: state.approval,
         last_candidate: state.candidate,
+        last_publication: state.publication,
     })
 }
 
@@ -182,6 +255,48 @@ fn write(db: &Connection, state: &State) -> Result<(), AslError> {
 mod tests {
     use super::*;
     use crate::{dashboard::Dashboard, open_store};
+
+    #[test]
+    fn profile_publication_fences_reapproval_revocation_and_pause() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("asl.sqlite3");
+        let mut store = open_store(&path).unwrap();
+        let mut cli = open_store(&path).unwrap();
+        let agent = AgentId([7; 32]);
+        cli.set_profile_signing_approval(agent, vec![101]).unwrap();
+        assert!(store.current_public_profile(agent).unwrap().is_none());
+        cli.approve_profile_publication(agent, vec![101]).unwrap();
+        let approval = store.current_public_profile(agent).unwrap().unwrap();
+        assert!(
+            store
+                .with_current_public_profile(&approval, || Ok(true))
+                .unwrap()
+        );
+        cli.set_network_pause_requested(true).unwrap();
+        assert!(
+            !store
+                .with_current_public_profile(&approval, || panic!("paused enqueue"))
+                .unwrap()
+        );
+        cli.set_network_pause_requested(false).unwrap();
+        cli.revoke_profile_signing_approval().unwrap();
+        cli.approve_profile_publication(agent, vec![101]).unwrap();
+        assert!(
+            !store
+                .with_current_public_profile(&approval, || panic!("stale enqueue"))
+                .unwrap()
+        );
+        store
+            .observe_profile_publication(&approval, ProfilePublicationResult::DhtAcknowledged)
+            .unwrap();
+        assert!(
+            store
+                .profile_signing_status()
+                .unwrap()
+                .last_publication
+                .is_none()
+        );
+    }
 
     #[test]
     fn profile_signing_settings_and_cursor_survive_reopen_without_inheriting_identity() {

@@ -22,7 +22,9 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             let mut store = open_store(&database)?;
             store.revoke_profile_signing_approval()
         }
-        [action, reviewed_agent, topics @ ..] if action == "approve-local-signing" => {
+        [action, reviewed_agent, topics @ ..]
+            if action == "approve-local-signing" || action == "approve-publication" =>
+        {
             let topics = parse_topics(topics)?;
             let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
             let agent_id = identity.agent_id();
@@ -31,7 +33,11 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 return Err(AslError::InvalidIdentity);
             }
             let mut store = open_store(&database)?;
-            store.set_profile_signing_approval(agent_id, topics)
+            if action == "approve-publication" {
+                store.approve_profile_publication(agent_id, topics)
+            } else {
+                store.set_profile_signing_approval(agent_id, topics)
+            }
         }
         _ => Err(AslError::InvalidMessage),
     }

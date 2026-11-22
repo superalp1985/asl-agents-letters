@@ -110,7 +110,7 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 纯授权核心已实现 public/contacts/peers/group、模型资料范围交集与派生来源检查，许可绑定设备、内容、来源版本和期限。信任/贡献不进入授权输入；本机授权事实由 core 提供，不接受对端自报。Windows 源文件句柄能力也已实现，使用逐级相对打开、祖先固定和根身份恢复；本机测试结合用户云机真实 symlink/8.3 夹具及修正后 22 项完整通过反馈，T08 本任务系统验收完成。数据库撤销与传输栅栏仍须后续集成，详见 `docs/policy-authorization.md` 和 `docs/windows-source-handles.md`。
 
-结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，并将该目录的发布序号持久保存；续签依赖当前链承诺、证书和本机目录文件有效。这只是直连身份材料续签，不等于 DHT 公网发布。资料默认不签名、不发布；现有本机授权仅允许为所选主题生成签名候选。头像引用需单独授权，尚未接入节点页。远端记录历史仍未持久化，签名资料的实际 DHT 发布待接入，详见 `docs/signed-records.md`。
+结构化签名记录覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，续签依赖当前链承诺、证书和本机目录文件有效；设备目录不在本切片发布。资料默认不签名、不公开。明确批准后，Core 可通过已连接的 DHT 邻居发送所选主题，使用独立持久序号。头像尚未接入，远端记录历史未持久化，详见 `docs/signed-records.md`。
 
 可信检查点续期只更换检查点，保留身份序号和撤销观察，并清空短期证明。过期快照不能用于普通恢复；最终性冲突锁不能通过续期清除。
 
@@ -159,7 +159,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 节点页可查看当前链身份检查点，录入并授权从可信来源独立核对的新 slot 和 Beacon root。Core 下次启动只验证一次，验证通过才替换检查点；失败保留原快照。验证开始前可取消，不会自动选取信任源。命令行可用 `asl-core --checkpoint status` 查看状态。
 
-节点页的「身份资料」可勾选 ASL 主题并授权本机签名，也可随时撤销。批准只适用于当前 AgentId 和选中的主题，不包括头像、自由文本或网络公开；「上次本机签名」不代表任何节点已收到资料。命令行可用 `asl-core --profile status` 查看状态。
+节点页的「身份资料」可勾选 ASL 主题，选择仅本机签名或授权 DHT 公开。批准绑定当前 AgentId 和选中的主题，不包括头像或自由文本。撤销会停止新提交和续发，无法追回已发送的副本。界面区分提交和 DHT 应答；应答不代表对端已验签保存。命令行可用 `asl-core --profile status` 查看状态。
 
 授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
 
@@ -249,7 +249,7 @@ The nine desktop views include contacts, groups, activity, transfers, and permis
 
 Nodes shows the current chain checkpoint and lets you approve a new slot and Beacon root checked against an independent trusted source. Core checks the approved candidate once on its next start. If verification fails, it keeps the previous snapshot. You can cancel before verification starts, and Core does not pick a trusted source for you. `asl-core --checkpoint status` shows the same state at the command line.
 
-Under Identity Profile on the Nodes page, you can select ASL topics, approve local signing, or revoke that approval. Approval applies only to the current AgentId and the selected topics. It does not cover avatars, free text, or network disclosure. The last local signature does not mean any peer received a profile. Run `asl-core --profile status` to inspect the state.
+Under Identity Profile on the Nodes page, select ASL topics and approve either local signing or DHT publication. Approval covers only the current AgentId and selected topics, not avatars or free text. Revocation stops new submissions and renewals but cannot recall copies already sent. The UI distinguishes submission from a DHT acknowledgment, which does not prove remote validation or storage. Run `asl-core --profile status` to inspect the state.
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
 
@@ -291,7 +291,7 @@ As of November 19, 2026, SQLite initialization/migration, the deterministic ASL/
 
 The pure authorization core implements public/contacts/peers/group audiences, model-provider intersections and provenance checks. Permits bind devices, content, source revisions and expiry. Trust/contribution are not authorization inputs. Facts come from the trusted local broker, never peer claims. Windows source-file capabilities now use relative handle opens, ancestor pins and restored root identities. Local tests, the user's earlier cloud log exercising real symlink/8.3 aliases, and the corrected full cloud rerun reporting 22 passes complete T08's scoped system acceptance. Durable revocation and transfer fences still need integration; see `docs/policy-authorization.md` and `docs/windows-source-handles.md`.
 
-The structured signed-record core covers profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes and persists its publication sequence; renewal requires the current chain commitment, device certificates and local directory file to remain valid. This refreshes direct identity-proof material but does not publish to the public DHT. Profile signing and publication are off by default. Local approval permits signing candidates for the selected topics only. Avatars require separate approval and are not wired into the Nodes page. Remote record history is not durable, and actual DHT profile publication remains pending; see `docs/signed-records.md`.
+Structured signed records cover profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes while its chain commitment, certificates and local directory file remain valid; this does not publish the directory. Profile signing and publication are off by default. Explicit publication approval lets Core send the selected topics through connected DHT neighbors, using a separate persistent sequence. Avatars are not wired in, and remote record history is not durable. See `docs/signed-records.md`.
 
 Explicit checkpoint renewal changes only the checkpoint, retains identity sequence and revocation observations, and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock.
 

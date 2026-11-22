@@ -233,6 +233,31 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::PrepareProfile {
+                operation_id,
+                agent,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .prepare_profile_publication(operation_id, agent)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::PublishProfile {
+                operation_id,
+                value,
+            } => {
+                if let Err(error) = self.transport.publish_prepared_profile(operation_id, value) {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::CancelProfile { operation_id } => {
+                self.transport.cancel_profile_publication(operation_id);
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;
@@ -918,6 +943,18 @@ impl NetworkBridge {
                     key,
                     value,
                 })?;
+            }
+            TransportEvent::ProfilePublicationProgress {
+                operation_id,
+                succeeded,
+            } => {
+                let result = if succeeded {
+                    Ok(())
+                } else {
+                    Err(io::ErrorKind::NotConnected.into())
+                };
+                self.send_operation_result(operation_id, result, writer)
+                    .map_err(|_| AslError::SandboxUnavailable)?;
             }
             TransportEvent::InboundRejected => {}
             TransportEvent::Connected { connection } => {

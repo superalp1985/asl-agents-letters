@@ -786,3 +786,9 @@ Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：定向检查�
 使用真实 SQLite 和 `asl-core --profile` 子进程核对默认关闭、当前身份核对、主题选择和撤销；只读 Dashboard 与持久游标测试覆盖重启后保留选项、不同 AgentId 不继承、资料序号与设备目录独立。CoreAdmission 使用合成链证据签发 CBOR，独立核对根签名和 30 分钟有效期；撤销并重新批准相同主题后旧候选仍不能写回。
 
 Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：`asl-app` profile 57 项、真实 CLI 1 项、`asl-store` 定向 1 项通过；`asl-app` 和 `asl-store` 含桌面目标的全目标严格 Clippy 通过。未运行原生窗口、真实链 RPC 或 DHT 出站；没有新增网络发布能力、协议字段或依赖。
+
+### 2026-11-22 T34 主题资料 DHT 出站
+
+两个同机 libp2p TCP transport 通过已按策略建立的连接验证：查找阶段无资料候选、取消后旧操作无法提交、批准的 PUT 到达对端待验证入口、DHT 应答可以在对端不落库时成立、发送端不留自动续发副本。夹具传送结构合法的合成签名封装，不代表接收端已完成真实链身份验证。SQLite 和 Core 的定向测试覆盖仅本机授权不公开、暂停和授权版本更替拦截入队、查找应答不算发布、旧应答不写入新批准。
+
+Windows x64、Rust 1.100.0、`--locked --offline`：同机 TCP 1 项、SQLite 2 项、IPC 21 项、Core 状态 1 项、真实 CLI 1 项通过。`asl-net`、`asl-store` 和 `asl-app` 含桌面目标的全目标严格 Clippy 通过。未在真实 AppContainer、公网、真实链 RPC 或原生桌面执行端到端发布，未接通远端资料浏览或头像。

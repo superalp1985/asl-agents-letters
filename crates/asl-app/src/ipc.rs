@@ -10,7 +10,7 @@ use asl_net::{
 };
 use asl_types::{
     error::AslError,
-    ids::PeerId,
+    ids::{AgentId, PeerId},
     manifest::MAX_MANIFEST_LEN,
     protocol::{
         GroupPacket, IdentityProof, IdentityProofRequest, MAX_CONTROL_FRAME_BYTES,
@@ -64,7 +64,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54 | 55)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=58)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -305,6 +305,17 @@ pub enum IpcMessage {
     StopProviding {
         operation_id: [u8; 16],
         key: [u8; 32],
+    },
+    PrepareProfile {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishProfile {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
+    },
+    CancelProfile {
+        operation_id: [u8; 16],
     },
     DhtProviders {
         lookup_id: [u8; 16],
@@ -1073,6 +1084,35 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             55
         }
+        IpcMessage::PrepareProfile {
+            operation_id,
+            agent,
+        } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(agent.as_bytes());
+            56
+        }
+        IpcMessage::PublishProfile {
+            operation_id,
+            value,
+        } => {
+            if *operation_id == [0; 16] || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(value);
+            57
+        }
+        IpcMessage::CancelProfile { operation_id } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            58
+        }
         IpcMessage::DhtProviders {
             lookup_id,
             status,
@@ -1444,6 +1484,19 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
         55 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::StopProviding {
             operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
+        }),
+        56 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::PrepareProfile {
+            operation_id: body[..16].try_into().unwrap(),
+            agent: AgentId(body[16..].try_into().unwrap()),
+        }),
+        57 if (17..=16 + MAX_DHT_VALUE_BYTES).contains(&body.len()) && body[..16] != [0; 16] => {
+            Ok(IpcMessage::PublishProfile {
+                operation_id: body[..16].try_into().unwrap(),
+                value: body[16..].to_vec(),
+            })
+        }
+        58 if body.len() == 16 && body != [0; 16] => Ok(IpcMessage::CancelProfile {
+            operation_id: body.try_into().unwrap(),
         }),
         45 if body.len() >= 18 && body[..16] != [0; 16] => {
             let status = match body[16] {
@@ -1956,7 +2009,9 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         39 => 50 + MAX_DHT_VALUE_BYTES,
         40 => 17,
         44 => 48,
-        54..=55 => 48,
+        54..=56 => 48,
+        57 => 16 + MAX_DHT_VALUE_BYTES,
+        58 => 16,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2331,6 +2386,17 @@ mod tests {
                 operation_id: [37; 16],
                 key: [38; 32],
             },
+            IpcMessage::PrepareProfile {
+                operation_id: [39; 16],
+                agent: AgentId([40; 32]),
+            },
+            IpcMessage::PublishProfile {
+                operation_id: [39; 16],
+                value: vec![0x81, 0x01],
+            },
+            IpcMessage::CancelProfile {
+                operation_id: [39; 16],
+            },
             IpcMessage::DhtProviders {
                 lookup_id: [34; 16],
                 status: DhtLookupStatus::Completed,
@@ -2496,6 +2562,9 @@ mod tests {
                 | IpcMessage::FindProviders { .. }
                 | IpcMessage::StartProviding { .. }
                 | IpcMessage::StopProviding { .. }
+                | IpcMessage::PrepareProfile { .. }
+                | IpcMessage::PublishProfile { .. }
+                | IpcMessage::CancelProfile { .. }
                 | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)

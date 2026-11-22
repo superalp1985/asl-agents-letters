@@ -153,6 +153,8 @@ short-code claim key = BLAKE3("ASL-SHORT-CODE-CLAIM-v1\0" || agent_id_bytes)
 
 profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受完全相同字节。撤下资料后不再续发，旧资料可能存续至 TTL 或远端缓存过期。profile key 基于 AgentId，签名者为身份根，避免设备轮换改变联系人身份。
 
+本机 Core → Net IPC 新增 kind 56（16 字节 operation ID、32 字节 AgentId，Net 派生 profile key 后查找）、57（同 ID、剩余字节为 1 至 8192 字节的签名记录，提交单阶段 PUT）、58（同 ID，取消）。Net 对查找或 PUT 完成复用 kind 19/20，Core 依当前操作阶段解释。DHT PUT 应答不代表接收方通过本节的记录验证。线上记录 CBOR 不变。
+
 profile payload 严格遵循 CDDL 中的 profile 结构，只能包含概念 ID 和明确授权的头像 content ID。昵称、描述、地点及任意标签文本不发布。头像必须同时存在一条明确公开的应用管理资源引用，不能因 profile 中出现 hash 就绕过文件授权。
 
 T13 编码补全（2026-11-18）：之前规范只冻结了签名原文，缺少封装、设备目录和短码声明的 CDDL。新增 `signed-record` 定义，不改变已有控制帧或合约存储。封装采用确定性整数键 map：0=版本 1、1=kind、2=AgentId、3=publication sequence、4=issued、5=expires、6=规范载荷字节、7=65 字节签名；整个封装最多 8 KiB。载荷字节必须再次通过对应已知结构的严格解码，不能承载任意 blob 或文本。所有记录最长 30 分钟。身份根签名复用设备证书的 Keccak-256、secp256k1 low-S 及 v=27/28 格式。

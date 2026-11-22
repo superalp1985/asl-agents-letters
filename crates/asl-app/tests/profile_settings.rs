@@ -48,6 +48,20 @@ fn profile_signing_cli_requires_reviewed_identity_and_never_claims_publication()
         serde_json::json!([101, 104])
     );
     assert!(approved["last_candidate"].is_null());
+    assert_eq!(approved["approval"]["publish"], false);
+    assert!(
+        !cli(&["approve-publication", "wrong-id", "101"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["approve-publication", &agent, "101"])
+            .status
+            .success()
+    );
+    let public = status();
+    assert_eq!(public["approval"]["publish"], true);
+    assert!(public["last_publication"].is_null());
     assert!(cli(&["revoke"]).status.success());
     assert!(status()["approval"].is_null());
 

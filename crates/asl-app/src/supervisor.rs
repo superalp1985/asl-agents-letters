@@ -1168,6 +1168,22 @@ impl Supervisor {
                     self.net.acknowledge_pong(nonce)?;
                     continue;
                 }
+                IpcMessage::OperationAccepted { operation_id }
+                    if self
+                        .profile_signing
+                        .handle_response(operation_id, true, Instant::now()) =>
+                {
+                    continue;
+                }
+                IpcMessage::OperationFailed { operation_id, .. }
+                    if self.profile_signing.handle_response(
+                        operation_id,
+                        false,
+                        Instant::now(),
+                    ) =>
+                {
+                    continue;
+                }
                 message if is_network_event(&message) => NetworkEvent::try_from(message)?,
                 _ => return Err(AslError::InvalidMessage),
             };

@@ -140,7 +140,7 @@ impl Viewer {
             "retention" => "浏览记录保留期限已更新",
             "providers" => "模型端点授权已更新",
             "checkpoint" => "检查点请求已更新",
-            "profile" => "本机资料签名授权已更新",
+            "profile" => "资料授权已更新",
             "network" => "已保存，待后台重新启动",
             _ => "本机授权已更新",
         };

@@ -20,6 +20,7 @@ use crate::relay::{
     relay_route_address,
 };
 mod behaviour;
+mod profile_publication;
 mod requests;
 use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
 use requests::Requests;
@@ -232,6 +233,10 @@ pub enum TransportEvent {
         key: [u8; 32],
         value: Vec<u8>,
     },
+    ProfilePublicationProgress {
+        operation_id: [u8; 16],
+        succeeded: bool,
+    },
     InboundRejected,
     DialFailed {
         peer_id: PeerId,
@@ -323,6 +328,7 @@ pub struct LocalTransport {
     reserved_relays: HashSet<libp2p::PeerId>,
     pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
     pending_dht_provider_lookups: HashMap<kad::QueryId, PendingDhtProviderLookup>,
+    profile_publication: Option<profile_publication::Publication>,
 }
 
 struct PendingDhtProviderLookup {
@@ -390,6 +396,7 @@ impl LocalTransport {
             reserved_relays: HashSet::new(),
             pending_dht_records: HashMap::new(),
             pending_dht_provider_lookups: HashMap::new(),
+            profile_publication: None,
         })
     }
 
@@ -1123,6 +1130,9 @@ impl LocalTransport {
     }
 
     fn handle_dht(&mut self, event: kad::Event) -> io::Result<Option<TransportEvent>> {
+        if let Some(progress) = self.handle_profile_publication_progress(&event) {
+            return Ok(Some(progress));
+        }
         if let kad::Event::OutboundQueryProgressed {
             id,
             result: kad::QueryResult::GetProviders(result),
