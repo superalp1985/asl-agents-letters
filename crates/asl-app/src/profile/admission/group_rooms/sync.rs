@@ -12,7 +12,8 @@ use asl_store::{
     Store,
     group_state::{
         MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsJournalEntry, MlsJournalKind,
-        MlsRemoveAuthority, MlsRoomUpdate, MlsSyncAddAuthority, MlsSyncReadAuthority, RoomVersion,
+        MlsRemoveAuthority, MlsRoomActivation, MlsRoomUpdate, MlsSyncAddAuthority,
+        MlsSyncReadAuthority, RoomVersion,
     },
 };
 use asl_types::{
@@ -369,6 +370,17 @@ impl CoreAdmission {
                     |_| Ok(false),
                 )?;
                 self.sync_peer_is_live(connection_id, &source.peer_id, &clock)?;
+                if source.peer_id == candidate.roster.creator {
+                    store.activate_mls_room_at_creator_head(MlsRoomActivation {
+                        wire_id,
+                        expected: run.expected,
+                        creator: &candidate.roster.creator,
+                        creator_device: &source.peer_id,
+                        members: &candidate.roster.members,
+                        chain_id,
+                        now_ms: clock.now_ms()?,
+                    })?;
+                }
                 Ok(Some(MlsNetworkOutcome::SyncHead {
                     wire_id,
                     version: run.expected,
@@ -592,7 +604,7 @@ impl CoreAdmission {
             roster.require_current_directories(&mut self.resolver, now)?;
             Ok(now)
         };
-        match projection {
+        let version = match projection {
             MemberProjection::Added(added) => store.commit_verified_mls_sync_add(
                 update,
                 MlsSyncAddAuthority {
@@ -615,7 +627,19 @@ impl CoreAdmission {
                 recorded_at_ms,
                 current_time,
             ),
+        }?;
+        if step.from.is_none() {
+            store.activate_mls_room_at_creator_head(MlsRoomActivation {
+                wire_id,
+                expected: version,
+                creator: &roster.creator,
+                creator_device: &self.local_hello.peer_id,
+                members: &roster.members,
+                chain_id,
+                now_ms: clock.now_ms()?,
+            })?;
         }
+        Ok(version)
     }
 
     fn sync_peer_is_live(

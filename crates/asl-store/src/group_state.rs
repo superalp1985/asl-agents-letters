@@ -8,6 +8,7 @@ mod invite_tests;
 mod outgoing;
 #[cfg(test)]
 mod outgoing_tests;
+mod policy;
 mod recovery;
 #[cfg(test)]
 mod recovery_tests;
@@ -18,7 +19,8 @@ mod transition;
 pub use application::MlsApplicationAuthority;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
-pub use recovery::{MlsMemberEvidence, MlsRoomRecovery};
+pub use policy::{GroupInboundPolicy, GroupInboundSwitch};
+pub use recovery::{MlsMemberEvidence, MlsRoomActivation, MlsRoomRecovery};
 pub use sync_authority::{MlsRemoveAuthority, MlsSyncAddAuthority, MlsSyncReadAuthority};
 pub use sync_log::{
     MLS_SYNC_MAX_STEPS, MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsSyncStoredStep,
@@ -65,19 +67,20 @@ pub struct MlsRoomSnapshot {
 }
 
 impl Store {
-    /// A trusted caller may stage a new room. Do not attach a network
-    /// identifier to an existing grant key or activate the room here.
+    /// A trusted caller may stage a new room. Staged rooms stay closed until
+    /// Core observes the creator's current head.
     pub fn stage_mls_room(&mut self, room: PendingMlsRoom<'_>) -> Result<(), AslError> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        insert_mls_room(&tx, &room, current_time_ms())?;
+        insert_mls_room(&tx, &room, current_time_ms(), false)?;
         tx.commit().map_err(database_error)
     }
 
     /// Create a local epoch-zero room and its creator projection together.
-    /// The sealed snapshot starts at revision one, and the room stays paused.
+    /// The sealed snapshot comes directly from the local creator's fresh MLS
+    /// state, so the room may become active in the same transaction.
     pub fn create_mls_room(
         &mut self,
         room: PendingMlsRoom<'_>,
@@ -107,7 +110,7 @@ impl Store {
 
         creator.register(&tx, chain_id, now_ms)?;
         let now = sql_number(now_ms)?;
-        insert_mls_room(&tx, &room, now)?;
+        insert_mls_room(&tx, &room, now, true)?;
         tx.execute(
             "INSERT INTO group_members(group_id,peer_id,role,state,joined_at_ms)
              VALUES (?1,?2,'creator','active',?3)",
@@ -144,6 +147,22 @@ impl Store {
             .optional()
             .map_err(database_error)?
             .map(|(state, epoch)| Ok((state, unsigned(epoch)?)))
+            .transpose()
+    }
+
+    pub fn mls_room_wire_id(&self, local_id: &GroupId) -> Result<Option<Hash32>, AslError> {
+        self.connection
+            .query_row(
+                "SELECT wire_group_id FROM mls_room_states WHERE local_group_id=?1",
+                [hex::encode(local_id.0.as_bytes())],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .map(|bytes| {
+                let bytes: [u8; 32] = bytes.try_into().map_err(|_| AslError::InvalidDatabase)?;
+                Ok(Hash32(bytes))
+            })
             .transpose()
     }
 }
@@ -201,6 +220,7 @@ fn insert_mls_room(
     tx: &rusqlite::Transaction<'_>,
     room: &PendingMlsRoom<'_>,
     now: i64,
+    active: bool,
 ) -> Result<(), AslError> {
     if *room.local_id.0.as_bytes() == [0; 16]
         || room.wire_id.0 == [0; 32]
@@ -210,10 +230,18 @@ fn insert_mls_room(
     }
     let local_id = hex::encode(room.local_id.0.as_bytes());
     let creator = bs58::encode(room.creator.as_bytes()).into_string();
+    let state = if active { "active" } else { "needs_sync" };
     tx.execute(
         "INSERT INTO asl_groups(group_id,creator_peer_id,local_name,mls_epoch,state,created_at_ms,updated_at_ms)
-         VALUES (?1,?2,?3,?4,'needs_sync',?5,?5)",
-        params![local_id, creator, room.local_name, sql_number(room.mls_epoch)?, now],
+         VALUES (?1,?2,?3,?4,?5,?6,?6)",
+        params![
+            local_id,
+            creator,
+            room.local_name,
+            sql_number(room.mls_epoch)?,
+            state,
+            now
+        ],
     )
     .map_err(database_error)?;
     tx.execute(
@@ -360,6 +388,7 @@ mod tests {
         let initial = store
             .commit_mls_room_candidate(update(base, 4, &members, b"projected", None))
             .unwrap();
+        assert_eq!(initial.membership_epoch, base.membership_epoch + 1);
         let id = Id128([2; 16]);
         let event = |kind, ciphertext| {
             Some(MlsJournalEntry {
@@ -427,7 +456,7 @@ mod tests {
             RoomVersion {
                 revision: 4,
                 mls_epoch: 5,
-                membership_epoch: 1,
+                membership_epoch: initial.membership_epoch + 1,
                 policy_revision: 1
             }
         );

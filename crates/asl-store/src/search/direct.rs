@@ -8,7 +8,7 @@ use asl_policy::{
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    task::{GrantId, ResourceKey},
+    task::{GrantId, GroupId, ResourceKey},
 };
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -189,14 +189,14 @@ impl Store {
     }
 }
 
-struct DirectRow {
-    key: ResourceKey,
-    resource: ResourcePolicy,
-    grant: GrantPolicy,
-    dependencies: Vec<(ResourceKey, ResourcePolicy, GrantPolicy)>,
+pub(super) struct DirectRow {
+    pub key: ResourceKey,
+    pub resource: ResourcePolicy,
+    pub grant: GrantPolicy,
+    pub dependencies: Vec<(ResourceKey, ResourcePolicy, GrantPolicy)>,
 }
 
-fn direct_revision(
+pub(super) fn direct_revision(
     db: &Connection,
     requester: &DirectRequester,
 ) -> Result<PolicyRevision, AslError> {
@@ -253,7 +253,8 @@ fn visit_direct_rows(
     drop(statement);
     for key in keys {
         let key = ResourceKey(Id128(bytes(&key)?));
-        let Some(node) = load_policy_node(db, requester, &key, 0, &mut HashSet::new())? else {
+        let Some(node) = load_policy_node(db, requester, None, &key, 0, &mut HashSet::new())?
+        else {
             continue;
         };
         let mut dependencies = Vec::new();
@@ -268,10 +269,10 @@ fn visit_direct_rows(
     Ok(())
 }
 
-struct PolicyNode {
-    key: ResourceKey,
-    resource: ResourcePolicy,
-    grant: GrantPolicy,
+pub(super) struct PolicyNode {
+    pub(super) key: ResourceKey,
+    pub(super) resource: ResourcePolicy,
+    pub(super) grant: GrantPolicy,
     sources: Vec<PolicyNode>,
 }
 
@@ -292,11 +293,13 @@ struct DirectPolicyRow {
     snapshot_state: String,
     grant_status: Option<String>,
     source_grant_epoch: Option<i64>,
+    group_id: Option<String>,
 }
 
-fn load_policy_node(
+pub(super) fn load_policy_node(
     db: &Connection,
     requester: &DirectRequester,
+    group_scope: Option<&GroupId>,
     key: &ResourceKey,
     depth: usize,
     path: &mut HashSet<ResourceKey>,
@@ -309,7 +312,7 @@ fn load_policy_node(
             "SELECT r.resource_key,r.content_id,r.grant_id,g.epoch,s.file_size,
                     r.source_relative,g.extensions_json,g.audience,g.max_snapshot_bytes,
                     g.allow_derived_disclosure,r.origin,r.active,r.label_json,s.state,
-                    g.status,r.source_grant_epoch
+                    g.status,r.source_grant_epoch,g.group_id
              FROM resources r JOIN snapshots s USING(content_id)
              LEFT JOIN grants g ON g.grant_id=r.grant_id
              WHERE r.resource_key=?1",
@@ -332,6 +335,7 @@ fn load_policy_node(
                     snapshot_state: row.get(13)?,
                     grant_status: row.get(14)?,
                     source_grant_epoch: row.get(15)?,
+                    group_id: row.get(16)?,
                 })
             },
         )
@@ -409,7 +413,12 @@ fn load_policy_node(
                 Audience::Peers(HashSet::new())
             }
         }
-        "group" => Audience::Peers(HashSet::new()),
+        "group" => match (group_scope, row.group_id.as_deref()) {
+            (Some(group), Some(granted)) if granted == hex::encode(group.0.as_bytes()) => {
+                Audience::Group(group.clone())
+            }
+            _ => Audience::Peers(HashSet::new()),
+        },
         _ => {
             path.remove(key);
             return Err(AslError::InvalidDatabase);
@@ -494,7 +503,8 @@ fn load_policy_node(
     let mut node = node;
     if let ResourceOrigin::Derived { sources, .. } = &node.resource.origin {
         for source in sources {
-            let Some(source_node) = load_policy_node(db, requester, source, depth + 1, path)?
+            let Some(source_node) =
+                load_policy_node(db, requester, group_scope, source, depth + 1, path)?
             else {
                 path.remove(key);
                 return Ok(None);
@@ -506,7 +516,7 @@ fn load_policy_node(
     Ok(Some(node))
 }
 
-fn flatten_dependencies(
+pub(super) fn flatten_dependencies(
     node: &PolicyNode,
     output: &mut Vec<(ResourceKey, ResourcePolicy, GrantPolicy)>,
 ) {

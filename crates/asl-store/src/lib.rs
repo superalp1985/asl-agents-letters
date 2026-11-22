@@ -8,16 +8,20 @@ use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub mod chain;
+pub mod contact_bindings;
 pub mod conversation;
+pub mod dashboard;
 pub mod evidence;
 pub mod group_state;
+pub mod inbound_observations;
 pub mod paired_contacts;
+mod publication;
 pub mod resources;
 pub mod search;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 20;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -33,6 +37,11 @@ const SCHEMA_V12: &str = include_str!("../../../specs/schema-v12.sql");
 const SCHEMA_V13: &str = include_str!("../../../specs/schema-v13.sql");
 const SCHEMA_V14: &str = include_str!("../../../specs/schema-v14.sql");
 const SCHEMA_V15: &str = include_str!("../../../specs/schema-v15.sql");
+const SCHEMA_V16: &str = include_str!("../../../specs/schema-v16.sql");
+const SCHEMA_V17: &str = include_str!("../../../specs/schema-v17.sql");
+const SCHEMA_V18: &str = include_str!("../../../specs/schema-v18.sql");
+const SCHEMA_V19: &str = include_str!("../../../specs/schema-v19.sql");
+const SCHEMA_V20: &str = include_str!("../../../specs/schema-v20.sql");
 
 pub struct Store {
     connection: Connection,
@@ -56,14 +65,7 @@ impl Store {
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, AslError> {
-        self.connection
-            .query_row(
-                "SELECT value_json FROM settings WHERE key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(database_error)
+        read_setting(&self.connection, key)
     }
 
     pub fn set_setting(
@@ -72,18 +74,38 @@ impl Store {
         value_json: &str,
         updated_at_ms: i64,
     ) -> Result<(), AslError> {
-        self.connection
-            .execute(
-                "INSERT INTO settings(key, value_json, updated_at_ms)
+        write_setting(&self.connection, key, value_json, updated_at_ms)
+    }
+}
+
+fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>, AslError> {
+    connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)
+}
+
+fn write_setting(
+    connection: &Connection,
+    key: &str,
+    value_json: &str,
+    updated_at_ms: i64,
+) -> Result<(), AslError> {
+    connection
+        .execute(
+            "INSERT INTO settings(key, value_json, updated_at_ms)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(key) DO UPDATE SET
                      value_json = excluded.value_json,
                      updated_at_ms = excluded.updated_at_ms",
-                params![key, value_json, updated_at_ms],
-            )
-            .map_err(database_error)?;
-        Ok(())
-    }
+            params![key, value_json, updated_at_ms],
+        )
+        .map_err(database_error)?;
+    Ok(())
 }
 
 pub fn open_store(path: &Path) -> Result<Store, AslError> {
@@ -140,6 +162,21 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 15 {
             apply_migration_in_transaction(&transaction, SCHEMA_V15, 15, now)?;
+        }
+        if version < 16 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V16, 16, now)?;
+        }
+        if version < 17 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V17, 17, now)?;
+        }
+        if version < 18 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V18, 18, now)?;
+        }
+        if version < 19 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V19, 19, now)?;
+        }
+        if version < 20 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V20, 20, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
@@ -325,12 +362,12 @@ mod tests {
 
         {
             let store = open_store(database.path()).unwrap();
-            assert_eq!(store.schema_version(), 15);
+            assert_eq!(store.schema_version(), SCHEMA_VERSION as u32);
             assert_eq!(store.policy_revision().unwrap(), 1);
         }
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), SCHEMA_VERSION as u32);
         assert_eq!(store.policy_revision().unwrap(), 1);
 
         let migration_count: i64 = store
@@ -339,7 +376,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 15);
+        assert_eq!(migration_count, SCHEMA_VERSION);
 
         let integrity: String = store
             .connection
@@ -365,7 +402,7 @@ mod tests {
         drop(connection);
 
         let store = open_store(database.path()).unwrap();
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), SCHEMA_VERSION as u32);
         let conversations_exist: i64 = store
             .connection
             .query_row(
@@ -409,6 +446,69 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_v16_with_device_bound_upload_approval_columns() {
+        let database = TestDatabase::new();
+        let mut connection = Connection::open(database.path()).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for (migration, version) in [
+            (SCHEMA_V1, 1),
+            (SCHEMA_V2, 2),
+            (SCHEMA_V3, 3),
+            (SCHEMA_V4, 4),
+            (SCHEMA_V5, 5),
+            (SCHEMA_V6, 6),
+            (SCHEMA_V7, 7),
+            (SCHEMA_V8, 8),
+            (SCHEMA_V9, 9),
+            (SCHEMA_V10, 10),
+            (SCHEMA_V11, 11),
+            (SCHEMA_V12, 12),
+            (SCHEMA_V13, 13),
+            (SCHEMA_V14, 14),
+            (SCHEMA_V15, 15),
+            (SCHEMA_V16, 16),
+        ] {
+            apply_migration_in_transaction(&transaction, migration, version, 0).unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let store = open_store(database.path()).unwrap();
+        assert_eq!(store.schema_version(), SCHEMA_VERSION as u32);
+        let columns: Vec<String> = store
+            .connection
+            .prepare("PRAGMA table_info(transfer_consents)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "target_peer_id"));
+        assert!(columns.iter().any(|column| column == "upload_filename"));
+        assert!(columns.iter().any(|column| column == "upload_size"));
+        let observation_table_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE type='table' AND name='direct_inbound_observations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(observation_table_exists);
+        let index_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE type='index' AND name='upload_consent_lookup')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists);
+    }
+
+    #[test]
     fn configures_wal_foreign_keys_and_full_synchronous_mode() {
         let database = TestDatabase::new();
         let store = open_store(database.path()).unwrap();
@@ -441,7 +541,7 @@ mod tests {
         store.set_setting(key, value, 42).unwrap();
 
         assert_eq!(store.get_setting(key).unwrap().as_deref(), Some(value));
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), SCHEMA_VERSION as u32);
     }
 
     #[test]
@@ -550,6 +650,6 @@ mod tests {
             upgraded.get_setting("keep").unwrap().as_deref(),
             Some("true")
         );
-        assert_eq!(upgraded.schema_version(), 15);
+        assert_eq!(upgraded.schema_version(), SCHEMA_VERSION as u32);
     }
 }

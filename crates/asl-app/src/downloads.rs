@@ -8,7 +8,7 @@
 use std::{collections::HashMap, path::Path};
 
 use asl_policy::WriteGrant;
-use asl_store::transfers::{DownloadBroker, DownloadRequest};
+use asl_store::transfers::{DownloadBroker, DownloadRequest, GroupTransferBinding};
 pub use asl_store::transfers::{DownloadConsent, DownloadInfo, DownloadMode, DownloadStart};
 use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
@@ -89,7 +89,22 @@ impl LocalDownloads {
         filename: &str,
     ) -> Result<DownloadStart, AslError> {
         self.broker
-            .request_download(&download_request(sources, inbox_grant, filename)?)
+            .request_download(&download_request(sources, inbox_grant, filename, None)?)
+    }
+
+    pub fn request_group_download_from(
+        &mut self,
+        sources: &[&VerifiedFetchManifest],
+        inbox_grant: Id128,
+        filename: &str,
+        group: GroupTransferBinding,
+    ) -> Result<DownloadStart, AslError> {
+        self.broker.request_download(&download_request(
+            sources,
+            inbox_grant,
+            filename,
+            Some(group),
+        )?)
     }
 
     /// Record the local user's decision. Approval alone does not start a transfer.
@@ -117,7 +132,21 @@ impl LocalDownloads {
         id: Id128,
     ) -> Result<DownloadInfo, AslError> {
         self.broker
-            .begin_approved_download(&download_request(sources, inbox_grant, filename)?, id)
+            .begin_approved_download(&download_request(sources, inbox_grant, filename, None)?, id)
+    }
+
+    pub fn begin_approved_group_download_from(
+        &mut self,
+        sources: &[&VerifiedFetchManifest],
+        inbox_grant: Id128,
+        filename: &str,
+        id: Id128,
+        group: GroupTransferBinding,
+    ) -> Result<DownloadInfo, AslError> {
+        self.broker.begin_approved_download(
+            &download_request(sources, inbox_grant, filename, Some(group))?,
+            id,
+        )
     }
 
     fn request_selected_download(
@@ -127,8 +156,9 @@ impl LocalDownloads {
         inbox_grant: Id128,
         filename: &str,
         approval: Option<Id128>,
+        group: Option<GroupTransferBinding>,
     ) -> Result<DownloadStart, AslError> {
-        let mut request = download_request(&[manifest], inbox_grant, filename)?;
+        let mut request = download_request(&[manifest], inbox_grant, filename, group)?;
         request.sources = sources
             .iter()
             .map(|source| source.peer_id.clone())
@@ -147,6 +177,7 @@ fn download_request(
     sources: &[&VerifiedFetchManifest],
     inbox_grant: Id128,
     filename: &str,
+    group: Option<GroupTransferBinding>,
 ) -> Result<DownloadRequest, AslError> {
     let &[event, ..] = sources else {
         return Err(AslError::NotFound);
@@ -179,6 +210,7 @@ fn download_request(
         write_grant_id: inbox_grant,
         destination_relative: filename.into(),
         sources: peers,
+        group,
     })
 }
 

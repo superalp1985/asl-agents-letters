@@ -6,10 +6,11 @@ use asl_types::{
     protocol::ConceptRef,
     record::{RecordKind, RecordPayload, decode_record},
 };
+pub use libp2p::kad::RecordKey;
 use libp2p::{
     PeerId,
     kad::{
-        ProviderRecord, Record, RecordKey,
+        ProviderRecord, Record,
         store::{self, MemoryStore, MemoryStoreConfig, RecordStore},
     },
 };

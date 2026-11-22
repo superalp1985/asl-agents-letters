@@ -5,10 +5,10 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
-        DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
-        IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer, PairingExchange,
-        PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus, StorageProof,
-        TypedValue, WireFrame,
+        DeviceCertificate, Feature, FetchGrant, FetchPending, FetchRequest, GroupEnvelope,
+        GroupOperation, Hello, IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer,
+        PairingExchange, PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus,
+        StorageProof, TypedValue, WireFrame,
     },
 };
 
@@ -183,6 +183,12 @@ pub fn sample_frames() -> Vec<WireFrame> {
             epoch: 2,
             operation: GroupOperation::Application,
             ciphertext: vec![16; 128],
+        }),
+        WireFrame::FetchPending(FetchPending {
+            message_id: id,
+            content_id: hash,
+            retry_at_ms: 150,
+            expires_at_ms: 200,
         }),
     ]
 }

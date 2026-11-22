@@ -86,6 +86,12 @@
       "accepted": true
     },
     {
+      "name": "fetch-pending-v1",
+      "root": "fetch-pending",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
       "name": "signed-profile-record-v1",
       "root": "signed-profile-record",
       "codec": "record",

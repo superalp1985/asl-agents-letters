@@ -362,6 +362,7 @@ impl LocalOffer {
                     inbox_grant: inbox,
                     filename: format!("asl-{}.bin", hex::encode(content_id.0)),
                     sources: vec![self.source.clone()],
+                    group: None,
                 }))
                 .map_err(error_code)?;
             // Keep the accepted job even if the caller times out before it has a transfer ID.

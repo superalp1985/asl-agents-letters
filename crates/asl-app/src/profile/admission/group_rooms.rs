@@ -11,7 +11,7 @@ mod removal;
 mod sync;
 
 pub use application::MlsApplicationReceive;
-pub use delivery::MlsApplicationDispatch;
+pub use delivery::{MlsApplicationDispatch, MlsApplicationSendToConnection};
 pub(super) use directories::GroupDirectoryCache;
 pub(super) use network::MlsJoinAttempts;
 pub use network::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome};

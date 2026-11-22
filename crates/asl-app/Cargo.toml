@@ -25,6 +25,7 @@ alloy-consensus.workspace = true
 helios-consensus-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+bs58.workspace = true
 cbor2.workspace = true
 blake3.workspace = true
 image.workspace = true
@@ -43,8 +44,20 @@ snow = "=0.10.0"
 tokio = { workspace = true, features = ["net", "io-util"] }
 
 [dev-dependencies]
+asl-policy = { path = "../asl-policy", features = ["appcontainer-loopback-fixture"] }
 eframe.workspace = true
 rmcp.workspace = true
 rusqlite.workspace = true
-bs58.workspace = true
 openmls_rust_crypto = "=0.6.0"
+
+[features]
+desktop-ui = ["dep:eframe"]
+
+[target.'cfg(windows)'.dependencies.eframe]
+workspace = true
+optional = true
+
+[[bin]]
+name = "asl-ui"
+path = "src/bin/asl-ui.rs"
+required-features = ["desktop-ui"]

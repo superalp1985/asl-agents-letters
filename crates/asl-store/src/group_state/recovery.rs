@@ -1,17 +1,36 @@
 use asl_types::{
     error::AslError,
-    ids::{Hash32, PeerId},
+    ids::{AgentId, Hash32, PeerId},
     protocol::{DeviceCertificate, MAX_GROUP_MEMBERS},
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::{MlsRoomSnapshot, read_mls_room_snapshot, transition::peer_text};
-use crate::{Store, chain::agent_text, database_error, transfer_peers::DeviceRegistration};
+use super::{
+    MlsRoomSnapshot, RoomVersion, read_mls_room_snapshot, sql_number,
+    sync_authority::{member_ids, room_version},
+    transition::peer_text,
+};
+use crate::{
+    Store,
+    chain::{agent_text, decode_agent_text},
+    database_error,
+    transfer_peers::DeviceRegistration,
+};
 
 pub struct MlsRoomRecovery {
     pub snapshot: MlsRoomSnapshot,
     pub creator: PeerId,
     pub members: Vec<PeerId>,
+}
+
+pub struct MlsRoomActivation<'a> {
+    pub wire_id: Hash32,
+    pub expected: RoomVersion,
+    pub creator: &'a PeerId,
+    pub creator_device: &'a PeerId,
+    pub members: &'a [MlsMemberEvidence],
+    pub chain_id: u64,
+    pub now_ms: u64,
 }
 
 /// Core-verified chain and device facts. SQLite compares them to current
@@ -48,9 +67,8 @@ impl MlsMemberEvidence {
 }
 
 impl Store {
-    /// Read a paused room and its active device projection from one SQLite snapshot.
-    /// Missing or non-paused rooms return `None`; a room without a consistent
-    /// projection cannot be reconciled. This does not activate the room.
+    /// Read a known room and its active device projection from one SQLite
+    /// snapshot. Callers still establish freshness before any authorization.
     pub fn mls_room_for_reconciliation(
         &self,
         wire_id: Hash32,
@@ -59,7 +77,7 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(database_error)?;
-        let room = match read_mls_room_snapshot(&tx, wire_id, true)? {
+        let room = match read_mls_room_snapshot(&tx, wire_id, false)? {
             Some((snapshot, creator)) => {
                 let creator = parse_peer(&creator)?;
                 let members = active_members(&tx, wire_id, &creator)?;
@@ -82,6 +100,76 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), AslError> {
         require_member(&self.connection, member, chain_id, now_ms)
+    }
+
+    /// Open a reconciled room only from the creator device's live head.
+    /// Membership changes close the room again by advancing its member epoch.
+    pub fn activate_mls_room_at_creator_head(
+        &mut self,
+        activation: MlsRoomActivation<'_>,
+    ) -> Result<RoomVersion, AslError> {
+        if activation.creator_device != activation.creator {
+            return Err(AslError::PolicyDenied);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if room_version(&tx, activation.wire_id, activation.creator)? != activation.expected {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        let projection = active_members(&tx, activation.wire_id, activation.creator)?;
+        if member_ids(activation.members)? != projection.iter().map(peer_text).collect() {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        for member in activation.members {
+            require_member(&tx, member, activation.chain_id, activation.now_ms)?;
+        }
+        let local_id: String = tx
+            .query_row(
+                "SELECT local_group_id FROM mls_room_states WHERE wire_group_id=?1",
+                [activation.wire_id.as_bytes()],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        let updated = tx
+            .execute(
+                "UPDATE asl_groups SET state='active',updated_at_ms=?4
+                 WHERE group_id=?1 AND state='needs_sync' AND creator_peer_id=?2
+                   AND mls_epoch=?3 AND membership_epoch=?5",
+                params![
+                    local_id,
+                    peer_text(activation.creator),
+                    sql_number(activation.expected.mls_epoch)?,
+                    sql_number(activation.now_ms)?,
+                    sql_number(activation.expected.membership_epoch)?,
+                ],
+            )
+            .map_err(database_error)?;
+        if updated != 1 {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(activation.expected)
+    }
+
+    /// Maps an MLS device leaf back to its stable AgentId for local group
+    /// conversation budgets. MLS admission already verified the leaf itself.
+    pub fn mls_peer_agent(&self, peer: &PeerId) -> Result<Option<AgentId>, AslError> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT d.agent_id FROM device_identities d
+                 JOIN peers p USING(peer_id,agent_id)
+                 JOIN agents a USING(agent_id)
+                 WHERE d.peer_id=?1 AND d.revoked_at_ms IS NULL
+                   AND a.identity_state IN ('pending_anchor','verified')",
+                [peer_text(peer)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        value.map(|text| decode_agent_text(&text)).transpose()
     }
 }
 

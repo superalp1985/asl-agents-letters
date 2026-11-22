@@ -16,6 +16,7 @@ const INVITE_DOMAIN: &[u8] = b"ASL-PAIR-INVITE-v1\0";
 const ACCEPT_DOMAIN: &[u8] = b"ASL-PAIR-DECISION-v1\0";
 const INVITE_LIFETIME_MS: u64 = 3 * 60 * 1_000;
 const MAX_INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
+#[cfg(test)]
 pub(crate) const MAX_PENDING_PAIRING_PROMPTS: usize = 5;
 
 #[derive(Default)]
@@ -30,10 +31,12 @@ struct PendingPairingPrompt {
 }
 
 impl PendingPairingPrompts {
+    #[cfg(test)]
     pub(crate) fn can_insert(&self, invite_id: [u8; 16]) -> bool {
         self.entries.len() < MAX_PENDING_PAIRING_PROMPTS && !self.entries.contains_key(&invite_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(
         &mut self,
         connection_id: [u8; 16],
@@ -177,26 +180,6 @@ pub fn answer_signed_invite(
     Ok(exchange)
 }
 
-pub(crate) fn decline_rate_limited_invite(
-    identity: &AgentIdentity,
-    admission: &mut CoreAdmission,
-    local_peer: &PeerId,
-    connection_id: [u8; 16],
-    invite: &PairingInvite,
-    now_ms: u64,
-) -> Result<PairingExchange, AslError> {
-    let (remote_agent, remote_peer) = admission.admitted_peer_identity(connection_id, now_ms)?;
-    let remote_controller = admission.verified_controller(remote_agent, now_ms)?;
-    validate_invite(
-        invite,
-        remote_agent,
-        identity.agent_id(),
-        now_ms,
-        remote_controller,
-    )?;
-    signed_exchange(identity, local_peer, invite, &remote_peer, false)
-}
-
 fn signed_exchange(
     identity: &AgentIdentity,
     local_peer: &PeerId,
@@ -315,22 +298,6 @@ fn validate_invite(
         });
     }
     verify_root_signature(&invite_signing_bytes(invite)?, invite.signature, controller)
-}
-
-pub(crate) fn verify_incoming_invite(
-    invite: &PairingInvite,
-    authenticated_inviter: AgentId,
-    expected_target: AgentId,
-    now_ms: u64,
-    controller: [u8; 20],
-) -> Result<(), AslError> {
-    validate_invite(
-        invite,
-        authenticated_inviter,
-        expected_target,
-        now_ms,
-        controller,
-    )
 }
 
 fn invite_signing_bytes(invite: &PairingInvite) -> Result<Vec<u8>, AslError> {

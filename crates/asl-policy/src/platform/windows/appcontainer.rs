@@ -12,6 +12,10 @@ use windows::Win32::Foundation::{
     DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
     SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+#[cfg(feature = "appcontainer-loopback-fixture")]
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
+#[cfg(feature = "appcontainer-loopback-fixture")]
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile};
 use windows::Win32::Security::{
     CreateWellKnownSid, EqualSid, FreeSid, GetTokenInformation, PSID, SECURITY_CAPABILITIES,
@@ -110,26 +114,51 @@ struct Profile {
     name: HSTRING,
     sid: PSID,
     present: bool,
+    #[cfg(feature = "appcontainer-loopback-fixture")]
+    loopback_fixture: Option<LoopbackFixture>,
 }
 
 impl Profile {
-    fn create() -> Result<Self, AslError> {
-        let name = HSTRING::from(format!("asl.{}", rand::random::<u128>()));
-        let sid = unsafe { CreateAppContainerProfile(&name, &name, &name, None) }
+    fn create(_role: SandboxRole, capabilities: &[SID_AND_ATTRIBUTES]) -> Result<Self, AslError> {
+        let name_text = format!("asl.{}", rand::random::<u128>());
+        let name = HSTRING::from(&name_text);
+        let requested = (!capabilities.is_empty()).then_some(capabilities);
+        let sid = unsafe { CreateAppContainerProfile(&name, &name, &name, requested) }
             .map_err(|error| setup_error("create_appcontainer", error))?;
-        Ok(Self {
+        let profile = Self {
             name,
             sid,
             present: true,
-        })
+            #[cfg(feature = "appcontainer-loopback-fixture")]
+            loopback_fixture: None,
+        };
+        #[cfg(feature = "appcontainer-loopback-fixture")]
+        if _role == SandboxRole::Net
+            && std::env::var_os("ASL_APPCONTAINER_LOOPBACK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            let mut profile = profile;
+            profile.loopback_fixture = Some(LoopbackFixture::enable(sid_text(sid)?)?);
+            return Ok(profile);
+        }
+        Ok(profile)
     }
 
     fn remove(&mut self) -> Result<(), AslError> {
+        #[cfg(feature = "appcontainer-loopback-fixture")]
+        let loopback_result = self
+            .loopback_fixture
+            .take()
+            .map(LoopbackFixture::remove)
+            .transpose();
         if self.present {
-            unsafe { DeleteAppContainerProfile(&self.name) }
-                .map_err(|_| AslError::SandboxUnavailable)?;
+            let result = unsafe { DeleteAppContainerProfile(&self.name) }
+                .map_err(|_| AslError::SandboxUnavailable);
             self.present = false;
+            result?;
         }
+        #[cfg(feature = "appcontainer-loopback-fixture")]
+        loopback_result?;
         Ok(())
     }
 }
@@ -139,6 +168,24 @@ impl Drop for Profile {
         let _ = self.remove();
         unsafe { FreeSid(self.sid) };
     }
+}
+
+#[cfg(feature = "appcontainer-loopback-fixture")]
+#[path = "loopback_fixture.rs"]
+mod loopback_fixture;
+#[cfg(feature = "appcontainer-loopback-fixture")]
+use loopback_fixture::LoopbackFixture;
+
+#[cfg(feature = "appcontainer-loopback-fixture")]
+fn sid_text(sid: PSID) -> Result<String, AslError> {
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(sid, &mut text) }
+        .map_err(|error| setup_error("convert_appcontainer_sid", error))?;
+    let value = unsafe { text.to_string() }.map_err(|_| AslError::SandboxUnavailable);
+    unsafe {
+        LocalFree(Some(HLOCAL(text.as_ptr().cast())));
+    }
+    value
 }
 
 struct Attributes {
@@ -217,8 +264,6 @@ pub(crate) fn spawn(
     limits: SandboxLimits,
 ) -> Result<Child, AslError> {
     let pin = pin_executable(program).map_err(|_| AslError::SandboxUnavailable)?;
-    let profile = Profile::create()?;
-    let grant = ExecutableGrant::new(pin, profile.sid)?;
     let job = Arc::new(Job::create(
         usize::try_from(limits.memory_bytes).map_err(|_| AslError::SandboxUnavailable)?,
         limits.cpu_time_ms.map(|value| (value * 10_000) as i64),
@@ -240,6 +285,9 @@ pub(crate) fn spawn(
             Attributes: SE_GROUP_ENABLED as u32,
         })
         .collect();
+    // Register the same role capabilities that we put in the process token.
+    let profile = Profile::create(role, &capabilities)?;
+    let grant = ExecutableGrant::new(pin, profile.sid)?;
     let security = SECURITY_CAPABILITIES {
         AppContainerSid: profile.sid,
         Capabilities: if capabilities.is_empty() {
@@ -380,6 +428,15 @@ pub(crate) fn spawn(
 }
 
 impl Child {
+    #[cfg(feature = "appcontainer-loopback-fixture")]
+    pub(crate) fn fixture_inbound(&mut self, enable: bool) -> Result<&str, AslError> {
+        self.profile
+            .as_mut()
+            .and_then(|profile| profile.loopback_fixture.as_mut())
+            .ok_or(AslError::PolicyDenied)?
+            .inbound(enable)
+    }
+
     pub(crate) fn id(&self) -> u32 {
         self.id
     }

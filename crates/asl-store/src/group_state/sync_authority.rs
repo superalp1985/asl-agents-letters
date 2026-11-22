@@ -40,6 +40,8 @@ pub struct MlsRemoveAuthority<'a> {
 }
 
 impl Store {
+    /// Select a room to compare against its creator's head. Active rooms are
+    /// included because another member may have advanced the creator's tree.
     pub fn next_mls_sync_room(
         &self,
         peer: &PeerId,
@@ -53,7 +55,8 @@ impl Store {
                 "SELECT s.wire_group_id FROM mls_room_states s
                  JOIN asl_groups g ON g.group_id=s.local_group_id
                  JOIN group_members m ON m.group_id=s.local_group_id
-                 WHERE g.state='needs_sync' AND m.peer_id=?1 AND m.state='active'
+                 WHERE g.state IN ('needs_sync','active')
+                   AND g.creator_peer_id=?1 AND m.peer_id=?1 AND m.state='active'
                    AND (?2 IS NULL OR s.wire_group_id>?2 OR (?3 AND s.wire_group_id=?2))
                  ORDER BY s.wire_group_id LIMIT 1",
                 params![peer_text(peer), boundary, include_boundary],
@@ -75,7 +78,7 @@ impl Store {
                 "SELECT EXISTS(SELECT 1 FROM mls_room_states s
                  JOIN asl_groups g ON g.group_id=s.local_group_id
                  JOIN group_members m ON m.group_id=s.local_group_id
-                 WHERE s.wire_group_id=?1 AND g.state='needs_sync'
+                 WHERE s.wire_group_id=?1 AND g.state IN ('needs_sync','active')
                    AND m.peer_id=?2 AND m.state='active')",
                 params![wire_id.as_bytes(), peer_text(peer)],
                 |r| r.get(0),
@@ -270,7 +273,8 @@ pub(super) fn room_version(
             "SELECT s.revision,g.mls_epoch,g.membership_epoch,p.revision
              FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
              CROSS JOIN policy_state p WHERE s.wire_group_id=?1
-               AND g.creator_peer_id=?2 AND g.state='needs_sync' AND p.singleton=1",
+               AND g.creator_peer_id=?2 AND g.state IN ('needs_sync','active')
+               AND p.singleton=1",
             params![wire_id.as_bytes(), peer_text(creator)],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )

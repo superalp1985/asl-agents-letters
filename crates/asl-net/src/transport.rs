@@ -624,6 +624,14 @@ impl LocalTransport {
             .map_err(|_| io::Error::other("DHT provider capacity reached"))
     }
 
+    pub fn stop_providing(&mut self, key: RecordKey) -> io::Result<()> {
+        if key.as_ref().len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.swarm.behaviour_mut().dht.stop_providing(&key);
+        Ok(())
+    }
+
     pub fn get_providers(&mut self, key: RecordKey) -> io::Result<kad::QueryId> {
         if key.as_ref().len() != 32 {
             return Err(io::ErrorKind::InvalidInput.into());

@@ -162,12 +162,7 @@ fn reconciliation_reads_a_bounded_active_projection_of_the_paused_room() {
         .connection
         .execute("UPDATE asl_groups SET state='active'", [])
         .unwrap();
-    assert!(
-        store
-            .mls_room_for_reconciliation(wire_id)
-            .unwrap()
-            .is_none()
-    );
+    invalid();
 }
 
 #[test]

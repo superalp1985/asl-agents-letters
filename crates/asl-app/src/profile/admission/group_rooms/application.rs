@@ -30,6 +30,7 @@ pub struct MlsApplicationReceive<'a> {
 }
 
 struct ApplicationSource<'a> {
+    kind: &'static str,
     connection_id: [u8; 16],
     key: &'a CredentialWithKey,
     device: &'a PeerId,
@@ -56,14 +57,21 @@ impl CoreAdmission {
         check_application_creation(created, time)?;
         let mut candidate =
             self.load_mls_application_base(store, wire_id, expected, directories, time)?;
-        self.prepare_mls_application(store, &mut candidate, application, &clock)
-            .map(|(packet, _)| packet)
+        self.prepare_mls_application(
+            store,
+            &mut candidate,
+            Id128(fresh_id()?),
+            application,
+            &clock,
+        )
+        .map(|(packet, _)| packet)
     }
 
     pub(super) fn prepare_mls_application(
         &mut self,
         store: &mut Store,
         candidate: &mut LocalRoomCandidate,
+        envelope_id: Id128,
         application: GroupApplication,
         clock: &SyncClock,
     ) -> Result<(GroupPacket, RoomVersion), AslError> {
@@ -74,7 +82,7 @@ impl CoreAdmission {
             &mut candidate.base.group,
             &candidate.base.provider,
             &candidate.base.signer,
-            Id128(fresh_id()?),
+            envelope_id,
             application,
         )?;
         let version =
@@ -144,6 +152,7 @@ impl CoreAdmission {
             packet,
             application.message_id(),
             Some(ApplicationSource {
+                kind: application.kind(),
                 connection_id: receive.connection_id,
                 key: &sender_key,
                 device: &peer,
@@ -227,7 +236,11 @@ impl CoreAdmission {
                 members: &members,
                 event: Some(MlsJournalEntry {
                     sender: incoming.as_ref().map_or(&local, |source| source.device),
-                    kind: MlsJournalKind::Application(message_id),
+                    kind: incoming
+                        .as_ref()
+                        .map_or(MlsJournalKind::Application(message_id), |source| {
+                            MlsJournalKind::ReceivedApplication(message_id, source.kind)
+                        }),
                     ciphertext,
                 }),
             },
@@ -282,6 +295,10 @@ pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>,
         GroupApplication::Query(query) => (Some(query.created_at_ms), query.expires_at_ms),
         GroupApplication::Answer(answer) => (Some(answer.created_at_ms), answer.expires_at_ms),
         GroupApplication::Offer(offer) => (None, offer.expires_at_ms),
+        GroupApplication::FetchRequest(_) => (None, u64::MAX),
+        GroupApplication::FetchGrant(grant) => (None, grant.expires_at_ms),
+        GroupApplication::FetchPending(pending) => (None, pending.expires_at_ms),
+        GroupApplication::Error(_) => (None, u64::MAX),
     }
 }
 

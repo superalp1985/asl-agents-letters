@@ -88,10 +88,12 @@ async fn mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox() {
     let provider_device = DeviceIdentity::generate().unwrap();
     let receiver_peer = receiver_device.peer_id();
     let provider_peer = provider_device.peer_id();
+    let receiver_key = receiver_device.into_keypair();
+    let receiver_device_key = receiver_key.public().try_into_ed25519().unwrap().to_bytes();
     let provider_key = provider_device.into_keypair();
     let device_key = provider_key.public().try_into_ed25519().unwrap().to_bytes();
     let mut listener = LocalTransport::new(provider_key).unwrap();
-    let mut dialer = LocalTransport::new(receiver_device.into_keypair()).unwrap();
+    let mut dialer = LocalTransport::new(receiver_key).unwrap();
     listener
         .listen(TransportKind::Tcp, "127.0.0.1:0".parse().unwrap())
         .unwrap();
@@ -125,12 +127,26 @@ async fn mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox() {
     // Synthetic Core admission: bind fixture registry state to the authenticated
     // peers. The provider's grant, lease and snapshot reads are production code.
     let now = unix_time_ms().unwrap();
-    let requester = admit_fixture(
-        &provider_db,
-        &AgentIdentity::generate().unwrap(),
-        receiver_peer,
-        now,
-    );
+    let requester_root = AgentIdentity::generate().unwrap();
+    let requester = admit_fixture(&provider_db, &requester_root, receiver_peer, now);
+    let requester_certificate = requester_root
+        .issue_device_certificate(
+            requester.peer.clone(),
+            1,
+            now,
+            requester.session_expires_at_ms,
+        )
+        .unwrap();
+    asl_store::open_store(&provider_db)
+        .unwrap()
+        .register_transfer_peer(
+            &requester,
+            1,
+            &requester_certificate,
+            receiver_device_key,
+            now,
+        )
+        .unwrap();
     let receiver_db = home.join("state/asl.sqlite3");
     let root = AgentIdentity::generate().unwrap();
     let admitted = admit_fixture(&receiver_db, &root, provider_peer, now);
@@ -200,7 +216,8 @@ async fn mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox() {
                     ).unwrap();
                     bridge.poll(now, |request| {
                         match request {
-                            WorkerRequest::Fetch { source: selected, request } => {
+                            WorkerRequest::Fetch { source: selected, group, request } => {
+                                assert!(group.is_none());
                                 assert_eq!(selected, source);
                                 let token = dialer.send_control_request(&client, WireFrame::FetchRequest(request.clone()))?;
                                 assert!(fetch.replace((token, request)).is_none());

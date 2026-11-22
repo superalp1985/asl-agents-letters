@@ -8,10 +8,10 @@ use crate::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
-        DeviceCertificate, Feature, FetchGrant, FetchRequest, GroupEnvelope, GroupOperation, Hello,
-        IdentityProof, IdentityProofRequest, Intent, MAX_PAIRING_NOTE_BYTES, MediaKind, Offer,
-        PairingExchange, PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus,
-        StorageProof, TypedValue, WireFrame, validate_pairing_note,
+        DeviceCertificate, Feature, FetchGrant, FetchPending, FetchRequest, GroupEnvelope,
+        GroupOperation, Hello, IdentityProof, IdentityProofRequest, Intent, MAX_PAIRING_NOTE_BYTES,
+        MediaKind, Offer, PairingExchange, PairingInvite, Profile, ProtocolError, Query,
+        ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame, validate_pairing_note,
     },
 };
 
@@ -736,6 +736,24 @@ fn decode_fetch_grant(mut fields: Fields) -> Result<WireFrame, AslError> {
     }))
 }
 
+fn decode_fetch_pending(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5])?;
+    let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let content_id = Hash32(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+    let retry_at_ms = as_u64(take(&mut fields, 4)?)?;
+    let expires_at_ms = as_u64(take(&mut fields, 5)?)?;
+    finish(fields)?;
+    if retry_at_ms > expires_at_ms || expires_at_ms > MAX_TIME_MS {
+        return invalid();
+    }
+    Ok(WireFrame::FetchPending(FetchPending {
+        message_id,
+        content_id,
+        retry_at_ms,
+        expires_at_ms,
+    }))
+}
+
 fn decode_error(mut fields: Fields) -> Result<WireFrame, AslError> {
     check_keys(&fields, &[2, 3])?;
     let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
@@ -975,6 +993,7 @@ fn frame_kind(frame: &WireFrame) -> u64 {
         WireFrame::Offer(_) => 3,
         WireFrame::FetchRequest(_) => 4,
         WireFrame::FetchGrant(_) => 5,
+        WireFrame::FetchPending(_) => 14,
         WireFrame::Error(_) => 6,
         WireFrame::Ack(_) => 7,
         WireFrame::Profile(_) => 8,
@@ -988,7 +1007,7 @@ fn frame_kind(frame: &WireFrame) -> u64 {
 
 fn frame_limit(kind: u64) -> usize {
     match kind {
-        0..=8 => MAX_CONTROL_FRAME_BYTES,
+        0..=8 | 14 => MAX_CONTROL_FRAME_BYTES,
         9..=10 | 13 => MAX_EXTENDED_FRAME_BYTES,
         11..=12 => MAX_PAIRING_FRAME_BYTES,
         _ => 0,
@@ -1003,7 +1022,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     if version != 1 {
         return Err(AslError::IncompatibleVersion);
     }
-    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 13)?;
+    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 14)?;
     let frame = match kind {
         0 => decode_hello(fields)?,
         1 => decode_query(fields)?,
@@ -1019,6 +1038,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
         11 => decode_pairing_invite(fields)?,
         12 => decode_pairing_exchange(fields)?,
         13 => decode_group_envelope(fields)?,
+        14 => decode_fetch_pending(fields)?,
         _ => return invalid(),
     };
     if bytes.len() > frame_limit(u64::from(kind)) {
@@ -1110,6 +1130,12 @@ fn encode_value(frame: &WireFrame) -> Value {
             (4, Value::Bytes(value.lease_id.0.to_vec())),
             (5, uint(value.expires_at_ms)),
             (6, uint(value.file_size)),
+        ]),
+        WireFrame::FetchPending(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.content_id.0.to_vec())),
+            (4, uint(value.retry_at_ms)),
+            (5, uint(value.expires_at_ms)),
         ]),
         WireFrame::Error(value) => entries.extend([
             (2, Value::Bytes(value.message_id.0.to_vec())),

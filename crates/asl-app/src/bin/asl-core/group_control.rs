@@ -21,6 +21,7 @@ list | peers | create | room <room-id>
 approve <invite-id> | retry <invite-id> | reject <invite-id>
 invite <room-id> <connection-id> | dial <ip:port> <base58-peer-id>
 remove <room-id> <base58-peer-id>
+inbound <on|off> <on|off>
 Room, connection and invite IDs are hex. Dial uses TCP.
 Approve saves the decision and tries once; use retry if needed.";
 
@@ -122,6 +123,10 @@ fn parse(line: &str) -> Result<LocalGroupAction, AslError> {
             room: Hash32(fixed_hex(room)?),
             peer: parse_peer(peer)?,
         },
+        ["inbound", browse, answer] => LocalGroupAction::ConfigureInbound {
+            browse_enabled: parse_switch(browse)?,
+            answer_enabled: parse_switch(answer)?,
+        },
         ["dial", address, peer] => {
             let address: SocketAddr = address.parse().map_err(|_| AslError::InvalidMessage)?;
             if address.port() == 0 {
@@ -135,6 +140,35 @@ fn parse(line: &str) -> Result<LocalGroupAction, AslError> {
         _ => return Err(AslError::InvalidMessage),
     };
     Ok(action)
+}
+
+fn parse_switch(value: &str) -> Result<bool, AslError> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+pub(super) fn set_inbound(
+    field: &std::ffi::OsStr,
+    value: &std::ffi::OsStr,
+) -> Result<(), AslError> {
+    use asl_app::paths::AppPaths;
+    use asl_policy::snapshot_files::PinnedHome;
+    use asl_store::group_state::{GroupInboundPolicy, GroupInboundSwitch, open_mls_runtime_store};
+    let switch = match field.to_str() {
+        Some("browse") => GroupInboundSwitch::Browse,
+        Some("answer") => GroupInboundSwitch::Answer,
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let enabled = parse_switch(value.to_str().ok_or(AslError::InvalidMessage)?)?;
+    let root =
+        std::path::PathBuf::from(std::env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
+    let paths = AppPaths::open_existing(&root)?;
+    let _pin = PinnedHome::open(&root)?;
+    let mut store = open_mls_runtime_store(&paths.state().join("asl.sqlite3"))?;
+    GroupInboundPolicy::set_switch(&mut store, switch, enabled)
 }
 
 fn parse_peer(text: &str) -> Result<PeerId, AslError> {
@@ -174,6 +208,13 @@ mod tests {
             parse(&format!("invite {room_id} {id}")),
             Ok(LocalGroupAction::Invite { room: Hash32(n), connection_id }) if n == [0xcd; 32] && connection_id == [0xab; 16]
         ));
+        assert!(matches!(
+            parse("inbound on off"),
+            Ok(LocalGroupAction::ConfigureInbound {
+                browse_enabled: true,
+                answer_enabled: false
+            })
+        ));
     }
 
     #[test]
@@ -212,6 +253,8 @@ mod tests {
             format!("invite {id} {id}"),
             format!("invite {} {id} extra", "cd".repeat(32)),
             "send".into(),
+            "inbound yes no".into(),
+            "inbound on".into(),
         ] {
             assert!(parse(&invalid).is_err());
         }

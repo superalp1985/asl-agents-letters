@@ -15,7 +15,7 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
     manifest::{CHUNK_SIZE, Manifest, decode_manifest},
-    task::{TaskId, TransferId},
+    task::{GroupId, TaskId, TransferId},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -23,7 +23,10 @@ use crate::{Store, current_time_ms, database_error, open_store};
 
 mod consent;
 use consent::{Admission, ConsentBinding, StartIntent};
-pub use consent::{DownloadConsent, DownloadMode, DownloadStart};
+pub use consent::{
+    DownloadConsent, DownloadMode, DownloadStart, UploadAdmission, UploadBinding, UploadConsent,
+    UploadMode,
+};
 
 pub const DOWNLOAD_IDLE_MS: i64 = 300_000;
 pub const DOWNLOAD_COOLDOWN_MS: i64 = 86_400_000;
@@ -87,6 +90,13 @@ pub struct DownloadRequest {
     pub write_grant_id: Id128,
     pub destination_relative: PathBuf,
     pub sources: Vec<PeerId>,
+    pub group: Option<GroupTransferBinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupTransferBinding {
+    pub group_id: GroupId,
+    pub membership_epoch: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,6 +118,7 @@ pub struct DownloadSchedule {
     pub durable_indexes: Vec<u32>,
     pub sources: Vec<PeerId>,
     pub expires_at_ms: i64,
+    pub group: Option<GroupTransferBinding>,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -193,12 +204,22 @@ impl DownloadBroker {
         let content = hex::encode(request.content_id.0);
         let grant = hex::encode(request.write_grant_id.0);
         let sources = consent::source_set(&request.sources)?;
+        let group = request
+            .group
+            .as_ref()
+            .map(GroupBindingText::try_from)
+            .transpose()?;
         let tx = self
             .store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let now = current_time_ms();
+        if let Some(group) = &group {
+            for source in &sources {
+                ensure_group_member(&tx, &group.id, group.epoch, source, now)?;
+            }
+        }
         let (root, max_bytes, volume, file_id, epoch) = tx
             .query_row(
                 "SELECT root_path,max_bytes,root_volume,root_file_id,epoch FROM write_grants
@@ -228,7 +249,15 @@ impl DownloadBroker {
         check_download_limits(&tx, bytes, has_stranger_source(&tx, &sources)?)?;
         check_write_grant_quota(&tx, &grant, bytes, max_bytes)?;
 
-        let binding = ConsentBinding::new(&grant, epoch, &content, &filename, bytes, &sources)?;
+        let binding = ConsentBinding::new(
+            &grant,
+            epoch,
+            &content,
+            &filename,
+            bytes,
+            &sources,
+            group.as_ref(),
+        )?;
         let (transfer_id, approval_deadline) = match binding.admit(&tx, intent, now)? {
             Admission::Pending {
                 approval_id,
@@ -263,8 +292,8 @@ impl DownloadBroker {
         tx.execute(
             "INSERT INTO transfers(transfer_id,task_id,content_id,write_grant_id,reservation_id,
              part_relative,state,durable_bytes,created_at_ms,updated_at_ms,expires_at_ms,
-             part_file_id,manifest_bytes)
-             VALUES (?1,?2,?3,?4,?5,?6,'pending',0,?7,?7,?8,NULL,?9)",
+             part_file_id,manifest_bytes,group_id,group_epoch)
+             VALUES (?1,?2,?3,?4,?5,?6,'pending',0,?7,?7,?8,NULL,?9,?10,?11)",
             params![
                 transfer,
                 task,
@@ -274,7 +303,9 @@ impl DownloadBroker {
                 path_text(&part_relative)?,
                 now,
                 expires,
-                request.manifest.as_slice()
+                request.manifest.as_slice(),
+                group.as_ref().map(|group| group.id.as_str()),
+                group.as_ref().map(|group| group.epoch),
             ],
         )
         .map_err(database_error)?;
@@ -356,6 +387,20 @@ impl DownloadBroker {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let now = current_time_ms();
+        let row = load_row_tx(&tx, &transfer)?;
+        ensure_active_transfer(&tx, &row)?;
+        if row.expires_at_ms <= now {
+            return Err(AslError::ExpiredMessage);
+        }
+        if let Some(group) = row.group_binding()? {
+            ensure_group_member(
+                &tx,
+                &hex::encode(group.group_id.0.as_bytes()),
+                sql_number(group.membership_epoch)?,
+                &peer,
+                now,
+            )?;
+        }
         let changed = tx
             .execute(
                 "UPDATE transfer_chunks SET state='assigned',source_peer=?3
@@ -451,10 +496,19 @@ impl DownloadBroker {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         ensure_active_transfer(&tx, &row)?;
+        let peer = peer_text(peer_id);
+        if let Some(group) = row.group_binding()? {
+            ensure_group_member(
+                &tx,
+                &hex::encode(group.group_id.0.as_bytes()),
+                sql_number(group.membership_epoch)?,
+                &peer,
+                current_time_ms(),
+            )?;
+        }
         if row.expires_at_ms <= current_time_ms() {
             return Err(AslError::ExpiredMessage);
         }
-        let peer = peer_text(peer_id);
         let assigned: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -682,6 +736,7 @@ impl DownloadBroker {
             durable_indexes,
             sources,
             expires_at_ms: row.expires_at_ms,
+            group: row.group_binding()?,
         })
     }
 
@@ -691,6 +746,34 @@ impl DownloadBroker {
         peer: &PeerId,
     ) -> Result<bool, AslError> {
         self.store.has_registered_transfer_peer(agent, peer)
+    }
+
+    pub fn source_is_current(
+        &self,
+        agent: asl_types::ids::AgentId,
+        peer: &PeerId,
+        group: Option<&GroupTransferBinding>,
+    ) -> Result<bool, AslError> {
+        if !self.store.has_registered_transfer_peer(agent, peer)? {
+            return Ok(false);
+        }
+        let Some(group) = group else {
+            return Ok(true);
+        };
+        let tx = self
+            .store
+            .connection
+            .unchecked_transaction()
+            .map_err(database_error)?;
+        ensure_group_member(
+            &tx,
+            &hex::encode(group.group_id.0.as_bytes()),
+            sql_number(group.membership_epoch)?,
+            &peer_text(peer),
+            current_time_ms(),
+        )?;
+        tx.commit().map_err(database_error)?;
+        Ok(true)
     }
 
     pub fn ensure_active_inbox(&self, id: Id128) -> Result<(), AslError> {
@@ -1005,7 +1088,7 @@ impl DownloadBroker {
                 "SELECT t.transfer_id,t.task_id,t.content_id,t.write_grant_id,t.reservation_id,
                  t.part_relative,t.state,t.durable_bytes,t.expires_at_ms,
                  r.state,w.root_path,w.status,w.root_volume,w.root_file_id,
-                 t.part_file_id,t.manifest_bytes,w.kind
+                 t.part_file_id,t.manifest_bytes,w.kind,t.group_id,t.group_epoch
                  FROM transfers t JOIN reservations r USING(reservation_id)
                  JOIN write_grants w ON w.write_grant_id=t.write_grant_id
                  WHERE t.transfer_id=?1",
@@ -1057,6 +1140,31 @@ struct TransferRow {
     expires_at_ms: i64,
     reservation_state: String,
     grant_status: String,
+    group_id: Option<String>,
+    group_epoch: Option<i64>,
+}
+
+impl TransferRow {
+    fn group_binding(&self) -> Result<Option<GroupTransferBinding>, AslError> {
+        group_binding(self.group_id.clone(), self.group_epoch)
+    }
+}
+
+struct GroupBindingText {
+    id: String,
+    epoch: i64,
+}
+
+impl TryFrom<&GroupTransferBinding> for GroupBindingText {
+    type Error = AslError;
+
+    fn try_from(binding: &GroupTransferBinding) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: hex::encode(binding.group_id.0.as_bytes()),
+            epoch: i64::try_from(binding.membership_epoch)
+                .map_err(|_| AslError::InvalidPolicyState)?,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1205,6 +1313,79 @@ fn fits(used: i64, requested: i64, limit: i64) -> bool {
         .is_some_and(|value| value <= limit)
 }
 
+fn sql_number(value: u64) -> Result<i64, AslError> {
+    i64::try_from(value).map_err(|_| AslError::InvalidPolicyState)
+}
+
+fn group_binding(
+    group_id: Option<String>,
+    group_epoch: Option<i64>,
+) -> Result<Option<GroupTransferBinding>, AslError> {
+    match (group_id, group_epoch) {
+        (None, None) => Ok(None),
+        (Some(group_id), Some(group_epoch)) => Ok(Some(GroupTransferBinding {
+            group_id: GroupId(parse_id(&group_id)?),
+            membership_epoch: u64::try_from(group_epoch).map_err(|_| AslError::InvalidDatabase)?,
+        })),
+        _ => Err(AslError::InvalidDatabase),
+    }
+}
+
+fn ensure_group_epoch(
+    tx: &Transaction<'_>,
+    group_id: &str,
+    membership_epoch: i64,
+    now_ms: i64,
+) -> Result<(), AslError> {
+    let active: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM asl_groups
+                WHERE group_id=?1 AND state='active'
+                  AND membership_epoch=?2 AND updated_at_ms<=?3
+            )",
+            params![group_id, membership_epoch, now_ms],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if active {
+        Ok(())
+    } else {
+        Err(AslError::PolicyDenied)
+    }
+}
+
+fn ensure_group_member(
+    tx: &Transaction<'_>,
+    group_id: &str,
+    membership_epoch: i64,
+    peer_id: &str,
+    now_ms: i64,
+) -> Result<(), AslError> {
+    let active: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM asl_groups g
+                JOIN group_members m ON m.group_id=g.group_id
+                JOIN device_identities d ON d.peer_id=m.peer_id
+                JOIN agents a ON a.agent_id=d.agent_id
+                WHERE g.group_id=?1 AND g.state='active'
+                  AND g.membership_epoch=?2
+                  AND m.peer_id=?3 AND m.state='active'
+                  AND d.revoked_at_ms IS NULL AND d.certificate_expires_ms>?4
+                  AND a.identity_state IN ('pending_anchor','verified')
+            )",
+            params![group_id, membership_epoch, peer_id, now_ms],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if active {
+        Ok(())
+    } else {
+        Err(AslError::PolicyDenied)
+    }
+}
+
 fn ensure_active_transfer(tx: &Transaction<'_>, row: &TransferRow) -> Result<(), AslError> {
     let active: bool = tx
         .query_row(
@@ -1219,11 +1400,18 @@ fn ensure_active_transfer(tx: &Transaction<'_>, row: &TransferRow) -> Result<(),
             |value| value.get(0),
         )
         .map_err(database_error)?;
-    if active {
-        Ok(())
-    } else {
-        Err(AslError::PolicyDenied)
+    if !active {
+        return Err(AslError::PolicyDenied);
     }
+    if let Some(group) = row.group_binding()? {
+        ensure_group_epoch(
+            tx,
+            &hex::encode(group.group_id.0.as_bytes()),
+            sql_number(group.membership_epoch)?,
+            current_time_ms(),
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_active_write_grant(
@@ -1299,7 +1487,7 @@ fn load_row_tx(tx: &Transaction<'_>, transfer: &str) -> Result<TransferRow, AslE
         "SELECT t.transfer_id,t.task_id,t.content_id,t.write_grant_id,t.reservation_id,
          t.part_relative,t.state,t.durable_bytes,t.expires_at_ms,
          r.state,w.root_path,w.status,w.root_volume,w.root_file_id,
-         t.part_file_id,t.manifest_bytes,w.kind
+         t.part_file_id,t.manifest_bytes,w.kind,t.group_id,t.group_epoch
          FROM transfers t JOIN reservations r USING(reservation_id)
          JOIN write_grants w ON w.write_grant_id=t.write_grant_id
          WHERE t.transfer_id=?1",
@@ -1329,6 +1517,8 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRow> {
         part_file_id: row.get(14)?,
         manifest_bytes: row.get(15)?,
         grant_kind: row.get(16)?,
+        group_id: row.get(17)?,
+        group_epoch: row.get(18)?,
     })
 }
 

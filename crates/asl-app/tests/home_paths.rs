@@ -56,6 +56,25 @@ fn creates_storage_layout_on_ntfs() {
 }
 
 #[test]
+fn opening_existing_storage_does_not_create_missing_directories() {
+    let base = std::env::var_os("ASL_TEST_FIXTURE_BASE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("asl-test-fs"));
+    fs::create_dir_all(&base).unwrap();
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = base.join(format!("readonly-home-{}-{id}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+
+    assert!(AppPaths::open_existing(&root).is_err());
+    assert!(!root.join("state").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rejects_unavailable_drive() {
     if !Path::new(r"Z:\").exists() {
         assert!(AppPaths::open(Path::new(r"Z:\asl-data")).is_err());

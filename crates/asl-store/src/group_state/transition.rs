@@ -25,6 +25,7 @@ pub struct RoomVersion {
 pub enum MlsJournalKind {
     /// The message ID inside the authenticated application plaintext.
     Application(Id128),
+    ReceivedApplication(Id128, &'static str),
     Commit,
     SyncCommit(MlsEpochBindings),
 }
@@ -82,14 +83,27 @@ pub(super) fn commit_candidate(
     }
     let expected = update.expected;
     let room = hex::encode(update.local_id.0.as_bytes());
-    let row = tx.query_row(
+    let row = tx
+        .query_row(
             "SELECT s.revision,g.mls_epoch,g.membership_epoch,p.revision,g.creator_peer_id
              FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
              CROSS JOIN policy_state p
-             WHERE s.local_group_id=?1 AND s.wire_group_id=?2 AND g.state='needs_sync' AND p.singleton=1",
+             WHERE s.local_group_id=?1 AND s.wire_group_id=?2
+               AND g.state IN ('needs_sync','active') AND p.singleton=1",
             params![room, update.wire_id.as_bytes()],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?)),
-        ).optional().map_err(database_error)?.ok_or(AslError::PolicyVersionConflict)?;
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .ok_or(AslError::PolicyVersionConflict)?;
     if (row.0, row.1, row.2, row.3)
         != (
             sql_number(expected.revision)?,
@@ -123,7 +137,7 @@ pub(super) fn commit_candidate(
         if !former.contains(&event_sender)
             || event.ciphertext.is_empty()
             || match event.kind {
-                MlsJournalKind::Application(_) => {
+                MlsJournalKind::Application(_) | MlsJournalKind::ReceivedApplication(..) => {
                     changed
                         || update.mls_epoch != expected.mls_epoch
                         || event.ciphertext.len() > MAX_GROUP_PAYLOAD_BYTES
@@ -139,7 +153,8 @@ pub(super) fn commit_candidate(
         let mut replay_key = blake3::Hasher::new_derive_key("ASL-MLS-ROOM-EVENT-v1");
         replay_key.update(update.wire_id.as_bytes());
         let kind = match event.kind {
-            MlsJournalKind::Application(message_id) => {
+            MlsJournalKind::Application(message_id)
+            | MlsJournalKind::ReceivedApplication(message_id, _) => {
                 replay_key.update(&[0]);
                 replay_key.update(message_id.as_bytes());
                 replay_key.update(event.sender.as_bytes());
@@ -160,12 +175,20 @@ pub(super) fn commit_candidate(
         } else {
             now.saturating_add(retention)
         };
+        let browse_kind = match event.kind {
+            MlsJournalKind::ReceivedApplication(_, name)
+                if super::GroupInboundPolicy::read(tx)?.browse_enabled =>
+            {
+                Some(name)
+            }
+            _ => None,
+        };
         let inserted = tx.execute(
-                "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,created_at_ms,expires_at_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(event_id) DO NOTHING",
+                "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,created_at_ms,expires_at_ms,browse_kind)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(event_id) DO NOTHING",
                 params![
                     event_id, room, row.1, event_sender, kind,
-                    event.ciphertext, now, expires_at_ms
+                    event.ciphertext, now, expires_at_ms, browse_kind
                 ],
             ).map_err(database_error)?;
         if inserted != 1 {
@@ -219,10 +242,16 @@ pub(super) fn commit_candidate(
         )
         .map_err(database_error)?;
     }
-    // The projection is still paused, so neither authority version changes.
+    let next_membership = if changed {
+        row.2.checked_add(1).ok_or(AslError::QuotaExceeded)?
+    } else {
+        row.2
+    };
     tx.execute(
-        "UPDATE asl_groups SET mls_epoch=?2,updated_at_ms=?3 WHERE group_id=?1",
-        params![room, next_epoch, now],
+        "UPDATE asl_groups SET mls_epoch=?2,membership_epoch=?3,
+             state=CASE WHEN ?4 THEN 'needs_sync' ELSE state END,updated_at_ms=?5
+         WHERE group_id=?1",
+        params![room, next_epoch, next_membership, changed, now],
     )
     .map_err(database_error)?;
     if row.1 != next_epoch {
@@ -236,7 +265,8 @@ pub(super) fn commit_candidate(
     Ok(RoomVersion {
         revision: revision as u64,
         mls_epoch: update.mls_epoch,
-        ..expected
+        membership_epoch: next_membership as u64,
+        policy_revision: expected.policy_revision,
     })
 }
 

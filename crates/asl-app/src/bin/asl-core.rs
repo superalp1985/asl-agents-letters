@@ -1,8 +1,16 @@
+#[path = "asl-core/access_control.rs"]
+mod access_control;
+#[path = "asl-core/bindings_control.rs"]
+mod bindings_control;
 #[path = "asl-core/download_control.rs"]
 mod download_control;
 #[cfg(windows)]
 #[path = "asl-core/group_control.rs"]
 mod group_control;
+#[path = "asl-core/retention_control.rs"]
+mod retention_control;
+#[path = "asl-core/upload_control.rs"]
+mod upload_control;
 
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -13,6 +21,16 @@ fn main() {
             .ok_or(asl_types::error::AslError::InvalidMessage)
             .and_then(asl_app::supervisor::set_direct_inbound_from_environment),
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
+        [flag, args @ ..] if flag == "--access" => access_control::run(args),
+        [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
+        [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
+        [flag, kind, days] if flag == "--retention" && kind == "direct" => {
+            retention_control::set_direct_days(days)
+        }
+        #[cfg(windows)]
+        [flag, field, value] if flag == "--group-inbound" => {
+            group_control::set_inbound(field, value)
+        }
         #[cfg(windows)]
         [flag] if flag == "--groups" => group_control::run(),
         _ => Err(asl_types::error::AslError::InvalidMessage),

@@ -452,7 +452,7 @@ impl Store {
         let version = if let Some(expected) = expected {
             replace_paused_room(&tx, &join, &local_id, expected, now)?
         } else {
-            insert_mls_room(&tx, &join.room, now)?;
+            insert_mls_room(&tx, &join.room, now, false)?;
             RoomVersion {
                 revision: 1,
                 mls_epoch: join.room.mls_epoch,

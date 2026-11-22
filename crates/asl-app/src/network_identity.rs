@@ -6,7 +6,11 @@ use std::{
 };
 
 use asl_store::open_store;
-use asl_types::{error::AslError, ids::PeerId, record::MAX_RECORD_BYTES};
+use asl_types::{
+    error::AslError,
+    ids::PeerId,
+    record::{MAX_RECORD_BYTES, MAX_RECORD_LIFETIME_MS, RecordPayload, decode_record},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -17,7 +21,7 @@ use crate::{
     chain_refresh::ChainRefreshWorker,
     identity::AgentIdentity,
     paths::AppPaths,
-    profile::CoreAdmission,
+    profile::{CoreAdmission, sign_record, verify_record},
 };
 
 const MAX_NETWORK_IDENTITY_CONFIGURATION_BYTES: u64 = 65_536;
@@ -38,6 +42,19 @@ pub enum NetworkAdmissionStatus {
     ChainUnavailable,
     RegistryAnchorMissing,
     Active,
+}
+
+impl NetworkAdmissionStatus {
+    pub(crate) fn dashboard_state(self) -> &'static str {
+        match self {
+            Self::TrustConfigurationMissing => "trust_configuration_missing",
+            Self::DeviceDirectoryMissing => "device_directory_missing",
+            Self::DeviceDirectoryUnavailable => "device_directory_unavailable",
+            Self::ChainUnavailable => "chain_unavailable",
+            Self::RegistryAnchorMissing => "registry_anchor_missing",
+            Self::Active => "network_active",
+        }
+    }
 }
 
 pub(crate) struct NetworkAdmissionSetup {
@@ -135,18 +152,65 @@ pub(crate) fn load_network_admission(
         configuration.resolver.deployment,
         configuration.resolver.max_cache_age_secs,
     )?;
+    let now_ms = unix_time_ms()?;
+    let signed_directory = renew_directory_envelope_if_due(
+        identity,
+        signed_directory,
+        &database_path,
+        &mut resolver,
+        now_ms,
+    )?;
     let admission = CoreAdmission::for_local_identity(
         identity,
         local_peer_id,
         signed_directory,
         resolver,
-        unix_time_ms()?,
+        now_ms,
     )?;
     Ok(NetworkAdmissionSetup {
         status: NetworkAdmissionStatus::Active,
         admission: Some(admission),
         refresh_worker: Some(refresh_worker),
     })
+}
+
+fn renew_directory_envelope_if_due(
+    identity: &AgentIdentity,
+    signed_directory: Vec<u8>,
+    database_path: &Path,
+    resolver: &mut DurableIdentityResolver,
+    now_ms: u64,
+) -> Result<Vec<u8>, AslError> {
+    const RENEWAL_MS: u64 = 5 * 60 * 1_000;
+
+    let record = decode_record(&signed_directory)?;
+    let RecordPayload::DeviceDirectory(directory) = record.record.payload else {
+        return Err(AslError::InvalidDeviceCertificate);
+    };
+    if directory.agent_id != identity.agent_id() {
+        return Err(AslError::InvalidIdentity);
+    }
+    let renewal_at = record.record.issued_at_ms.saturating_add(RENEWAL_MS);
+    if now_ms < record.record.expires_at_ms && now_ms < renewal_at {
+        return Ok(signed_directory);
+    }
+
+    let minimum = record
+        .record
+        .sequence
+        .checked_add(1)
+        .ok_or(AslError::PolicyVersionConflict)?;
+    let mut store = open_store(database_path)?;
+    let sequence = store.reserve_device_directory_sequence(identity.agent_id(), minimum)?;
+    let renewed = sign_record(
+        identity,
+        RecordPayload::DeviceDirectory(directory),
+        sequence,
+        now_ms,
+        MAX_RECORD_LIFETIME_MS,
+    )?;
+    verify_record(&renewed, identity.agent_id(), now_ms, resolver)?;
+    Ok(renewed)
 }
 
 pub(crate) fn read_signed_device_directory(path: &Path) -> Result<Option<Vec<u8>>, AslError> {
@@ -217,13 +281,46 @@ mod tests {
     };
 
     use crate::chain::{
-        ChainEndpointV1, CheckpointV1, ConsensusConfigV1, DurableResolverConfigV1, ForkV1, ForksV1,
-        RegistryDeploymentV1,
+        ChainEndpointV1, CheckpointV1, ConsensusConfigV1, DurableIdentityResolver,
+        DurableResolverConfigV1, ForkV1, ForksV1, RegistryDeploymentV1,
+        test_support::{
+            BOOTSTRAP_TIME, TestChainDatabase, bootstrapped, consensus_config,
+            proof_fixture_for_agent,
+        },
     };
+    use asl_types::record::{DeviceDirectory, RecordPayload, device_directory_commitment};
 
     use super::*;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn network_admission_states_have_stable_dashboard_labels() {
+        assert_eq!(
+            NetworkAdmissionStatus::TrustConfigurationMissing.dashboard_state(),
+            "trust_configuration_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::DeviceDirectoryMissing.dashboard_state(),
+            "device_directory_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::DeviceDirectoryUnavailable.dashboard_state(),
+            "device_directory_unavailable"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::ChainUnavailable.dashboard_state(),
+            "chain_unavailable"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::RegistryAnchorMissing.dashboard_state(),
+            "registry_anchor_missing"
+        );
+        assert_eq!(
+            NetworkAdmissionStatus::Active.dashboard_state(),
+            "network_active"
+        );
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -389,5 +486,73 @@ mod tests {
         )
         .unwrap();
         assert!(NetworkIdentityConfigurationV1::load(&path).is_err());
+    }
+
+    #[test]
+    fn startup_renews_an_expired_directory_envelope_and_reserves_its_sequence() {
+        let root = AgentIdentity::generate().unwrap();
+        let peer = crate::identity::DeviceIdentity::generate()
+            .unwrap()
+            .peer_id();
+        let now_ms = BOOTSTRAP_TIME * 1_000 + 123;
+        let certificate = root
+            .issue_device_certificate(peer, 1, now_ms - 1_000, now_ms + 86_400_000)
+            .unwrap();
+        let payload = RecordPayload::DeviceDirectory(DeviceDirectory {
+            agent_id: root.agent_id(),
+            registry_sequence: 7,
+            devices: vec![certificate],
+            revoked_serials: Vec::new(),
+        });
+        let RecordPayload::DeviceDirectory(directory) = &payload else {
+            unreachable!()
+        };
+        let commitment = device_directory_commitment(directory).unwrap();
+        let mut values = [[0; 32]; 3];
+        values[0][12..].copy_from_slice(&root.controller_address());
+        values[1] = commitment.0;
+        values[2][23] = 1;
+        values[2][24..].copy_from_slice(&directory.registry_sequence.to_be_bytes());
+        let (deployment, finalized, proof) = proof_fixture_for_agent(values, 8, root.agent_id());
+        let database = TestChainDatabase::new();
+        let mut resolver = DurableIdentityResolver::create(
+            database.open(),
+            DurableResolverConfigV1 {
+                consensus: consensus_config(),
+                deployment,
+                max_cache_age_secs: 900,
+                cache_capacity: 8,
+            },
+            bootstrapped().with_test_execution(finalized),
+            BOOTSTRAP_TIME,
+        )
+        .unwrap();
+        resolver
+            .accept_proof(root.agent_id(), &proof, BOOTSTRAP_TIME)
+            .unwrap();
+        let source = sign_record(&root, payload, 1, now_ms, 10).unwrap();
+
+        let renewed = renew_directory_envelope_if_due(
+            &root,
+            source,
+            &database.path,
+            &mut resolver,
+            now_ms + 10,
+        )
+        .unwrap();
+        let record = decode_record(&renewed).unwrap();
+        assert_eq!(record.record.sequence, 2);
+        assert_eq!(record.record.issued_at_ms, now_ms + 10);
+        assert_eq!(
+            record.record.expires_at_ms,
+            now_ms + 10 + MAX_RECORD_LIFETIME_MS
+        );
+        assert_eq!(
+            database
+                .open()
+                .reserve_device_directory_sequence(root.agent_id(), 0)
+                .unwrap(),
+            3
+        );
     }
 }

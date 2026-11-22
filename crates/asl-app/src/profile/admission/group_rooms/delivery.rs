@@ -23,6 +23,23 @@ pub struct MlsApplicationDispatch {
     pub available: usize,
 }
 
+pub struct MlsApplicationSendToConnection {
+    pub wire_id: Hash32,
+    pub connection_id: [u8; 16],
+    pub envelope_id: Id128,
+    pub application: GroupApplication,
+    pub now_ms: u64,
+}
+
+struct MlsApplicationDelivery {
+    wire_id: Hash32,
+    target_connection: Option<[u8; 16]>,
+    automatic_reply: bool,
+    envelope_id: Id128,
+    application: GroupApplication,
+    now_ms: u64,
+}
+
 impl CoreAdmission {
     /// Trusted Core caller only. A creator fans out against its durable head;
     /// a non-creator may only address the creator, which checks its own head.
@@ -33,8 +50,79 @@ impl CoreAdmission {
         wire_id: Hash32,
         application: GroupApplication,
         now_ms: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        let envelope_id = Id128(fresh_id()?);
+        self.send_loopback_mls_application_inner(
+            store,
+            MlsApplicationDelivery {
+                wire_id,
+                target_connection: None,
+                automatic_reply: false,
+                envelope_id,
+                application,
+                now_ms,
+            },
+            enqueue,
+        )
+    }
+
+    pub fn send_loopback_mls_application_to_connection(
+        &mut self,
+        store: &mut Store,
+        send: MlsApplicationSendToConnection,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        self.send_loopback_mls_application_inner(
+            store,
+            MlsApplicationDelivery {
+                wire_id: send.wire_id,
+                target_connection: Some(send.connection_id),
+                automatic_reply: false,
+                envelope_id: send.envelope_id,
+                application: send.application,
+                now_ms: send.now_ms,
+            },
+            enqueue,
+        )
+    }
+
+    pub(crate) fn send_group_query_reply(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        application: GroupApplication,
+        now_ms: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        self.send_loopback_mls_application_inner(
+            store,
+            MlsApplicationDelivery {
+                wire_id,
+                target_connection: None,
+                automatic_reply: true,
+                envelope_id: Id128(fresh_id()?),
+                application,
+                now_ms,
+            },
+            enqueue,
+        )
+    }
+
+    fn send_loopback_mls_application_inner(
+        &mut self,
+        store: &mut Store,
+        delivery: MlsApplicationDelivery,
         mut enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<MlsApplicationDispatch, AslError> {
+        let MlsApplicationDelivery {
+            wire_id,
+            target_connection,
+            automatic_reply,
+            envelope_id,
+            application,
+            now_ms,
+        } = delivery;
         if self.group_directories.is_none() {
             return Err(AslError::PolicyDenied);
         }
@@ -54,7 +142,8 @@ impl CoreAdmission {
         let local = self.local_hello.peer_id.clone();
         let mut routes = Vec::new();
         for (agent, connection, peer) in self.admitted_connections(clock.now_ms()?) {
-            if peer == local
+            if target_connection.is_some_and(|target| target != connection)
+                || peer == local
                 || !creator_edge(&local, &peer, &candidate.creator)
                 || routes.iter().any(|(device, _, _)| *device == peer)
             {
@@ -67,7 +156,7 @@ impl CoreAdmission {
             {
                 let key = CredentialWithKey::from(&leaf.member);
                 if self
-                    .verify_admitted_group_leaf(connection, wire_id, &key, clock.now_ms()?)
+                    .verify_group_route_leaf(connection, wire_id, &key, clock.now_ms()?)
                     .is_ok()
                 {
                     routes.push((peer, connection, key));
@@ -79,7 +168,7 @@ impl CoreAdmission {
         }
         let message_id = application.message_id();
         let (packet, version) =
-            self.prepare_mls_application(store, &mut candidate, application, &clock)?;
+            self.prepare_mls_application(store, &mut candidate, envelope_id, application, &clock)?;
         let mut result = MlsApplicationDispatch {
             message_id,
             queued: 0,
@@ -95,13 +184,14 @@ impl CoreAdmission {
                 chain_id,
             },
             clock.now_ms()?,
+            automatic_reply,
             || {
                 for (_, connection, leaf) in routes {
                     let Ok(current) = clock.now_ms() else {
                         break;
                     };
                     if self
-                        .verify_admitted_group_leaf(connection, wire_id, &leaf, current)
+                        .verify_group_route_leaf(connection, wire_id, &leaf, current)
                         .is_err()
                     {
                         continue;
@@ -135,7 +225,7 @@ impl CoreAdmission {
         packet: &GroupPacket,
         deadline_ms: u64,
         now_ms: u64,
-    ) -> Result<(PeerId, GroupApplication), AslError> {
+    ) -> Result<([u8; 16], PeerId, GroupApplication), AslError> {
         if self.group_directories.is_none() {
             return Err(AslError::PolicyDenied);
         }
@@ -167,7 +257,7 @@ impl CoreAdmission {
             &HashMap::new(),
             &clock,
         )?;
-        Ok((peer, application))
+        Ok((connection_id, peer, application))
     }
 }
 

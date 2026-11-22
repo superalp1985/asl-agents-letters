@@ -4,35 +4,37 @@ use std::{
 };
 
 use asl_net::codec::{BulkRequest, BulkResponse};
+use asl_store::Store;
 use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{Hello, IdentityProof, PairingExchange, PairingInvite, WireFrame},
-    record::{RecordKind, RecordPayload, decode_record},
+    record::{MAX_RECORD_LIFETIME_MS, RecordKind, RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
 
 use crate::{
     chain::{DurableIdentityResolver, IdentityResolution, IdentityResolver, RegistryStatus},
+    identity::AgentIdentity,
     network::{NetworkCommand, NetworkEvent},
-    pairing::verify_incoming_invite,
     transfer::{MatchedBulkResponse, VerifiedFetchManifest},
 };
 
-use super::{DeviceSession, RecordHistory, serve_local_identity_proof};
+use super::{DeviceSession, RecordHistory, serve_local_identity_proof, sign_record};
 
 #[cfg(windows)]
 mod group_rooms;
 #[cfg(windows)]
 pub use group_rooms::{
-    MlsApplicationDispatch, MlsApplicationReceive, MlsInviteSend, MlsJoinSend, MlsNetworkOutcome,
-    ReconciledMlsRoom,
+    MlsApplicationDispatch, MlsApplicationReceive, MlsApplicationSendToConnection, MlsInviteSend,
+    MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom,
 };
 
 pub(crate) const MAX_ADMISSION_CONNECTIONS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 128;
 const MAX_DHT_RECORD_OWNERS: usize = 10_000;
+const DEVICE_DIRECTORY_RENEWAL_MS: u64 = 5 * 60 * 1_000;
 const MAX_PENDING_PROOFS: usize = MAX_ADMISSION_CONNECTIONS;
 const PROOF_BUDGET_CAPACITY: u8 = 2;
 const PROOF_BUDGET_REFILL: Duration = Duration::from_millis(500);
@@ -45,6 +47,7 @@ pub struct CoreAdmission {
     local_controller: Option<[u8; 20]>,
     resolver: DurableIdentityResolver,
     peers: HashMap<[u8; 16], PeerAdmission>,
+    blocked_agents: std::collections::HashSet<AgentId>,
     dht_histories: HashMap<AgentId, RecordHistory>,
     pending_proofs: VecDeque<[u8; 16]>,
     proof_budget: ProofVerificationBudget,
@@ -73,6 +76,8 @@ struct DirectoryLease {
     hash: blake3::Hash,
     issued_at_ms: u64,
     expires_at_ms: u64,
+    record_sequence: u64,
+    record_issued_at_ms: u64,
 }
 
 impl DirectoryLease {
@@ -97,6 +102,8 @@ impl DirectoryLease {
             hash: blake3::hash(record.bytes()),
             issued_at_ms,
             expires_at_ms,
+            record_sequence: signed.sequence,
+            record_issued_at_ms: signed.issued_at_ms,
         })
     }
 }
@@ -331,6 +338,7 @@ impl CoreAdmission {
             local_controller: None,
             resolver,
             peers: HashMap::new(),
+            blocked_agents: std::collections::HashSet::new(),
             dht_histories,
             pending_proofs: VecDeque::new(),
             proof_budget: ProofVerificationBudget::new(Instant::now()),
@@ -446,6 +454,111 @@ impl CoreAdmission {
                 .is_some_and(|history| history.matches_directory(agent, lease.hash))
     }
 
+    pub(crate) fn local_directory_renewal_due(&self, now_ms: u64) -> bool {
+        self.local_directory_lease
+            .record_issued_at_ms
+            .checked_add(DEVICE_DIRECTORY_RENEWAL_MS)
+            .is_none_or(|deadline| now_ms >= deadline)
+    }
+
+    pub(crate) fn update_local_device_directory_source(
+        &mut self,
+        signed_source: Vec<u8>,
+        identity: &AgentIdentity,
+        store: &mut Store,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        if !self.local_chain_is_current(now_ms) || identity.agent_id() != self.local_hello.agent_id
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let source = decode_record(&signed_source)?;
+        let RecordPayload::DeviceDirectory(source_directory) = &source.record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if source_directory.agent_id != self.local_hello.agent_id {
+            return Err(AslError::InvalidIdentity);
+        }
+        let current = decode_record(&self.local_signed_directory)?;
+        let current_sequence = self.local_directory_lease.record_sequence;
+        if source.record.sequence <= current_sequence
+            && source.record.payload == current.record.payload
+        {
+            return Ok(false);
+        }
+
+        let verified = super::verify_record(
+            &signed_source,
+            self.local_hello.agent_id,
+            now_ms,
+            &mut self.resolver,
+        )?;
+        let replacement = if source.record.sequence > current_sequence {
+            signed_source
+        } else {
+            if self.verified_controller(self.local_hello.agent_id, now_ms)?
+                != identity.controller_address()
+            {
+                return Err(AslError::InvalidIdentity);
+            }
+            let minimum = source
+                .record
+                .sequence
+                .max(current_sequence)
+                .checked_add(1)
+                .ok_or(AslError::PolicyVersionConflict)?;
+            let sequence =
+                store.reserve_device_directory_sequence(self.local_hello.agent_id, minimum)?;
+            sign_record(
+                identity,
+                verified.signed().record.payload.clone(),
+                sequence,
+                now_ms,
+                MAX_RECORD_LIFETIME_MS,
+            )?
+        };
+        self.renew_local_device_directory(replacement, now_ms)
+    }
+
+    pub(crate) fn renew_local_device_directory_if_due(
+        &mut self,
+        identity: &AgentIdentity,
+        store: &mut Store,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        if !self.local_directory_renewal_due(now_ms) {
+            return Ok(false);
+        }
+        if !self.local_chain_is_current(now_ms) {
+            return Err(AslError::InvalidIdentity);
+        }
+        let current = decode_record(&self.local_signed_directory)?;
+        let RecordPayload::DeviceDirectory(directory) = current.record.payload else {
+            return Err(AslError::InvalidDeviceCertificate);
+        };
+        if directory.agent_id != self.local_hello.agent_id
+            || identity.agent_id() != self.local_hello.agent_id
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let minimum = current
+            .record
+            .sequence
+            .max(self.local_directory_lease.record_sequence)
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        let sequence =
+            store.reserve_device_directory_sequence(self.local_hello.agent_id, minimum)?;
+        let renewed = sign_record(
+            identity,
+            RecordPayload::DeviceDirectory(directory),
+            sequence,
+            now_ms,
+            MAX_RECORD_LIFETIME_MS,
+        )?;
+        self.renew_local_device_directory(renewed, now_ms)
+    }
+
     /// Reload the signed envelope without changing the device or Hello.
     pub(crate) fn renew_local_device_directory(
         &mut self,
@@ -478,6 +591,31 @@ impl CoreAdmission {
             self.close(connection_id, &mut batch);
         }
         batch
+    }
+
+    pub fn block_agent(&mut self, agent_id: AgentId) -> AdmissionBatch {
+        self.blocked_agents.insert(agent_id);
+        let connections = self
+            .peers
+            .iter()
+            .filter_map(|(connection_id, peer)| {
+                (peer.admitted_agent == Some(agent_id)
+                    || peer
+                        .remote_hello
+                        .as_ref()
+                        .is_some_and(|hello| hello.agent_id == agent_id))
+                .then_some(*connection_id)
+            })
+            .collect::<Vec<_>>();
+        let mut batch = AdmissionBatch::default();
+        for connection_id in connections {
+            self.close(connection_id, &mut batch);
+        }
+        batch
+    }
+
+    pub fn unblock_agent(&mut self, agent_id: AgentId) {
+        self.blocked_agents.remove(&agent_id);
     }
 
     pub fn poll(&mut self, now_ms: u64) -> AdmissionBatch {
@@ -599,66 +737,11 @@ impl CoreAdmission {
                 connection_id,
                 proof,
             } => self.queue_proof(connection_id, proof, &mut batch),
-            NetworkEvent::UnverifiedPairingInvite {
-                connection_id,
-                response_id,
-                invite,
-            } => {
-                let remote_agent = self.current_agent(connection_id, now_ms);
-                let verified = remote_agent.and_then(|agent_id| {
-                    self.verified_controller(agent_id, now_ms)
-                        .ok()
-                        .and_then(|controller| {
-                            verify_incoming_invite(
-                                &invite,
-                                agent_id,
-                                self.local_hello.agent_id,
-                                now_ms,
-                                controller,
-                            )
-                            .ok()
-                            .map(|()| agent_id)
-                        })
-                });
-                if let Some(agent_id) = verified {
-                    batch
-                        .events
-                        .push(AdmittedNetworkEvent::PairingInviteReceived {
-                            connection_id,
-                            agent_id,
-                            response_id,
-                            invite,
-                        });
-                } else {
-                    self.close(connection_id, &mut batch);
-                }
+            NetworkEvent::UnverifiedPairingInvite { connection_id, .. } => {
+                self.close(connection_id, &mut batch);
             }
-            NetworkEvent::UnverifiedPairingExchangeResponse {
-                connection_id,
-                request_id,
-                invite,
-                exchange,
-            } => {
-                let remote_agent = self.current_agent(connection_id, now_ms);
-                if let Some(agent_id) = remote_agent.filter(|agent_id| {
-                    invite.inviter == self.local_hello.agent_id
-                        && invite.target == *agent_id
-                        && request_id == invite.invite_id.0
-                        && exchange.exchange_id == invite.invite_id
-                        && exchange.agent_id == *agent_id
-                }) {
-                    batch
-                        .events
-                        .push(AdmittedNetworkEvent::PairingExchangeReceived {
-                            connection_id,
-                            agent_id,
-                            request_id,
-                            invite,
-                            exchange,
-                        });
-                } else {
-                    self.close(connection_id, &mut batch);
-                }
+            NetworkEvent::UnverifiedPairingExchangeResponse { connection_id, .. } => {
+                self.close(connection_id, &mut batch);
             }
             NetworkEvent::UnverifiedControlRequest {
                 connection_id,
@@ -984,6 +1067,10 @@ impl CoreAdmission {
         now_ms: u64,
         batch: &mut AdmissionBatch,
     ) {
+        if self.blocked_agents.contains(&hello.agent_id) {
+            self.close(connection_id, batch);
+            return;
+        }
         let Some(peer) = self.peers.get(&connection_id) else {
             self.close(connection_id, batch);
             return;
@@ -1135,6 +1222,10 @@ impl CoreAdmission {
         });
         match admitted {
             Some((agent_id, peer_id)) => {
+                if self.blocked_agents.contains(&agent_id) {
+                    self.close(connection_id, batch);
+                    return;
+                }
                 if agent_id == self.local_hello.agent_id
                     && (self
                         .dht_histories
@@ -1170,7 +1261,12 @@ impl CoreAdmission {
             .session
             .current_agent(history, &mut self.resolver, now_ms)
         {
-            Ok(agent_id) if peer.admitted_agent == Some(agent_id) => Some(agent_id),
+            Ok(agent_id)
+                if peer.admitted_agent == Some(agent_id)
+                    && !self.blocked_agents.contains(&agent_id) =>
+            {
+                Some(agent_id)
+            }
             _ => None,
         }
     }
@@ -1218,6 +1314,51 @@ impl CoreAdmission {
             .session
             .admission_facts()
             .ok_or(AslError::InvalidIdentity)?;
+        if hello.device_certificate.agent_id != agent
+            || &hello.device_certificate.peer_id != peer.session.peer_id()
+        {
+            return Err(AslError::InvalidDeviceCertificate);
+        }
+        super::group_credential::verify_binding(
+            wire_room,
+            leaf,
+            &hello.device_certificate,
+            registry.controller,
+        )
+    }
+
+    /// Authenticates a leaf for a route that was selected from the current
+    /// room roster. The roster load already rechecked every member's current
+    /// signed directory against the chain; this additional check only binds
+    /// the MLS leaf to the still-admitted transport device and its local
+    /// admission facts. Re-running the full Hello chain gate here would turn a
+    /// valid route into a second, independently-timed admission decision.
+    pub(crate) fn verify_group_route_leaf(
+        &self,
+        connection_id: [u8; 16],
+        wire_room: Hash32,
+        leaf: &openmls::prelude::CredentialWithKey,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if !self.local_is_current(now_ms) {
+            return Err(AslError::InvalidIdentity);
+        }
+        let peer = self
+            .peers
+            .get(&connection_id)
+            .ok_or(AslError::InvalidIdentity)?;
+        let agent = peer.admitted_agent.ok_or(AslError::InvalidIdentity)?;
+        let (registry, expires_at_ms) = peer
+            .session
+            .admission_facts()
+            .ok_or(AslError::InvalidIdentity)?;
+        if now_ms >= expires_at_ms {
+            return Err(AslError::ExpiredMessage);
+        }
+        let hello = peer
+            .remote_hello
+            .as_ref()
+            .ok_or(AslError::InvalidDeviceCertificate)?;
         if hello.device_certificate.agent_id != agent
             || &hello.device_certificate.peer_id != peer.session.peer_id()
         {

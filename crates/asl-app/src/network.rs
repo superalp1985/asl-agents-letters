@@ -114,6 +114,14 @@ pub enum NetworkCommand {
         lookup_id: [u8; 16],
         key: [u8; 32],
     },
+    StartProviding {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    StopProviding {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
 }
 
 impl NetworkCommand {
@@ -158,25 +166,9 @@ impl NetworkCommand {
                 response_id,
                 proof,
             },
-            Self::RequestPairing {
-                connection_id,
-                request_id,
-                invite,
-            } => IpcMessage::RequestPairing {
-                connection_id,
-                request_id,
-                invite,
-            },
-            Self::ReplyPairing {
-                connection_id,
-                response_id,
-                exchange,
-            } => IpcMessage::ReplyPairing {
-                connection_id,
-                response_id,
-                exchange,
-            },
-            Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
+            Self::RequestPairing { .. }
+            | Self::ReplyPairing { .. }
+            | Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
             Self::SendControl {
                 connection_id,
                 request_id,
@@ -260,6 +252,12 @@ impl NetworkCommand {
                 accept,
             },
             Self::FindProviders { lookup_id, key } => IpcMessage::FindProviders { lookup_id, key },
+            Self::StartProviding { operation_id, key } => {
+                IpcMessage::StartProviding { operation_id, key }
+            }
+            Self::StopProviding { operation_id, key } => {
+                IpcMessage::StopProviding { operation_id, key }
+            }
         })
     }
 }
@@ -674,11 +672,27 @@ impl Supervisor {
         for command in batch.commands {
             self.send_network_command(command)?;
         }
-        batch
-            .events
-            .into_iter()
-            .filter_map(|event| self.verify_pairing_response(event, now_ms).transpose())
-            .collect()
+        let mut events = Vec::with_capacity(batch.events.len());
+        for event in batch.events {
+            self.observe_contact_binding_event(&event)?;
+            if let AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } = &event {
+                self.send_network_command(NetworkCommand::CloseConnection {
+                    connection_id: *connection_id,
+                })?;
+                continue;
+            }
+            if matches!(
+                &event,
+                AdmittedNetworkEvent::PairingAccepted { .. }
+                    | AdmittedNetworkEvent::PairingDeclined { .. }
+            ) {
+                continue;
+            }
+            if let Some(event) = self.verify_pairing_response(event, now_ms)? {
+                events.push(event);
+            }
+        }
+        Ok(events)
     }
 
     pub(crate) fn send_admitted_network_command(

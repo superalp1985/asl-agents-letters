@@ -7,14 +7,18 @@ use std::{
 };
 
 use alloy_primitives::hex;
+use asl_agent::runner::{InboundMode, InboundRunner, Ingress, ResourceMatch};
 use asl_groups::GroupApplication;
+use asl_policy::PolicyEngine;
 use asl_store::{
     Store,
-    group_state::{MlsIncomingInvite, open_mls_runtime_store},
+    group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
+    search::group::GroupRequester,
 };
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
+    protocol::{Intent, MediaKind, ResultShape, WireFrame},
     task::GroupId,
 };
 use serde_json::{Value, json};
@@ -22,6 +26,7 @@ use serde_json::{Value, json};
 use crate::{
     network::{NetworkCommand, NetworkEvent},
     profile::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, fresh_id},
+    transfer::TransferService,
 };
 
 use super::{
@@ -37,6 +42,7 @@ const SYNC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_JOIN_DIAGNOSTICS: usize = 5;
 const MAX_RECENT_ROOMS: usize = 32;
+const MAX_PENDING_GROUP_TRANSFERS: usize = 64;
 
 pub enum LocalGroupAction {
     List,
@@ -59,6 +65,10 @@ pub enum LocalGroupAction {
         room: Hash32,
         application: Box<GroupApplication>,
     },
+    ConfigureInbound {
+        browse_enabled: bool,
+        answer_enabled: bool,
+    },
     Dial {
         address: SocketAddr,
         peer: PeerId,
@@ -80,6 +90,7 @@ pub(super) struct LoopbackGroups {
     recent_applications: VecDeque<ReceivedApplication>,
     next_sync_probe: Instant,
     sync_cursor: Option<(Hash32, PeerId)>,
+    pending_transfers: VecDeque<PendingGroupTransfer>,
 }
 
 struct ReceivedApplication {
@@ -88,6 +99,15 @@ struct ReceivedApplication {
     sender: PeerId,
     message: Id128,
     kind: &'static str,
+}
+
+struct PendingGroupTransfer {
+    connection_id: [u8; 16],
+    wire_id: Hash32,
+    epoch: u64,
+    envelope_id: Id128,
+    sender: PeerId,
+    application: GroupApplication,
 }
 
 impl LoopbackGroups {
@@ -102,6 +122,7 @@ impl LoopbackGroups {
             recent_applications: VecDeque::new(),
             next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
             sync_cursor: None,
+            pending_transfers: VecDeque::new(),
         })
     }
 }
@@ -142,29 +163,83 @@ impl Supervisor {
             |command| enqueue(net, command),
         );
         if let Ok(Some(MlsNetworkOutcome::ApplicationReceived {
+            connection_id,
             wire_id,
             epoch,
+            envelope_id,
             sender,
             application,
         })) = &result
         {
-            groups
-                .recent_applications
-                .retain(|entry| entry.room != *wire_id);
-            if groups.recent_applications.len() == MAX_RECENT_ROOMS {
-                groups.recent_applications.pop_front();
+            if GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled) {
+                groups
+                    .recent_applications
+                    .retain(|entry| entry.room != *wire_id);
+                if groups.recent_applications.len() == MAX_RECENT_ROOMS {
+                    groups.recent_applications.pop_front();
+                }
+                groups.recent_applications.push_back(ReceivedApplication {
+                    room: *wire_id,
+                    epoch: *epoch,
+                    sender: sender.clone(),
+                    message: application.message_id(),
+                    kind: application.kind(),
+                });
             }
-            groups.recent_applications.push_back(ReceivedApplication {
-                room: *wire_id,
-                epoch: *epoch,
-                sender: sender.clone(),
-                message: application.message_id(),
-                kind: match application.as_ref() {
-                    GroupApplication::Query(_) => "query",
-                    GroupApplication::Answer(_) => "answer",
-                    GroupApplication::Offer(_) => "offer",
-                },
-            });
+            let requester = groups
+                .store
+                .mls_peer_agent(sender)
+                .ok()
+                .flatten()
+                .and_then(|agent| {
+                    let direct = admission.direct_requester(*connection_id, agent)?;
+                    let snapshot = groups.store.mls_room_snapshot(*wire_id).ok().flatten()?;
+                    let (state, _) = groups.store.mls_room_progress(*wire_id).ok().flatten()?;
+                    (state == "active").then_some(GroupRequester {
+                        direct,
+                        wire_id: *wire_id,
+                        group_id: snapshot.local_id,
+                        membership_epoch: snapshot.version.membership_epoch,
+                    })
+                });
+            if matches!(
+                application.as_ref(),
+                GroupApplication::FetchRequest(_)
+                    | GroupApplication::FetchGrant(_)
+                    | GroupApplication::FetchPending(_)
+                    | GroupApplication::Error(_)
+            ) {
+                if groups.pending_transfers.len() == MAX_PENDING_GROUP_TRANSFERS {
+                    groups.pending_transfers.pop_front();
+                }
+                groups.pending_transfers.push_back(PendingGroupTransfer {
+                    connection_id: *connection_id,
+                    wire_id: *wire_id,
+                    epoch: *epoch,
+                    envelope_id: *envelope_id,
+                    sender: sender.clone(),
+                    application: application.as_ref().clone(),
+                });
+            }
+            match groups.prepare_application_reply(
+                *wire_id,
+                sender,
+                application,
+                requester.as_ref(),
+                now_ms,
+            ) {
+                Ok(Some(reply)) => {
+                    let _ = admission.send_group_query_reply(
+                        &mut groups.store,
+                        *wire_id,
+                        reply,
+                        now_ms,
+                        |command| enqueue(net, command),
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
         }
         if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
             && let Some((connection_id, wire_id)) = joined_route
@@ -198,6 +273,220 @@ impl Supervisor {
                         .push_back((id, describe_join_failure(error)));
                 }
                 _ => {}
+            }
+        }
+    }
+
+    pub(super) fn poll_group_transfers(
+        &mut self,
+        transfers: &mut TransferService,
+        mut deliver: impl FnMut(
+            &mut Self,
+            &mut TransferService,
+            crate::profile::AdmittedNetworkEvent,
+        ) -> Result<(), AslError>,
+    ) -> Result<(), AslError> {
+        loop {
+            let Some(pending) = self
+                .groups
+                .as_mut()
+                .and_then(|groups| groups.pending_transfers.pop_front())
+            else {
+                return Ok(());
+            };
+            let now_ms = unix_time_ms()?;
+            let Some(requester) = self.current_group_requester(
+                pending.connection_id,
+                &pending.sender,
+                pending.wire_id,
+                pending.epoch,
+            ) else {
+                continue;
+            };
+            match pending.application {
+                GroupApplication::FetchRequest(request) => {
+                    let prepared = match transfers.prepare_group_fetch(requester, &request, now_ms)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(_) => continue,
+                    };
+                    let Some(groups) = self.groups.as_mut() else {
+                        continue;
+                    };
+                    let Some(admission) = self.admission.as_mut() else {
+                        continue;
+                    };
+                    let net = &self.net;
+                    let result = transfers.finish_group_fetch(
+                        prepared,
+                        now_ms,
+                        |response, envelope_id, _| {
+                            let application = match response {
+                                WireFrame::FetchGrant(grant) => GroupApplication::FetchGrant(grant),
+                                WireFrame::FetchPending(pending) => {
+                                    GroupApplication::FetchPending(pending)
+                                }
+                                WireFrame::Error(error) => GroupApplication::Error(error),
+                                _ => return Err(AslError::InvalidMessage),
+                            };
+                            let dispatched = admission
+                                .send_loopback_mls_application_to_connection(
+                                    &mut groups.store,
+                                    crate::profile::MlsApplicationSendToConnection {
+                                        wire_id: pending.wire_id,
+                                        connection_id: pending.connection_id,
+                                        envelope_id,
+                                        application,
+                                        now_ms: unix_time_ms()?,
+                                    },
+                                    |command| enqueue(net, command),
+                                )?;
+                            if dispatched.queued == 0 {
+                                return Err(AslError::NotFound);
+                            }
+                            Ok(())
+                        },
+                    );
+                    if matches!(
+                        result,
+                        Err(AslError::NotFound
+                            | AslError::PolicyDenied
+                            | AslError::ExpiredMessage
+                            | AslError::PolicyVersionConflict)
+                    ) {
+                        continue;
+                    }
+                    result?;
+                }
+                reply @ (GroupApplication::FetchGrant(_)
+                | GroupApplication::FetchPending(_)
+                | GroupApplication::Error(_)) => {
+                    if !transfers.matches_group_reply(
+                        pending.envelope_id,
+                        pending.connection_id,
+                        &requester,
+                        now_ms,
+                    ) {
+                        continue;
+                    }
+                    let response = match reply {
+                        GroupApplication::FetchGrant(grant) => WireFrame::FetchGrant(grant),
+                        GroupApplication::FetchPending(wait) => WireFrame::FetchPending(wait),
+                        GroupApplication::Error(error) => WireFrame::Error(error),
+                        _ => unreachable!(),
+                    };
+                    let event = crate::profile::AdmittedNetworkEvent::ControlResponse {
+                        connection_id: pending.connection_id,
+                        agent_id: requester.direct.agent,
+                        request_id: pending.envelope_id.0,
+                        response,
+                    };
+                    if let Some(event) = Self::route_matched_transfer(
+                        self.admission.as_mut(),
+                        transfers,
+                        event,
+                        now_ms,
+                        |command| self.net.try_send(&command.into_ipc()?),
+                    )? {
+                        deliver(self, transfers, event)?;
+                    }
+                }
+                GroupApplication::Query(_)
+                | GroupApplication::Answer(_)
+                | GroupApplication::Offer(_) => {}
+            }
+        }
+    }
+
+    fn current_group_requester(
+        &self,
+        connection_id: [u8; 16],
+        sender: &PeerId,
+        wire_id: Hash32,
+        epoch: u64,
+    ) -> Option<GroupRequester> {
+        let groups = self.groups.as_ref()?;
+        let admission = self.admission.as_ref()?;
+        let agent = groups.store.mls_peer_agent(sender).ok().flatten()?;
+        let direct = admission.direct_requester(connection_id, agent)?;
+        let snapshot = groups.store.mls_room_snapshot(wire_id).ok().flatten()?;
+        let (state, _) = groups.store.mls_room_progress(wire_id).ok().flatten()?;
+        (state == "active"
+            && snapshot.version.mls_epoch == epoch
+            && groups.store.has_mls_sync_member(wire_id, sender).ok()?)
+        .then_some(GroupRequester {
+            direct,
+            wire_id,
+            group_id: snapshot.local_id,
+            membership_epoch: snapshot.version.membership_epoch,
+        })
+    }
+
+    pub(super) fn send_group_fetch(
+        &mut self,
+        transfers: &mut TransferService,
+        source: &crate::downloads::DownloadSource,
+        group: &asl_store::transfers::GroupTransferBinding,
+        request: &asl_types::protocol::FetchRequest,
+    ) -> Result<Option<[u8; 16]>, AslError> {
+        let now_ms = unix_time_ms()?;
+        let groups = self.groups.as_mut().ok_or(AslError::PolicyDenied)?;
+        let wire_id = groups
+            .store
+            .mls_room_wire_id(&group.group_id)?
+            .ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        let (state, _) = groups
+            .store
+            .mls_room_progress(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        if state != "active"
+            || snapshot.local_id != group.group_id
+            || snapshot.version.membership_epoch != group.membership_epoch
+        {
+            return Ok(None);
+        }
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let (agent_id, connection_id, _) = admission
+            .admitted_connections(now_ms)
+            .into_iter()
+            .find(|(agent, _, peer)| *agent == source.agent_id && *peer == source.peer_id)
+            .ok_or(AslError::NotFound)?;
+        let requester = admission
+            .direct_requester(connection_id, agent_id)
+            .ok_or(AslError::InvalidIdentity)?;
+        transfers.expect_group_fetch_response(
+            connection_id,
+            &requester,
+            request,
+            (wire_id, group.membership_epoch),
+            now_ms,
+        )?;
+        let net = &self.net;
+        let sent = admission.send_loopback_mls_application_to_connection(
+            &mut groups.store,
+            crate::profile::MlsApplicationSendToConnection {
+                wire_id,
+                connection_id,
+                envelope_id: request.message_id,
+                application: GroupApplication::FetchRequest(request.clone()),
+                now_ms,
+            },
+            |command| enqueue(net, command),
+        );
+        match sent {
+            Ok(dispatched) if dispatched.queued > 0 => Ok(Some(connection_id)),
+            Ok(_) | Err(_) => {
+                transfers.fail_control_request(
+                    connection_id,
+                    requester.agent,
+                    &requester.peer,
+                    request.message_id.0,
+                );
+                Ok(None)
             }
         }
     }
@@ -293,7 +582,24 @@ impl Supervisor {
                         "kind": entry.kind
                     });
                 }
+                let policy = GroupInboundPolicy::load(store)?;
+                view["browse_enabled"] = json!(policy.browse_enabled);
+                view["answer_enabled"] = json!(policy.answer_enabled);
                 return Ok(view);
+            }
+            LocalGroupAction::ConfigureInbound {
+                browse_enabled,
+                answer_enabled,
+            } => {
+                let policy = GroupInboundPolicy {
+                    browse_enabled,
+                    answer_enabled,
+                };
+                policy.save(store, now_ms)?;
+                return Ok(json!({
+                    "browse_enabled": policy.browse_enabled,
+                    "answer_enabled": policy.answer_enabled
+                }));
             }
             LocalGroupAction::Reject(id) => {
                 let invite = select_invite(pending(store)?, id)?;
@@ -339,7 +645,7 @@ impl Supervisor {
                     "Group",
                     now_ms,
                 )?;
-                Ok(json!({"room": hex::encode(wire_id.0), "state": "needs_sync"}))
+                Ok(json!({"room": hex::encode(wire_id.0), "state": "active"}))
             }
             LocalGroupAction::Approve(id) | LocalGroupAction::Retry(id) => {
                 let is_approval = matches!(action, LocalGroupAction::Approve(_));
@@ -451,7 +757,10 @@ impl Supervisor {
                 )?;
                 Ok(json!({"queued": true}))
             }
-            LocalGroupAction::List | LocalGroupAction::Room(_) | LocalGroupAction::Reject(_) => {
+            LocalGroupAction::List
+            | LocalGroupAction::Room(_)
+            | LocalGroupAction::Reject(_)
+            | LocalGroupAction::ConfigureInbound { .. } => {
                 unreachable!()
             }
         }
@@ -459,6 +768,98 @@ impl Supervisor {
 }
 
 impl LoopbackGroups {
+    fn prepare_application_reply(
+        &mut self,
+        wire_id: Hash32,
+        sender: &PeerId,
+        application: &GroupApplication,
+        requester: Option<&GroupRequester>,
+        now_ms: u64,
+    ) -> Result<Option<GroupApplication>, AslError> {
+        let GroupApplication::Query(query) = application else {
+            return Ok(None);
+        };
+        if requester.is_none() || !GroupInboundPolicy::load(&self.store)?.answer_enabled {
+            return Ok(None);
+        }
+        let Some(agent) = self.store.mls_peer_agent(sender)? else {
+            return Ok(None);
+        };
+        let mut inbound = InboundRunner::default();
+        inbound.set_mode(InboundMode::Answer);
+        let Ingress::Work(work) = inbound.receive(
+            agent,
+            sender.clone(),
+            WireFrame::Query(query.clone()),
+            now_ms,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !self.store.claim_group_inbound_query(
+            wire_id,
+            agent,
+            query.root_task_id,
+            query.message_id,
+            now_ms as i64,
+            query.expires_at_ms as i64,
+        )? {
+            return Ok(None);
+        }
+        let requester = requester.ok_or(AslError::PolicyDenied)?;
+        let (snapshot, keys) = self.store.group_search_snapshot(requester)?;
+        let revision = snapshot.revision;
+        let engine = PolicyEngine::new(snapshot, 10_000)?;
+        let policy = engine.for_group(requester.direct.peer.clone(), requester.group_id.clone());
+        let mut hit = None;
+        if query.constraints.is_empty()
+            && matches!(
+                query.intent_id,
+                Intent::FindEvidence | Intent::LocateResource
+            )
+            && query.result_shape != ResultShape::Agents
+            && let Some((found, permit)) = self
+                .store
+                .peer_search(&policy, requester.direct.agent)
+                .search_with_metadata_permits(&keys, &query.topics, 1)?
+                .pop()
+        {
+            let concepts = query
+                .topics
+                .iter()
+                .copied()
+                .filter(|topic| found.local_concept_ids.contains(topic))
+                .take(16)
+                .collect();
+            let file_size = permit.file_size();
+            hit = Some(ResourceMatch::new(
+                permit,
+                concepts,
+                file_size,
+                MediaKind::Other,
+            )?);
+        }
+        let Some(reply) = inbound.finish_without_model(*work, hit, &policy, now_ms)? else {
+            return Ok(None);
+        };
+        let permit = reply.permit().cloned();
+        let Some(frame) = inbound.take_reply(reply, &policy, now_ms) else {
+            return Ok(None);
+        };
+        self.store.with_current_group_authority(
+            requester,
+            revision,
+            permit.as_ref(),
+            Some(query.root_task_id),
+            || Ok(()),
+        )?;
+        match frame {
+            WireFrame::Answer(answer) => Ok(Some(GroupApplication::Answer(answer))),
+            WireFrame::Offer(offer) => Ok(Some(GroupApplication::Offer(offer))),
+            _ => Err(AslError::InvalidMessage),
+        }
+    }
+
     fn poll_sync(
         &mut self,
         admission: &mut crate::profile::CoreAdmission,
