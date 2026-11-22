@@ -124,7 +124,7 @@ impl Provider {
         )
     }
 
-    pub async fn serve(&mut self) {
+    pub async fn serve(mut self, interrupt: Option<&Cell<Option<u32>>>) {
         loop {
             let event = self.listener.next_event().await.unwrap();
             let now = unix_time_ms().unwrap();
@@ -178,6 +178,13 @@ impl Provider {
                     response,
                 } => {
                     assert_eq!(connection, self.server);
+                    if request.operation == BulkOperation::Chunk
+                        && let Some(interrupt) = interrupt
+                        && interrupt.get().is_none()
+                    {
+                        interrupt.set(Some(request.chunk_index));
+                        return; // Drop this provider and its TCP connection without replying.
+                    }
                     let prepared = self.transfer.prepare_bulk(
                         &self.libraries,
                         self.requester.clone(),

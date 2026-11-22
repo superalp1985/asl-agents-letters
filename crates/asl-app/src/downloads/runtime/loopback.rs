@@ -41,15 +41,28 @@ use provider::{Provider, ReceiverIdentity};
 
 #[tokio::test]
 async fn mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox() {
-    verify_download(1).await;
+    verify_download(Scenario::Single).await;
 }
 
 #[tokio::test]
 async fn mcp_selects_two_offers_and_both_tcp_sources_supply_chunks() {
-    verify_download(2).await;
+    verify_download(Scenario::TwoSources).await;
 }
 
-async fn verify_download(provider_count: usize) {
+#[tokio::test]
+async fn mcp_surviving_tcp_source_replaces_chunk_lost_to_disconnect() {
+    verify_download(Scenario::LoseSource).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    Single,
+    TwoSources,
+    LoseSource,
+}
+
+async fn verify_download(scenario: Scenario) {
+    let provider_count = if scenario == Scenario::Single { 1 } else { 2 };
     let fixture = Fixture::new();
     let home = fixture.path().join("receiver");
     let inbox = fixture.path().join("inbox");
@@ -129,6 +142,8 @@ async fn verify_download(provider_count: usize) {
     let mut granted = HashMap::new();
     let mut bulk = HashMap::new();
     let mut delivered = HashSet::new();
+    let interrupted = Cell::new(None);
+    let mut disconnected = None;
     let drive_network = async {
         loop {
             tokio::select! {
@@ -152,6 +167,9 @@ async fn verify_download(provider_count: usize) {
                         };
                         let (connection_id, source) = &peers[&device.peer_id];
                         assert_eq!(device, source);
+                        if disconnected.as_ref() == Some(&device.peer_id) {
+                            return Err(AslError::NotFound);
+                        }
                         let client = &clients[connection_id];
                         match request {
                             WorkerRequest::Fetch { group, request, .. } => {
@@ -234,20 +252,52 @@ async fn verify_download(provider_count: usize) {
                         };
                         bridge.forward(&event);
                     }
+                    TransportEvent::Disconnected { connection_id, peer } if scenario == Scenario::LoseSource => {
+                        let (id, source) = &peers[&peer];
+                        assert_eq!(clients[id].connection_id(), connection_id);
+                        assert!(interrupted.get().is_some());
+                        assert!(disconnected.replace(peer.clone()).is_none());
+                        bridge.forward(&AdmittedNetworkEvent::PeerDisconnected {
+                            connection_id: *id, agent_id: Some(source.agent_id), peer_id: Some(peer),
+                        });
+                    }
+                    TransportEvent::RequestFailed { connection_id, request } if scenario == Scenario::LoseSource => {
+                        let (id, client) = clients.iter().find(|(_, c)| c.connection_id() == connection_id).unwrap();
+                        let (_, source) = &peers[client.peer_id()];
+                        let request_id = *bulk.iter().find(|(_, (token, _))| token == &request).unwrap().0;
+                        bulk.remove(&request_id);
+                        // The disconnect has already released every ticket for this connection.
+                        if disconnected.as_ref() == Some(client.peer_id()) {
+                            continue;
+                        }
+                        bridge.forward(&AdmittedNetworkEvent::RequestFailed {
+                            connection_id: *id, agent_id: source.agent_id, peer_id: source.peer_id.clone(),
+                            request_id: request_id.0, protocol: NetworkProtocol::Bulk,
+                            code: crate::ipc::NetworkErrorCode::TimedOut,
+                        });
+                    }
                     other => panic!("unexpected receiver event: {other:?}"),
                 }
             }
         }
     };
     let expected_peers: HashSet<_> = peers.keys().cloned().collect();
-    let (first, rest) = providers.split_first_mut().unwrap();
+    let loss = (scenario == Scenario::LoseSource).then_some(&interrupted);
+    let mut providers = providers.into_iter();
+    let first = providers.next().unwrap();
+    let drive_providers = async {
+        tokio::join!(first.serve(loss), async {
+            if let Some(second) = providers.next() {
+                second.serve(loss).await;
+            }
+        });
+    };
     let transfer_id = timeout(Duration::from_secs(20), async {
         tokio::select! {
             biased;
             id = approve_and_download(&mut host, &mut decisions, &destination, content, size, &approved, &expected_peers) => id,
             () = drive_network => unreachable!(),
-            () = first.serve() => unreachable!(),
-            () = async {rest[0].serve().await}, if !rest.is_empty() => unreachable!(),
+            () = drive_providers => unreachable!(),
         }
     })
     .await
@@ -259,7 +309,23 @@ async fn verify_download(provider_count: usize) {
         .info(&transfer_id)
         .unwrap();
     assert_eq!(info.content_id, content);
-    assert_eq!(delivered, expected_peers);
+    if scenario == Scenario::LoseSource {
+        let lost = disconnected.expect("expected a TCP disconnect");
+        let survivor = expected_peers.iter().find(|peer| **peer != lost).unwrap();
+        assert_eq!(delivered, HashSet::from([survivor.clone()]));
+        let durable_source: String = rusqlite::Connection::open(&receiver_db).unwrap()
+            .query_row(
+                "SELECT source_peer FROM transfer_chunks WHERE transfer_id=?1 AND chunk_index=?2 AND state='durable'",
+                params![hex::encode(transfer_id.0.as_bytes()), interrupted.get().unwrap()],
+                |row| row.get(0),
+            ).unwrap();
+        assert_eq!(
+            durable_source,
+            bs58::encode(survivor.as_bytes()).into_string()
+        );
+    } else {
+        assert_eq!(delivered, expected_peers);
+    }
     assert_eq!(
         (info.file_size, info.durable_bytes, info.chunk_count),
         (size, size, expected.chunk_hashes.len() as u32)
