@@ -4,7 +4,7 @@ use alloy_primitives::hex;
 use asl_agent::{MAX_QUERY_PEERS, OutgoingTask, QUERY_WINDOW_MS, QueryScope, QueryStatus};
 use asl_types::{
     error::{AslError, ErrorCode},
-    ids::Id128,
+    ids::{Hash32, Id128},
     protocol::{
         Answer, AnswerStatus, Claim, ConceptRef, MediaKind, Offer, ResultStatus, TypedValue,
         WireFrame,
@@ -23,7 +23,9 @@ use crate::{
     supervisor::unix_time_ms,
 };
 
-use super::contract::{FetchArgs, QueryArgs, Request};
+use super::contract::{FetchArgs, QueryArgs, Request, parse_id};
+
+mod selection;
 
 const MAX_TASKS: usize = 16;
 const MAX_TERMS: usize = 12;
@@ -128,16 +130,10 @@ impl<'a> Session<'a> {
 
     async fn fetch(&mut self, args: FetchArgs) -> Result<Value, ErrorCode> {
         let task = find_task(&mut self.tasks, &args.task_id)?;
-        let offer_id = parse_id(&args.offer_id)?;
+        let ids = args.offer_ids()?;
         task.poll();
-        let offer = task
-            .offers
-            .iter_mut()
-            .find(|offer| offer.id == offer_id)
-            .ok_or(ErrorCode::NotFound)?;
-        let inbox = self.inbox.ok_or(ErrorCode::PolicyDenied)?;
-        let download = offer.select(self.downloads, inbox)?;
-        download.wait_for_reference(offer_id).await
+        let download = task.select_download(self.downloads, self.inbox, ids)?;
+        download.wait_for_reference().await
     }
 }
 
@@ -146,6 +142,7 @@ struct Task {
     query: Option<OutgoingQueryTicket>,
     state: QueryState,
     offers: Vec<LocalOffer>,
+    downloads: Vec<Download>,
     answers: Vec<Value>,
     answer_bytes: usize,
     answers_truncated: bool,
@@ -166,6 +163,7 @@ impl Task {
             query: Some(ticket),
             state: QueryState::Queued,
             offers: Vec::new(),
+            downloads: Vec::new(),
             answers: Vec::new(),
             answer_bytes: 0,
             answers_truncated: false,
@@ -180,11 +178,7 @@ impl Task {
                 Err(error) => self.finish(QueryState::Failed(error_code(error))),
             }
         }
-        for download in self
-            .offers
-            .iter_mut()
-            .filter_map(|offer| offer.download.as_mut())
-        {
+        for download in &mut self.downloads {
             download.poll();
         }
     }
@@ -212,12 +206,7 @@ impl Task {
                             && self.offers.len() < MAX_QUERY_PEERS =>
                     {
                         match fresh_id(|id| self.offers.iter().any(|offer| offer.id == id)) {
-                            Ok(id) => self.offers.push(LocalOffer {
-                                id,
-                                offer,
-                                source,
-                                download: None,
-                            }),
+                            Ok(id) => self.offers.push(LocalOffer { id, offer, source }),
                             Err(code) => self.finish(QueryState::Failed(code)),
                         }
                     }
@@ -248,13 +237,14 @@ impl Task {
 
     fn can_evict(&self, now: u64) -> bool {
         self.query.is_none()
-            && self.offers.iter().all(|entry| {
-                entry.offer.expires_at_ms <= now
-                    && !entry
-                        .download
-                        .as_ref()
-                        .is_some_and(|download| download.ticket.is_some())
-            })
+            && self
+                .offers
+                .iter()
+                .all(|entry| entry.offer.expires_at_ms <= now)
+            && self
+                .downloads
+                .iter()
+                .all(|download| download.ticket.is_none())
     }
 
     fn record_answer(&mut self, source: &DownloadSource, answer: Answer) {
@@ -322,9 +312,9 @@ impl Task {
             .map(LocalOffer::value)
             .collect::<Vec<_>>();
         let downloads = self
-            .offers
+            .downloads
             .iter()
-            .filter_map(|entry| Some(entry.download.as_ref()?.value(entry.id)))
+            .map(Download::value)
             .collect::<Vec<_>>();
         let mut value = json!({
             "task_id": hex::encode(self.id.0),
@@ -346,34 +336,9 @@ struct LocalOffer {
     id: Id128,
     offer: Offer,
     source: DownloadSource,
-    download: Option<Download>,
 }
 
 impl LocalOffer {
-    fn select(&mut self, port: &DownloadPort, inbox: Id128) -> Result<&mut Download, ErrorCode> {
-        if self.download.is_none() {
-            if self.offer.expires_at_ms <= unix_time_ms().map_err(error_code)? {
-                return Err(ErrorCode::Timeout);
-            }
-            let content_id = self.offer.content_id;
-            let ticket = port
-                .submit(DownloadJob::Fetch(DownloadSelection {
-                    content_id,
-                    inbox_grant: inbox,
-                    filename: format!("asl-{}.bin", hex::encode(content_id.0)),
-                    sources: vec![self.source.clone()],
-                    group: None,
-                }))
-                .map_err(error_code)?;
-            // Keep the accepted job even if the caller times out before it has a transfer ID.
-            self.download = Some(Download {
-                ticket: Some(ticket),
-                state: DownloadState::Queued,
-            });
-        }
-        self.download.as_mut().ok_or(ErrorCode::InternalError)
-    }
-
     fn value(&self) -> Value {
         let media_kind = match self.offer.media_kind {
             MediaKind::Other => "other",
@@ -397,6 +362,8 @@ impl LocalOffer {
 }
 
 struct Download {
+    content_id: Hash32,
+    offer_ids: Vec<Id128>,
     ticket: Option<DownloadTicket>,
     state: DownloadState,
 }
@@ -451,14 +418,14 @@ impl Download {
         self.ticket = None;
     }
 
-    async fn wait_for_reference(&mut self, offer_id: Id128) -> Result<Value, ErrorCode> {
+    async fn wait_for_reference(&mut self) -> Result<Value, ErrorCode> {
         let deadline = Instant::now() + FETCH_WAIT;
         loop {
             self.poll();
             match self.state {
                 DownloadState::Queued => {}
                 DownloadState::Failed(_, code) => return Err(code),
-                _ => return Ok(self.value(offer_id)),
+                _ => return Ok(self.value()),
             }
             let now = Instant::now();
             if now >= deadline {
@@ -468,7 +435,7 @@ impl Download {
         }
     }
 
-    fn value(&self, offer_id: Id128) -> Value {
+    fn value(&self) -> Value {
         let (status, error) = match self.state {
             DownloadState::Queued => ("queued", None),
             DownloadState::AwaitingApproval(_) => ("awaiting_approval", None),
@@ -476,12 +443,21 @@ impl Download {
             DownloadState::Completed(_) => ("completed", None),
             DownloadState::Failed(_, code) => ("failed", Some(code)),
         };
-        json!({
-            "offer_id": hex::encode(offer_id.0),
+        let mut value = json!({
+            "offer_id": hex::encode(self.offer_ids[0].0),
             "transfer_id": self.state.transfer_id().map(|id| hex::encode(id.0.as_bytes())),
             "status": status,
             "error": error,
-        })
+        });
+        if self.offer_ids.len() > 1 {
+            value["additional_offer_ids"] = json!(
+                self.offer_ids[1..]
+                    .iter()
+                    .map(|id| hex::encode(id.0))
+                    .collect::<Vec<_>>()
+            );
+        }
+        value
     }
 }
 
@@ -501,15 +477,6 @@ fn find_task<'a>(tasks: &'a mut VecDeque<Task>, id: &str) -> Result<&'a mut Task
         .iter_mut()
         .find(|task| task.id == id)
         .ok_or(ErrorCode::NotFound)
-}
-
-fn parse_id(id: &str) -> Result<Id128, ErrorCode> {
-    if id.len() != Id128::LENGTH * 2 {
-        return Err(ErrorCode::InvalidMessage);
-    }
-    let mut bytes = [0; Id128::LENGTH];
-    hex::decode_to_slice(id, &mut bytes).map_err(|_| ErrorCode::InvalidMessage)?;
-    Ok(Id128(bytes))
 }
 
 fn fresh_id(exists: impl Fn(Id128) -> bool) -> Result<Id128, ErrorCode> {

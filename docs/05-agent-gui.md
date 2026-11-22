@@ -116,8 +116,22 @@ Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派�
 
 - `asl_query`：query、terms、audience、deadline_ms → task_id。audience 只能收窄人类既有网络授权。
 - `asl_task_status`：task_id → 状态、当前有效的 Offer 及下载状态。
-- `asl_fetch`：task_id、offer_id → 本地 transfer_id 与状态；不得接受任意 URL 或保存路径。询问模式返回 `awaiting_approval`，由本机用户确认。等待超时可用相同参数查询原下载提交，不会重复创建。
+- `asl_fetch`：`task_id`、`offer_id`，以及可选的 `additional_offer_ids` → 本地 `transfer_id` 与状态。不接受 URL、设备地址或保存路径。省略附加列表时仍从单一设备下载，响应格式不变。
 - `asl_result`：task_id → 最终结构化答案、来源、有效 Offer 和传输引用。收件完成不等于已导入知识库；当前不返回应用内资源 ID。
+
+例如，两台设备在同一次查询中提供同一文件时，用 `asl_task_status` 或 `asl_result` 返回的实际句柄填入以下参数：
+
+```json
+{
+  "task_id": "00000000000000000000000000000001",
+  "offer_id": "00000000000000000000000000000002",
+  "additional_offer_ids": ["00000000000000000000000000000003"]
+}
+```
+
+首次请求最多选择四台不同设备。所有 Offer 必须来自当前会话的同一次查询，尚未过期，且 `content_id` 和文件大小一致。Core 为该查询的这份内容创建一个下载，提交时固定来源集合。询问模式下只产生一个收件审批，覆盖所选设备；`awaiting_approval` 不是放行。各来源的上传授权仍独立生效。
+
+调用等待超时，用同一组 Offer 重试即可，也可交换主、附 Offer 的顺序。Core 返回原下载的状态，不重复排队；在同一查询里改换、增加或减少该文件的来源会被拒绝。多源下载的状态保留首次提交时的 `offer_id` 和 `additional_offer_ids`。
 
 不提供 read_any_file、execute、change_grant、set_trust、fetch_url 等工具。没有授权时返回 policy_denied，而不是自行弹窗获取无限权限。
 

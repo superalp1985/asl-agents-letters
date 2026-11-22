@@ -111,7 +111,7 @@ fn tool_definitions() -> Result<Vec<Tool>, String> {
         )?,
         tool::<FetchArgs>(
             FETCH,
-            "Request a resource offered to an ASL task in this session.",
+            "Download an offered file. To use multiple devices, include additional offers of the same content from this task.",
         )?,
         tool::<TaskArgs>(
             RESULT,
@@ -152,7 +152,7 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
         }
         FETCH => {
             let args: FetchArgs = parse_arguments(arguments)?;
-            if !valid_id(&args.task_id) || !valid_id(&args.offer_id) {
+            if !valid_id(&args.task_id) || args.offer_ids().is_err() {
                 return Err(invalid_arguments());
             }
             Ok(Request::Fetch(args))
@@ -209,6 +209,25 @@ mod tests {
                 panic!("invalid tool request was accepted");
             };
             assert_eq!(error.code, McpErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    #[test]
+    fn fetch_accepts_at_most_four_distinct_local_offer_handles() {
+        let args = |extra: Value| {
+            CallToolRequestParams::new(FETCH).with_arguments(object(json!({
+                "task_id": ID, "offer_id": ID, "additional_offer_ids": extra
+            })))
+        };
+        let ids = (1..=4).map(|n| format!("{n:032x}")).collect::<Vec<_>>();
+        assert!(parse_request(args(json!(ids[..3]))).is_ok());
+        for bad in [
+            json!(ids),
+            json!([ID.to_uppercase()]),
+            json!(["invalid"]),
+            json!([ids[0], ids[0]]),
+        ] {
+            assert!(parse_request(args(bad)).is_err());
         }
     }
 
