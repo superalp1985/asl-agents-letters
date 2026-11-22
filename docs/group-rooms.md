@@ -148,7 +148,7 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 .\scripts\run-appcontainer-loopback-test.ps1
 ```
 
-脚本不写死盘符，会使用 `ASL_DEV_ROOT`，或在仓库上级目录中查找现有 `dev-cache`。
+`-DevRoot` 优先于 `ASL_DEV_ROOT`。两者都未指定时，脚本从仓库向上查找含 `dev-cache\cargo\bin\cargo.exe` 的目录，跳过只有缓存的目录，不写死盘符。可用 `-CheckEnvironment` 在普通 PowerShell 查看实际选中的开发根、Cargo 路径和版本；此模式不构建、不运行验收，也不修改防火墙规则。
 
 ### 群文件验收
 
