@@ -28,7 +28,10 @@ const PROVIDER: &str = "local-test";
 struct TestCredentials;
 
 impl ProviderCredentialSource for TestCredentials {
-    fn api_key(&self, _: &ProviderId) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
+    fn api_key(
+        &self,
+        _: &ProviderConfigV1,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
         Ok(Some(Zeroizing::new(b"test-token".to_vec())))
     }
 }
@@ -36,7 +39,10 @@ impl ProviderCredentialSource for TestCredentials {
 struct NoCredentials;
 
 impl ProviderCredentialSource for NoCredentials {
-    fn api_key(&self, _: &ProviderId) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
+    fn api_key(
+        &self,
+        _: &ProviderConfigV1,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
         Ok(None)
     }
 }
@@ -231,7 +237,61 @@ fn gateway_with_credentials(
     config: ProviderConfigV1,
     credentials: Arc<dyn ProviderCredentialSource>,
 ) -> HttpModelGateway {
-    HttpModelGateway::new(registry(config), credentials).unwrap()
+    registry(config.clone()).validate().unwrap();
+    HttpModelGateway::new(
+        Arc::new(move |id: &ProviderId| {
+            if &config.id == id {
+                Ok(config.clone())
+            } else {
+                Err(ModelGatewayError::AuthorizationDenied)
+            }
+        }),
+        credentials,
+    )
+    .unwrap()
+}
+
+#[test]
+fn revocation_during_request_preparation_prevents_dispatch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RevokingCredentials(Arc<AtomicBool>);
+
+    impl ProviderCredentialSource for RevokingCredentials {
+        fn api_key(
+            &self,
+            _: &ProviderConfigV1,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
+            self.0.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    let server = MockServer::start(success_response());
+    let config = provider_config(server.endpoint.clone(), true);
+    let allowed = Arc::new(AtomicBool::new(true));
+    let allowed_at_dispatch = Arc::clone(&allowed);
+    let gateway = HttpModelGateway::new(
+        Arc::new(move |_: &ProviderId| {
+            if allowed_at_dispatch.load(Ordering::SeqCst) {
+                Ok(config.clone())
+            } else {
+                Err(ModelGatewayError::AuthorizationDenied)
+            }
+        }),
+        Arc::new(RevokingCredentials(allowed)),
+    )
+    .unwrap();
+    let id = provider_id();
+    let (policy, permit) = authorized_policy(id.clone(), true);
+    let result = runtime().block_on(gateway.complete(
+        &id,
+        prompt(id.clone(), permit, "local test"),
+        &policy,
+        NOW_MS,
+    ));
+    assert_eq!(result.unwrap_err(), ModelGatewayError::AuthorizationDenied);
+    server.assert_no_request();
 }
 
 fn runtime() -> tokio::runtime::Runtime {

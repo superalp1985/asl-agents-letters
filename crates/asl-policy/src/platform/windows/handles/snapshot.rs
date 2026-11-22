@@ -70,12 +70,11 @@ pub(crate) fn pin_state(home: &Path) -> Result<PinnedDirectory, AslError> {
     pin_directory(home)?.child("state", false)
 }
 
-pub(crate) fn open_download_marker(state: &PinnedDirectory) -> Result<File, AslError> {
-    const NAME: &str = "download-worker.lock";
+pub(crate) fn open_exclusive_marker(state: &PinnedDirectory, name: &str) -> Result<File, AslError> {
     // The marker persists. Read-data access makes the zero-share handle exclusive.
     let file = match relative_handle(
         state.leaf(),
-        NAME,
+        name,
         Entry::File,
         FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         FILE_SHARE_MODE(0),
@@ -86,7 +85,7 @@ pub(crate) fn open_download_marker(state: &PinnedDirectory) -> Result<File, AslE
         }
         result => result?,
     };
-    state.check_file(&file, NAME)?;
+    state.check_file(&file, name)?;
     super::check_single_link(&file)?;
     Ok(file)
 }

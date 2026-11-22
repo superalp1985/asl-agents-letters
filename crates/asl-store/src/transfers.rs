@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::evidence::{TrustDimension, TrustOutcome};
-use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::DownloadOwner};
+use asl_policy::{AuthorizedWriteFile, FileIdentity, WriteGrant, snapshot_files::ProfileOwner};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
@@ -133,12 +133,12 @@ pub struct RecoveryReport {
 pub struct DownloadBroker {
     store: Store,
     home: PathBuf,
-    _owner: DownloadOwner,
+    _owner: ProfileOwner,
 }
 
 impl DownloadBroker {
     pub fn open(home: &Path) -> Result<Self, AslError> {
-        let owner = DownloadOwner::acquire(home)?;
+        let owner = ProfileOwner::downloads(home)?;
         let store = open_store(&home.join("state").join("asl.sqlite3"))?;
         let mut broker = Self {
             store,
@@ -664,7 +664,19 @@ impl DownloadBroker {
         };
         let mut report = RecoveryReport::default();
         for id in ids {
-            match self.recover_one(id, now_ms)? {
+            let action = match self.recover_one(&id, now_ms) {
+                Err(AslError::PolicyDenied) => {
+                    // The room may change while durable blocks are being verified.
+                    let row = self.load_row(&id)?;
+                    if group_binding_current(&self.store.connection, &row, current_time_ms())? {
+                        return Err(AslError::PolicyDenied);
+                    }
+                    self.release_inactive(&row, now_ms)?;
+                    RecoveryAction::Released
+                }
+                result => result?,
+            };
+            match action {
                 RecoveryAction::Resumed => report.resumed += 1,
                 RecoveryAction::Repaired => report.repaired_chunks += 1,
                 RecoveryAction::Completed => report.completed += 1,
@@ -850,8 +862,11 @@ impl DownloadBroker {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        if let Some(part) = part.as_mut() {
-            ensure_active_transfer(&tx, row)?;
+        // Cleanup needs local ownership of this exact part, not permission
+        // to receive more content from the former group.
+        if let Some(part) = part.as_mut()
+            && active_inbox_transfer(&tx, row)?
+        {
             part.remove()?;
         }
         reset_assignments(&tx, &row.transfer)?;
@@ -861,13 +876,14 @@ impl DownloadBroker {
 
     fn recover_one(
         &mut self,
-        transfer_id: TransferId,
+        transfer_id: &TransferId,
         now_ms: i64,
     ) -> Result<RecoveryAction, AslError> {
-        let row = self.load_row(&transfer_id)?;
+        let row = self.load_row(transfer_id)?;
         if row.reservation_state != "held"
             || row.expires_at_ms <= now_ms
             || row.grant_status != "active"
+            || !group_binding_current(&self.store.connection, &row, current_time_ms())?
         {
             self.release_inactive(&row, now_ms)?;
             return Ok(RecoveryAction::Released);
@@ -1331,28 +1347,28 @@ fn group_binding(
     }
 }
 
-fn ensure_group_epoch(
-    tx: &Transaction<'_>,
-    group_id: &str,
-    membership_epoch: i64,
+fn group_binding_current(
+    db: &rusqlite::Connection,
+    row: &TransferRow,
     now_ms: i64,
-) -> Result<(), AslError> {
-    let active: bool = tx
-        .query_row(
-            "SELECT EXISTS(
+) -> Result<bool, AslError> {
+    let Some(group) = row.group_binding()? else {
+        return Ok(true);
+    };
+    db.query_row(
+        "SELECT EXISTS(
                 SELECT 1 FROM asl_groups
                 WHERE group_id=?1 AND state='active'
                   AND membership_epoch=?2 AND updated_at_ms<=?3
             )",
-            params![group_id, membership_epoch, now_ms],
-            |row| row.get(0),
-        )
-        .map_err(database_error)?;
-    if active {
-        Ok(())
-    } else {
-        Err(AslError::PolicyDenied)
-    }
+        params![
+            hex::encode(group.group_id.0.as_bytes()),
+            sql_number(group.membership_epoch)?,
+            now_ms
+        ],
+        |row| row.get(0),
+    )
+    .map_err(database_error)
 }
 
 fn ensure_group_member(
@@ -1386,30 +1402,24 @@ fn ensure_group_member(
     }
 }
 
-fn ensure_active_transfer(tx: &Transaction<'_>, row: &TransferRow) -> Result<(), AslError> {
-    let active: bool = tx
-        .query_row(
-            "SELECT EXISTS(
+fn active_inbox_transfer(tx: &Transaction<'_>, row: &TransferRow) -> Result<bool, AslError> {
+    tx.query_row(
+        "SELECT EXISTS(
                 SELECT 1 FROM transfers t JOIN reservations r USING(reservation_id)
                 JOIN write_grants w ON w.write_grant_id=t.write_grant_id
                 WHERE t.transfer_id=?1 AND r.state='held'
                   AND t.state IN ('pending','running','paused','verifying')
                   AND w.status='active' AND w.kind='inbox'
             )",
-            [&row.transfer],
-            |value| value.get(0),
-        )
-        .map_err(database_error)?;
-    if !active {
+        [&row.transfer],
+        |value| value.get(0),
+    )
+    .map_err(database_error)
+}
+
+fn ensure_active_transfer(tx: &Transaction<'_>, row: &TransferRow) -> Result<(), AslError> {
+    if !active_inbox_transfer(tx, row)? || !group_binding_current(tx, row, current_time_ms())? {
         return Err(AslError::PolicyDenied);
-    }
-    if let Some(group) = row.group_binding()? {
-        ensure_group_epoch(
-            tx,
-            &hex::encode(group.group_id.0.as_bytes()),
-            sql_number(group.membership_epoch)?,
-            current_time_ms(),
-        )?;
     }
     Ok(())
 }

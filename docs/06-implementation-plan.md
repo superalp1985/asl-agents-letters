@@ -594,7 +594,7 @@ T24 集中验证（2026-11-19，Windows x64，Rust 1.100.0，Cargo 缓存/产物
 
 验收 mock endpoint 的超时、错误、超大响应、重定向、授权外provider；远端文本中的 URL 不产生 HTTP；本地模型必须单独获准。无真实收费服务也能用 mock 跑测试。
 
-provider 配置文件为 `state/model-providers-v1.json`，每项包含 `id`、`endpoint`、`model`、`mode`、`enabled_by_user` 和 `request_timeout_ms`；不含凭据。ID 限小写字母、数字、连字符与下划线。远端 endpoint 仅 HTTPS，本地 endpoint 仅使用明确登记的 IPv4/IPv6 loopback 字面地址；缺失注册表时保持空 provider 集。凭据以 `provider-<provider-id>.dpapi` 单独存放；远端调用必须有 key，本地端点可无 key。Core 持有网关并逐次重验与 provider ID 和本地/远端模式绑定的 `ModelInput` permit；调用失败不会降级为其他 provider。
+provider 配置文件为 `state/model-providers-v1.json`，每项包含 `id`、`endpoint`、`model`、`mode`、`enabled_by_user` 和 `request_timeout_ms`；不含凭据。ID 限小写字母、数字、连字符与下划线。远端 endpoint 仅 HTTPS，本地 endpoint 仅使用明确登记的 IPv4/IPv6 loopback 字面地址；缺失注册表时保持空 provider 集。凭据以 `provider-v1-<config-fingerprint>.dpapi` 单独存放；远端调用必须有 key，本地端点可无 key。Core 持有网关并逐次重验与 provider ID 和本地/远端模式绑定的 `ModelInput` permit；调用失败不会降级为其他 provider。端点的本机批准与撤销见 T34。
 
 ```text
 cargo test -p asl-agent --test model_gateway
@@ -781,6 +781,18 @@ T34 直连接收模式子切片（2026-11-21）：只读 Dashboard 投影现有 
 T34 群组接收授权（2026-11-22）。群组页分别控制所有本机群组的浏览与自动回答。SQLite v20 在已认证的入站群消息提交时记录获准浏览的消息类型。自动回答在进入发送队列前复核当前开关。三个 Core 进程已验证运行期间授权生效，范围见 `docs/plan-validation.md`。
 
 T34 本机授权反馈（2026-11-22）。直连浏览记录保留期限可设为 0 至 7 天。群目录授权按稳定群组 ID 保留选择。联系人页展示最近 12 项本机操作及处理结果，区分排队、处理、找到候选和失败。
+
+T34 群来信保留（2026-11-22）。活动页和 `asl-core --retention group <0..7>` 支持独立调整群来信浏览期限。SQLite v21 将显示期限与 MLS 密文和同步日志分开。期限缩短立即影响可见记录，延长不恢复旧记录。未改变群接收授权，也不代表 T35 的完整数据清理已实现。
+
+T34 网络隐私（2026-11-22）。节点页及 `asl-core --network relay-only on|off` 可保存启动时仅中继限制。沿用用户配置地址与现有 Net RelayOnly 策略，不写回配置文件；限制与原设置冲突时拒绝启动，不回退。活动网络不热切换地址模式。节点页分别显示下次启动设置和 Core 上次报告的模式及预约数量；在线确认和公网验收仍待完成。
+
+T34 对等网络暂停（2026-11-22）。节点页及 `asl-core --network pause on|off` 保存暂停请求，Core 运行中应用；重启时若已暂停则不启动 Net。暂停结束 Net 子进程，关闭监听、连接和中继并清理连接级待办。恢复使用本次 Core 启动时的地址策略与原设备身份，对端重新通过链身份及设备准入；不修改目录授权、群授权或信任分数。恢复失败不回退或自动重试。仅暂停 ASL 对等网络，不影响链 RPC 和本机服务。T34 仍未关闭。
+
+T34 模型端点授权（2026-11-22）。授权页显示登记端点的实际目标、模型、模式和批准状态，通过 `asl-core --providers` 持久化精确配置批准。网关每次调用及 HTTP 发送前读取现行授权；同 ID 的新配置不继承旧批准或旧凭据。该开关独立于每份内容的 `ModelInput` permit，不接通直连或群自动回答中的模型调用。凭据继续由 DPAPI 保管，配置编辑及凭据录入不在本切片；未调用真实服务，未操作原生界面。T34 尚需公开资料、检查点、迁移控制及人工界面验收。
+
+T34 可信检查点更新（2026-11-22）。节点页与 `asl-core --checkpoint` 显示当前锚点并接收从可信来源核对的 slot 与 Beacon root。审批绑定当前锚点、链和 RPC 配置，未被 Core 领取时可撤销；下次只尝试一次。同资料目录使用 NTFS 独占句柄限制单个 Core。原信任配置文件不改写，新锚点与已验证快照一起提交；保留身份序号和撤销观察，清空旧证明。无自动来源或回退，未对真实链服务发起更新。T34 仍未关闭。
+
+T34 身份资料本机签名（2026-11-22）。节点页和 `asl-core --profile` 管理绑定 AgentId、主题概念和授权版本的本机签名；默认关闭。Core 在当前链身份及设备目录有效时使用独立持久序号签名，只保存只读面板所需的状态元数据。修改或撤销清空旧状态，旧授权的候选不能事后写回。此授权不允许 DHT 出站，也不允许签入头像。以后接通公开时必须单独明确批准，不能升级沿用此批准。头像生成与应用管理资源授权接线、DHT 实际发送及停止续发、迁移操作和人工界面验收仍待完成。
 
 ### T35 — 保留、备份、诊断与崩溃恢复
 

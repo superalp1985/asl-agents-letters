@@ -67,6 +67,17 @@ pub struct ChainBundle {
 }
 
 impl Store {
+    pub fn chain_checkpoint_hash(&self, chain_id: u64) -> Result<Option<[u8; 32]>, AslError> {
+        self.connection
+            .query_row(
+                "SELECT checkpoint_hash FROM chain_state_cache WHERE chain_id = ?1",
+                [chain_integer(chain_id)?],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
     /// Loads a consistent snapshot, with rows ordered by canonical AgentId text.
     pub fn load_chain_bundle(&self, chain_id: u64) -> Result<Option<ChainBundle>, AslError> {
         let chain_id = chain_integer(chain_id)?;
@@ -89,6 +100,15 @@ impl Store {
         &mut self,
         bundle: &ChainBundle,
         expected_state: Option<&[u8]>,
+    ) -> Result<(), AslError> {
+        self.save_chain_bundle_with_setting(bundle, expected_state, None)
+    }
+
+    pub fn save_chain_bundle_with_setting(
+        &mut self,
+        bundle: &ChainBundle,
+        expected_state: Option<&[u8]>,
+        setting: Option<(&str, &str)>,
     ) -> Result<(), AslError> {
         let observations = validate_bundle(bundle)?;
         if expected_state.is_some_and(|state| state.len() > MAX_CHAIN_SNAPSHOT_BYTES) {
@@ -279,6 +299,9 @@ impl Store {
                     ])
                     .map_err(database_error)?;
             }
+        }
+        if let Some((key, value)) = setting {
+            crate::write_setting(&transaction, key, value, db_integer(state.updated_at_ms)?)?;
         }
         transaction.commit().map_err(database_error)
     }

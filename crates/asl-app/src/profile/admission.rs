@@ -397,6 +397,37 @@ impl CoreAdmission {
         self.local_chain_is_current(now_ms) && self.local_directory_is_current(now_ms)
     }
 
+    pub(crate) fn prepare_local_profile(
+        &mut self,
+        identity: &AgentIdentity,
+        approval: &asl_store::public_profile::ProfileSigningApproval,
+        sequence: u64,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, AslError> {
+        use asl_policy::{PolicyEngine, PolicySnapshot};
+        use asl_store::public_profile::profile_topic;
+
+        if !self.local_is_current(now_ms)
+            || self.local_hello.agent_id != identity.agent_id()
+            || approval.agent_id != identity.agent_id()
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut publisher = super::ProfilePublisher::new(identity, sequence);
+        publisher.configure(super::ProfileConfiguration {
+            capabilities: approval.topics.iter().copied().map(profile_topic).collect(),
+            avatar: None,
+        });
+        // This stage has no resource grants and can never sign a file reference.
+        let policy = PolicyEngine::new(PolicySnapshot::default(), 10_000)?;
+        publisher.poll_record(
+            now_ms,
+            asl_types::task::TaskId(Id128(fresh_id()?)),
+            &policy,
+            &mut self.resolver,
+        )
+    }
+
     fn check_local_directory_record(
         &self,
         verified: &super::VerifiedRecord,

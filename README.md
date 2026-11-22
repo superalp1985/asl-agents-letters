@@ -96,19 +96,23 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 **Windows 双节点群文件回环验收已通过。** 两个独立 AppContainer 网络进程在同机 TCP 上传输了一个两分块文件，无需另传种子文件。双方都选择逐文件审批时，发送方批准上传后，接收方的收件目录仍为空；接收方批准后，落盘内容与源文件逐字节一致。[群文件验收记录](docs/plan-validation.md#2026-11-22-t32-跨容器群文件验收)
 
-**加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。上述回环测试不覆盖跨机局域网、公网/中继、多来源并发下载或真实链 RPC；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
+**群文件断点续传：** 下载工作线程重启后，原群授权仍有效时，只用新租约取缺块；成员版本已变则不再请求或发布文件，也不阻塞其他下载。此项使用真实 SQLite 和 NTFS、模拟网络事件，不是跨机续传测试。[恢复验证记录](docs/plan-validation.md#2026-11-22-t23-群下载恢复)
+
+**双来源群文件：** 三个独立 Core 通过本机 TCP 完成了一次四分块下载。两个群成员各自共享同一内容，接收方一次批准这两个来源；落盘记录确认两个成员都提供了分块，最终文件与原件一致。本项使用进程内 Net 驱动，不是三 AppContainer 验收。[多来源验证记录](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
+
+**加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。上述回环测试不覆盖跨机局域网、公网/中继或真实链 RPC；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
-**本机 MCP（T30）：** 获准宿主可使用 `asl.exe mcp --home <绝对路径>` 提交结构化查询，并从本次会话的 Offer 请求收件。默认关闭；查询与收件分别授权。已验证真实 stdio 到 Core 和经 TCP 回环的批准下载，不代表公网文件传输已验收。[配置与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
+**本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
 截至 2026-11-19，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。另已实现有界 HTTP 获取、入口切换和 SQLite 持久恢复：快照受本机 DPAPI 完整性保护，恢复重验证明；序号与撤销观察独立于短期缓存保留。未注册身份的负缓存仅留在有界内存，重启后回到未知状态。
 
 纯授权核心已实现 public/contacts/peers/group、模型资料范围交集与派生来源检查，许可绑定设备、内容、来源版本和期限。信任/贡献不进入授权输入；本机授权事实由 core 提供，不接受对端自报。Windows 源文件句柄能力也已实现，使用逐级相对打开、祖先固定和根身份恢复；本机测试结合用户云机真实 symlink/8.3 夹具及修正后 22 项完整通过反馈，T08 本任务系统验收完成。数据库撤销与传输栅栏仍须后续集成，详见 `docs/policy-authorization.md` 和 `docs/windows-source-handles.md`。
 
-结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，并将该目录的发布序号持久保存；续签依赖当前链承诺、证书和本机目录文件有效。这只是直连身份材料续签，不等于 DHT 公网发布。资料默认不发布，授权后续发，头像引用需独立公开授权；远端记录历史仍未持久化，实际 DHT 发布待接入，详见 `docs/signed-records.md`。
+结构化签名记录核心已实现，覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，并将该目录的发布序号持久保存；续签依赖当前链承诺、证书和本机目录文件有效。这只是直连身份材料续签，不等于 DHT 公网发布。资料默认不签名、不发布；现有本机授权仅允许为所选主题生成签名候选。头像引用需单独授权，尚未接入节点页。远端记录历史仍未持久化，签名资料的实际 DHT 发布待接入，详见 `docs/signed-records.md`。
 
-可信检查点续期的本机 API 已实现：只更换检查点，保留身份序号/撤销观察并清空短期证明；过期快照不通过普通恢复入口使用，最终性冲突锁不能通过续期清除。共享/收件/经验目录授权界面已接入本机 Core；检查点来源选择和其他 T34 策略控制仍待实现。
+可信检查点续期只更换检查点，保留身份序号和撤销观察，并清空短期证明。过期快照不能用于普通恢复；最终性冲突锁不能通过续期清除。
 
 Windows T09 已实现按 Net/Worker/Extractor 分权的 AppContainer 启动、Job Object 资源约束、白名单匿名管道和可执行文件独立 ACL。真实系统探针验证 Worker 不能读授权目录外文件、联网或启动子进程；Net 的 TCP 网络能力、Worker 的拒绝、内存/CPU/期限限制及清理路径均有实测。外部 TCP 仅测连接握手；真实 UDP 回包、libp2p QUIC 及 mDNS 查询/响应尚未验证，因此 T09 仍为部分验收，不能称整个沙箱/网络已完成。
 
@@ -133,7 +137,7 @@ flowchart LR
 
 沙箱与 IPC 阶段的全工作区回归为 284 项通过、2 项外部端点测试忽略。已验证 Net 心跳、Worker 握手中止及新 Worker 接续，尚不代表运行中计算崩溃或 Supervisor 崩溃。外部 UDP 回包与真实 mDNS 仍待验收。完整分轮结果、云机夹具与本次验证范围见 [验证记录](docs/plan-validation.md)。
 
-HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、检查点授权界面、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；公网发现与连接、群组、Agent 自主工作流、端到端文件传输、完整 GUI 和发布包仍未整体验收。这些本地检查不代表完整产品或公网已验收。
+HTTP 测试使用本地服务、历史 Mainnet 夹具和合成证明；真实多运营商证明服务兼容、后台调度与进程额度接入及独立安全审计仍待完成，T06b 尚未整体验收。合约尚未部署；公网发现与连接、群组、Agent 自主工作流、端到端文件传输、完整 GUI 和发布包仍未整体验收。这些本地检查不代表完整产品或公网已验收。
 
 ### 架构一览
 
@@ -151,11 +155,21 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，目录授权操作交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移、检查点、模型服务与网络设置，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+
+节点页可查看当前链身份检查点，录入并授权从可信来源独立核对的新 slot 和 Beacon root。Core 下次启动只验证一次，验证通过才替换检查点；失败保留原快照。验证开始前可取消，不会自动选取信任源。命令行可用 `asl-core --checkpoint status` 查看状态。
+
+节点页的「身份资料」可勾选 ASL 主题并授权本机签名，也可随时撤销。批准只适用于当前 AgentId 和选中的主题，不包括头像、自由文本或网络公开；「上次本机签名」不代表任何节点已收到资料。命令行可用 `asl-core --profile status` 查看状态。
+
+授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
+
+节点页可为下次启动后台启用「仅中继」。需要预先在 `state/network-settings-v1.json` 配置中继地址；启用后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
+
+节点页的「暂停 ASL 对等网络」也可通过 `asl-core --network pause on|off` 设置。暂停关闭节点连接、监听和中继预约，重启后台后仍生效，不会暂停链 RPC 或本机服务。恢复使用当前后台启动时的地址策略和设备身份，对端须重新通过准入；进行中的查询不会自动重发。暂停请求和后台上次报告分开显示。
 
 直连接收可设为关闭、只浏览或允许回答。只浏览会在活动页显示已认证请求的意图、主题编号、约束数量和结果类型。活动页可将直连浏览记录设为「不保存」或 1 至 7 天，默认 7 天，最多 200 条。缩短期限会立即清理过期记录，选「不保存」会清空已有直连浏览记录。
 
-活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型和身份编号。窗口最多列出最近 100 条仍在保留期内的会话事件。
+活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型和身份编号。窗口最多列出最近 100 条仍在保留期内的会话事件。直连和群来信的浏览记录可分别保留 0 至 7 天；选择不保存会清空相应浏览记录，不关闭自动回答或删除群同步日志。
 
 群组页有两个适用于本机所有群组的开关：「浏览来信」和「允许自动回答」。修改即时生效。活动页仅显示收到时已开启浏览的群来信类型与发送设备。文件传输继续使用单独的目录和收发授权。
 
@@ -231,9 +245,19 @@ The preparation script copies five executables into a new directory. Run just th
 
 ### Desktop Controls
 
-The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint, model provider and network settings, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
 
-Expand a conversation in Activity to see when each event occurred, its direction, structured message type and participating identities. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events.
+Nodes shows the current chain checkpoint and lets you approve a new slot and Beacon root checked against an independent trusted source. Core checks the approved candidate once on its next start. If verification fails, it keeps the previous snapshot. You can cancel before verification starts, and Core does not pick a trusted source for you. `asl-core --checkpoint status` shows the same state at the command line.
+
+Under Identity Profile on the Nodes page, you can select ASL topics, approve local signing, or revoke that approval. Approval applies only to the current AgentId and the selected topics. It does not cover avatars, free text, or network disclosure. The last local signature does not mean any peer received a profile. Run `asl-core --profile status` to inspect the state.
+
+In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
+
+Nodes can enable relay-only mode for the next Core start. Configure relay addresses in `state/network-settings-v1.json` first. With relay-only enabled, missing or invalid relay settings prevent Core from starting rather than falling back to direct connections. Nodes shows the last reported mode and reservation count, not a live connectivity guarantee.
+
+Pause the ASL peer network in Nodes or with `asl-core --network pause on|off`. Pausing closes peer connections, listeners, and relay reservations and persists across Core restarts. It does not pause chain RPC or local services. Resuming uses the address policy and device identity from the current Core session. Peers must pass admission again, and in-flight queries are not replayed. The saved request and the last report are shown separately.
+
+Expand a conversation in Activity to see when each event occurred, its direction, structured message type and participating identities. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events. Set inbound direct and group browsing history separately to 0–7 days. Zero clears the corresponding browsing history without disabling automatic replies or removing the group synchronization journal.
 
 The current pixel icon and mascot are original, pixel-by-pixel assets in the repository. Their provenance and system-font boundary are recorded in [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt).
 
@@ -253,19 +277,23 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 **The two-node Windows loopback group file test passed.** Two separate AppContainer network processes transferred a two-chunk file over TCP on one computer, without a separate torrent file. With per-file approval enabled on both peers, the recipient's inbox stayed empty after the sender approved the upload. Once the recipient approved the download, the saved file matched the original byte for byte. [Group file validation notes](docs/plan-validation.md#2026-11-22-t32-跨容器群文件验收)
 
-**Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. These loopback tests did not cover LAN connections between machines, public or relay networks, concurrent downloads from multiple sources, or live chain RPC. Other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
+**Resuming a group download:** After a worker restart, a download with valid group authorization gets a fresh lease and requests only the missing chunks. If membership changed, the old download neither requests data nor publishes the file, and other downloads can recover. This was tested with SQLite, NTFS and simulated network events, not across machines. [Recovery test scope](docs/plan-validation.md#2026-11-22-t23-群下载恢复)
+
+**Two-source group downloads:** Three separate Core processes completed a four-chunk transfer over TCP loopback. Two group members shared identical content, and the receiver approved both sources in one decision. The saved chunk records identified both providers, and the final file matched the original. This test used in-process Net drivers, not three AppContainers. [Multi-source validation notes](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
+
+**Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. These loopback tests did not cover LAN connections between machines, public or relay networks, or live chain RPC. Other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 
-**Local MCP (T30):** Authorized hosts can run `asl.exe mcp --home <absolute path>` to submit structured queries and download resources offered in the current session. MCP is off by default; query and inbox access are granted separately. Real stdio to Core and approved downloads over TCP loopback were tested, not public-network transfers. [Setup and revocation](docs/05-agent-gui.md#7-stdio-mcp-接入)
+**Local MCP (T30):** Authorized hosts can query resources via `asl.exe mcp --home <absolute path>`. By default, `asl_fetch` downloads from one device. With `additional_offer_ids`, it can use up to four devices offering the same file in that query, without a separate torrent file. In ask mode, one inbox approval covers the selected devices; retries cannot add or remove sources. MCP is off by default, with separate query and inbox grants. Tests cover real stdio to Core and, separately, receiving distinct chunks from two devices over TCP loopback. Public-network transfers were not tested. [Setup, example and revocation](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
 As of November 19, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration. Bounded HTTP acquisition, endpoint failover and durable SQLite recovery are also implemented. Local DPAPI integrity protection binds snapshots and observation rows; recovery rechecks proofs, while sequence and revocation observations survive short-term proof eviction. Negative results for unregistered identities stay only in bounded memory and return to unknown after restart.
 
 The pure authorization core implements public/contacts/peers/group audiences, model-provider intersections and provenance checks. Permits bind devices, content, source revisions and expiry. Trust/contribution are not authorization inputs. Facts come from the trusted local broker, never peer claims. Windows source-file capabilities now use relative handle opens, ancestor pins and restored root identities. Local tests, the user's earlier cloud log exercising real symlink/8.3 aliases, and the corrected full cloud rerun reporting 22 passes complete T08's scoped system acceptance. Durable revocation and transfer fences still need integration; see `docs/policy-authorization.md` and `docs/windows-source-handles.md`.
 
-The structured signed-record core covers profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes and persists its publication sequence; renewal requires the current chain commitment, device certificates and local directory file to remain valid. This refreshes direct identity-proof material but does not publish to the public DHT. Profiles remain disabled until explicitly configured, and avatar renewal requires separate public-resource authorization. Remote record history is not durable, and actual DHT publication remains pending; see `docs/signed-records.md`.
+The structured signed-record core covers profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes and persists its publication sequence; renewal requires the current chain commitment, device certificates and local directory file to remain valid. This refreshes direct identity-proof material but does not publish to the public DHT. Profile signing and publication are off by default. Local approval permits signing candidates for the selected topics only. Avatars require separate approval and are not wired into the Nodes page. Remote record history is not durable, and actual DHT profile publication remains pending; see `docs/signed-records.md`.
 
-An explicit local checkpoint-renewal API now changes only the checkpoint, retains identity sequence/revocation observations and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock. Checkpoint authorization and trusted checkpoint-source selection remain pending.
+Explicit checkpoint renewal changes only the checkpoint, retains identity sequence and revocation observations, and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock.
 
 The first Windows T09 slice implements per-role AppContainer launch, Job Object limits, an explicit anonymous-pipe allowlist and executable-only ACL access. Real probes verify that Worker cannot read outside files, connect to a test HTTP listener or spawn a child; Net TCP capability, resource deadlines and cleanup are also exercised. The external TCP test proves only connection establishment. UDP echo, libp2p QUIC and an actual mDNS exchange remain unverified, so T09 is only partially accepted.
 
@@ -290,4 +318,4 @@ flowchart LR
 
 The sandbox/IPC workspace run passed 284 tests with two external endpoint tests ignored. Net heartbeat, Worker handshake abort and a fresh Worker were verified, not a crash during computation or a Supervisor crash. External UDP echo and live mDNS exchange remain open. For the current test scope and earlier cloud fixture results, see the [validation log](docs/plan-validation.md).
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, checkpoint-authorization UI, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.

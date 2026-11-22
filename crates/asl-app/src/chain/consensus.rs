@@ -123,7 +123,7 @@ impl EthereumLightClient {
     }
 
     #[cfg(test)]
-    pub(super) fn with_test_checkpoint(mut self, checkpoint: super::CheckpointV1) -> Self {
+    pub(crate) fn with_test_checkpoint(mut self, checkpoint: super::CheckpointV1) -> Self {
         self.config.checkpoint = checkpoint;
         self
     }

@@ -4,7 +4,7 @@ Status on 2026-11-18: local consensus/MPT verification, bounded HTTP acquisition
 durable SQLite recovery and an explicit local checkpoint-renewal API are
 implemented. HTTP and restart integration tests
 use local servers with historical or synthetic fixtures. T06b remains open for
-real multi-provider compatibility, checkpoint-authorization UI, background
+real multi-provider compatibility, background
 scheduling/process limits and independent security audit. No public deployment
 or live Mainnet synchronization is claimed.
 
@@ -227,9 +227,17 @@ snapshot compare-and-swap. A stale writer or failed write preserves the previous
 database. After success, ordinary restore requires the new configuration; the
 old one fails closed. The caller must retain that new local configuration.
 
-This callable API does not implement a GUI confirmation flow, checkpoint-source
-selection, unattended trust decisions, background scheduling or cross-device
-migration.
+In the desktop Nodes view, locally confirm a slot and Beacon root obtained from
+an independently trusted source. The equivalent CLI is
+`asl-core --checkpoint status`, then `asl-core --checkpoint stage <context> <slot> <root>`.
+`asl-core --checkpoint cancel` cancels a still-pending request. The approval
+binds the current anchor and verification configuration, including configured
+RPC endpoints. One Core at a time owns the profile. On its next start, Core
+consumes the request once, bootstraps against the exact approved root using
+the existing endpoints, and checks the persisted rollback floors. The active
+anchor and verified bundle commit in one SQLite transaction; the original JSON
+file stays unchanged. A failed request does not replace the old snapshot.
+No automatic source selection or cross-device transfer is performed.
 
 On 2026-11-18, the workspace passed 247 test functions, including 21 new renewal
 tests (70 chain tests total). Clippy with `-D warnings`, formatting and diff

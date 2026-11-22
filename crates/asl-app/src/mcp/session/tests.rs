@@ -122,6 +122,7 @@ async fn offers_and_lookup_stay_in_their_correlated_task_and_session() {
             .call(Request::Fetch(FetchArgs {
                 task_id: other_task_id,
                 offer_id: offer_id.clone(),
+                additional_offer_ids: vec![],
             }))
             .await,
         Err(ErrorCode::NotFound)
@@ -130,7 +131,8 @@ async fn offers_and_lookup_stay_in_their_correlated_task_and_session() {
         session
             .call(Request::Fetch(FetchArgs {
                 task_id: task_id.clone(),
-                offer_id
+                offer_id,
+                additional_offer_ids: vec![],
             }))
             .await,
         Err(ErrorCode::PolicyDenied)
@@ -181,49 +183,40 @@ async fn timeout_keeps_the_submission_and_the_worker_transfer_id() {
         Request::Fetch(FetchArgs {
             task_id: task_id.clone(),
             offer_id: offer_id.clone(),
+            additional_offer_ids: vec![],
         })
     };
     session.tasks[0].offers[0].offer.expires_at_ms = 0;
     assert_eq!(session.call(fetch()).await, Err(ErrorCode::Timeout));
-    assert!(session.tasks[0].offers[0].download.is_none());
+    assert!(session.tasks[0].downloads.is_empty());
     session.tasks[0].offers[0].offer.expires_at_ms = unix_time_ms().unwrap() + QUERY_WINDOW_MS;
     assert_eq!(session.call(fetch()).await, Err(ErrorCode::Timeout));
     let status = session.report(&task_id, false).unwrap();
     assert_eq!(status["downloads"][0]["status"], "queued");
     assert!(status["downloads"][0]["transfer_id"].is_null());
 
-    let entry = &mut session.tasks[0].offers[0];
-    entry.offer.expires_at_ms = 0;
+    session.tasks[0].offers[0].offer.expires_at_ms = 0;
     let transfer = TransferId(Id128([7; 16]));
-    entry
-        .download
-        .as_mut()
-        .unwrap()
-        .accept(DownloadEvent::AwaitingApproval {
-            approval_id: Id128([8; 16]),
-            transfer_id: transfer.clone(),
-        });
+    session.tasks[0].downloads[0].accept(DownloadEvent::AwaitingApproval {
+        approval_id: Id128([8; 16]),
+        transfer_id: transfer.clone(),
+    });
     let pending = session.call(fetch()).await.unwrap();
     assert_eq!(pending["transfer_id"], hex::encode(transfer.0.as_bytes()));
     assert_eq!(pending["status"], "awaiting_approval");
     assert!(pending.get("approval_id").is_none());
 
-    let entry = &mut session.tasks[0].offers[0];
-    entry
-        .download
-        .as_mut()
-        .unwrap()
-        .accept(DownloadEvent::Completed(DownloadInfo {
-            transfer_id: transfer,
-            task_id: TaskId(root),
-            content_id: Hash32([5; 32]),
-            file_size: 32,
-            chunk_count: 1,
-            durable_bytes: 32,
-            state: "complete".into(),
-            part_path: "private-part-path".into(),
-            destination_path: "private-destination-path".into(),
-        }));
+    session.tasks[0].downloads[0].accept(DownloadEvent::Completed(DownloadInfo {
+        transfer_id: transfer,
+        task_id: TaskId(root),
+        content_id: Hash32([5; 32]),
+        file_size: 32,
+        chunk_count: 1,
+        durable_bytes: 32,
+        state: "complete".into(),
+        part_path: "private-part-path".into(),
+        destination_path: "private-destination-path".into(),
+    }));
     let result = session
         .call(Request::Result(TaskArgs { task_id }))
         .await
@@ -236,6 +229,72 @@ async fn timeout_keeps_the_submission_and_the_worker_transfer_id() {
     );
     assert!(result["downloads"][0].get("resource_id").is_none());
     assert!(!result.to_string().contains("private-"));
+}
+
+#[test]
+fn multi_offer_selection_rejects_invalid_sets_before_queueing_and_freezes_on_submit() {
+    let (queries, _query_runtime) = outgoing_query_channel();
+    let (port, _runtime) = download_channel();
+    let inbox = Some(Id128([6; 16]));
+    let mut session = Session::new(&queries, &port, QueryScope::ContactsOnly, inbox);
+    session.query(args()).unwrap();
+    let task = session.tasks.front_mut().unwrap();
+    let root = Id128([1; 16]);
+    task.accept(OutgoingQueryEvent::TaskStarted {
+        task_id: TaskId(root),
+    });
+    for n in 0..6 {
+        let mut event = offer_response(TaskId(root), root);
+        let OutgoingQueryEvent::Response { peer_id, frame, .. } = &mut event else {
+            unreachable!()
+        };
+        let WireFrame::Offer(offer) = frame.as_mut() else {
+            unreachable!()
+        };
+        let mut bytes = peer_id.as_bytes().to_vec();
+        *bytes.last_mut().unwrap() = if n == 4 { 0 } else { n };
+        *peer_id = PeerId::from_bytes(bytes).unwrap();
+        match n {
+            1 => offer.content_id = Hash32([8; 32]),
+            2 => offer.file_size += 1,
+            3 => offer.expires_at_ms = 0,
+            _ => {}
+        }
+        task.accept(event);
+    }
+    let ids: Vec<_> = task.offers.iter().map(|o| o.id).collect();
+    for (other, reason) in [
+        (ids[1], ErrorCode::InvalidMessage),
+        (ids[2], ErrorCode::InvalidMessage),
+        (ids[3], ErrorCode::Timeout),
+        (ids[4], ErrorCode::InvalidMessage),
+        (Id128([0; 16]), ErrorCode::NotFound),
+    ] {
+        assert_eq!(
+            task.select_download(&port, inbox, vec![ids[0], other])
+                .err(),
+            Some(reason)
+        );
+    }
+    assert!(task.downloads.is_empty());
+    task.select_download(&port, inbox, vec![ids[0], ids[5]])
+        .unwrap();
+    task.offers[0].offer.expires_at_ms = 0;
+    assert!(
+        task.select_download(&port, inbox, vec![ids[5], ids[0]])
+            .is_ok()
+    );
+    for changed in [
+        vec![ids[5]],
+        vec![ids[4], ids[5]],
+        vec![ids[5], ids[0], ids[4]],
+    ] {
+        assert_eq!(
+            task.select_download(&port, inbox, changed).err(),
+            Some(ErrorCode::PolicyDenied)
+        );
+    }
+    assert_eq!(task.downloads.len(), 1);
 }
 
 #[test]

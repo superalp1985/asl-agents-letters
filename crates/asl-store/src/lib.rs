@@ -12,16 +12,19 @@ pub mod contact_bindings;
 pub mod conversation;
 pub mod dashboard;
 pub mod evidence;
+mod group_observations;
 pub mod group_state;
 pub mod inbound_observations;
+pub mod network_privacy;
 pub mod paired_contacts;
+pub mod public_profile;
 mod publication;
 pub mod resources;
 pub mod search;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -42,6 +45,7 @@ const SCHEMA_V17: &str = include_str!("../../../specs/schema-v17.sql");
 const SCHEMA_V18: &str = include_str!("../../../specs/schema-v18.sql");
 const SCHEMA_V19: &str = include_str!("../../../specs/schema-v19.sql");
 const SCHEMA_V20: &str = include_str!("../../../specs/schema-v20.sql");
+const SCHEMA_V21: &str = include_str!("../../../specs/schema-v21.sql");
 
 pub struct Store {
     connection: Connection,
@@ -68,6 +72,17 @@ impl Store {
         read_setting(&self.connection, key)
     }
 
+    pub fn take_setting(&self, key: &str) -> Result<Option<String>, AslError> {
+        self.connection
+            .query_row(
+                "DELETE FROM settings WHERE key = ?1 RETURNING value_json",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
     pub fn set_setting(
         &self,
         key: &str,
@@ -75,6 +90,27 @@ impl Store {
         updated_at_ms: i64,
     ) -> Result<(), AslError> {
         write_setting(&self.connection, key, value_json, updated_at_ms)
+    }
+
+    pub fn model_provider_approval(&self, id: &str) -> Result<Option<String>, AslError> {
+        self.get_setting(&format!("agent.model_provider_approval_v1.{id}"))?
+            .map(|value| serde_json::from_str::<Option<String>>(&value))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|_| AslError::InvalidDatabase)
+    }
+
+    pub fn set_model_provider_approval(
+        &self,
+        id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<(), AslError> {
+        let value = serde_json::to_string(&fingerprint).map_err(|_| AslError::InvalidMessage)?;
+        self.set_setting(
+            &format!("agent.model_provider_approval_v1.{id}"),
+            &value,
+            current_time_ms(),
+        )
     }
 }
 
@@ -106,6 +142,21 @@ fn write_setting(
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+pub fn open_store_read_only(path: &Path) -> Result<Store, AslError> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(database_error)?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(database_error)?;
+    if read_schema_version(&connection)? != Some(SCHEMA_VERSION) {
+        return Err(AslError::UnsupportedSchemaVersion);
+    }
+    Ok(Store { connection })
 }
 
 pub fn open_store(path: &Path) -> Result<Store, AslError> {
@@ -177,6 +228,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 20 {
             apply_migration_in_transaction(&transaction, SCHEMA_V20, 20, now)?;
+        }
+        if version < 21 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V21, 21, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

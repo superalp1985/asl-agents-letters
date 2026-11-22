@@ -84,7 +84,7 @@ impl ConsensusConfigV1 {
         Ok(())
     }
 
-    pub(super) fn slot_time(&self, slot: u64) -> Result<u64, ChainError> {
+    pub(crate) fn slot_time(&self, slot: u64) -> Result<u64, ChainError> {
         slot.checked_mul(self.seconds_per_slot)
             .and_then(|elapsed| self.genesis_time_secs.checked_add(elapsed))
             .ok_or(ChainError::InvalidConfiguration)

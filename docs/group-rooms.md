@@ -160,6 +160,8 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 
 两个节点建群并审批入群，发送方只将测试源目录授权给该群。两端均设为逐文件确认：接收端收到 `FetchPending`，发送端批准后才出现下载审批；接收端批准前收件目录为空。最后比较收件文件和原文件的全部字节。普通权限的双 Core 版本和[管理员运行的真实 AppContainer 文件用例](plan-validation.md#2026-11-22-t32-跨容器群文件验收)均已通过。两种用例均使用合成链证明和本机 TCP。
 
+双来源文件验收另选 `-Scenario MultiSource`，不重跑消息或双端审批场景。接收端授权的两个群成员各自提供不同分块，测试核对来源记录和完整文件。普通权限的三 Core TCP 版本已通过；此场景的真实 AppContainer 版本尚未运行。[多来源验证记录](plan-validation.md#2026-11-22-t22-双来源群文件)
+
 ### 回环故障排查
 
 容器回环许可与 Windows 防火墙入站许可分别检查。测试按当前接收方配置 `asl-net.exe` 完整路径、容器 SID、实际监听端口以及均为 `127.0.0.1` 的本地和远端地址。查到生效策略中的对应规则后才拨号。接收方交接和测试退出都会释放规则，脚本退出时也会按本次运行的随机标识清理。机器策略拒绝本地规则时，测试报告失败。此操作仅在管理员验收用例中执行。[Microsoft 防火墙规则及策略优先级](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules)

@@ -2,11 +2,19 @@
 mod access_control;
 #[path = "asl-core/bindings_control.rs"]
 mod bindings_control;
+#[path = "asl-core/checkpoint_control.rs"]
+mod checkpoint_control;
 #[path = "asl-core/download_control.rs"]
 mod download_control;
 #[cfg(windows)]
 #[path = "asl-core/group_control.rs"]
 mod group_control;
+#[path = "asl-core/network_control.rs"]
+mod network_control;
+#[path = "asl-core/profile_control.rs"]
+mod profile_control;
+#[path = "asl-core/provider_control.rs"]
+mod provider_control;
 #[path = "asl-core/retention_control.rs"]
 mod retention_control;
 #[path = "asl-core/upload_control.rs"]
@@ -23,9 +31,16 @@ fn main() {
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
+        [flag, args @ ..] if flag == "--checkpoint" => checkpoint_control::run(args),
+        [flag, args @ ..] if flag == "--profile" => profile_control::run(args),
         [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
-        [flag, kind, days] if flag == "--retention" && kind == "direct" => {
-            retention_control::set_direct_days(days)
+        [flag, args @ ..] if flag == "--providers" => provider_control::run(args),
+        [flag, kind, days] if flag == "--retention" => retention_control::set_days(kind, days),
+        [flag, key, mode] if flag == "--network" && key == "relay-only" => {
+            network_control::set_relay_only(mode)
+        }
+        [flag, key, mode] if flag == "--network" && key == "pause" => {
+            network_control::set_pause(mode)
         }
         #[cfg(windows)]
         [flag, field, value] if flag == "--group-inbound" => {

@@ -1,5 +1,6 @@
 pub mod chain;
 mod chain_refresh;
+pub mod checkpoint_access;
 mod direct_inbound;
 mod direct_outbound;
 mod documents;
@@ -10,6 +11,7 @@ pub mod ipc;
 pub mod libraries;
 #[cfg(windows)]
 pub mod mcp;
+pub mod model_endpoint_access;
 pub mod network;
 pub mod network_identity;
 pub mod network_settings;

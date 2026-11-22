@@ -122,15 +122,16 @@ fn dashboard_keeps_session_context_and_excludes_expired_or_hidden_events() {
     ] {
         db.execute(
             "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,ciphertext,
-                                      created_at_ms,expires_at_ms,browse_kind)
-             VALUES (?1,?2,1,?3,'application',X'01',?4,?5,?6)",
+                                      created_at_ms,expires_at_ms,browse_kind,browse_expires_at_ms)
+             VALUES (?1,?2,1,?3,'application',X'01',?4,?5,?6,?7)",
             rusqlite::params![
                 hex::encode([id; 16]),
                 context,
                 peer_text,
                 now - 2,
                 expires,
-                browse
+                browse,
+                browse.map(|_| expires)
             ],
         )
         .unwrap();

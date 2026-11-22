@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$DevRoot = $env:ASL_DEV_ROOT,
-    [ValidateSet('Messages', 'File')][string]$Scenario = 'Messages',
+    [ValidateSet('Messages', 'File', 'MultiSource')][string]$Scenario = 'Messages',
     [switch]$CheckEnvironment,
     [ValidatePattern('^S-1-15-2-(\d+-){6}\d+$')][string]$ReleaseOrphanSid
 )
@@ -95,10 +95,10 @@ try {
         exit $LASTEXITCODE
     }
     $env:ASL_GROUP_FIREWALL_RUN = $runId
-    $test = if ($Scenario -eq 'File') {
-        'group_file_crosses_sandboxed_net_processes_with_two_approvals'
-    } else {
-        'group_messages_cross_sandboxed_net_processes'
+    $test = switch ($Scenario) {
+        'File' { 'group_file_crosses_sandboxed_net_processes_with_two_approvals' }
+        'MultiSource' { 'two_group_sources_deliver_distinct_chunks_across_sandboxed_net_processes' }
+        'Messages' { 'group_messages_cross_sandboxed_net_processes' }
     }
     & $cargo +1.100.0 test -p asl-app --lib --locked --offline `
         "supervisor::groups::process_tests::$test" `

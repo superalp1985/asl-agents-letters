@@ -6,7 +6,7 @@ use crate::{Store, current_time_ms, database_error};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct DirectorySequenceCursor {
+struct PublicationSequenceCursor {
     version: u8,
     next_sequence: u64,
     exhausted: bool,
@@ -20,8 +20,21 @@ impl Store {
         agent_id: AgentId,
         minimum: u64,
     ) -> Result<u64, AslError> {
+        self.reserve_publication_sequence("device-directory", agent_id, minimum)
+    }
+
+    pub fn reserve_profile_sequence(&mut self, agent_id: AgentId) -> Result<u64, AslError> {
+        self.reserve_publication_sequence("profile", agent_id, 0)
+    }
+
+    fn reserve_publication_sequence(
+        &mut self,
+        namespace: &str,
+        agent_id: AgentId,
+        minimum: u64,
+    ) -> Result<u64, AslError> {
         let key = format!(
-            "device-directory-publication-sequence-v1/{}",
+            "{namespace}-publication-sequence-v1/{}",
             bs58::encode(agent_id.as_bytes()).into_string()
         );
         let transaction = self
@@ -37,7 +50,7 @@ impl Store {
             .optional()
             .map_err(database_error)?
             .map(|value| {
-                let cursor: DirectorySequenceCursor =
+                let cursor: PublicationSequenceCursor =
                     serde_json::from_str(&value).map_err(|_| AslError::InvalidDatabase)?;
                 if cursor.version != 1 {
                     return Err(AslError::InvalidDatabase);
@@ -54,7 +67,7 @@ impl Store {
             Some(next) => (next, false),
             None => (sequence, true),
         };
-        let value = serde_json::to_string(&DirectorySequenceCursor {
+        let value = serde_json::to_string(&PublicationSequenceCursor {
             version: 1,
             next_sequence,
             exhausted,

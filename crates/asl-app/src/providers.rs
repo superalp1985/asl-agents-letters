@@ -4,10 +4,13 @@ use std::{
     path::PathBuf,
 };
 
-use asl_agent::gateway::{ModelGatewayError, ProviderCredentialSource, validate_provider_id};
+use asl_agent::gateway::{
+    ModelGatewayError, ProviderConfigV1, ProviderCredentialSource, validate_provider_id,
+};
 use asl_policy::{protect_secret, unprotect_secret};
-use asl_types::task::ProviderId;
 use zeroize::Zeroizing;
+
+use crate::model_endpoint_access::fingerprint;
 
 const MAX_CREDENTIAL_CIPHERTEXT_BYTES: u64 = 8 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
@@ -23,7 +26,7 @@ impl DpapiProviderCredentialSource {
 
     pub fn store_api_key(
         &self,
-        provider: &ProviderId,
+        provider: &ProviderConfigV1,
         api_key: Zeroizing<Vec<u8>>,
     ) -> Result<(), ModelGatewayError> {
         let path = self.credential_path(provider)?;
@@ -42,7 +45,7 @@ impl DpapiProviderCredentialSource {
             .map_err(|_| ModelGatewayError::CredentialsUnavailable)
     }
 
-    pub fn remove_api_key(&self, provider: &ProviderId) -> Result<(), ModelGatewayError> {
+    pub fn remove_api_key(&self, provider: &ProviderConfigV1) -> Result<(), ModelGatewayError> {
         let path = self.credential_path(provider)?;
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -51,18 +54,20 @@ impl DpapiProviderCredentialSource {
         }
     }
 
-    fn credential_path(&self, provider: &ProviderId) -> Result<PathBuf, ModelGatewayError> {
-        validate_provider_id(&provider.0)?;
+    fn credential_path(&self, provider: &ProviderConfigV1) -> Result<PathBuf, ModelGatewayError> {
+        validate_provider_id(&provider.id.0)?;
+        let fingerprint =
+            fingerprint(provider).map_err(|_| ModelGatewayError::InvalidConfiguration)?;
         Ok(self
             .directory
-            .join(format!("provider-{}.dpapi", provider.0)))
+            .join(format!("provider-v1-{fingerprint}.dpapi")))
     }
 }
 
 impl ProviderCredentialSource for DpapiProviderCredentialSource {
     fn api_key(
         &self,
-        provider: &ProviderId,
+        provider: &ProviderConfigV1,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError> {
         let path = self.credential_path(provider)?;
         let metadata = match fs::symlink_metadata(&path) {
@@ -105,6 +110,8 @@ mod tests {
     };
 
     use super::*;
+    use asl_agent::gateway::ProviderMode;
+    use asl_types::task::ProviderId;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -122,7 +129,14 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
 
         let source = DpapiProviderCredentialSource::new(directory.clone());
-        let provider = ProviderId("provider-a".into());
+        let provider = ProviderConfigV1 {
+            id: ProviderId("provider-a".into()),
+            endpoint: "https://provider.example/v1/chat/completions".into(),
+            model: "test-model".into(),
+            mode: ProviderMode::Remote,
+            enabled_by_user: true,
+            request_timeout_ms: 1_000,
+        };
         source
             .store_api_key(&provider, Zeroizing::new(b"test-only-secret".to_vec()))
             .unwrap();
@@ -132,7 +146,10 @@ mod tests {
         );
         assert!(
             source
-                .api_key(&ProviderId("provider-b".into()))
+                .api_key(&ProviderConfigV1 {
+                    endpoint: "https://another.example/v1/chat/completions".into(),
+                    ..provider.clone()
+                })
                 .unwrap()
                 .is_none()
         );
@@ -145,7 +162,13 @@ mod tests {
         assert!(source.api_key(&provider).unwrap().is_none());
         assert!(
             source
-                .store_api_key(&ProviderId("../outside".into()), Zeroizing::new(vec![1]))
+                .store_api_key(
+                    &ProviderConfigV1 {
+                        id: ProviderId("../outside".into()),
+                        ..provider
+                    },
+                    Zeroizing::new(vec![1]),
+                )
                 .is_err()
         );
 

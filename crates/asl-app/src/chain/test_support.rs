@@ -86,6 +86,18 @@ pub fn bootstrapped() -> EthereumLightClient {
 }
 
 #[cfg(windows)]
+pub fn fixture_execution_at(
+    mut head: FinalizedExecution,
+    now: u64,
+    height_delta: u64,
+) -> FinalizedExecution {
+    head.beacon_slot = consensus_config().current_slot(now).unwrap();
+    head.timestamp_secs = now;
+    head.block_number += height_delta;
+    head
+}
+
+#[cfg(windows)]
 pub fn process_fixture_client(
     mut finalized: FinalizedExecution,
     now_secs: u64,

@@ -51,6 +51,17 @@ struct PendingPeer {
 }
 
 impl Supervisor {
+    pub(super) fn reset_binding_transport(&mut self) -> Result<(), AslError> {
+        let store = open_store(&self.state_database)?;
+        let initialized = self.contact_bindings.initialized;
+        let old = std::mem::take(&mut self.contact_bindings);
+        self.contact_bindings.initialized = initialized;
+        for pending in old.pending_lookups.into_values() {
+            store.finish_contact_binding_action(pending.action_id, Err("unavailable"))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn poll_contact_bindings(&mut self) -> Result<(), AslError> {
         let mut store = open_store(&self.state_database)?;
         if !self.contact_bindings.initialized {
@@ -228,7 +239,8 @@ impl Supervisor {
         let result = match action.kind {
             ContactBindingActionKind::Lookup => {
                 let code = action.code.ok_or(AslError::InvalidMessage)?;
-                if self.network_admission_status != NetworkAdmissionStatus::Active
+                if !self.net.is_running()
+                    || self.network_admission_status != NetworkAdmissionStatus::Active
                     || self.contact_bindings.pending_lookups.len() >= MAX_BINDING_LOOKUPS
                 {
                     Err("unavailable")
@@ -340,6 +352,7 @@ impl Supervisor {
     fn synchronize_binding_publication(&mut self, store: &Store) -> Result<(), AslError> {
         let enabled = store.binding_code_public()?;
         let should_publish = enabled
+            && self.net.is_running()
             && self.network_admission_status == NetworkAdmissionStatus::Active
             && self.admission.is_some();
         if should_publish == self.contact_bindings.published {

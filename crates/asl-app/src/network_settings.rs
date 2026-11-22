@@ -80,6 +80,15 @@ impl NetworkSettingsV1 {
         self.address_scope.into()
     }
 
+    pub fn with_relay_only_override(mut self, enabled: bool) -> Result<Self, AslError> {
+        if enabled {
+            self.address_scope = NetworkAddressScopeV1::RelayOnly;
+            self.listen_on_interfaces = false;
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn listener_address(&self, port: u16) -> SocketAddr {
         let ip = match self.address_scope {
             NetworkAddressScopeV1::LoopbackOnly => Ipv4Addr::LOCALHOST,

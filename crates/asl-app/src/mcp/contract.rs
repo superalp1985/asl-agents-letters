@@ -1,5 +1,10 @@
 use asl_agent::QueryScope;
-use asl_types::protocol::{Intent, ResultShape};
+use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
+use asl_types::{
+    error::ErrorCode,
+    ids::Id128,
+    protocol::{Intent, ResultShape},
+};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -98,4 +103,37 @@ pub(super) struct FetchArgs {
     pub task_id: String,
     #[schemars(length(equal = 32))]
     pub offer_id: String,
+    /// Other offers of the same file in this task, each from a different device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_ADDITIONAL_OFFERS), inner(length(equal = 32)))]
+    pub additional_offer_ids: Vec<String>,
+}
+
+const MAX_ADDITIONAL_OFFERS: usize = MAX_ACTIVE_SOURCES - 1;
+
+impl FetchArgs {
+    pub fn offer_ids(&self) -> Result<Vec<Id128>, ErrorCode> {
+        if self.additional_offer_ids.len() > MAX_ADDITIONAL_OFFERS {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let mut ids = Vec::with_capacity(1 + self.additional_offer_ids.len());
+        for value in std::iter::once(&self.offer_id).chain(&self.additional_offer_ids) {
+            let id = parse_id(value)?;
+            if ids.contains(&id) {
+                return Err(ErrorCode::InvalidMessage);
+            }
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+}
+
+pub(super) fn parse_id(value: &str) -> Result<Id128, ErrorCode> {
+    if value.len() != Id128::LENGTH * 2 {
+        return Err(ErrorCode::InvalidMessage);
+    }
+    let mut bytes = [0; Id128::LENGTH];
+    alloy_primitives::hex::decode_to_slice(value, &mut bytes)
+        .map_err(|_| ErrorCode::InvalidMessage)?;
+    Ok(Id128(bytes))
 }

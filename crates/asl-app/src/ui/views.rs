@@ -49,7 +49,19 @@ pub(super) struct Interaction<'a> {
     pub(super) code_input: &'a mut String,
     pub(super) access_form: &'a mut AccessForm,
     pub(super) retention: &'a mut super::retention::RetentionForm,
+    pub(super) network_config:
+        &'a Result<asl_app::network_settings::NetworkSettingsV1, asl_types::error::AslError>,
+    pub(super) model_endpoints: &'a Result<
+        Vec<asl_app::model_endpoint_access::ModelProviderStatus>,
+        asl_types::error::AslError,
+    >,
     pub(super) actions_enabled: bool,
+    pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
+    pub(super) checkpoints: &'a Result<
+        Option<asl_app::checkpoint_access::CheckpointStatus>,
+        asl_types::error::AslError,
+    >,
     pub(super) action: &'a mut Option<super::LocalAction>,
 }
 
@@ -113,6 +125,11 @@ impl Page {
             code_input,
             access_form,
             retention,
+            network_config,
+            model_endpoints,
+            checkpoint_form,
+            profile_form,
+            checkpoints,
             actions_enabled,
             action,
         } = interaction;
@@ -128,7 +145,7 @@ impl Page {
                     overview(ui, data, mascot, *actions_enabled, action);
                 }
                 Self::Activity => {
-                    retention.show(ui, data.direct_observation_days, *actions_enabled, action);
+                    retention.show(ui, data, *actions_enabled, action);
                     ui.label(RichText::new("近期结构化直连请求").strong());
                     table(
                         ui,
@@ -164,21 +181,35 @@ impl Page {
                     ui.label(RichText::new("会话活动").strong());
                     conversations::show(ui, data, now);
                 }
-                Self::Nodes => table(
-                    ui,
-                    ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],
-                    [2.0, 2.0, 1.5, 1.0],
-                    &data.nodes,
-                    "暂无节点记录",
-                    |row| {
-                        [
-                            row.agent_id.clone(),
-                            row.peer_id.clone(),
-                            text(&row.identity_state).into(),
-                            age(row.last_seen_ms, now),
-                        ]
-                    },
-                ),
+                Self::Nodes => {
+                    super::network_privacy::show(
+                        ui,
+                        network_config,
+                        data,
+                        *actions_enabled,
+                        action,
+                    );
+                    ui.separator();
+                    checkpoint_form.show(ui, checkpoints, *actions_enabled, action);
+                    ui.separator();
+                    profile_form.show(ui, data, now.max(0) as u64, *actions_enabled, action);
+                    ui.separator();
+                    table(
+                        ui,
+                        ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],
+                        [2.0, 2.0, 1.5, 1.0],
+                        &data.nodes,
+                        "暂无节点记录",
+                        |row| {
+                            [
+                                row.agent_id.clone(),
+                                row.peer_id.clone(),
+                                text(&row.identity_state).into(),
+                                age(row.last_seen_ms, now),
+                            ]
+                        },
+                    );
+                }
                 Self::Contacts => contacts(ui, data, now, code_input, *actions_enabled, action),
                 Self::Groups => {
                     ui.horizontal_wrapped(|ui| {
@@ -264,7 +295,11 @@ impl Page {
                         ]
                     },
                 ),
-                Self::Access => access(ui, data, access_form, *actions_enabled, action),
+                Self::Access => {
+                    super::model_endpoints::show(ui, model_endpoints, *actions_enabled, action);
+                    ui.separator();
+                    access(ui, data, access_form, *actions_enabled, action);
+                }
             });
     }
 }

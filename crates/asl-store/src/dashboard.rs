@@ -5,10 +5,15 @@ use asl_types::{error::AslError, ids::AgentId, record::short_code};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
+use crate::group_observations::group_observation_days;
 use crate::group_state::GroupInboundPolicy;
 use crate::inbound_observations::{
     DirectInboundObservation, direct_observation_days, read_recent_direct_inbound_observations,
 };
+use crate::network_privacy::{
+    NetworkReport, force_relay_only, last_network_report, network_pause_requested,
+};
+use crate::public_profile::{ProfileSigningStatus, profile_signing_status};
 use crate::transfers::{DownloadConsent, UploadConsent};
 use crate::{SCHEMA_VERSION, Store, current_time_ms, database_error};
 
@@ -20,6 +25,11 @@ pub struct Dashboard {
     pub activity: Vec<ActivityRow>,
     pub direct_observations: Vec<DirectInboundObservation>,
     pub direct_observation_days: u8,
+    pub group_observation_days: u8,
+    pub force_relay_only: bool,
+    pub network_pause_requested: bool,
+    pub network_report: Option<NetworkReport>,
+    pub profile_signing: ProfileSigningStatus,
     pub nodes: Vec<NodeRow>,
     pub contact_bindings: Vec<ContactBindingRow>,
     pub binding_candidates: Vec<BindingCandidateRow>,
@@ -212,6 +222,11 @@ impl Dashboard {
             activity: read_activity(database)?,
             direct_observations: read_recent_direct_inbound_observations(database)?,
             direct_observation_days: direct_observation_days(database)?,
+            group_observation_days: group_observation_days(database)?,
+            force_relay_only: force_relay_only(database)?,
+            network_pause_requested: network_pause_requested(database)?,
+            network_report: last_network_report(database)?,
+            profile_signing: profile_signing_status(database)?,
             nodes: read_nodes(database)?,
             contact_bindings: read_contact_bindings(database)?,
             binding_candidates: read_binding_candidates(database)?,
@@ -429,7 +444,7 @@ fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
                  SELECT g.created_at_ms,'group',coalesce(g.browse_kind,g.kind),g.sender_peer_id,p.agent_id,
                         g.group_id,CASE WHEN g.browse_kind IS NOT NULL THEN 'in' END,g.event_id
                  FROM group_events g JOIN peers p ON p.peer_id=g.sender_peer_id
-                 WHERE g.expires_at_ms>?1 AND (g.kind<>'application' OR g.browse_kind IS NOT NULL)
+                 WHERE g.expires_at_ms>?1 AND (g.kind<>'application' OR g.browse_expires_at_ms>?1)
              ) ORDER BY created_at_ms DESC,scope,event_id LIMIT 100",
         )
         .map_err(database_error)?;

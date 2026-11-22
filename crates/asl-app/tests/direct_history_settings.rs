@@ -32,5 +32,14 @@ fn core_updates_the_selected_profiles_history_without_changing_inbound_permissio
     assert_eq!(dashboard().direct_inbound_mode, "browse");
     assert!(change(&["--retention", "direct", "3"]));
     assert_eq!(dashboard().direct_observation_days, 3);
+    assert_eq!(dashboard().group_observation_days, 7);
+    assert!(change(&["--group-inbound", "answer", "on"]));
+    assert!(!change(&["--retention", "group", "8"]));
+    assert!(change(&["--retention", "group", "0"]));
+    let data = dashboard();
+    assert_eq!(data.group_observation_days, 0);
+    assert_eq!(data.direct_observation_days, 3);
+    assert!(data.group_inbound.answer_enabled);
+    assert!(data.group_inbound.browse_enabled);
     std::fs::remove_dir_all(profile).unwrap();
 }
