@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod libraries;
 #[cfg(windows)]
 pub mod mcp;
+pub mod model_endpoint_access;
 pub mod network;
 pub mod network_identity;
 pub mod network_settings;

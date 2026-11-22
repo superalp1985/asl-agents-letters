@@ -79,6 +79,27 @@ impl Store {
     ) -> Result<(), AslError> {
         write_setting(&self.connection, key, value_json, updated_at_ms)
     }
+
+    pub fn model_provider_approval(&self, id: &str) -> Result<Option<String>, AslError> {
+        self.get_setting(&format!("agent.model_provider_approval_v1.{id}"))?
+            .map(|value| serde_json::from_str::<Option<String>>(&value))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|_| AslError::InvalidDatabase)
+    }
+
+    pub fn set_model_provider_approval(
+        &self,
+        id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<(), AslError> {
+        let value = serde_json::to_string(&fingerprint).map_err(|_| AslError::InvalidMessage)?;
+        self.set_setting(
+            &format!("agent.model_provider_approval_v1.{id}"),
+            &value,
+            current_time_ms(),
+        )
+    }
 }
 
 fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>, AslError> {
@@ -109,6 +130,21 @@ fn write_setting(
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+pub fn open_store_read_only(path: &Path) -> Result<Store, AslError> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(database_error)?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(database_error)?;
+    if read_schema_version(&connection)? != Some(SCHEMA_VERSION) {
+        return Err(AslError::UnsupportedSchemaVersion);
+    }
+    Ok(Store { connection })
 }
 
 pub fn open_store(path: &Path) -> Result<Store, AslError> {

@@ -13,7 +13,7 @@ data/
   identity/agent-root-secp256k1.dpapi
   identity/device-key.dpapi
   identity/device-directory.cbor
-  credentials/provider-<provider-id>.dpapi
+  credentials/provider-v1-<config-fingerprint>.dpapi
   snapshots/ab/<content_id>.blob
   manifests/ab/<content_id>.mnf
   incoming/<transfer_id>.part
@@ -28,7 +28,9 @@ data/
 
 `state/network-identity-v1.json` 由本地操作者配置版本化链部署、最终性 checkpoint、缓存限额及 beacon/execution 服务入口；其中没有默认合约地址、RPC 地址或 checkpoint。`identity/device-directory.cbor` 是当前根身份签名的设备目录。任一文件缺失时网络身份准入保持关闭；身份根、目录 commitment 与本机最终化链状态全部一致后才会开放准入。
 
-`state/model-providers-v1.json` 是本机版本化 provider 注册表，保存显式 endpoint、模型名、远端/本地模式、启用状态和请求时限，不含 API Key。`credentials/provider-<provider-id>.dpapi` 只保存对应 provider 的 DPAPI 密文；远端 provider 必须有凭据，本地 loopback provider 可不配置凭据。Core 固定向登记的 endpoint 发送请求，不跟随跳转、不读取提示词中的 URL；每次调用都重新验证绑定 provider 与本地/远端模式的 ModelInput permit。缺少注册表时不启用任何模型 provider。
+`state/model-providers-v1.json` 是本机版本化 provider 注册表，保存显式 endpoint、模型名、远端/本地模式、启用状态和请求时限，不含 API Key。`enabled_by_user` 仅使该配置可供审批；当前授权指纹另存于 SQLite `settings` 的 `agent.model_provider_approval_v1.<id>`。授权必须匹配完整配置的 V1 指纹。`credentials/provider-v1-<config-fingerprint>.dpapi` 只保存该精确配置的 DPAPI 密文；旧的仅按 ID 命名的凭据不会自动复用。远端 provider 必须有凭据，本地 loopback provider 可不配置凭据。
+
+Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重查两者；撤销阻止后续通过检查的请求，不取消已经交给客户端的请求。网关固定向登记的 endpoint 发送请求，不跟随跳转、不读取提示词中的 URL；每次调用还须独立验证每份输入绑定 provider 与本地/远端模式的 `ModelInput` permit。注册表缺失或不合法时不调用模型，不影响对等服务启动。`asl-core --providers list` 仅输出配置、指纹及授权状态，`allow <id> <fingerprint>` 只批准核对过且仍一致的配置，`revoke <id>` 可在原配置已更换或删除时清除旧批准。这些命令不接收 API Key。
 
 路径全部由程序用已验证 ID 推导，不能从 peer、模型或文档中接受路径字符串。存储命名空间按对象种类区分，不提供裸块 hash 读取 API。程序自身密钥、凭据、数据库、缓存和 logs 禁止被普通共享 grant 覆盖；头像/经验只有显式生成的资源引用可发布。
 

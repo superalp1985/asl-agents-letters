@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt,
     fs::{self, File},
     future::Future,
@@ -173,8 +173,27 @@ pub enum ModelGatewayError {
 pub trait ProviderCredentialSource: Send + Sync {
     fn api_key(
         &self,
-        provider: &ProviderId,
+        provider: &ProviderConfigV1,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, ModelGatewayError>;
+}
+
+pub trait ProviderAuthorizationSource: Send + Sync {
+    fn authorized_config(
+        &self,
+        provider: &ProviderId,
+    ) -> Result<ProviderConfigV1, ModelGatewayError>;
+}
+
+impl<F> ProviderAuthorizationSource for F
+where
+    F: Fn(&ProviderId) -> Result<ProviderConfigV1, ModelGatewayError> + Send + Sync,
+{
+    fn authorized_config(
+        &self,
+        provider: &ProviderId,
+    ) -> Result<ProviderConfigV1, ModelGatewayError> {
+        self(provider)
+    }
 }
 
 pub struct AuthorizedPrompt {
@@ -269,31 +288,17 @@ pub trait ModelGateway {
     ) -> impl Future<Output = Result<ModelText, ModelGatewayError>> + Send + 'a;
 }
 
-struct RuntimeProvider {
-    config: ProviderConfigV1,
-    endpoint: Url,
-}
-
 pub struct HttpModelGateway {
-    providers: HashMap<ProviderId, RuntimeProvider>,
+    providers: Arc<dyn ProviderAuthorizationSource>,
     credentials: Arc<dyn ProviderCredentialSource>,
     client: Client,
 }
 
 impl HttpModelGateway {
     pub fn new(
-        registry: ProviderRegistryV1,
+        providers: Arc<dyn ProviderAuthorizationSource>,
         credentials: Arc<dyn ProviderCredentialSource>,
     ) -> Result<Self, ModelGatewayError> {
-        registry.validate()?;
-        let providers = registry
-            .providers
-            .into_iter()
-            .map(|config| {
-                let endpoint = validate_endpoint(&config.endpoint, config.mode)?;
-                Ok((config.id.clone(), RuntimeProvider { config, endpoint }))
-            })
-            .collect::<Result<HashMap<_, _>, ModelGatewayError>>()?;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -327,14 +332,13 @@ impl ModelGateway for HttpModelGateway {
         if &prompt.provider_id != provider_id {
             return Err(ModelGatewayError::AuthorizationDenied);
         }
-        let provider = self
-            .providers
-            .get(provider_id)
-            .filter(|provider| provider.config.enabled_by_user)
-            .ok_or(ModelGatewayError::AuthorizationDenied)?;
+        let provider = self.providers.authorized_config(provider_id)?;
+        if &provider.id != provider_id || !provider.enabled_by_user {
+            return Err(ModelGatewayError::AuthorizationDenied);
+        }
+        let endpoint = validate_endpoint(&provider.endpoint, provider.mode)?;
         for permit in &prompt.permits {
-            if permit.model_provider()
-                != Some((provider_id, provider.config.mode == ProviderMode::Local))
+            if permit.model_provider() != Some((provider_id, provider.mode == ProviderMode::Local))
             {
                 return Err(ModelGatewayError::AuthorizationDenied);
             }
@@ -343,7 +347,7 @@ impl ModelGateway for HttpModelGateway {
                 .map_err(|_| ModelGatewayError::AuthorizationDenied)?;
         }
 
-        let authorization = match self.credentials.api_key(provider_id)? {
+        let authorization = match self.credentials.api_key(&provider)? {
             Some(api_key) if !api_key.is_empty() && api_key.len() <= 4_096 => {
                 let mut value = Zeroizing::new(b"Bearer ".to_vec());
                 value.extend_from_slice(&api_key);
@@ -353,12 +357,12 @@ impl ModelGateway for HttpModelGateway {
                 Some(header)
             }
             Some(_) => return Err(ModelGatewayError::CredentialsUnavailable),
-            None if provider.config.mode == ProviderMode::Local => None,
+            None if provider.mode == ProviderMode::Local => None,
             None => return Err(ModelGatewayError::CredentialsUnavailable),
         };
 
         let request_body = ChatCompletionRequest {
-            model: &provider.config.model,
+            model: &provider.model,
             messages: [
                 ChatMessage {
                     role: "system",
@@ -372,15 +376,19 @@ impl ModelGateway for HttpModelGateway {
             stream: false,
             n: 1,
         };
-        let timeout = Duration::from_millis(provider.config.request_timeout_ms);
+        let timeout = Duration::from_millis(provider.request_timeout_ms);
         let mut request = self
             .client
-            .post(provider.endpoint.clone())
+            .post(endpoint)
             .timeout(timeout)
             .header(CONTENT_TYPE, "application/json")
             .json(&request_body);
         if let Some(authorization) = authorization {
             request = request.header(AUTHORIZATION, authorization);
+        }
+        // The destination and consent must still match at dispatch.
+        if self.providers.authorized_config(provider_id)? != provider {
+            return Err(ModelGatewayError::AuthorizationDenied);
         }
         let mut response = request.send().await.map_err(map_request_error)?;
         if !response.status().is_success() {

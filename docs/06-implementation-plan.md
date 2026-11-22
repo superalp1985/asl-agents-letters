@@ -594,7 +594,7 @@ T24 集中验证（2026-11-19，Windows x64，Rust 1.100.0，Cargo 缓存/产物
 
 验收 mock endpoint 的超时、错误、超大响应、重定向、授权外provider；远端文本中的 URL 不产生 HTTP；本地模型必须单独获准。无真实收费服务也能用 mock 跑测试。
 
-provider 配置文件为 `state/model-providers-v1.json`，每项包含 `id`、`endpoint`、`model`、`mode`、`enabled_by_user` 和 `request_timeout_ms`；不含凭据。ID 限小写字母、数字、连字符与下划线。远端 endpoint 仅 HTTPS，本地 endpoint 仅使用明确登记的 IPv4/IPv6 loopback 字面地址；缺失注册表时保持空 provider 集。凭据以 `provider-<provider-id>.dpapi` 单独存放；远端调用必须有 key，本地端点可无 key。Core 持有网关并逐次重验与 provider ID 和本地/远端模式绑定的 `ModelInput` permit；调用失败不会降级为其他 provider。
+provider 配置文件为 `state/model-providers-v1.json`，每项包含 `id`、`endpoint`、`model`、`mode`、`enabled_by_user` 和 `request_timeout_ms`；不含凭据。ID 限小写字母、数字、连字符与下划线。远端 endpoint 仅 HTTPS，本地 endpoint 仅使用明确登记的 IPv4/IPv6 loopback 字面地址；缺失注册表时保持空 provider 集。凭据以 `provider-v1-<config-fingerprint>.dpapi` 单独存放；远端调用必须有 key，本地端点可无 key。Core 持有网关并逐次重验与 provider ID 和本地/远端模式绑定的 `ModelInput` permit；调用失败不会降级为其他 provider。端点的本机批准与撤销见 T34。
 
 ```text
 cargo test -p asl-agent --test model_gateway
@@ -787,6 +787,8 @@ T34 群来信保留（2026-11-22）。活动页和 `asl-core --retention group <
 T34 网络隐私（2026-11-22）。节点页及 `asl-core --network relay-only on|off` 可保存启动时仅中继限制。沿用用户配置地址与现有 Net RelayOnly 策略，不写回配置文件；限制与原设置冲突时拒绝启动，不回退。活动网络不热切换地址模式。节点页分别显示下次启动设置和 Core 上次报告的模式及预约数量；在线确认和公网验收仍待完成。
 
 T34 对等网络暂停（2026-11-22）。节点页及 `asl-core --network pause on|off` 保存暂停请求，Core 运行中应用；重启时若已暂停则不启动 Net。暂停结束 Net 子进程，关闭监听、连接和中继并清理连接级待办。恢复使用本次 Core 启动时的地址策略与原设备身份，对端重新通过链身份及设备准入；不修改目录授权、群授权或信任分数。恢复失败不回退或自动重试。仅暂停 ASL 对等网络，不影响链 RPC 和本机服务。T34 仍未关闭。
+
+T34 模型端点授权（2026-11-22）。授权页显示登记端点的实际目标、模型、模式和批准状态，通过 `asl-core --providers` 持久化精确配置批准。网关每次调用及 HTTP 发送前读取现行授权；同 ID 的新配置不继承旧批准或旧凭据。该开关独立于每份内容的 `ModelInput` permit，不接通直连或群自动回答中的模型调用。凭据继续由 DPAPI 保管，配置编辑及凭据录入不在本切片；未调用真实服务，未操作原生界面。T34 尚需公开资料、检查点、迁移控制及人工界面验收。
 
 ### T35 — 保留、备份、诊断与崩溃恢复
 

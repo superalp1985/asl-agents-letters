@@ -51,6 +51,10 @@ pub(super) struct Interaction<'a> {
     pub(super) retention: &'a mut super::retention::RetentionForm,
     pub(super) network_config:
         &'a Result<asl_app::network_settings::NetworkSettingsV1, asl_types::error::AslError>,
+    pub(super) model_endpoints: &'a Result<
+        Vec<asl_app::model_endpoint_access::ModelProviderStatus>,
+        asl_types::error::AslError,
+    >,
     pub(super) actions_enabled: bool,
     pub(super) action: &'a mut Option<super::LocalAction>,
 }
@@ -116,6 +120,7 @@ impl Page {
             access_form,
             retention,
             network_config,
+            model_endpoints,
             actions_enabled,
             action,
         } = interaction;
@@ -276,7 +281,11 @@ impl Page {
                         ]
                     },
                 ),
-                Self::Access => access(ui, data, access_form, *actions_enabled, action),
+                Self::Access => {
+                    super::model_endpoints::show(ui, model_endpoints, *actions_enabled, action);
+                    ui.separator();
+                    access(ui, data, access_form, *actions_enabled, action);
+                }
             });
     }
 }

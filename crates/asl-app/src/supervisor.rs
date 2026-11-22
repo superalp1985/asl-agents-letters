@@ -12,7 +12,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asl_agent::gateway::{
     AuthorizedPrompt, HttpModelGateway, ModelGateway, ModelGatewayError, ModelText,
-    ProviderRegistryV1,
 };
 #[cfg(any(windows, test))]
 use asl_net::transport::TransportKind;
@@ -46,6 +45,7 @@ use crate::ipc::{
     TaskStatus, WorkerOperation, encode_frame, write_net_startup_prelude,
 };
 use crate::libraries::LocalLibraries;
+use crate::model_endpoint_access::configured_model_gateway;
 use crate::network::{LocalNetworkObservation, NetworkCommand, NetworkEvent};
 use crate::network_identity::{NetworkAdmissionStatus, load_network_admission};
 use crate::network_settings::NetworkSettingsV1;
@@ -54,7 +54,6 @@ use crate::paths::AppPaths;
 use crate::profile::{
     AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS,
 };
-use crate::providers::DpapiProviderCredentialSource;
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
 use asl_store::network_privacy::NetworkRuntimeState;
@@ -132,13 +131,8 @@ impl Supervisor {
         let network_store = open_store(&state_database)?;
         let network_settings =
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
-        let providers = ProviderRegistryV1::load(&paths.model_provider_configuration())
-            .map_err(|_| AslError::InvalidIdentity)?;
-        let model_credentials = Arc::new(DpapiProviderCredentialSource::new(
-            paths.provider_credentials().to_path_buf(),
-        ));
-        let model_gateway = HttpModelGateway::new(providers, model_credentials)
-            .map_err(|_| AslError::InvalidIdentity)?;
+        let model_gateway =
+            configured_model_gateway(&paths).map_err(|_| AslError::InvalidPolicyState)?;
         let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
         let device_key_path = paths.device_key();
         let device_identity = DeviceIdentity::load_or_create_protected(&device_key_path)?;

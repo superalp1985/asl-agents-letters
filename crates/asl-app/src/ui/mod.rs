@@ -1,5 +1,6 @@
 mod art;
 mod binding_feedback;
+mod model_endpoints;
 mod network_privacy;
 mod retention;
 mod views;
@@ -12,7 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asl_app::{network_settings::NetworkSettingsV1, paths::AppPaths};
+use asl_app::{
+    model_endpoint_access::{ModelEndpointAccess, ModelProviderStatus},
+    network_settings::NetworkSettingsV1,
+    paths::AppPaths,
+};
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::dashboard::Dashboard;
 use asl_types::error::AslError;
@@ -60,6 +65,7 @@ struct Viewer {
 struct Snapshot {
     dashboard: Dashboard,
     network_config: Result<NetworkSettingsV1, AslError>,
+    model_endpoints: Result<Vec<ModelProviderStatus>, AslError>,
 }
 
 impl Viewer {
@@ -124,6 +130,7 @@ impl Viewer {
             "direct-inbound" => "直连接收策略已更新",
             "group-inbound" => "群组接收策略已更新",
             "retention" => "浏览记录保留期限已更新",
+            "providers" => "模型端点授权已更新",
             "network" => "已保存，待后台重新启动",
             _ => "本机授权已更新",
         };
@@ -210,7 +217,12 @@ impl eframe::App for Viewer {
         }
         if matches!(
             self.page,
-            Page::Activity | Page::Transfers | Page::Groups | Page::Contacts | Page::Nodes
+            Page::Activity
+                | Page::Transfers
+                | Page::Groups
+                | Page::Contacts
+                | Page::Nodes
+                | Page::Access
         ) {
             ctx.request_repaint_after(Duration::from_secs(1));
             if self.snapshot.is_some()
@@ -296,6 +308,7 @@ impl eframe::App for Viewer {
                             access_form: &mut self.access_form,
                             retention: &mut self.retention,
                             network_config: &snapshot.network_config,
+                            model_endpoints: &snapshot.model_endpoints,
                             actions_enabled: self.action.is_none() && self.loading.is_none(),
                             action: &mut action,
                         };
@@ -336,6 +349,7 @@ fn load(home: &Path) -> Result<Snapshot, AslError> {
     Ok(Snapshot {
         dashboard: Dashboard::load(&database)?,
         network_config: NetworkSettingsV1::load(&paths.network_settings_configuration()),
+        model_endpoints: ModelEndpointAccess::new(&paths).list(),
     })
 }
 

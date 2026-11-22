@@ -9,6 +9,8 @@ mod download_control;
 mod group_control;
 #[path = "asl-core/network_control.rs"]
 mod network_control;
+#[path = "asl-core/provider_control.rs"]
+mod provider_control;
 #[path = "asl-core/retention_control.rs"]
 mod retention_control;
 #[path = "asl-core/upload_control.rs"]
@@ -26,6 +28,7 @@ fn main() {
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
         [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
+        [flag, args @ ..] if flag == "--providers" => provider_control::run(args),
         [flag, kind, days] if flag == "--retention" => retention_control::set_days(kind, days),
         [flag, key, mode] if flag == "--network" && key == "relay-only" => {
             network_control::set_relay_only(mode)

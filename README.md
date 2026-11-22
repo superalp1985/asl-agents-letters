@@ -155,7 +155,9 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，目录授权操作交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移、检查点、模型服务、运行中暂停网络，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移、检查点界面，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+
+授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
 
 节点页可为下次启动后台启用「仅中继」。需要预先在 `state/network-settings-v1.json` 配置中继地址；启用后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
 
@@ -239,7 +241,9 @@ The preparation script copies five executables into a new directory. Run just th
 
 ### Desktop Controls
 
-The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint and model-provider controls, pausing a running network process, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. Full identity migration, checkpoint controls, and the window size/DPI acceptance matrix remain open. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+
+In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
 
 Nodes can enable relay-only mode for the next Core start. Configure relay addresses in `state/network-settings-v1.json` first. With relay-only enabled, missing or invalid relay settings prevent Core from starting rather than falling back to direct connections. Nodes shows the last reported mode and reservation count, not a live connectivity guarantee.
 
