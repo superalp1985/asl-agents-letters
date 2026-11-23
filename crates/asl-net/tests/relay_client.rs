@@ -82,6 +82,7 @@ async fn next_reservation_after_recovery(
             | TransportEvent::DiscoveryCandidate(_)
             | TransportEvent::DhtRecordCandidate { .. }
             | TransportEvent::DhtProviders { .. }
+            | TransportEvent::ProfilePublicationProgress { .. }
             | TransportEvent::PairingInviteRequest { .. }
             | TransportEvent::PairingExchangeResponse { .. }
             | TransportEvent::DialFailed { .. } => {}
@@ -160,6 +161,7 @@ async fn next_connected(
             | TransportEvent::DiscoveryCandidate(_)
             | TransportEvent::DhtRecordCandidate { .. }
             | TransportEvent::DhtProviders { .. }
+            | TransportEvent::ProfilePublicationProgress { .. }
             | TransportEvent::PairingInviteRequest { .. }
             | TransportEvent::PairingExchangeResponse { .. }
             | TransportEvent::DialFailed { .. } => {}

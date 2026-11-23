@@ -233,6 +233,48 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::LookupProfile {
+                operation_id,
+                agent,
+            } => {
+                let key = asl_net::dht::identity_record_key(
+                    agent,
+                    asl_types::record::RecordKind::Profile,
+                )
+                .map_err(|_| NetworkErrorCode::Transport)?;
+                let result = self.transport.get_record(key).map(|_| ());
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::PrepareProfile {
+                operation_id,
+                agent,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .prepare_profile_publication(operation_id, agent)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::PublishProfile {
+                operation_id,
+                value,
+            } => {
+                if let Err(error) = self.transport.publish_prepared_profile(operation_id, value) {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::CancelProfile {
+                operation_id,
+                receipt_id,
+            } => {
+                self.transport.cancel_profile_publication(operation_id);
+                self.send_operation_result(receipt_id, Ok(()), writer)?;
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;
@@ -919,6 +961,18 @@ impl NetworkBridge {
                     value,
                 })?;
             }
+            TransportEvent::ProfilePublicationProgress {
+                operation_id,
+                succeeded,
+            } => {
+                let result = if succeeded {
+                    Ok(())
+                } else {
+                    Err(io::ErrorKind::NotConnected.into())
+                };
+                self.send_operation_result(operation_id, result, writer)
+                    .map_err(|_| AslError::SandboxUnavailable)?;
+            }
             TransportEvent::InboundRejected => {}
             TransportEvent::Connected { connection } => {
                 let connection_id = fresh_handle(&self.connections)?;
@@ -1359,6 +1413,46 @@ mod tests {
 
     async fn connected_bridges() -> ((NetworkBridge, [u8; 16]), (NetworkBridge, [u8; 16])) {
         connected_bridges_with(LocalTransport::new).await
+    }
+
+    #[tokio::test]
+    async fn profile_cancel_receipt_is_emitted_after_discarding_old_operation() {
+        let mut bridge =
+            NetworkBridge::new(LocalTransport::new(Keypair::generate_ed25519()).unwrap());
+        let id = [3; 16];
+        let receipt_id = [4; 16];
+        bridge
+            .transport
+            .prepare_profile_publication(id, asl_types::ids::AgentId([5; 32]))
+            .unwrap();
+        let mut writer = FrameWriter::new(Vec::new(), IpcRole::Net, IpcRole::Core);
+        bridge
+            .handle_command(
+                IpcMessage::CancelProfile {
+                    operation_id: id,
+                    receipt_id,
+                },
+                &mut writer,
+            )
+            .unwrap();
+        assert_eq!(
+            read_event(writer.into_inner()),
+            IpcMessage::OperationAccepted {
+                operation_id: receipt_id
+            }
+        );
+        assert_eq!(
+            bridge
+                .transport
+                .publish_prepared_profile(id, vec![])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        bridge
+            .transport
+            .prepare_profile_publication([6; 16], asl_types::ids::AgentId([5; 32]))
+            .unwrap();
     }
 
     async fn connected_bridges_with(

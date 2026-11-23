@@ -49,6 +49,23 @@ use crate::sandbox::{BrokerPipes, SandboxLimits, SandboxRole};
 // concurrent ASL launches from observing temporary inheritable duplicates.
 static PROCESS_CREATION_LOCK: Mutex<()> = Mutex::new(());
 
+pub(crate) fn confirmed_process_exit(pid: u32) -> bool {
+    use windows::Win32::{
+        Foundation::ERROR_INVALID_PARAMETER,
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE},
+    };
+    if pid == 0 {
+        return false;
+    }
+    match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(handle) => {
+            let process = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+            unsafe { WaitForSingleObject(raw(&process), 0) == WAIT_OBJECT_0 }
+        }
+        Err(error) => error.code() == ERROR_INVALID_PARAMETER.to_hresult(),
+    }
+}
+
 pub(super) fn setup_error(stage: &'static str, error: windows::core::Error) -> AslError {
     AslError::SandboxSetupFailed {
         stage,

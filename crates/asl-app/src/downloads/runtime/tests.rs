@@ -407,6 +407,192 @@ fn restarted_worker_can_resume_only_with_previously_authorized_sources() {
 }
 
 #[test]
+fn recovery_host_resumes_only_the_approved_existing_transfer() {
+    check_recovery_host_resume(false);
+}
+
+#[test]
+fn recovery_host_resumes_group_download_in_its_original_membership_epoch() {
+    check_recovery_host_resume(true);
+}
+
+fn check_recovery_host_resume(group_download: bool) {
+    let bytes = vec![4; CHUNK_SIZE as usize + 23];
+    let inbox = Inbox::new(&bytes);
+    let binding = group_download.then(|| seed_group(&inbox));
+    drop(inbox.local);
+    let (info, old_lease) = interrupt_after_first_chunk(
+        &inbox.home,
+        &inbox.event,
+        inbox.grant,
+        binding.as_ref(),
+        &bytes,
+    );
+    let store = asl_store::open_store(&inbox.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [17; 32];
+    store
+        .configure_mcp_recovery(Some(&subject), unix_time_ms().unwrap() as i64)
+        .unwrap();
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let resume = |subject| DownloadJob::ResumeForHost {
+        transfer_id: info.transfer_id.clone(),
+        subject,
+    };
+    let denied = h.port.submit(resume(subject)).unwrap();
+    assert!(matches!(
+        h.event(&denied),
+        DownloadEvent::Failed(AslError::NotFound)
+    ));
+    store
+        .authorize_recovery_download(&info.transfer_id)
+        .unwrap();
+    let denied = h.port.submit(resume([18; 32])).unwrap();
+    assert!(matches!(
+        h.event(&denied),
+        DownloadEvent::Failed(AslError::PolicyDenied)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
+
+    let resumed = h.port.submit(resume(subject)).unwrap();
+    let DownloadEvent::Started(started) = h.event(&resumed) else {
+        panic!("expected start")
+    };
+    assert_eq!(started.transfer_id, info.transfer_id);
+    assert_eq!(started.durable_bytes, CHUNK_SIZE as u64);
+    let WorkerRequest::Fetch { request, group, .. } = h.request() else {
+        panic!("expected Fetch")
+    };
+    assert_eq!(group, binding);
+    h.manifest(request);
+    let WorkerRequest::Bulk { request, .. } = h.request() else {
+        panic!("expected missing chunk")
+    };
+    assert_eq!(request.chunk_index, 1);
+    assert_ne!(request.lease_id, old_lease);
+    h.respond(request, bytes[CHUNK_SIZE as usize..].to_vec());
+    let DownloadEvent::Completed(done) = h.event(&resumed) else {
+        panic!("expected completion")
+    };
+    assert_eq!(fs::read(done.destination_path).unwrap(), bytes);
+    let repeated = h.port.submit(resume(subject)).unwrap();
+    assert!(matches!(h.event(&repeated), DownloadEvent::Completed(_)));
+    assert!(recv(&h.output).unwrap().is_none());
+}
+
+#[test]
+fn recovery_host_cannot_resume_group_download_after_membership_changes() {
+    check_group_recovery_loses_authority(true);
+}
+
+#[test]
+fn recovery_host_stops_when_the_group_source_device_is_revoked() {
+    check_group_recovery_loses_authority(false);
+}
+
+fn check_group_recovery_loses_authority(change_epoch: bool) {
+    let bytes = vec![5; CHUNK_SIZE as usize + 7];
+    let inbox = Inbox::new(&bytes);
+    let binding = seed_group(&inbox);
+    drop(inbox.local);
+    let (info, _) = interrupt_after_first_chunk(
+        &inbox.home,
+        &inbox.event,
+        inbox.grant,
+        Some(&binding),
+        &bytes,
+    );
+    let store = asl_store::open_store(&inbox.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [17; 32];
+    store
+        .configure_mcp_recovery(Some(&subject), unix_time_ms().unwrap() as i64)
+        .unwrap();
+    store
+        .authorize_recovery_download(&info.transfer_id)
+        .unwrap();
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h
+        .port
+        .submit(DownloadJob::ResumeForHost {
+            transfer_id: info.transfer_id.clone(),
+            subject,
+        })
+        .unwrap();
+    assert!(matches!(h.event(&ticket), DownloadEvent::Started(_)));
+    let WorkerRequest::Fetch { request, group, .. } = h.request() else {
+        panic!("expected Fetch in original epoch");
+    };
+    assert_eq!(group.as_ref(), Some(&binding));
+    let db = Inbox::database(&inbox.home);
+    if change_epoch {
+        assert_eq!(db.execute(
+            "UPDATE asl_groups SET membership_epoch=membership_epoch+1 WHERE group_id=lower(hex(?1))",
+            [binding.group_id.0.as_bytes().as_slice()],
+        ).unwrap(), 1);
+    } else {
+        assert_eq!(
+            db.execute(
+                "UPDATE device_identities SET revoked_at_ms=?1 WHERE peer_id=?2",
+                rusqlite::params![
+                    unix_time_ms().unwrap() as i64,
+                    bs58::encode(inbox.event.peer_id.as_bytes()).into_string(),
+                ],
+            )
+            .unwrap(),
+            1
+        );
+    }
+    h.manifest(request);
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::PolicyDenied)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
+    assert!(!info.destination_path.exists());
+    if change_epoch {
+        assert!(matches!(
+            store.authorize_recovery_download(&info.transfer_id),
+            Err(AslError::PolicyDenied)
+        ));
+    }
+}
+
+#[test]
+fn recovery_host_does_not_fetch_after_inbox_revocation() {
+    let bytes = vec![4; CHUNK_SIZE as usize + 23];
+    let inbox = Inbox::new(&bytes);
+    drop(inbox.local);
+    let (info, _) =
+        interrupt_after_first_chunk(&inbox.home, &inbox.event, inbox.grant, None, &bytes);
+    let store = asl_store::open_store(&inbox.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [17; 32];
+    store
+        .configure_mcp_recovery(Some(&subject), unix_time_ms().unwrap() as i64)
+        .unwrap();
+    store
+        .authorize_recovery_download(&info.transfer_id)
+        .unwrap();
+    asl_store::resources::SnapshotBroker::open(&inbox.home)
+        .unwrap()
+        .revoke_inbox_directory(inbox.grant)
+        .unwrap();
+
+    let mut h = Harness::new(&inbox.home, &inbox.event);
+    let ticket = h
+        .port
+        .submit(DownloadJob::ResumeForHost {
+            transfer_id: info.transfer_id,
+            subject,
+        })
+        .unwrap();
+    assert!(matches!(
+        h.event(&ticket),
+        DownloadEvent::Failed(AslError::NotFound)
+    ));
+    assert!(recv(&h.output).unwrap().is_none());
+    assert!(!info.destination_path.exists());
+}
+
+#[test]
 fn restarted_group_download_keeps_its_binding_and_requests_only_the_missing_chunk() {
     check_worker_resume(true);
 }

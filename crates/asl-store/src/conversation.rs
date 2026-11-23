@@ -573,7 +573,8 @@ fn frame_info(frame: &WireFrame) -> Result<FrameInfo, AslError> {
         | WireFrame::IdentityProof(_)
         | WireFrame::PairingInvite(_)
         | WireFrame::PairingExchange(_)
-        | WireFrame::GroupEnvelope(_) => return Err(AslError::InvalidMessage),
+        | WireFrame::GroupEnvelope(_)
+        | WireFrame::Expression(_) => return Err(AslError::InvalidMessage),
     };
     Ok(FrameInfo { message_id, kind })
 }

@@ -239,7 +239,7 @@ fn immediate(conn: &mut Connection) -> Result<Transaction<'_>, AslError> {
         .map_err(database_error)
 }
 
-fn bump_revision(conn: &Connection) -> Result<(), AslError> {
+pub(crate) fn bump_revision(conn: &Connection) -> Result<(), AslError> {
     conn.execute(
         "UPDATE policy_state SET revision=revision+1 WHERE singleton=1",
         [],

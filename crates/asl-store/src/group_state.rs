@@ -3,8 +3,10 @@
 
 mod application;
 mod invite;
+pub mod invite_review;
 #[cfg(test)]
 mod invite_tests;
+pub mod operator;
 mod outgoing;
 #[cfg(test)]
 mod outgoing_tests;

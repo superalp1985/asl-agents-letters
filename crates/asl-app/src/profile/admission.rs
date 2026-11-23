@@ -241,6 +241,7 @@ pub enum AdmittedNetworkEvent {
         agent_id: AgentId,
         kind: RecordKind,
         sequence: u64,
+        registry_sequence: u64,
         record: Vec<u8>,
     },
 }
@@ -277,7 +278,7 @@ impl CoreAdmission {
             peer_id: local_peer_id.clone(),
             device_certificate,
             major: 1,
-            minor: 0,
+            minor: 1,
             features: Vec::new(),
         };
         let mut admission = Self::new(
@@ -400,11 +401,12 @@ impl CoreAdmission {
     pub(crate) fn prepare_local_profile(
         &mut self,
         identity: &AgentIdentity,
+        store: &asl_store::Store,
         approval: &asl_store::public_profile::ProfileSigningApproval,
         sequence: u64,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, AslError> {
-        use asl_policy::{PolicyEngine, PolicySnapshot};
+        use asl_policy::PolicyEngine;
         use asl_store::public_profile::profile_topic;
 
         if !self.local_is_current(now_ms)
@@ -416,16 +418,19 @@ impl CoreAdmission {
         let mut publisher = super::ProfilePublisher::new(identity, sequence);
         publisher.configure(super::ProfileConfiguration {
             capabilities: approval.topics.iter().copied().map(profile_topic).collect(),
-            avatar: None,
+            avatar: approval.avatar().map(|grant| super::AvatarReference {
+                grant_id: grant.grant_id.clone(),
+                resource_key: grant.resource_key.clone(),
+                epoch: grant.epoch,
+                content_id: grant.content_id,
+            }),
         });
-        // This stage has no resource grants and can never sign a file reference.
-        let policy = PolicyEngine::new(PolicySnapshot::default(), 10_000)?;
-        publisher.poll_record(
-            now_ms,
-            asl_types::task::TaskId(Id128(fresh_id()?)),
-            &policy,
-            &mut self.resolver,
-        )
+        let task = asl_types::task::TaskId(Id128(fresh_id()?));
+        let policy = PolicyEngine::new(
+            store.profile_signing_policy(approval, task.clone())?,
+            10_000,
+        )?;
+        publisher.poll_record(now_ms, task, &policy, &mut self.resolver)
     }
 
     fn check_local_directory_record(
@@ -784,6 +789,11 @@ impl CoreAdmission {
                 }
                 request => {
                     if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                        if matches!(request, WireFrame::Expression(_))
+                            && !self.peer_supports_expression(connection_id)
+                        {
+                            return batch;
+                        }
                         batch.events.push(AdmittedNetworkEvent::ControlRequest {
                             connection_id,
                             agent_id,
@@ -825,6 +835,11 @@ impl CoreAdmission {
                         self.close(connection_id, &mut batch);
                     }
                 } else if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    if matches!(response, WireFrame::Expression(_)) {
+                        // Expression letters use fresh requests. A correlated legacy
+                        // query response must never create an unsolicited letter.
+                        return batch;
+                    }
                     batch.events.push(AdmittedNetworkEvent::ControlResponse {
                         connection_id,
                         agent_id,
@@ -981,6 +996,7 @@ impl CoreAdmission {
             agent_id,
             kind,
             sequence: verified.signed().record.sequence,
+            registry_sequence: verified.registry_sequence(),
             record: value,
         });
     }
@@ -992,6 +1008,11 @@ impl CoreAdmission {
         request: WireFrame,
         now_ms: u64,
     ) -> Result<NetworkCommand, AslError> {
+        if matches!(&request, WireFrame::Expression(_))
+            && !self.peer_supports_expression(connection_id)
+        {
+            return Err(AslError::IncompatibleVersion);
+        }
         if matches!(
             &request,
             WireFrame::Hello(_) | WireFrame::IdentityProofRequest(_) | WireFrame::IdentityProof(_)
@@ -1016,7 +1037,10 @@ impl CoreAdmission {
     ) -> Result<NetworkCommand, AslError> {
         if matches!(
             &response,
-            WireFrame::Hello(_) | WireFrame::IdentityProofRequest(_) | WireFrame::IdentityProof(_)
+            WireFrame::Hello(_)
+                | WireFrame::IdentityProofRequest(_)
+                | WireFrame::IdentityProof(_)
+                | WireFrame::Expression(_)
         ) || !response.is_control()
         {
             return Err(AslError::InvalidMessage);
@@ -1412,12 +1436,28 @@ impl CoreAdmission {
         if manifest.expires_at_ms <= now_ms {
             return Err(AslError::ExpiredMessage);
         }
-        let connection = manifest.connection_id;
+        self.register_connected_transfer_peer(
+            store,
+            manifest.connection_id,
+            manifest.agent_id,
+            &manifest.peer_id,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn register_connected_transfer_peer(
+        &mut self,
+        store: &mut asl_store::Store,
+        connection: [u8; 16],
+        expected_agent: AgentId,
+        expected_peer: &PeerId,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
         let agent = self.require_agent(connection, now_ms)?;
         let source = self
             .direct_requester(connection, agent)
             .ok_or(AslError::InvalidIdentity)?;
-        if source.agent != manifest.agent_id || source.peer != manifest.peer_id {
+        if source.agent != expected_agent || &source.peer != expected_peer {
             return Err(AslError::InvalidIdentity);
         }
         // This hello cannot change after finish_proof checked it against the signed
@@ -1451,6 +1491,15 @@ impl CoreAdmission {
             }
             _ => Err(AslError::InvalidIdentity),
         }
+    }
+
+    pub(crate) fn peer_supports_expression(&self, connection_id: [u8; 16]) -> bool {
+        self.local_hello.minor >= 1
+            && self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.remote_hello.as_ref())
+                .is_some_and(|hello| hello.major == 1 && hello.minor >= 1)
     }
 
     pub(crate) fn direct_requester(

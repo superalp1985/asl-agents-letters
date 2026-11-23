@@ -202,18 +202,10 @@ impl StagedSnapshot {
     pub fn from_bytes(home: &Path, bytes: &[u8]) -> Result<Self, AslError> {
         #[cfg(windows)]
         {
-            use asl_types::manifest::{CHUNK_SIZE, content_id, encode_manifest};
+            use asl_types::manifest::{content_id, encode_manifest};
             use std::io::Write;
 
-            let file_size = u64::try_from(bytes.len()).map_err(|_| AslError::QuotaExceeded)?;
-            let manifest = Manifest {
-                file_size,
-                file_hash: *blake3::hash(bytes).as_bytes(),
-                chunk_hashes: bytes
-                    .chunks(CHUNK_SIZE as usize)
-                    .map(|chunk| *blake3::hash(chunk).as_bytes())
-                    .collect(),
-            };
+            let manifest = Manifest::from_bytes(bytes).map_err(|_| AslError::QuotaExceeded)?;
             let encoded = encode_manifest(&manifest).map_err(|_| AslError::InvalidPolicyState)?;
             let mut files = snapshot::ObjectFiles::stage(home)?;
             let (blob, mnf) = files.writers();

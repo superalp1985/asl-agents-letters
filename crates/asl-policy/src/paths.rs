@@ -12,6 +12,23 @@ use crate::platform::windows::handles;
 const MAX_SOURCE_BYTES: u64 = 68_719_476_736;
 const MAX_COMPONENTS: usize = 128;
 
+/// Reads one explicitly selected local file without granting directory access.
+pub fn read_local_selection(
+    path: &Path,
+    protected_root: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AslError> {
+    #[cfg(windows)]
+    {
+        handles::read_local_selection(path, protected_root, max_bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, protected_root, max_bytes);
+        Err(AslError::PlatformUnavailable)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileIdentity {
     pub volume_serial: u64,
@@ -297,6 +314,20 @@ impl AuthorizedWriteFile {
 
     pub fn is_empty(&self) -> io::Result<bool> {
         self.len().map(|length| length == 0)
+    }
+
+    pub fn last_write_stamp(&self) -> io::Result<u64> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            self.inner
+                .metadata()
+                .map(|metadata| metadata.last_write_time())
+        }
+        #[cfg(not(windows))]
+        {
+            match self.unavailable {}
+        }
     }
 
     pub fn retain(&mut self) {

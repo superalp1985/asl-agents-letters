@@ -2,8 +2,8 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     protocol::{
-        Answer, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupPacket, Offer,
-        ProtocolError, Query, WireFrame, decode_control, encode_control,
+        Answer, ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupPacket,
+        Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -21,6 +21,7 @@ pub enum GroupApplication {
     FetchGrant(FetchGrant),
     FetchPending(FetchPending),
     Error(ProtocolError),
+    Expression(ExpressionLetter),
 }
 
 impl GroupApplication {
@@ -33,6 +34,7 @@ impl GroupApplication {
             Self::FetchGrant(_) => "fetch_grant",
             Self::FetchPending(_) => "fetch_pending",
             Self::Error(_) => "error",
+            Self::Expression(_) => "expression",
         }
     }
 
@@ -45,6 +47,7 @@ impl GroupApplication {
             Self::FetchGrant(grant) => grant.message_id,
             Self::FetchPending(pending) => pending.message_id,
             Self::Error(error) => error.message_id,
+            Self::Expression(letter) => letter.message_id,
         }
     }
 
@@ -57,6 +60,7 @@ impl GroupApplication {
             WireFrame::FetchGrant(grant) => Ok(Self::FetchGrant(grant)),
             WireFrame::FetchPending(pending) => Ok(Self::FetchPending(pending)),
             WireFrame::Error(error) => Ok(Self::Error(error)),
+            WireFrame::Expression(letter) => Ok(Self::Expression(letter)),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -70,6 +74,7 @@ impl GroupApplication {
             Self::FetchGrant(grant) => WireFrame::FetchGrant(grant),
             Self::FetchPending(pending) => WireFrame::FetchPending(pending),
             Self::Error(error) => WireFrame::Error(error),
+            Self::Expression(letter) => WireFrame::Expression(letter),
         })
     }
 }
@@ -191,5 +196,23 @@ mod tests {
         ] {
             assert!(GroupApplication::decode(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn expression_application_round_trips_the_control_letter() {
+        let mut bytes = vec![0xa7, 0, 1, 1, 15, 2, 0x50];
+        bytes.extend([1; 16]);
+        bytes.extend([3, 0x50]);
+        bytes.extend([2; 16]);
+        bytes.extend([4, 0x18, 100, 5, 0x18, 200, 6, 0x82, 0, 0x20]);
+
+        let application = GroupApplication::decode(&bytes).unwrap();
+        assert_eq!(application.kind(), "expression");
+        assert_eq!(application.message_id(), Id128([1; 16]));
+        assert!(matches!(
+            &application,
+            GroupApplication::Expression(letter) if letter.root_task_id == Id128([2; 16])
+        ));
+        assert_eq!(application.encode().unwrap(), bytes);
     }
 }

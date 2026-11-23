@@ -1,4 +1,5 @@
 pub(crate) mod cbor;
+mod expression;
 mod group;
 
 use serde::Serialize;
@@ -11,6 +12,7 @@ pub use cbor::{
     MAX_CONTROL_FRAME_BYTES, MAX_EXTENDED_FRAME_BYTES, MAX_PAIRING_FRAME_BYTES, decode_control,
     decode_frame, encode_control, encode_frame,
 };
+pub use expression::{Expression, ExpressionLetter};
 pub use group::{
     GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS, MAX_GROUP_MLS_OBJECT_BYTES,
     MAX_GROUP_PAYLOAD_BYTES,
@@ -364,6 +366,7 @@ pub enum WireFrame {
     PairingInvite(PairingInvite),
     PairingExchange(PairingExchange),
     GroupEnvelope(GroupEnvelope),
+    Expression(ExpressionLetter),
 }
 
 impl WireFrame {
@@ -380,6 +383,7 @@ impl WireFrame {
                 | Self::Error(_)
                 | Self::Ack(_)
                 | Self::Profile(_)
+                | Self::Expression(_)
         )
     }
 }

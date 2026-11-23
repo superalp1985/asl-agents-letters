@@ -582,7 +582,7 @@ fn decode_base58(value: &str) -> Result<Vec<u8>, AslError> {
         .map_err(|_| AslError::InvalidDatabase)
 }
 
-fn list_invites(
+pub(super) fn list_invites(
     connection: &Connection,
     recipient: AgentId,
     device: &PeerId,

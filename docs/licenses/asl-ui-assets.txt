@@ -3,10 +3,10 @@ ASL UI asset record
 
 Pixel product icon and agent mascot
 -----------------------------------
-- Source: crates/asl-app/src/ui/art.rs
-- Creator: ASL project contributors; original pixel patterns authored in this repository
-- Method: hand-authored 16x16 envelope icon and 24x24 chibi mascot, rasterized at runtime from embedded color grids
-- Third-party art, model output, external image URLs, and copied project assets: none
+- Source: scripts/generate-art.py; see docs/assets/ART-SOURCE.md
+- Creator: ASL project contributors; original programmatically drawn pixel designs
+- Method: offline Pillow render for the product icon, mascot states, preset avatars, and state glyphs
+- External image URLs and third-party or copied art: none
 - License: MIT, under the repository LICENSE
 
 Fonts

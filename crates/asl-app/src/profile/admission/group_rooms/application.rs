@@ -85,7 +85,7 @@ impl CoreAdmission {
             envelope_id,
             application,
         )?;
-        let version =
+        let (version, _) =
             self.persist_mls_application(store, candidate, &packet, message_id, None, || {
                 clock.now_ms()
             })?;
@@ -93,15 +93,15 @@ impl CoreAdmission {
     }
 
     /// Return structured plaintext only after the receive ratchet and replay
-    /// record commit. A future delivery caller must separately establish
-    /// group freshness for the supplied snapshot.
+    /// record commit. `None` means an expression was received while local
+    /// browsing was disabled. Callers still establish group freshness.
     pub fn commit_mls_application_receive(
         &mut self,
         store: &mut Store,
         receive: MlsApplicationReceive<'_>,
         directories: &HashMap<AgentId, Vec<u8>>,
         now_ms: u64,
-    ) -> Result<GroupApplication, AslError> {
+    ) -> Result<Option<GroupApplication>, AslError> {
         let clock = SyncClock::inbound(now_ms, receive.deadline_ms);
         self.apply_mls_application(store, receive, directories, &clock)
     }
@@ -112,7 +112,7 @@ impl CoreAdmission {
         receive: MlsApplicationReceive<'_>,
         directories: &HashMap<AgentId, Vec<u8>>,
         clock: &SyncClock,
-    ) -> Result<GroupApplication, AslError> {
+    ) -> Result<Option<GroupApplication>, AslError> {
         let packet = receive.packet;
         let now = clock.now_ms()?;
         packet.validate_request()?;
@@ -144,9 +144,14 @@ impl CoreAdmission {
             sender_index,
             packet,
         )?;
+        if matches!(application, GroupApplication::Expression(_))
+            && !self.peer_supports_expression(receive.connection_id)
+        {
+            return Err(AslError::IncompatibleVersion);
+        }
         let (created, expires) = application_times(&application);
         check_application_creation(created, clock.now_ms()?)?;
-        self.persist_mls_application(
+        let (_, browse_enabled) = self.persist_mls_application(
             store,
             &candidate,
             packet,
@@ -165,7 +170,10 @@ impl CoreAdmission {
                 Ok(now)
             },
         )?;
-        Ok(application)
+        Ok(
+            (!matches!(application, GroupApplication::Expression(_)) || browse_enabled)
+                .then_some(application),
+        )
     }
 
     pub(super) fn load_mls_application_base(
@@ -197,7 +205,7 @@ impl CoreAdmission {
         message_id: Id128,
         incoming: Option<ApplicationSource<'_>>,
         current_time: impl Fn() -> Result<u64, AslError>,
-    ) -> Result<RoomVersion, AslError> {
+    ) -> Result<(RoomVersion, bool), AslError> {
         let GroupBody::Application(ciphertext) = &packet.body else {
             return Err(AslError::InvalidMessage);
         };
@@ -299,6 +307,7 @@ pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>,
         GroupApplication::FetchGrant(grant) => (None, grant.expires_at_ms),
         GroupApplication::FetchPending(pending) => (None, pending.expires_at_ms),
         GroupApplication::Error(_) => (None, u64::MAX),
+        GroupApplication::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
     }
 }
 

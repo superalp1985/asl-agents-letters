@@ -58,7 +58,7 @@ impl AgentIdentity {
 
     pub fn load_protected(path: &Path) -> Result<Self, AslError> {
         let ciphertext = fs::read(path)?;
-        let plaintext = unprotect_secret(&ciphertext)?;
+        let plaintext = Zeroizing::new(unprotect_secret(&ciphertext)?);
         if plaintext.len() != ROOT_FILE_MAGIC.len() + 32 + ROOT_ADDRESS_LENGTH + PRIVATE_KEY_LENGTH
             || !plaintext.starts_with(ROOT_FILE_MAGIC)
         {
@@ -90,6 +90,35 @@ impl AgentIdentity {
             initial_root_address,
             signing_key,
         })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn migration_seed(&self) -> Zeroizing<[u8; 32]> {
+        let mut seed = Zeroizing::new([0; 32]);
+        seed.copy_from_slice(self.signing_key.to_bytes().as_ref());
+        seed
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_migration_seed(seed: &[u8]) -> Result<Self, AslError> {
+        let signing_key = SigningKey::from_slice(seed).map_err(|_| AslError::InvalidIdentity)?;
+        let initial_root_address = root_address(signing_key.verifying_key());
+        Ok(Self {
+            agent_id: derive_agent_id(initial_root_address),
+            initial_root_address,
+            signing_key,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn migration_public_checksum(&self) -> [u8; 32] {
+        *blake3::hash(
+            self.signing_key
+                .verifying_key()
+                .to_sec1_point(false)
+                .as_bytes(),
+        )
+        .as_bytes()
     }
 
     pub fn load_or_create_protected(path: &Path) -> Result<Self, AslError> {

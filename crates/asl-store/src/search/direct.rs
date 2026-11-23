@@ -42,6 +42,17 @@ pub fn open_direct_store(path: &Path) -> Result<Store, AslError> {
 }
 
 impl Store {
+    /// Serialize a nonblocking local mail handoff with contact and mode edits.
+    pub fn with_mail_dispatch<T>(
+        &self,
+        enqueue: impl FnOnce() -> Result<T, AslError>,
+    ) -> Result<T, AslError> {
+        let _transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+        enqueue()
+    }
+
     pub fn direct_search_snapshot(
         &self,
         requester: &DirectRequester,

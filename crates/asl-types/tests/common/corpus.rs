@@ -16,9 +16,9 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 21;
-pub const ACCEPTED_COUNT: usize = 18;
-pub const REJECTED_COUNT: usize = 3;
+pub const VECTOR_COUNT: usize = 24;
+pub const ACCEPTED_COUNT: usize = 19;
+pub const REJECTED_COUNT: usize = 5;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,6 +106,7 @@ pub fn vector_cases() -> Vec<VectorCase> {
                 WireFrame::PairingInvite(_) => ("pairing-invite-v1", "pairing-invite"),
                 WireFrame::PairingExchange(_) => ("pairing-exchange-v1", "pairing-exchange"),
                 WireFrame::GroupEnvelope(_) => ("group-envelope-v1", "group-envelope"),
+                WireFrame::Expression(_) => ("expression-letter-v1", "expression-letter"),
             };
             VectorCase {
                 name,
@@ -198,6 +199,36 @@ pub fn vector_cases() -> Vec<VectorCase> {
             bytes: cbor2::to_canonical_vec(&Value::Map(fields)).unwrap(),
         });
     }
+
+    let expression = cases
+        .iter()
+        .find(|case| case.name == "expression-letter-v1")
+        .unwrap();
+    let Value::Map(fields) = cbor2::from_slice::<Value>(&expression.bytes).unwrap() else {
+        panic!("expression fixture must be a map");
+    };
+    let uint = |value: u64| Value::Integer(Integer::from(value));
+    for (name, term) in [
+        (
+            "expression-text-literal-v1",
+            Value::Array(vec![uint(0), Value::Text("1".into())]),
+        ),
+        (
+            "expression-wrong-operator-arity-v1",
+            Value::Array(vec![uint(3), uint(0), Value::Array(vec![uint(0), uint(1)])]),
+        ),
+    ] {
+        let mut fields = fields.clone();
+        let (_, value) = fields.iter_mut().find(|(key, _)| *key == uint(6)).unwrap();
+        *value = term;
+        cases.push(VectorCase {
+            name,
+            root: "expression-letter",
+            codec: Codec::Frame,
+            accepted: false,
+            bytes: cbor2::to_canonical_vec(&Value::Map(fields)).unwrap(),
+        });
+    }
     cases
 }
 
@@ -216,12 +247,12 @@ pub fn check_case_counts(cases: &[VectorCase]) -> CorpusResult<()> {
     if cases.len() != VECTOR_COUNT
         || accepted != ACCEPTED_COUNT
         || rejected != REJECTED_COUNT
-        || frames != 15
+        || frames != 16
         || records != 3
         || unique_names.len() != cases.len()
     {
         return Err(
-            "expected 21 unique vectors: 15 frames + 3 records accepted, 3 rejected".into(),
+            "expected 24 unique vectors: 16 frames + 3 records accepted, 5 rejected".into(),
         );
     }
     Ok(())
@@ -268,7 +299,7 @@ pub fn check_vectors(directory: &Path) -> CorpusResult<()> {
         }
     }
     if actual_files != expected_files {
-        return Err("hex file inventory differs from the 20 typed vectors".into());
+        return Err("hex file inventory differs from the typed vectors".into());
     }
     for case in &cases {
         let path = directory.join(format!("{}.hex", case.name));

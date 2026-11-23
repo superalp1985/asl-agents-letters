@@ -1,7 +1,11 @@
 //! A bounded, local observation snapshot. None of these rows grant permission.
 use std::{path::Path, time::Duration};
 
-use asl_types::{error::AslError, ids::AgentId, record::short_code};
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, Id128},
+    record::short_code,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +18,10 @@ use crate::network_privacy::{
     NetworkReport, force_relay_only, last_network_report, network_pause_requested,
 };
 use crate::public_profile::{ProfileSigningStatus, profile_signing_status};
+pub use crate::remote_profiles::RemoteProfileRow;
+use crate::remote_profiles::read_remote_profiles;
 use crate::transfers::{DownloadConsent, UploadConsent};
-use crate::{SCHEMA_VERSION, Store, current_time_ms, database_error};
+use crate::{SCHEMA_VERSION, Store, current_time_ms, database_error, read_setting};
 
 const LOCAL_IDENTITY_SETTING: &str = "ui.local_identity.v1";
 
@@ -31,17 +37,26 @@ pub struct Dashboard {
     pub network_report: Option<NetworkReport>,
     pub profile_signing: ProfileSigningStatus,
     pub nodes: Vec<NodeRow>,
+    pub remote_profiles: Vec<RemoteProfileRow>,
+    pub profile_lookup: Option<crate::profile_lookup::ProfileLookup>,
     pub contact_bindings: Vec<ContactBindingRow>,
     pub binding_candidates: Vec<BindingCandidateRow>,
     pub binding_actions: Vec<BindingActionRow>,
     pub binding_code_public: bool,
     pub groups: Vec<GroupRow>,
+    pub group_invitations: Vec<crate::group_state::invite_review::ReviewedInvite>,
+    pub group_admin_snapshot: Option<crate::group_state::operator::AdminSnapshot>,
+    pub group_admin_status: Option<crate::group_state::operator::AdminOutcome>,
+    pub group_decision: Option<crate::group_state::invite_review::Decision>,
     pub group_inbound: GroupInboundPolicy,
+    pub group_inbound_unset: bool,
     pub transfers: Vec<TransferRow>,
     pub direct_inbound_mode: String,
+    pub direct_inbound_unset: bool,
     pub download_mode: String,
     pub upload_mode: String,
     pub download_approvals: Vec<DownloadConsent>,
+    pub host_inbox_request: Option<Id128>,
     pub upload_approvals: Vec<UploadConsent>,
     pub knowledge: Vec<KnowledgeRow>,
     pub trust: Vec<TrustRow>,
@@ -68,8 +83,10 @@ pub struct LocalIdentityProjection {
     pub binding_code: String,
 }
 
+#[derive(serde::Serialize)]
 pub struct ContactBindingRow {
     pub agent_id: String,
+    pub authorized: bool,
     pub peer_id: Option<String>,
     pub state: String,
     pub updated_at_ms: i64,
@@ -156,6 +173,7 @@ pub struct TrustRow {
 }
 
 pub struct AccessRow {
+    pub indexed_files: u64,
     pub kind: String,
     pub id: String,
     pub directory: String,
@@ -192,15 +210,6 @@ impl Dashboard {
         tx.commit().map_err(database_error)?;
         // Reuse the transfer layer's eligibility filters through this read-only connection.
         let store = Store { connection };
-        dashboard.direct_inbound_mode = match store
-            .get_setting("agent.direct_inbound_mode_v1")?
-            .as_deref()
-        {
-            Some("\"browse_only\"") => "browse",
-            Some("\"answer\"") => "answer",
-            _ => "off",
-        }
-        .into();
         dashboard.download_mode = match store.download_mode()? {
             crate::transfers::DownloadMode::Ask => "ask",
             crate::transfers::DownloadMode::Automatic => "automatic",
@@ -217,8 +226,30 @@ impl Dashboard {
     }
 
     fn read(database: &Transaction<'_>) -> Result<Self, AslError> {
+        let direct_inbound = read_setting(database, "agent.direct_inbound_mode_v1")?;
+        let group_inbound = GroupInboundPolicy::read_saved(database)?;
+        let identity = read_identity(database)?;
+        let now = current_time_ms() as u64;
+        let local = identity
+            .agent_id
+            .as_deref()
+            .and_then(|s| bs58::decode(s).into_vec().ok()?.try_into().ok())
+            .map(AgentId);
+        let device = identity.peer_id.as_deref().and_then(|s| {
+            asl_types::ids::PeerId::from_bytes(bs58::decode(s).into_vec().ok()?).ok()
+        });
+        let (group_admin_snapshot, group_admin_status) =
+            crate::group_state::operator::projection(database, local.zip(device.as_ref()), now)?;
+        let group_invitations = match (local, device) {
+            (Some(a), Some(p)) => crate::group_state::invite_review::list(database, a, &p, now)?,
+            _ => Vec::new(),
+        };
         Ok(Self {
-            identity: read_identity(database)?,
+            identity,
+            group_admin_snapshot,
+            group_admin_status,
+            group_invitations,
+            group_decision: crate::group_state::invite_review::status(database, now)?,
             activity: read_activity(database)?,
             direct_observations: read_recent_direct_inbound_observations(database)?,
             direct_observation_days: direct_observation_days(database)?,
@@ -228,17 +259,30 @@ impl Dashboard {
             network_report: last_network_report(database)?,
             profile_signing: profile_signing_status(database)?,
             nodes: read_nodes(database)?,
+            remote_profiles: read_remote_profiles(database, current_time_ms())?,
+            profile_lookup: crate::profile_lookup::status(database, current_time_ms())?,
             contact_bindings: read_contact_bindings(database)?,
             binding_candidates: read_binding_candidates(database)?,
             binding_actions: read_binding_actions(database)?,
             binding_code_public: read_binding_code_public(database)?,
             groups: read_groups(database)?,
-            group_inbound: GroupInboundPolicy::read(database)?,
+            group_inbound: group_inbound.unwrap_or_default(),
+            group_inbound_unset: group_inbound.is_none(),
             transfers: read_transfers(database)?,
-            direct_inbound_mode: String::new(),
+            direct_inbound_mode: match direct_inbound.as_deref() {
+                Some("\"browse_only\"") => "browse",
+                Some("\"answer\"") => "answer",
+                _ => "off",
+            }
+            .into(),
+            direct_inbound_unset: direct_inbound.is_none(),
             download_mode: String::new(),
             upload_mode: String::new(),
             download_approvals: Vec::new(),
+            host_inbox_request: crate::host_inbox::pending_request(
+                database,
+                current_time_ms() as u64,
+            )?,
             upload_approvals: Vec::new(),
             knowledge: read_knowledge(database)?,
             trust: read_trust(database)?,
@@ -247,7 +291,7 @@ impl Dashboard {
     }
 }
 
-fn read_identity(database: &Connection) -> Result<LocalIdentity, AslError> {
+pub(crate) fn read_identity(database: &Connection) -> Result<LocalIdentity, AslError> {
     let projection = database
         .query_row(
             "SELECT value_json FROM settings WHERE key=?1",
@@ -345,6 +389,12 @@ fn derive_binding_code(agent_id: &str) -> Option<String> {
     Some(format!("{:016}", short_code(agent_id)))
 }
 
+impl crate::Store {
+    pub fn recent_contact_bindings(&self) -> Result<Vec<ContactBindingRow>, AslError> {
+        read_contact_bindings(&self.connection)
+    }
+}
+
 fn read_contact_bindings(database: &Connection) -> Result<Vec<ContactBindingRow>, AslError> {
     let mut statement = database
         .prepare(
@@ -352,11 +402,16 @@ fn read_contact_bindings(database: &Connection) -> Result<Vec<ContactBindingRow>
              FROM contact_bindings ORDER BY updated_at_ms DESC,agent_id LIMIT 200",
         )
         .map_err(database_error)?;
+    let mut membership = database
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM authorized_contacts WHERE agent_id=?1)")
+        .map_err(database_error)?;
     statement
         .query_map([], |row| {
             let agent: Vec<u8> = row.get(0)?;
+            let agent_id = bs58::encode(agent).into_string();
             Ok(ContactBindingRow {
-                agent_id: bs58::encode(agent).into_string(),
+                authorized: membership.query_row([&agent_id], |r| r.get(0))?,
+                agent_id,
                 peer_id: row.get(1)?,
                 state: row.get(2)?,
                 updated_at_ms: row.get(3)?,
@@ -610,7 +665,7 @@ fn read_access(database: &Connection) -> Result<Vec<AccessRow>, AslError> {
     let mut statement = database
         .prepare(
             "SELECT kind,grant_id,root_path,scope,state,epoch,extensions_json,
-                    max_bytes,model_policy,allow_derived_disclosure FROM (
+                    max_bytes,model_policy,allow_derived_disclosure,indexed_files FROM (
                  SELECT 'share' AS kind,grant_id,root_path,
                         CASE audience
                             WHEN 'group' THEN 'group:' || group_id
@@ -626,11 +681,13 @@ fn read_access(database: &Connection) -> Result<Vec<AccessRow>, AslError> {
                             ELSE audience
                         END AS scope,
                         status AS state,epoch,extensions_json,max_snapshot_bytes AS max_bytes,
-                        model_policy,allow_derived_disclosure
+                        model_policy,allow_derived_disclosure,
+                        (SELECT COUNT(*) FROM resources r WHERE r.grant_id=g.grant_id
+                         AND r.active=1 AND r.origin='local') AS indexed_files
                  FROM grants g
                  UNION ALL
                  SELECT kind,write_grant_id,root_path,kind,status,epoch,
-                        NULL,max_bytes,NULL,0
+                        NULL,max_bytes,NULL,0,0
                  FROM write_grants
              ) ORDER BY kind,grant_id LIMIT 200",
         )
@@ -653,6 +710,7 @@ fn read_access(database: &Connection) -> Result<Vec<AccessRow>, AslError> {
                 .transpose()?
                 .unwrap_or_default();
             Ok(AccessRow {
+                indexed_files: read_unsigned(row, 10)?,
                 kind: row.get(0)?,
                 id: row.get(1)?,
                 directory,
@@ -679,12 +737,49 @@ fn read_unsigned(row: &Row<'_>, column: usize) -> rusqlite::Result<u64> {
     unsigned(column, row.get(column)?)
 }
 
-fn unsigned(column: usize, value: i64) -> rusqlite::Result<u64> {
+pub(crate) fn unsigned(column: usize, value: i64) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_inbox_reminder_coalesces_expires_and_grants_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asl.sqlite3");
+        let store = crate::open_store(&path).unwrap();
+        let now = super::current_time_ms() as u64;
+        let id = super::Id128([3; 16]);
+        store.request_host_inbox(id, now).unwrap();
+        store.request_host_inbox(id, now + 1_000).unwrap();
+        let view = super::Dashboard::load(&path).unwrap();
+        assert!(
+            view.host_inbox_request == Some(id)
+                && view.access.is_empty()
+                && view.download_approvals.is_empty()
+        );
+        assert!(
+            crate::host_inbox::pending_request(&store.connection, now + 600_000)
+                .unwrap()
+                .is_none()
+        );
+        let other = super::Id128([4; 16]);
+        assert!(store.decide_host_inbox(other, None, now + 2_000).is_err());
+        assert!(
+            store
+                .decide_host_inbox(id, Some(other), now + 2_000)
+                .is_err()
+        );
+        store.decide_host_inbox(id, None, now + 2_001).unwrap();
+        assert!(matches!(
+            store.host_inbox_decision(id, now + 2_002),
+            Err(asl_types::error::AslError::PolicyDenied)
+        ));
+        assert!(store.request_host_inbox(other, now + 2_003).is_err());
+        store.request_host_inbox(other, now + 600_000).unwrap();
+        assert!(store.decide_host_inbox(id, None, now + 600_001).is_err());
+    }
+
     #[test]
     fn latest_local_binding_actions_keep_leading_zeroes_and_report_the_core_decision() {
         use crate::contact_bindings::ContactBindingActionKind;
@@ -784,6 +879,31 @@ mod tests {
 
         let dashboard = Dashboard::load(&path).unwrap();
         assert_eq!(dashboard.direct_inbound_mode, "browse");
+    }
+
+    #[test]
+    fn projects_unset_inbound_settings_without_saving_the_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("asl.sqlite3");
+        let store = crate::open_store(&path).unwrap();
+        let direct_key = "agent.direct_inbound_mode_v1";
+        let group_key = "agent.group_inbound_policy_v1";
+
+        let dashboard = Dashboard::load(&path).unwrap();
+        assert_eq!(dashboard.direct_inbound_mode, "off");
+        assert!(dashboard.direct_inbound_unset);
+        assert!(dashboard.group_inbound_unset);
+        assert!(dashboard.group_inbound.browse_enabled);
+        assert!(!dashboard.group_inbound.answer_enabled);
+        assert_eq!(store.get_setting(direct_key).unwrap(), None);
+        assert_eq!(store.get_setting(group_key).unwrap(), None);
+
+        store.set_setting(direct_key, "\"off\"", 1).unwrap();
+        GroupInboundPolicy::default().save(&store, 1).unwrap();
+        let dashboard = Dashboard::load(&path).unwrap();
+        assert_eq!(dashboard.direct_inbound_mode, "off");
+        assert!(!dashboard.direct_inbound_unset);
+        assert!(!dashboard.group_inbound_unset);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$RunDir,
-    [switch]$Offline
+    [switch]$Offline,
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,9 +17,10 @@ if (Test-Path -LiteralPath $destination) {
     throw "The run directory already exists. Reuse its binaries or build into a new directory."
 }
 
-$names = @("asl-core", "asl-net", "asl-worker", "asl-extractor", "asl-ui")
+$names = @("asl", "asl-core", "asl-net", "asl-worker", "asl-extractor", "asl-ui")
 $build = @("build", "-p", "asl-app", "--features", "desktop-ui", "--locked", "--message-format=json-render-diagnostics")
 if ($Offline) { $build += "--offline" }
+if ($Release) { $build += "--release" }
 foreach ($name in $names) { $build += @("--bin", $name) }
 
 $binaries = @{}
@@ -31,7 +33,7 @@ try {
         }
     }
     if ($LASTEXITCODE -ne 0 -or $binaries.Count -ne $names.Count) {
-        throw "Cargo did not produce all five Windows desktop binaries."
+        throw "Cargo did not produce the complete Windows runtime."
     }
 }
 finally { Pop-Location }

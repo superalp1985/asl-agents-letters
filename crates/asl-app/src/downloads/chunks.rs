@@ -23,6 +23,7 @@ use crate::{
 };
 
 const IDLE_SWEEP_INTERVAL_MS: u64 = 1_000;
+const FILE_PRUNE_INTERVAL_MS: u64 = 60_000;
 
 pub(super) struct ChunkDownload {
     transfer: TransferId,
@@ -168,6 +169,16 @@ impl LocalDownloads {
         if now_ms >= self.next_idle_sweep_ms {
             self.broker.sweep_idle_downloads(broker_time(now_ms)?)?;
             self.next_idle_sweep_ms = now_ms.saturating_add(IDLE_SWEEP_INTERVAL_MS);
+        }
+        if now_ms >= self.next_file_prune_ms {
+            self.next_file_prune_ms = now_ms.saturating_add(FILE_PRUNE_INTERVAL_MS);
+            let now = broker_time(now_ms)?;
+            if self.broker.prune_failed_parts(now).is_err() {
+                eprintln!("ASL failed-part retention failed");
+            }
+            if self.broker.prune_received_files(now).is_err() {
+                eprintln!("ASL inbox retention failed");
+            }
         }
         self.expire_idle_chunks(now_ms)?;
         self.retired_chunks

@@ -444,6 +444,58 @@ impl Store {
         Ok(())
     }
 
+    pub fn grant_contact_access(
+        &mut self,
+        agent: AgentId,
+        reviewed_device: &PeerId,
+        bound_at: i64,
+    ) -> Result<(), AslError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let text = agent_text(agent);
+        let valid: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM contact_bindings b, identity_registry_states r
+                 WHERE b.agent_id=?1 AND b.peer_id=?2 AND b.updated_at_ms=?3 AND b.state='bound'
+                 AND r.agent_id=?4 AND r.status='active'
+                 AND NOT EXISTS(SELECT 1 FROM local_agent_identity WHERE agent_id=r.agent_id))",
+                params![
+                    agent.as_bytes(),
+                    bs58::encode(reviewed_device.as_bytes()).into_string(),
+                    bound_at,
+                    text
+                ],
+                |r| r.get(0),
+            )
+            .map_err(database_error)?;
+        if !valid {
+            return Err(AslError::PolicyDenied);
+        }
+        let changed = tx
+            .execute(
+                "INSERT INTO authorized_contacts(agent_id,authorized_at_ms,authorization_revision)
+                 SELECT ?1,?2,revision+1 FROM policy_state WHERE singleton=1
+                 ON CONFLICT(agent_id) DO NOTHING",
+                params![text, crate::current_time_ms()],
+            )
+            .map_err(database_error)?;
+        if changed > 0 {
+            crate::resources::bump_revision(&tx)?;
+        }
+        tx.commit().map_err(database_error)
+    }
+
+    pub fn remove_contact_access(&mut self, agent: AgentId) -> Result<(), AslError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        remove_membership(&tx, agent)?;
+        tx.commit().map_err(database_error)
+    }
+
     pub fn revoke_contact_binding(&self, agent_id: AgentId, now_ms: u64) -> Result<(), AslError> {
         if now_ms > i64::MAX as u64 {
             return Err(AslError::InvalidMessage);
@@ -452,29 +504,17 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(database_error)?;
-        let peer: Option<String> = tx
-            .query_row(
-                "SELECT peer_id FROM contact_bindings WHERE agent_id=?1",
-                [agent_id.as_bytes().as_slice()],
-                |row| row.get(0),
+        let changed = tx
+            .execute(
+                "UPDATE contact_bindings
+             SET state='revoked',updated_at_ms=?2 WHERE agent_id=?1",
+                params![agent_id.as_bytes().as_slice(), now_ms as i64],
             )
-            .optional()
-            .map_err(database_error)?
-            .flatten();
-        if peer.is_none() {
+            .map_err(database_error)?;
+        if changed == 0 {
             return Err(AslError::NotFound);
         }
-        tx.execute(
-            "UPDATE contact_bindings
-             SET state='revoked',updated_at_ms=?2 WHERE agent_id=?1",
-            params![agent_id.as_bytes().as_slice(), now_ms as i64],
-        )
-        .map_err(database_error)?;
-        tx.execute(
-            "DELETE FROM authorized_contacts WHERE agent_id=?1",
-            [agent_text(agent_id)],
-        )
-        .map_err(database_error)?;
+        remove_membership(&tx, agent_id)?;
         tx.execute(
             "DELETE FROM paired_contacts WHERE agent_id=?1",
             [agent_id.as_bytes().as_slice()],
@@ -504,11 +544,7 @@ impl Store {
             [agent_id.as_bytes().as_slice()],
         )
         .map_err(database_error)?;
-        tx.execute(
-            "DELETE FROM authorized_contacts WHERE agent_id=?1",
-            [agent_text(agent_id)],
-        )
-        .map_err(database_error)?;
+        remove_membership(&tx, agent_id)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -546,6 +582,20 @@ impl Store {
             now_ms as i64,
         )
     }
+}
+
+fn remove_membership(tx: &rusqlite::Transaction<'_>, agent: AgentId) -> Result<(), AslError> {
+    if tx
+        .execute(
+            "DELETE FROM authorized_contacts WHERE agent_id=?1",
+            [agent_text(agent)],
+        )
+        .map_err(database_error)?
+        != 0
+    {
+        crate::resources::bump_revision(tx)?;
+    }
+    Ok(())
 }
 
 fn valid_action(
@@ -636,6 +686,72 @@ mod tests {
         );
         assert!(store.authorized_contacts().unwrap().is_empty());
         assert!(store.paired_contacts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn contact_access_requires_reviewed_binding_and_only_real_changes_advance_policy() {
+        let (_dir, mut store) = store();
+        let agent = AgentId([10; 32]);
+        let device = peer(11);
+        let code = short_code(agent);
+        store
+            .record_contact_binding_candidate(agent, &device, code, 10)
+            .unwrap();
+        store
+            .approve_contact_binding(agent, &device, code, 11)
+            .unwrap();
+        let revision = store.policy_revision().unwrap();
+        assert!(matches!(
+            store.grant_contact_access(agent, &device, 11),
+            Err(AslError::PolicyDenied)
+        ));
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO chain_state_cache VALUES
+            (1,zeroblob(20),zeroblob(32),1,zeroblob(32),zeroblob(32),zeroblob(32),x'',0)",
+            )
+            .unwrap();
+        let text = agent_text(agent);
+        store
+            .connection
+            .execute("INSERT INTO agents(agent_id) VALUES(?1)", [&text])
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO identity_registry_states VALUES
+            (?1,1,zeroblob(20),zeroblob(32),1,'active',1,zeroblob(32),0)",
+                [&text],
+            )
+            .unwrap();
+        for (peer, at) in [(&peer(12), 11), (&device, 10)] {
+            assert!(matches!(
+                store.grant_contact_access(agent, peer, at),
+                Err(AslError::PolicyDenied)
+            ));
+        }
+        for _ in 0..2 {
+            store.grant_contact_access(agent, &device, 11).unwrap();
+        }
+        assert_eq!(store.authorized_contacts().unwrap(), [agent]);
+        assert_eq!(store.policy_revision().unwrap(), revision + 1);
+        for _ in 0..2 {
+            store.remove_contact_access(agent).unwrap();
+        }
+        assert_eq!(store.policy_revision().unwrap(), revision + 2);
+        assert_eq!(
+            store.contact_binding_state(agent).unwrap(),
+            Some(ContactBindingState::Bound)
+        );
+        store.grant_contact_access(agent, &device, 11).unwrap();
+        store.revoke_contact_binding(agent, 12).unwrap();
+        assert!(store.authorized_contacts().unwrap().is_empty());
+        assert_eq!(store.policy_revision().unwrap(), revision + 4);
+        assert!(matches!(
+            store.grant_contact_access(agent, &device, 11),
+            Err(AslError::PolicyDenied)
+        ));
     }
 
     #[test]

@@ -79,6 +79,7 @@ impl SandboxLimits {
 }
 
 /// Executables chosen by the local broker, never a shell command or remote path.
+#[derive(Clone)]
 pub struct SandboxLauncher {
     net: PathBuf,
     worker: PathBuf,
@@ -165,6 +166,20 @@ impl InheritedPipes {
 pub struct SandboxChild {
     #[cfg(windows)]
     inner: crate::platform::windows::appcontainer::Child,
+}
+
+/// A missing or signalled PID proves the previous helper cannot run a queued
+/// command. Access denial or a reused live PID does not prove termination.
+pub fn confirmed_process_exit(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        crate::platform::windows::appcontainer::confirmed_process_exit(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 #[cfg(not(windows))]

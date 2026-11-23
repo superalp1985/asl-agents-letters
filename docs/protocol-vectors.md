@@ -1,9 +1,9 @@
 # Fixed ASL/1 Schema Corpus
 
-The corpus in `schemas/vectors/` covers all 14 declared frame kinds and the
+The corpus in `schemas/vectors/` covers all 16 declared frame kinds and the
 three T13 signed-record kinds. `index.json` selects the exact CDDL rule and
-Rust codec for each case. Three additional cases exercise schema rejection of
-an unknown field, a text field and an unknown kind. Hex files are fixed byte
+Rust codec for each case. Five additional cases exercise schema rejection of
+unknown fields/kinds, text in typed fields, and a malformed expression operator. Hex files are fixed byte
 fixtures; the original ACK fixture is retained.
 
 `crates/asl-types/tests/common/` contains shared, typed fixture builders. The
@@ -28,8 +28,8 @@ verification. Schema values and fixture changes still require protocol review.
 The script requires PowerShell 7.2 or newer and invokes the pinned independent
 `cddl 0.10.7` executable.
 It places a temporary first rule referencing each case's exact frozen root in a
-wrapper, followed by the unchanged application schema. It validates all 20
-cases, requiring 17 accepted and three rejected. Temporary files are under this
+wrapper, followed by the unchanged application schema. It validates all 24
+cases, requiring 19 accepted and five rejected. Temporary files are under this
 checkout's ignored `work/` directory and removed after execution.
 
 The tool's global `--ci` flag is required: without it, version 0.10.7 can report

@@ -15,6 +15,56 @@ use asl_types::{
 };
 
 const MAX_LINE: usize = 512;
+
+pub(super) fn review(args: &[std::ffi::OsString]) -> Result<(), AslError> {
+    use asl_app::{
+        identity::{AgentIdentity, DeviceIdentity},
+        paths::AppPaths,
+    };
+    use asl_store::{
+        group_state::{invite_review::Choice, open_mls_runtime_store},
+        open_store_read_only,
+    };
+    let home =
+        std::path::PathBuf::from(std::env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
+    let paths = AppPaths::open_existing(&home)?;
+    let _pin = asl_policy::snapshot_files::PinnedHome::open(&home)?;
+    let db = paths.existing_state_database()?;
+    let agent = AgentIdentity::load_protected(&paths.agent_root_key())?.agent_id();
+    let device = DeviceIdentity::load_protected(&paths.device_key())?.peer_id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| AslError::InvalidMessage)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| AslError::InvalidMessage)?;
+    match args {
+        [op] if op == "list" => println!(
+            "{}",
+            serde_json::json!(
+                open_store_read_only(&db)?.local_group_invitations(agent, &device, now)?
+            )
+        ),
+        [op, tag] => {
+            let choice = match op.to_str() {
+                Some("approve") => Choice::Approve,
+                Some("retry") => Choice::Retry,
+                Some("reject") => Choice::Reject,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            open_mls_runtime_store(&db)?.queue_group_decision(
+                agent,
+                &device,
+                tag.to_str().ok_or(AslError::InvalidMessage)?,
+                choice,
+                now,
+            )?;
+            println!("{}", serde_json::json!({"state":"queued"}));
+        }
+        _ => return Err(AslError::InvalidMessage),
+    }
+    Ok(())
+}
 const MAX_REPLY: usize = 64 * 1024;
 const HELP: &str = "\
 list | peers | create | room <room-id>

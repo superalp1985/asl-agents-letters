@@ -60,6 +60,7 @@ impl Task {
             }))
             .map_err(error_code)?;
         Ok(self.downloads.push_mut(Download {
+            notices: VecDeque::new(),
             content_id,
             offer_ids: ids,
             ticket: Some(ticket),

@@ -23,6 +23,10 @@ enum Command {
         root: PathBuf,
         max_bytes: u64,
     },
+    Import {
+        grant: GrantId,
+        relative: PathBuf,
+    },
     Revoke {
         kind: String,
         id: Id128,
@@ -36,6 +40,20 @@ impl Command {
             .map(|arg| arg.to_str().ok_or(AslError::InvalidMessage))
             .collect::<Result<Vec<_>, _>>()?;
         match args.as_slice() {
+            ["import", id, relative] => {
+                let path = PathBuf::from(relative);
+                if path.as_os_str().is_empty()
+                    || !path
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err(AslError::InvalidMessage);
+                }
+                Ok(Self::Import {
+                    grant: GrantId(parse_id(id)?),
+                    relative: path,
+                })
+            }
             ["share", root, extensions, scope, target, max_bytes, derived] => {
                 let root = PathBuf::from(root);
                 if !root.is_absolute() {
@@ -85,6 +103,10 @@ impl Command {
 
     fn apply(self, broker: &mut SnapshotBroker) -> Result<Value, AslError> {
         match self {
+            Self::Import { grant, relative } => {
+                let key = broker.import_source(&grant, &relative)?;
+                Ok(json!({"resource_key":hex::encode(key.0.0), "state":"indexed"}))
+            }
             Self::Share {
                 root,
                 extensions,

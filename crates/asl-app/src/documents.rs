@@ -16,7 +16,7 @@ use crate::ipc::{ExtractorOperation, MAX_IPC_EXTRACTOR_INPUT_BYTES};
 pub const MAX_PDF_PAGES: usize = 500;
 pub const MAX_PDF_TEXT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_AVATAR_INPUT_BYTES: usize = MAX_IPC_EXTRACTOR_INPUT_BYTES;
-pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
+pub const MAX_AVATAR_BYTES: usize = asl_store::avatar_publication::MAX_IMAGE_BYTES;
 pub const MAX_AVATAR_EDGE: u32 = 128;
 pub const MAX_AVATAR_PIXELS: u64 = 16_777_216;
 const MAX_AVATAR_DIMENSION: u32 = 8_192;

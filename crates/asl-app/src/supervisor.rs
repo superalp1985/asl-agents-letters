@@ -58,12 +58,17 @@ use crate::profile::{
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
 use asl_store::network_privacy::NetworkRuntimeState;
-use asl_store::{dashboard::LocalIdentityProjection, open_store};
+use asl_store::{
+    dashboard::LocalIdentityProjection, open_store, search::direct::open_direct_store,
+};
 
+mod avatar_download;
 mod bindings;
 mod directory;
 #[cfg(windows)]
 mod groups;
+#[cfg(windows)]
+mod mail;
 mod network_pause;
 mod network_report;
 mod profile_signing;
@@ -78,9 +83,12 @@ const MAX_PENDING_NET_WRITES: usize = 8;
 const NET_ADMISSION_WRITE_HEADROOM: usize = 2;
 const NETWORK_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const ACTIVITY_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 const DIRECTORY_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct Supervisor {
+    #[cfg(windows)]
+    mailbox: crate::agent_mail::Mailbox,
     agent_identity: AgentIdentity,
     device_peer_id: PeerId,
     libraries: LocalLibraries,
@@ -170,6 +178,8 @@ impl Supervisor {
             )?
         };
         let mut supervisor = Self {
+            #[cfg(windows)]
+            mailbox: Default::default(),
             agent_identity,
             device_peer_id,
             libraries,
@@ -368,9 +378,22 @@ impl Supervisor {
     pub fn run(self) -> Result<(), AslError> {
         let (port, runtime) = outgoing_query_channel();
         #[cfg(windows)]
-        if let Some(grant) = crate::mcp::HostGrant::from_environment()? {
+        let (grant, recovery) = {
+            let grant = crate::mcp::HostGrant::from_environment()?;
+            let recovery = crate::mcp::Recovery::configure(&self.state_database, grant.as_ref())?;
+            (grant, recovery)
+        };
+        #[cfg(windows)]
+        if let Some(grant) = grant {
             let (download_port, downloads) = download_channel();
-            let _mcp = crate::mcp::McpWorker::spawn(self.home.clone(), grant, port, download_port)?;
+            let _mcp = crate::mcp::McpWorker::spawn_with_mail(
+                self.home.clone(),
+                grant,
+                port,
+                download_port,
+                self.mailbox.port.clone(),
+                recovery,
+            )?;
             return self.run_with_local_downloads(runtime, downloads);
         }
         drop(port);
@@ -434,6 +457,8 @@ impl Supervisor {
     ) -> Result<(), AslError> {
         let mut inbound = DirectInbound::open(&self.state_database)?;
         let transfer = std::cell::RefCell::new(TransferService::open(&self.state_database)?);
+        let avatars =
+            std::cell::RefCell::new(avatar_download::Receiver::open(&self.state_database)?);
         let driver = std::cell::RefCell::new(driver);
         let outbound =
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
@@ -452,6 +477,13 @@ impl Supervisor {
                 event => {
                     let mut transfer = transfer.borrow_mut();
                     let now_ms = unix_time_ms()?;
+                    let Some(event) =
+                        avatars
+                            .borrow_mut()
+                            .route(supervisor, &mut transfer, event, now_ms)?
+                    else {
+                        return Ok(());
+                    };
                     let Some(event) =
                         supervisor.route_transfer_event(&mut transfer, event, now_ms)?
                     else {
@@ -480,8 +512,13 @@ impl Supervisor {
                 }
             },
             |supervisor| {
+                #[cfg(windows)]
+                supervisor.poll_mail();
                 supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
                 let mut transfer = transfer.borrow_mut();
+                avatars
+                    .borrow_mut()
+                    .poll(supervisor, &mut transfer, unix_time_ms()?)?;
                 #[cfg(windows)]
                 supervisor.poll_group_transfers(&mut transfer, |supervisor, transfer, event| {
                     driver.borrow_mut()(supervisor, transfer, DownloadDriverEvent::Network(&event))
@@ -581,17 +618,23 @@ impl Supervisor {
             return Ok(());
         };
         let now_ms = unix_time_ms()?;
-        let Some(requester) = self
-            .admission
-            .as_ref()
-            .and_then(|admission| admission.direct_requester(connection_id, agent_id))
-        else {
-            return Ok(());
-        };
-        let Ok(prepared) = transfers.prepare_fetch(requester, &request, now_ms) else {
-            return Ok(());
-        };
         let Some(admission) = self.admission.as_mut() else {
+            return Ok(());
+        };
+        let Some(requester) = admission.direct_requester(connection_id, agent_id) else {
+            return Ok(());
+        };
+        let Ok(prepared) =
+            transfers.prepare_fetch(requester, &request, now_ms, |store, recipient| {
+                admission.register_connected_transfer_peer(
+                    store,
+                    connection_id,
+                    recipient.agent,
+                    &recipient.peer,
+                    now_ms,
+                )
+            })
+        else {
             return Ok(());
         };
         let net = &self.net;
@@ -689,6 +732,8 @@ impl Supervisor {
         inbound: &mut DirectInbound,
         event: AdmittedNetworkEvent,
     ) -> Result<(), AslError> {
+        #[cfg(windows)]
+        self.observe_direct_mail(&event)?;
         let AdmittedNetworkEvent::ControlRequest {
             connection_id,
             agent_id,
@@ -794,6 +839,30 @@ impl Supervisor {
         }
         match command {
             NetworkCommand::SendControl {
+                request: WireFrame::FetchRequest(_),
+                ..
+            }
+            | NetworkCommand::SendBulk { .. } => {
+                self.send_tracked_with(transfers, command, now_ms, NetRuntime::try_send)
+            }
+            command => self
+                .send_admitted_network_command(command, now_ms)
+                .map(|()| true),
+        }
+    }
+
+    fn send_tracked_with(
+        &mut self,
+        transfers: &mut TransferService,
+        command: NetworkCommand,
+        now_ms: u64,
+        enqueue: impl FnOnce(&NetRuntime, &IpcMessage) -> Result<bool, AslError>,
+    ) -> Result<bool, AslError> {
+        if !self.net.is_running() {
+            return Ok(false);
+        }
+        match command {
+            NetworkCommand::SendControl {
                 connection_id,
                 request_id,
                 request: WireFrame::FetchRequest(fetch),
@@ -823,7 +892,7 @@ impl Supervisor {
                 }
                 let sent = command
                     .into_ipc()
-                    .and_then(|message| self.net.try_send(&message));
+                    .and_then(|message| enqueue(&self.net, &message));
                 if !matches!(sent, Ok(true)) {
                     transfers.fail_control_request(
                         connection_id,
@@ -852,15 +921,13 @@ impl Supervisor {
                 };
                 let sent = authorized
                     .into_ipc()
-                    .and_then(|message| self.net.try_send(&message));
+                    .and_then(|message| enqueue(&self.net, &message));
                 if !matches!(sent, Ok(true)) {
                     transfers.cancel_bulk_request(request_id);
                 }
                 sent
             }
-            command => self
-                .send_admitted_network_command(command, now_ms)
-                .map(|()| true),
+            _ => Err(AslError::InvalidMessage),
         }
     }
 
@@ -915,15 +982,14 @@ impl Supervisor {
                 let Some(requester) = admission.direct_requester(connection_id, agent_id) else {
                     return Ok(None);
                 };
-                let manifest = transfers.prepare_manifest_request(
+                let (bulk_id, command) = match transfers.prepare_manifest_request(
                     admission,
                     connection_id,
                     &requester,
                     request_id,
                     &grant,
                     now_ms,
-                );
-                let (bulk_id, command) = match manifest {
+                ) {
                     Ok(Some(request)) => request,
                     Err(AslError::QuotaExceeded) => {
                         return Ok(Some(fetch_failure(
@@ -973,15 +1039,14 @@ impl Supervisor {
                 request_id,
                 response,
             } => {
-                let result = transfers.accept_bulk_response(
+                match transfers.accept_bulk_response(
                     connection_id,
                     agent_id,
                     &peer_id,
                     request_id,
                     response,
                     now_ms,
-                );
-                match result {
+                ) {
                     Some(ReceivedBulk::Manifest(manifest)) => {
                         let Some(admission) = admission else {
                             return Ok(None);
@@ -1091,6 +1156,8 @@ impl Supervisor {
         mut observer: impl FnMut(&mut Self, LocalNetworkObservation) -> Result<(), AslError>,
         mut tick: impl FnMut(&mut Self) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
+        let mut activity_store = open_direct_store(&self.state_database)?;
+        let mut next_activity_prune = Instant::now();
         let mut next_health_check = Instant::now();
         let mut next_ping = Instant::now();
         let mut next_agent_tick = Instant::now();
@@ -1153,6 +1220,14 @@ impl Supervisor {
                 self.libraries.check_health()?;
                 next_health_check = now + HEALTH_CHECK_INTERVAL;
             }
+            if now >= next_activity_prune {
+                next_activity_prune = now + ACTIVITY_PRUNE_INTERVAL;
+                let now_ms =
+                    i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidMessage)?;
+                if activity_store.prune_expired_activity(now_ms).is_err() {
+                    eprintln!("ASL activity retention failed");
+                }
+            }
             if !self.net.is_running() {
                 thread::sleep(NETWORK_EVENT_POLL_INTERVAL);
                 continue;
@@ -1166,6 +1241,22 @@ impl Supervisor {
             let event = match message {
                 IpcMessage::Pong { nonce } => {
                     self.net.acknowledge_pong(nonce)?;
+                    continue;
+                }
+                IpcMessage::OperationAccepted { operation_id }
+                    if self
+                        .profile_signing
+                        .handle_response(operation_id, true, Instant::now()) =>
+                {
+                    continue;
+                }
+                IpcMessage::OperationFailed { operation_id, .. }
+                    if self.profile_signing.handle_response(
+                        operation_id,
+                        false,
+                        Instant::now(),
+                    ) =>
+                {
                     continue;
                 }
                 message if is_network_event(&message) => NetworkEvent::try_from(message)?,
@@ -1301,6 +1392,8 @@ impl Supervisor {
         }
         for event in batch.events {
             self.observe_contact_binding_event(&event)?;
+            self.profile_signing
+                .observe_remote_record(self.agent_identity.agent_id(), &event);
             match &event {
                 AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } => {
                     self.pending_pairing_prompts
@@ -2063,6 +2156,23 @@ fn run_worker_validation_with(
         return Err(AslError::SandboxUnavailable);
     }
     Ok(status)
+}
+
+pub(crate) fn sanitize_local_avatar(input: &[u8]) -> Result<Vec<u8>, AslError> {
+    let executable = env::current_exe()?;
+    let launcher = SandboxLauncher::new(
+        executable.with_file_name("asl-net.exe"),
+        executable.with_file_name("asl-worker.exe"),
+        executable.with_file_name("asl-extractor.exe"),
+    )?;
+    sanitize_avatar_with(&launcher, input)
+}
+
+pub(crate) fn sanitize_avatar_with(
+    launcher: &SandboxLauncher,
+    input: &[u8],
+) -> Result<Vec<u8>, AslError> {
+    run_extractor_task(launcher, rand::random(), ExtractorOperation::Avatar, input)
 }
 
 fn run_extractor_task(

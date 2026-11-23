@@ -253,21 +253,22 @@ impl CoreAdmission {
                         body: GroupBody::Membership(GroupMembership::Receipt),
                         ..request
                     };
-                    let outcome = MlsNetworkOutcome::ApplicationReceived {
-                        connection_id,
-                        wire_id: response.group_id,
-                        epoch: response.epoch,
-                        envelope_id: response.message_id,
-                        sender,
-                        application: Box::new(application),
-                    };
+                    let outcome =
+                        application.map(|application| MlsNetworkOutcome::ApplicationReceived {
+                            connection_id,
+                            wire_id: response.group_id,
+                            epoch: response.epoch,
+                            envelope_id: response.message_id,
+                            sender,
+                            application: Box::new(application),
+                        });
                     // The event is committed even if the receipt cannot be queued.
                     let _ = enqueue(NetworkCommand::ReplyGroup {
                         connection_id,
                         response_id,
                         response,
                     });
-                    return Ok(Some(outcome));
+                    return Ok(outcome);
                 }
                 if matches!(
                     &request.body,

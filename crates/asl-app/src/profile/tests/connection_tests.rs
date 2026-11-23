@@ -19,6 +19,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 #[cfg(windows)]
+mod avatar_publication;
+#[cfg(windows)]
 mod group_rooms;
 
 #[cfg(windows)]
@@ -69,7 +71,7 @@ fn hello(cert: &DeviceCertificate) -> Hello {
         peer_id: cert.peer_id.clone(),
         device_certificate: cert.clone(),
         major: 1,
-        minor: 0,
+        minor: 1,
         features: vec![Feature::Query],
     }
 }
@@ -659,7 +661,7 @@ fn local_profile_signing_checks_chain_and_binds_revocation_to_exact_approval() {
     let approval = store.profile_signing_due(agent, NOW).unwrap().unwrap();
     let sequence = store.reserve_profile_sequence(agent).unwrap();
     let bytes = core
-        .prepare_local_profile(&root, &approval, sequence, NOW)
+        .prepare_local_profile(&root, &store, &approval, sequence, NOW)
         .unwrap()
         .unwrap();
     let signed = decode_record(&bytes).unwrap();
@@ -698,7 +700,7 @@ fn local_profile_signing_checks_chain_and_binds_revocation_to_exact_approval() {
     );
     core.clear_local_chain();
     assert!(
-        core.prepare_local_profile(&root, &approval, sequence, NOW + RENEWAL)
+        core.prepare_local_profile(&root, &store, &approval, sequence, NOW + RENEWAL)
             .is_err()
     );
 
@@ -764,7 +766,8 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
 
     let (_remote_database, mut remote_resolver, _) =
         durable_directory_resolver(&local_root, &local_directory);
-    let remote_hello = hello(&remote_cert);
+    let mut remote_hello = hello(&remote_cert);
+    remote_hello.minor = 0;
 
     let unlisted_device = DeviceIdentity::generate().unwrap();
     let (_unlisted_database, unlisted_resolver, _) =
@@ -1011,6 +1014,31 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
         message_id: Id128([96; 16]),
         received_id: Id128([97; 16]),
     });
+    let old_peer_letter = WireFrame::Expression(asl_types::protocol::ExpressionLetter {
+        message_id: Id128([81; 16]),
+        root_task_id: Id128([82; 16]),
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 1000,
+        expression: asl_types::protocol::Expression::from_json(&serde_json::json!(["int", "42"]))
+            .unwrap(),
+    });
+    assert!(matches!(
+        admission.authorize_control_command(connection_id, [81; 16], old_peer_letter.clone(), NOW),
+        Err(AslError::IncompatibleVersion)
+    ));
+    assert!(
+        admission
+            .handle_event(
+                NetworkEvent::UnverifiedControlRequest {
+                    connection_id,
+                    response_id: [82; 16],
+                    request: old_peer_letter
+                },
+                NOW
+            )
+            .events
+            .is_empty()
+    );
     let delivered = admission.handle_event(
         NetworkEvent::UnverifiedControlRequest {
             connection_id,
@@ -1383,6 +1411,7 @@ fn dht_records_are_cached_only_after_key_signature_and_chain_admission() {
             agent_id,
             kind: RecordKind::Profile,
             sequence: 1,
+            registry_sequence: 7,
             record,
         }] if *agent_id == root.agent_id() && record == &bytes
     ));

@@ -393,6 +393,8 @@ async fn approve_and_download(
         .as_str()
         .expect("reserved transfer ID");
     assert_eq!(host.call("asl_fetch", selection).await, pending);
+    host.wait_transfer_notice("file_approval_required", id)
+        .await;
     if offers.len() == 2 {
         let reordered = json!({"task_id":task,"offer_id":offers[1]["offer_id"],"additional_offer_ids":[offer["offer_id"]]});
         assert_eq!(host.call("asl_fetch", reordered).await, pending);
@@ -424,7 +426,10 @@ async fn approve_and_download(
         let download = &status["downloads"][0];
         assert_eq!(download["transfer_id"], id, "{status}");
         match download["status"].as_str() {
-            Some("completed") => break,
+            Some("completed") => {
+                host.wait_transfer_notice("file_received", id).await;
+                break;
+            }
             Some("awaiting_approval" | "started") => sleep(Duration::from_millis(25)).await,
             _ => panic!("unexpected transfer status: {status}"),
         }

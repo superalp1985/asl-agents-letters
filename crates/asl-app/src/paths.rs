@@ -83,6 +83,15 @@ impl AppPaths {
         &self.state
     }
 
+    pub fn existing_state_database(&self) -> Result<PathBuf, AslError> {
+        let database = self.state.join("asl.sqlite3");
+        validate_existing_components(&database)?;
+        if !fs::metadata(&database)?.is_file() {
+            return Err(AslError::InvalidStorageRoot);
+        }
+        Ok(database)
+    }
+
     pub fn identity(&self) -> &Path {
         &self.identity
     }
@@ -109,6 +118,10 @@ impl AppPaths {
 
     pub fn model_provider_configuration(&self) -> PathBuf {
         self.state.join("model-providers-v1.json")
+    }
+
+    pub fn ui_configuration(&self) -> PathBuf {
+        self.state.join("ui-settings-v1.json")
     }
 
     pub fn provider_credentials(&self) -> &Path {
@@ -155,7 +168,7 @@ fn existing_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
     Ok(path)
 }
 
-fn validate_existing_components(path: &Path) -> Result<(), AslError> {
+pub(crate) fn validate_existing_components(path: &Path) -> Result<(), AslError> {
     let mut components = path.ancestors().collect::<Vec<_>>();
     components.reverse();
 

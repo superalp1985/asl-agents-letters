@@ -18,6 +18,7 @@ impl Supervisor {
         match (paused, self.network_report.runtime()) {
             (true, NetworkRuntimeState::Running) => {
                 self.net.stop_for_pause()?;
+                self.profile_signing.reset_transport();
                 let now = unix_time_ms()?;
                 for (connection_id, peer_id) in std::mem::take(&mut self.transport_connections) {
                     let mut batch = self.handle_admitted_event(

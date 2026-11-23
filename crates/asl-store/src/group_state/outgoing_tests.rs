@@ -693,13 +693,17 @@ fn remove_group_transfer_schema_for_legacy_fixture(store: &Store) {
 }
 
 fn remove_contact_binding_schema_for_legacy_fixture(store: &Store) {
+    crate::avatar_receipts::remove_schema_for_legacy_fixture(store);
     store
         .connection
         .execute_batch(
-            "DROP TABLE contact_binding_actions;
+            "DROP TABLE avatar_reference_grant;
+             DROP TABLE local_avatar_selection;
+             DROP TABLE contact_binding_actions;
              DROP TABLE contact_binding_candidates;
              DROP TABLE contact_bindings;
              DROP TABLE direct_inbound_observations;
+             DROP TABLE observed_remote_profiles;
              ALTER TABLE group_events DROP COLUMN browse_expires_at_ms;
              ALTER TABLE group_events DROP COLUMN browse_kind;
              DELETE FROM settings WHERE key='ui.binding_code_public.v1';",
@@ -726,26 +730,25 @@ fn group_browse_retention_zero_and_shortening_leave_the_mls_journal_intact() {
                 members: std::slice::from_ref(&f.creator),
                 event: Some(MlsJournalEntry {
                     sender: &f.creator,
-                    kind: MlsJournalKind::ReceivedApplication(Id128([id; 16]), "query"),
+                    kind: MlsJournalKind::ReceivedApplication(Id128([id; 16]), "expression"),
                     ciphertext: b"received fixture",
                 }),
             },
             None,
             at,
-        )
-        .unwrap();
+        )?;
         tx.commit().unwrap();
-        next
+        Ok::<_, AslError>(next)
     };
-    version = append(&mut store, version, 1, now - 2 * day);
-    version = append(&mut store, version, 2, now);
+    version = append(&mut store, version, 1, now - 2 * day).unwrap();
+    version = append(&mut store, version, 2, now).unwrap();
     let activity_count = || Dashboard::load(&f.path).unwrap().activity.len();
     assert_eq!(activity_count(), 2);
 
     store.set_group_observation_days(1).unwrap();
     assert_eq!(activity_count(), 1);
     store.set_group_observation_days(7).unwrap();
-    version = append(&mut store, version, 3, now + 1);
+    version = append(&mut store, version, 3, now + 1).unwrap();
     let deadlines = |store: &Store| {
         store
             .connection
@@ -766,7 +769,7 @@ fn group_browse_retention_zero_and_shortening_leave_the_mls_journal_intact() {
             .unwrap()
             .map(|r| {
                 let (kind, deadline) = r.unwrap();
-                assert_eq!(kind.as_deref(), deadline.map(|_| "query"));
+                assert_eq!(kind.as_deref(), deadline.map(|_| "expression"));
                 deadline
             })
             .collect::<Vec<_>>()
@@ -779,7 +782,11 @@ fn group_browse_retention_zero_and_shortening_leave_the_mls_journal_intact() {
     store.set_group_observation_days(0).unwrap();
     drop(store);
     let mut store = open_store(&f.path).unwrap();
-    append(&mut store, version, 4, now + 2);
+    assert!(matches!(
+        append(&mut store, version, 3, now + 2),
+        Err(AslError::PolicyVersionConflict)
+    ));
+    append(&mut store, version, 4, now + 2).unwrap();
     assert_eq!(deadlines(&store), [None; 4]);
     store.set_group_observation_days(7).unwrap();
     assert_eq!(activity_count(), 0);
@@ -789,11 +796,15 @@ fn group_browse_retention_zero_and_shortening_leave_the_mls_journal_intact() {
 fn upgrading_v20_preserves_which_group_events_were_visible() {
     let (f, store, _) = Fixture::new();
     let peer = peer_text(&f.creator);
+    crate::avatar_receipts::remove_schema_for_legacy_fixture(&store);
     store
         .connection
         .execute_batch(
             "ALTER TABLE group_events DROP COLUMN browse_expires_at_ms;
-             DELETE FROM schema_migrations WHERE version=21;",
+             DROP TABLE avatar_reference_grant;
+             DROP TABLE local_avatar_selection;
+             DROP TABLE observed_remote_profiles;
+             DELETE FROM schema_migrations WHERE version>=21;",
         )
         .unwrap();
     for (id, kind) in [(1, Some("query")), (2, None)] {
@@ -826,6 +837,77 @@ fn upgrading_v20_preserves_which_group_events_were_visible() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(deadlines, [Some(100), None]);
+}
+
+#[test]
+fn upgrading_v22_preserves_group_activity_and_sync_references() {
+    let (f, mut store, base) = Fixture::new();
+    crate::avatar_receipts::remove_schema_for_legacy_fixture(&store);
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE group_events DROP COLUMN browse_expires_at_ms;
+             DROP TABLE avatar_reference_grant;
+             DROP TABLE local_avatar_selection;
+             ALTER TABLE group_events DROP COLUMN browse_kind;
+             ALTER TABLE observed_remote_profiles DROP COLUMN avatar_content_id;
+             DELETE FROM schema_migrations WHERE version>=23;",
+        )
+        .unwrap();
+    store.connection.execute_batch(crate::SCHEMA_V20).unwrap();
+    store.connection.execute_batch(crate::SCHEMA_V21).unwrap();
+    let event_id = hex::encode([0xab; 16]);
+    let tx = store.connection.transaction().unwrap();
+    let members = std::slice::from_ref(&f.creator);
+    commit_candidate(
+        &tx,
+        f.sync_change(base, members, b"commit"),
+        None,
+        NOW as i64,
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO group_events(event_id,group_id,mls_epoch,sender_peer_id,kind,
+                                  ciphertext,created_at_ms,expires_at_ms,browse_kind,browse_expires_at_ms)
+         VALUES (?1,?2,1,?3,'application',X'01',10,100,'query',50)",
+        params![event_id, hex::encode(LOCAL.0.0), peer_text(&f.creator)],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(store);
+
+    let store = open_store(&f.path).unwrap();
+    assert_eq!(
+        store.mls_sync_step(WIRE, 0, NOW).unwrap().unwrap().commit,
+        b"commit"
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT browse_kind,browse_expires_at_ms FROM group_events WHERE event_id=?1",
+                [&event_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+        ("query".into(), 50)
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE group_events SET browse_kind='expression' WHERE event_id=?1",
+            [&event_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .connection
+            .execute(
+                "UPDATE group_events SET browse_kind='unknown' WHERE event_id=?1",
+                [&event_id]
+            )
+            .is_err()
+    );
 }
 
 #[test]

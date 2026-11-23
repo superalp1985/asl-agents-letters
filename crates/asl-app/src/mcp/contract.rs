@@ -3,10 +3,19 @@ use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
     error::ErrorCode,
     ids::Id128,
-    protocol::{Intent, ResultShape},
+    protocol::{Expression, Intent, ResultShape},
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub(super) enum ServerFrame {
+    AgentEvent { event: Value },
+    AgentEventLoss { dropped: u64 },
+    Reply(Result<Value, ErrorCode>),
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -15,6 +24,86 @@ pub(super) enum Request {
     TaskStatus(TaskArgs),
     Fetch(FetchArgs),
     Result(TaskArgs),
+    AgentEventsAvailable,
+    SubscribeAgentEvents,
+    UnsubscribeAgentEvents,
+    LocalCapabilities,
+    SendExpression(ExpressionArgs),
+    ReceiveOffer(ReceiveOfferArgs),
+    RecoveryTask(TaskArgs),
+    RecoveryEvents(RecoveryEventsArgs),
+    RecoveryQuery(RecoveryQueryArgs),
+    RecoveryResult(TaskArgs),
+    RecoveryDownload(RecoveryDownloadArgs),
+    RecoveryDownloadDecision(RecoveryDownloadDecisionArgs),
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryDownloadDecisionArgs {
+    #[schemars(length(equal = 32))]
+    pub approval_id: String,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryDownloadArgs {
+    #[schemars(length(equal = 32))]
+    pub transfer_id: String,
+    pub resume: bool,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryQueryArgs {
+    #[schemars(length(equal = 32))]
+    pub request_id: String,
+    #[schemars(range(min = 1))]
+    pub valid_until_ms: i64,
+    pub request: QueryArgs,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryEventsArgs {
+    #[schemars(range(min = 0))]
+    pub after: i64,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExpressionArgs {
+    #[schemars(regex(pattern = r"^(agent|group):[a-fA-F0-9]{64}$"))]
+    pub target: String,
+    #[schemars(length(equal = 32))]
+    pub root: Option<String>,
+    pub expression: Vec<Value>,
+}
+
+impl ExpressionArgs {
+    pub(super) fn validate(self) -> Result<(String, Option<Id128>, Expression), ErrorCode> {
+        let (kind, id) = self
+            .target
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if !matches!(kind, "agent" | "group")
+            || id.len() != 64
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let root = self.root.as_deref().map(parse_id).transpose()?;
+        let expression = Expression::from_json(&Value::Array(self.expression))
+            .map_err(|_| ErrorCode::InvalidMessage)?;
+        Ok((self.target, root, expression))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReceiveOfferArgs {
+    #[schemars(length(equal = 32))]
+    pub offer_id: String,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]

@@ -6,8 +6,8 @@ use asl_groups::{
     membership::{GROUP_CIPHERSUITE, read_key_package, sync_epoch_binding},
     pending_join,
 };
-use asl_store::group_state::{MLS_SYNC_MAX_STEPS, MlsIncomingInvite};
-use asl_types::protocol::{GroupBody, GroupMembership, GroupPacket};
+use asl_store::group_state::{GroupInboundPolicy, MLS_SYNC_MAX_STEPS, MlsIncomingInvite};
+use asl_types::protocol::{Expression, ExpressionLetter, GroupBody, GroupMembership, GroupPacket};
 use openmls::prelude::{GroupId as MlsGroupId, MlsGroup, MlsGroupCreateConfig, OpenMlsProvider};
 use openmls_basic_credential::SignatureKeyPair;
 
@@ -433,8 +433,27 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
         proofs[2].clone(),
         &signed[2],
     );
-    let (queued, outbound) =
-        dispatch_query(&mut creator, &mut creator_store, wire_id, 71, probe_now());
+    let now = probe_now();
+    GroupInboundPolicy {
+        browse_enabled: false,
+        answer_enabled: true,
+    }
+    .save(&second_store, now)
+    .unwrap();
+    GroupInboundPolicy {
+        browse_enabled: false,
+        answer_enabled: false,
+    }
+    .save(&creator_store, now)
+    .unwrap();
+    let message = GroupApplication::Expression(sample_group_expression(71, now));
+    let (queued, outbound) = dispatch_application(
+        &mut creator,
+        &mut creator_store,
+        wire_id,
+        message.clone(),
+        now,
+    );
     assert_eq!((queued.available, queued.queued), (2, 2));
     let [
         (first_route, first_handle, first_packet),
@@ -444,14 +463,14 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
     assert!([first_route, second_route].contains(&removed_connection));
     assert_ne!(first_handle, second_handle);
     assert_eq!(first_packet, second_packet);
-    for (node, store, route) in [
-        (&mut first, &mut first_store, connection),
-        (&mut second, &mut second_store, removed_connection),
+    for (node, store, route, browse_enabled) in [
+        (&mut first, &mut first_store, connection, true),
+        (&mut second, &mut second_store, removed_connection, false),
     ] {
         let now = probe_now();
         let mut enqueued = None;
-        assert!(matches!(
-            node.handle_mls_network_event(
+        let received = node
+            .handle_mls_network_event(
                 store,
                 NetworkEvent::UnverifiedGroupRequest {
                     connection_id: route,
@@ -465,10 +484,21 @@ fn group_catch_up_follows_add_then_removes_revoked_leaf() {
                     enqueued = Some(reply);
                     Ok(())
                 },
-            ),
-            Ok(Some(MlsNetworkOutcome::ApplicationReceived { sender, application, .. }))
-                if sender == certs[0].peer_id && application.message_id() == queued.message_id
-        ));
+            )
+            .unwrap();
+        match received {
+            Some(MlsNetworkOutcome::ApplicationReceived {
+                sender,
+                application,
+                ..
+            }) if browse_enabled => {
+                assert_eq!(sender, certs[0].peer_id);
+                assert_eq!(application.message_id(), queued.message_id);
+                assert_eq!(*application, message);
+            }
+            None if !browse_enabled => {}
+            other => panic!("unexpected expression outcome: {other:?}"),
+        }
         let Some(NetworkCommand::ReplyGroup {
             response,
             response_id,
@@ -691,9 +721,22 @@ fn dispatch_query(
     query.message_id = Id128([message_byte; 16]);
     query.created_at_ms = now;
     query.expires_at_ms = now + 5_000;
+    dispatch_application(node, store, room, GroupApplication::Query(query), now)
+}
+
+fn dispatch_application(
+    node: &mut CoreAdmission,
+    store: &mut asl_store::Store,
+    room: Hash32,
+    application: GroupApplication,
+    now: u64,
+) -> (
+    crate::profile::MlsApplicationDispatch,
+    Vec<QueuedApplication>,
+) {
     let mut outbound = Vec::new();
     let result = node
-        .send_loopback_mls_application(store, room, GroupApplication::Query(query), now, |cmd| {
+        .send_loopback_mls_application(store, room, application, now, |cmd| {
             let NetworkCommand::SendGroup {
                 connection_id,
                 request_handle,
@@ -721,6 +764,16 @@ fn sample_group_query() -> asl_types::protocol::Query {
     query
 }
 
+fn sample_group_expression(message_byte: u8, now: u64) -> ExpressionLetter {
+    ExpressionLetter {
+        message_id: Id128([message_byte; 16]),
+        root_task_id: Id128([2; 16]),
+        created_at_ms: now,
+        expires_at_ms: now + 5_000,
+        expression: Expression::from_json(&serde_json::json!(["request", ["int", "1"]])).unwrap(),
+    }
+}
+
 fn exercise_application_candidate(
     (sender, send_store, sender_device): (&mut CoreAdmission, &mut asl_store::Store, &PeerId),
     (receiver, receive_store, receive_db): (
@@ -733,11 +786,9 @@ fn exercise_application_candidate(
     directories: &HashMap<AgentId, Vec<u8>>,
     now: impl Fn() -> u64,
 ) -> GroupPacket {
-    let mut query = sample_group_query();
-    query.created_at_ms = now();
-    query.expires_at_ms = query.created_at_ms + 5_000;
-    let deadline = query.created_at_ms + 3_000;
-    let message = GroupApplication::Query(query.clone());
+    let mut letter = sample_group_expression(70, now());
+    let deadline = letter.created_at_ms + 3_000;
+    let message = GroupApplication::Expression(letter.clone());
     let current = |store: &asl_store::Store| store.mls_room_snapshot(wire_id).unwrap().unwrap();
     let old_send = current(send_store).version;
     let old_receive = current(receive_store);
@@ -844,7 +895,7 @@ fn exercise_application_candidate(
             receive_store
         )
         .unwrap(),
-        message
+        Some(message.clone())
     );
     let committed = current(&receive_db.open());
     assert_eq!(committed.version.revision, old_receive.version.revision + 1);
@@ -880,14 +931,14 @@ fn exercise_application_candidate(
         GROUP_CIPHERSUITE.signature_algorithm(),
     )
     .unwrap();
-    let mut future = query.clone();
+    let mut future = letter.clone();
     future.created_at_ms = deadline;
     let future_packet = encrypt_application(
         &mut group,
         &provider,
         &signer,
         retagged.message_id,
-        GroupApplication::Query(future),
+        GroupApplication::Expression(future),
     )
     .unwrap();
     assert!(matches!(
@@ -912,8 +963,8 @@ fn exercise_application_candidate(
         ),
         Err(AslError::PolicyVersionConflict)
     ));
-    query.message_id.0[0] ^= 0x80;
-    let next = GroupApplication::Query(query);
+    letter.message_id.0[0] ^= 0x80;
+    let next = GroupApplication::Expression(letter);
     let new_packet = sender
         .commit_mls_application_send(
             send_store,
@@ -933,7 +984,7 @@ fn exercise_application_candidate(
             receive_store
         )
         .unwrap(),
-        next
+        Some(next)
     );
     assert_eq!(journal_count(), 2);
     packet

@@ -116,6 +116,151 @@ impl Fixture {
 }
 
 #[test]
+fn recovered_download_decision_is_read_only_and_bound_to_the_original_grant() {
+    let fixture = Fixture::new();
+    let mut broker = fixture.open_with_mode(DownloadMode::Ask);
+    let request = fixture.valid_request(b"awaiting approval");
+    let DownloadStart::Pending {
+        approval_id,
+        transfer_id,
+    } = broker.request_download(&request).unwrap()
+    else {
+        panic!("expected a pending decision")
+    };
+    let mut store = open_store(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [15; 32];
+    store.configure_mcp_recovery(Some(&subject), 0).unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(approval_id, &subject),
+        Err(AslError::NotFound)
+    ));
+    store
+        .authorize_recovery_download_decision(approval_id)
+        .unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(approval_id, &[16; 32]),
+        Err(AslError::PolicyDenied)
+    ));
+    let pending = store
+        .recovery_download_decision(approval_id, &subject)
+        .unwrap();
+    assert_eq!(pending.transfer_id, transfer_id);
+    assert_eq!(pending.state, "awaiting_approval");
+    fixture.assert_no_download();
+    store.decide_download(approval_id, true).unwrap();
+    drop(store);
+    let mut store = open_store(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    store.configure_mcp_recovery(Some(&subject), 1).unwrap();
+    assert_eq!(
+        store
+            .recovery_download_decision(approval_id, &subject)
+            .unwrap()
+            .state,
+        "approved"
+    );
+    fixture.assert_no_download();
+    store.decide_download(approval_id, false).unwrap();
+    assert_eq!(
+        store
+            .recovery_download_decision(approval_id, &subject)
+            .unwrap()
+            .state,
+        "denied"
+    );
+    fixture.assert_no_download();
+    store.configure_mcp_recovery(Some(&[16; 32]), 2).unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(approval_id, &[16; 32]),
+        Err(AslError::NotFound)
+    ));
+}
+
+#[test]
+fn expired_or_revoked_recovery_decisions_do_not_remain_visible() {
+    let f = Fixture::new();
+    let mut broker = f.open_with_mode(DownloadMode::Ask);
+    let store = open_store(&f.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [15; 32];
+    store.configure_mcp_recovery(Some(&subject), 0).unwrap();
+    let offer = |broker: &mut DownloadBroker, body: &[u8]| {
+        let DownloadStart::Pending { approval_id, .. } =
+            broker.request_download(&f.valid_request(body)).unwrap()
+        else {
+            panic!("expected pending approval");
+        };
+        store
+            .authorize_recovery_download_decision(approval_id)
+            .unwrap();
+        approval_id
+    };
+    let expired = offer(&mut broker, b"expires");
+    let revoked = offer(&mut broker, b"revoked");
+    let db = f.db();
+    let expiry: i64 = db
+        .query_row(
+            "UPDATE transfer_consents SET expires_at_ms=created_at_ms
+         WHERE approval_id=?1 RETURNING expires_at_ms",
+            [hex::encode(expired.0)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(expired, &subject),
+        Err(AslError::ExpiredMessage)
+    ));
+    // Changing the underlying deadline after expiry does not restore visibility.
+    db.execute(
+        "UPDATE transfer_consents SET expires_at_ms=?2 WHERE approval_id=?1",
+        rusqlite::params![hex::encode(expired.0), expiry + 300_000],
+    )
+    .unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(expired, &subject),
+        Err(AslError::NotFound)
+    ));
+    SnapshotBroker::open(&f.home)
+        .unwrap()
+        .revoke_inbox_directory(f.write_grant)
+        .unwrap();
+    assert!(matches!(
+        store.recovery_download_decision(revoked, &subject),
+        Err(AslError::NotFound)
+    ));
+    f.assert_no_download();
+}
+
+#[test]
+fn observing_expired_recovery_consent_removes_it() {
+    let fixture = Fixture::new();
+    let mut broker = fixture.open();
+    let info = broker
+        .begin_download(&fixture.valid_request(b"bytes"))
+        .unwrap();
+    let store = open_store(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [15; 32];
+    store.configure_mcp_recovery(Some(&subject), 0).unwrap();
+    store
+        .authorize_recovery_download(&info.transfer_id)
+        .unwrap();
+    assert!(store.recovery_download(&info.transfer_id, &subject).is_ok());
+    fixture
+        .db()
+        .execute("UPDATE mcp_recovery_downloads SET expires_at_ms=0", [])
+        .unwrap();
+    assert!(matches!(
+        store.recovery_download(&info.transfer_id, &subject),
+        Err(AslError::NotFound)
+    ));
+    let remaining: i64 = fixture
+        .db()
+        .query_row("SELECT count(*) FROM mcp_recovery_downloads", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[test]
 fn dashboard_shows_downloads_that_are_not_local_snapshots() {
     let fixture = Fixture::new();
     let mut broker = fixture.open();
@@ -292,6 +437,12 @@ fn group_epoch_change_hides_pending_download_consent() {
         panic!("ask mode must create a consent");
     };
     assert_eq!(broker.download_consents().unwrap().len(), 1);
+    let store = open_store(&f.home.join("state/asl.sqlite3")).unwrap();
+    let subject = [15; 32];
+    store.configure_mcp_recovery(Some(&subject), 0).unwrap();
+    store
+        .authorize_recovery_download_decision(approval_id)
+        .unwrap();
     f.db()
         .execute(
             "UPDATE asl_groups
@@ -302,6 +453,10 @@ fn group_epoch_change_hides_pending_download_consent() {
         .unwrap();
 
     assert!(broker.download_consents().unwrap().is_empty());
+    assert!(matches!(
+        store.recovery_download_decision(approval_id, &subject),
+        Err(AslError::PolicyDenied)
+    ));
     assert!(matches!(
         broker.decide_download(approval_id, true),
         Err(AslError::PolicyDenied)
@@ -600,6 +755,144 @@ fn recovery_does_not_remove_a_replaced_part_file() {
         fs::read(&info.part_path).unwrap(),
         b"not the authorized transfer file"
     );
+}
+
+#[test]
+fn failed_part_retention_removes_only_expired_owned_parts() {
+    let fixture = Fixture::new();
+    let mut broker = fixture.open();
+    let day = 86_400_000;
+    let now = 10 * day;
+    let begin = |broker: &mut DownloadBroker, name: &str| {
+        let mut request = fixture.valid_request(name.as_bytes());
+        request.destination_relative = name.into();
+        broker.begin_download(&request).unwrap()
+    };
+    let expired = begin(&mut broker, "expired.bin");
+    let recent = begin(&mut broker, "recent.bin");
+    let replaced = begin(&mut broker, "replaced.bin");
+    let active = begin(&mut broker, "active.bin");
+    for (info, failed_at) in [
+        (&expired, now - 3 * day),
+        (&recent, now - 3 * day + 1),
+        (&replaced, now - 4 * day),
+    ] {
+        let database = fixture.db();
+        let id = hex::encode(info.transfer_id.0.as_bytes());
+        database
+            .execute(
+                "UPDATE reservations SET state='released' WHERE reservation_id=(
+                     SELECT reservation_id FROM transfers WHERE transfer_id=?1)",
+                [&id],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE transfers SET state='failed',updated_at_ms=?2 WHERE transfer_id=?1",
+                rusqlite::params![id, failed_at],
+            )
+            .unwrap();
+    }
+    fs::rename(&replaced.part_path, &replaced.destination_path).unwrap();
+    fs::write(&replaced.part_path, b"replacement").unwrap();
+
+    assert_eq!(broker.prune_failed_parts(now).unwrap(), 1);
+    assert!(!expired.part_path.exists());
+    assert!(recent.part_path.is_file());
+    assert!(active.part_path.is_file());
+    assert!(replaced.destination_path.is_file());
+    assert_eq!(fs::read(&replaced.part_path).unwrap(), b"replacement");
+    assert_eq!(broker.prune_failed_parts(now).unwrap(), 0);
+    assert_eq!(broker.info(&expired.transfer_id).unwrap().state, "failed");
+}
+
+#[test]
+fn received_file_retention_applies_only_to_opted_in_unchanged_files() {
+    let fixture = Fixture::new();
+    let mut broker = fixture.open();
+    let mut store = open_store(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    let now_ms = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
+    let receive = |broker: &mut DownloadBroker, name: &str| {
+        let bytes = name.as_bytes();
+        let mut request = fixture.valid_request(bytes);
+        request.destination_relative = name.into();
+        let id = broker.begin_download(&request).unwrap().transfer_id;
+        broker.assign_chunk(id.clone(), &fixture.peer, 0).unwrap();
+        broker
+            .write_chunk(id.clone(), &fixture.peer, 0, bytes)
+            .unwrap();
+        let info = broker.complete(id).unwrap();
+        assert_eq!(info.state, "complete");
+        info
+    };
+    let existing = receive(&mut broker, "existing.bin");
+    assert_eq!(store.inbox_retention_days(fixture.write_grant).unwrap(), 0);
+    store
+        .set_inbox_retention_days(fixture.write_grant, 30)
+        .unwrap();
+    let removed = receive(&mut broker, "removed.bin");
+    let edited = receive(&mut broker, "edited.bin");
+    fs::write(&edited.destination_path, b"changed after delivery").unwrap();
+    let deadline = || {
+        fixture
+            .db()
+            .query_row(
+                "SELECT k.expires_at_ms-t.updated_at_ms FROM received_file_retention k
+                 JOIN transfers t USING(transfer_id) WHERE t.transfer_id=?1",
+                [hex::encode(removed.transfer_id.0.as_bytes())],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(deadline(), 30 * 86_400_000);
+    store
+        .set_inbox_retention_days(fixture.write_grant, 1)
+        .unwrap();
+    store
+        .set_inbox_retention_days(fixture.write_grant, 30)
+        .unwrap();
+    assert_eq!(deadline(), 86_400_000);
+    let after_shorter_deadline = now_ms() + 86_400_000;
+    assert_eq!(
+        broker.prune_received_files(after_shorter_deadline).unwrap(),
+        1
+    );
+    assert!(!removed.destination_path.exists());
+    assert!(existing.destination_path.is_file());
+    assert_eq!(
+        fs::read(edited.destination_path).unwrap(),
+        b"changed after delivery"
+    );
+
+    let kept = receive(&mut broker, "kept.bin");
+    store
+        .set_inbox_retention_days(fixture.write_grant, 0)
+        .unwrap();
+    store
+        .set_inbox_retention_days(fixture.write_grant, 1)
+        .unwrap();
+    assert_eq!(
+        broker
+            .prune_received_files(now_ms() + 31 * 86_400_000)
+            .unwrap(),
+        0
+    );
+    assert!(kept.destination_path.is_file());
+    let state: String = fixture
+        .db()
+        .query_row(
+            "SELECT r.state FROM reservations r JOIN transfers t USING(reservation_id)
+         WHERE t.transfer_id=?1",
+            [hex::encode(removed.transfer_id.0.as_bytes())],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "released");
 }
 
 fn pending_id(broker: &mut DownloadBroker, request: &DownloadRequest) -> Id128 {

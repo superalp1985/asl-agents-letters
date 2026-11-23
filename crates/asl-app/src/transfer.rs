@@ -451,8 +451,10 @@ impl TransferService {
         requester: DirectRequester,
         request: &FetchRequest,
         now_ms: u64,
+        register_recipient: impl FnOnce(&mut asl_store::Store, &DirectRequester) -> Result<(), AslError>,
     ) -> Result<PreparedFetch, AslError> {
         let (revision, permit) = self.authorize_content(&requester, request.content_id, now_ms)?;
+        register_recipient(&mut self.store, &requester)?;
         let admission = self.store.admit_upload(
             &UploadBinding {
                 source_grant_id: permit.grant_id().0,
@@ -1708,6 +1710,8 @@ mod bulk_response_tests {
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod avatar_permissions;
+
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1847,7 +1851,7 @@ pub(crate) mod tests {
             .set_upload_mode(asl_store::transfers::UploadMode::Ask)
             .unwrap();
         let blocked = service
-            .prepare_fetch(requester.clone(), &fetch, now_ms)
+            .prepare_fetch(requester.clone(), &fetch, now_ms, |_, _| Ok(()))
             .unwrap();
         let approval = service.store.upload_consents().unwrap().pop().unwrap();
         assert_eq!(approval.content_id, content);
@@ -1895,7 +1899,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let blocked = service
-            .prepare_fetch(requester.clone(), &fetch, now_ms)
+            .prepare_fetch(requester.clone(), &fetch, now_ms, |_, _| Ok(()))
             .unwrap();
         let mut database = Connection::open(&database_path).unwrap();
         let writer = database
@@ -1909,7 +1913,7 @@ pub(crate) mod tests {
         ));
         writer.rollback().unwrap();
         let prepared = service
-            .prepare_fetch(requester.clone(), &fetch, now_ms)
+            .prepare_fetch(requester.clone(), &fetch, now_ms, |_, _| Ok(()))
             .unwrap();
 
         let mut fetch_grant = None;

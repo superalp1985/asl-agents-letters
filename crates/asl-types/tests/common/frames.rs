@@ -5,10 +5,10 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
-        DeviceCertificate, Feature, FetchGrant, FetchPending, FetchRequest, GroupEnvelope,
-        GroupOperation, Hello, IdentityProof, IdentityProofRequest, Intent, MediaKind, Offer,
-        PairingExchange, PairingInvite, Profile, ProtocolError, Query, ResultShape, ResultStatus,
-        StorageProof, TypedValue, WireFrame,
+        DeviceCertificate, Expression, ExpressionLetter, Feature, FetchGrant, FetchPending,
+        FetchRequest, GroupEnvelope, GroupOperation, Hello, IdentityProof, IdentityProofRequest,
+        Intent, MediaKind, Offer, PairingExchange, PairingInvite, Profile, ProtocolError, Query,
+        ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame,
     },
 };
 
@@ -189,6 +189,40 @@ pub fn sample_frames() -> Vec<WireFrame> {
             content_id: hash,
             retry_at_ms: 150,
             expires_at_ms: 200,
+        }),
+        WireFrame::Expression(ExpressionLetter {
+            message_id: id,
+            root_task_id: Id128([4; 16]),
+            created_at_ms: 100,
+            expires_at_ms: 200,
+            expression: Expression::from_json(&serde_json::json!([
+                "let",
+                ["int", "3"],
+                [
+                    "define",
+                    1,
+                    ["op", "add", ["var", 0], ["var", 1]],
+                    [
+                        "if",
+                        ["op", "lt", ["call", 0, [["int", "4"]]], ["int", "8"]],
+                        [
+                            "assert",
+                            ["op", "eq", ["call", 0, [["int", "5"]]], ["int", "8"]]
+                        ],
+                        [
+                            "meaning",
+                            [
+                                "concept",
+                                "abababababababababababababababababababababababababababababababab",
+                                4,
+                                1,
+                                27
+                            ]
+                        ]
+                    ]
+                ]
+            ]))
+            .unwrap(),
         }),
     ]
 }

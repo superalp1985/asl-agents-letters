@@ -1,5 +1,7 @@
+mod avatars;
 mod files;
 mod firewall;
+mod letters;
 
 use std::{
     fs,
@@ -12,6 +14,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asl_store::{
+    Store,
+    group_state::operator::{AdminOutcome, AdminRequest, AdminRoom, AdminSnapshot},
+};
 use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{ConceptRef, Intent, Query, ResultShape},
@@ -60,7 +66,9 @@ struct RegistryFixture {
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 enum Scenario {
+    Avatar,
     Messages,
+    Letters,
     SingleSource,
     TwoSources,
 }
@@ -83,7 +91,6 @@ enum Action {
     Room(Hash32),
     Send(Hash32),
     ConfigureInbound(bool, bool),
-    Remove(Hash32, Vec<u8>),
 }
 
 impl Action {
@@ -108,10 +115,6 @@ impl Action {
                     answer_enabled,
                 }
             }
-            Self::Remove(room, peer) => LocalGroupAction::Remove {
-                room,
-                peer: PeerId::from_bytes(peer).map_err(|_| AslError::InvalidIdentity)?,
-            },
             Self::Send(room) => LocalGroupAction::SendApplication {
                 room,
                 application: Box::new(GroupApplication::Query(Query {
@@ -131,8 +134,19 @@ impl Action {
 }
 
 #[test]
+#[ignore = "requires a built sibling asl-extractor.exe for the isolated receive path"]
+fn explicit_avatar_crosses_core_processes_and_an_isolated_extractor() {
+    verify_group_delivery(Verification::Protocol, Scenario::Avatar);
+}
+
+#[test]
 fn group_messages_cross_core_processes_over_framed_ipc_and_tcp() {
     verify_group_delivery(Verification::Protocol, Scenario::Messages);
+}
+
+#[test]
+fn expression_hosts_exchange_a_definition_across_core_processes() {
+    verify_group_delivery(Verification::Protocol, Scenario::Letters);
 }
 
 #[test]
@@ -172,6 +186,16 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
         for executable in ["asl-net.exe", "asl-worker.exe", "asl-extractor.exe"] {
             fs::copy(source.join(executable), bin.join(executable)).unwrap();
         }
+    } else if scenario == Scenario::Avatar {
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::copy(
+            sibling_binary_directory()
+                .unwrap()
+                .join("asl-extractor.exe"),
+            bin.join("asl-extractor.exe"),
+        )
+        .unwrap();
     }
 
     let now_ms = unix_time_ms().unwrap();
@@ -197,6 +221,14 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
         (first_peer, first_home, _),
         (second_peer, second_home, _),
     ] = &nodes;
+    if scenario == Scenario::Letters {
+        letters::verify(&registry_path, &nodes);
+        return;
+    }
+    if scenario == Scenario::Avatar {
+        avatars::verify(&registry_path, &nodes);
+        return;
+    }
     let loopback_fixture = verification == Verification::AppContainer;
     let (mut creator, creator_ready) =
         CoreProcess::start(creator_home, &registry_path, loopback_fixture);
@@ -206,8 +238,113 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
         first.dial(&creator_ready, creator_peer);
         first.connection(&creator_ready["peer"]);
         let connection = creator.connection(&first_ready["peer"]);
-        let room = Hash32(parse_hex(&creator.ok(Action::Create)["room"]));
-        creator.invite(room, connection, &mut first, 1);
+        let creator_agent = nodes[0].2.0;
+        let first_agent = nodes[1].2.0;
+        let mut operator = asl_store::open_store(&creator_home.join("state/asl.sqlite3")).unwrap();
+        let refresh = |store: &mut Store| refresh_group_admin(store, creator_agent, creator_peer);
+        let snapshot = refresh(&mut operator);
+        assert!(snapshot.rooms.is_empty());
+        run_group_admin(
+            &mut operator,
+            creator_agent,
+            creator_peer,
+            AdminRequest::Create { tag: snapshot.tag },
+            AdminOutcome::Created,
+        );
+        assert!(
+            operator
+                .local_group_admin_snapshot(creator_agent, creator_peer, unix_time_ms().unwrap())
+                .unwrap()
+                .is_none()
+        );
+
+        let snapshot = refresh(&mut operator);
+        let [created] = snapshot.rooms.as_slice() else {
+            panic!("create must publish exactly one room on refresh");
+        };
+        assert_eq!(created.epoch, 0);
+        assert!(!created.name.is_empty());
+        let room = Hash32(parse_hex(&json!(created.room)));
+        let agent = bs58::encode(first_agent.as_bytes()).into_string();
+        let device = super::peer_text(first_peer);
+        let peer = snapshot
+            .peers
+            .iter()
+            .find(|peer| peer.agent == agent && peer.device == device)
+            .expect("the admitted recipient must appear in the operator snapshot");
+        assert_eq!(peer.connection, alloy_primitives::hex::encode(connection));
+        run_group_admin(
+            &mut operator,
+            creator_agent,
+            creator_peer,
+            AdminRequest::Invite {
+                tag: snapshot.tag,
+                room: created.room.clone(),
+                connection: peer.connection.clone(),
+            },
+            AdminOutcome::InviteQueued,
+        );
+        assert!(
+            operator
+                .local_group_admin_snapshot(creator_agent, creator_peer, unix_time_ms().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let id = first.wait_membership_offer(room);
+        let snapshot = refresh(&mut operator);
+        let [pending_room] = snapshot.rooms.as_slice() else {
+            panic!("invite must leave the same room in the operator snapshot");
+        };
+        assert_eq!(pending_room.room, alloy_primitives::hex::encode(room.0));
+        assert_eq!(
+            pending_room.epoch, 0,
+            "an invite alone must not advance the room"
+        );
+        assert_admin_roster(pending_room, &[(creator_agent, creator_peer, true)]);
+        let before = creator.ok(Action::Room(room));
+        assert_eq!(before["stored_members"], json!([creator_ready["peer"]]));
+        let database = first_home.join("state/asl.sqlite3");
+        let mut store = asl_store::open_store(&database).unwrap();
+        assert!(
+            store.mls_room_progress(room).unwrap().is_none(),
+            "recipient must not have joined before approval"
+        );
+        let choices = store
+            .local_group_invitations(first_agent, first_peer, unix_time_ms().unwrap())
+            .unwrap();
+        let choice = choices.iter().find(|i| i.id == id).unwrap();
+        assert!(!choice.approved);
+        store
+            .queue_group_decision(
+                first_agent,
+                first_peer,
+                &choice.tag,
+                asl_store::group_state::invite_review::Choice::Approve,
+                unix_time_ms().unwrap(),
+            )
+            .unwrap();
+        first.wait_epoch(room, 1);
+        creator.wait_epoch(room, 1);
+        let snapshot = refresh(&mut operator);
+        let [joined_room] = snapshot.rooms.as_slice() else {
+            panic!("approval must leave the same room in the operator snapshot");
+        };
+        assert_eq!(joined_room.room, pending_room.room);
+        assert_eq!(joined_room.epoch, 1);
+        assert_admin_roster(
+            joined_room,
+            &[
+                (creator_agent, creator_peer, true),
+                (first_agent, first_peer, false),
+            ],
+        );
+        for core in [&mut creator, &mut first] {
+            let state = core.ok(Action::Room(room));
+            let members = state["stored_members"].as_array().unwrap();
+            assert_eq!(members.len(), 2, "{state}");
+            assert!(members.contains(&creator_ready["peer"]), "{state}");
+            assert!(members.contains(&first_ready["peer"]), "{state}");
+        }
         files::verify(
             &mut creator,
             &mut first,
@@ -331,9 +468,58 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
     );
     second.ok(Action::ConfigureInbound(false, false));
 
-    assert_eq!(
-        creator.ok(Action::Remove(room, second_peer.as_bytes().to_vec()))["mls_epoch"],
-        3
+    let creator_agent = nodes[0].2.0;
+    let first_agent = nodes[1].2.0;
+    let second_agent = nodes[2].2.0;
+    let mut operator = asl_store::open_store(&creator_home.join("state/asl.sqlite3")).unwrap();
+    let snapshot = refresh_group_admin(&mut operator, creator_agent, creator_peer);
+    let room_hex = alloy_primitives::hex::encode(room.0);
+    let managed = snapshot
+        .rooms
+        .iter()
+        .find(|entry| entry.room == room_hex)
+        .expect("creator must manage the room");
+    assert_eq!(managed.epoch, 2);
+    assert_admin_roster(
+        managed,
+        &[
+            (creator_agent, creator_peer, true),
+            (first_agent, first_peer, false),
+            (second_agent, second_peer, false),
+        ],
+    );
+
+    let remove = |member: &PeerId| {
+        let device = super::peer_text(member);
+        let listed = managed
+            .members
+            .iter()
+            .find(|entry| entry.device == device)
+            .unwrap();
+        AdminRequest::Remove {
+            tag: snapshot.tag.clone(),
+            room: managed.room.clone(),
+            device: listed.device.clone(),
+        }
+    };
+    assert!(
+        matches!(
+            operator.queue_group_admin(
+                creator_agent,
+                creator_peer,
+                remove(creator_peer),
+                unix_time_ms().unwrap()
+            ),
+            Err(AslError::PolicyVersionConflict)
+        ),
+        "the displayed creator cannot be selected for removal"
+    );
+    run_group_admin(
+        &mut operator,
+        creator_agent,
+        creator_peer,
+        remove(second_peer),
+        AdminOutcome::MemberRemoved,
     );
     // Check fan-out before idle timeouts can hide an incorrectly retained
     // recipient. The remaining member may not have applied Remove yet.
@@ -341,6 +527,7 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
     let sent = creator.ok(Action::Send(room));
     assert_eq!(sent["available"], 1);
     assert_eq!(sent["queued"], 1);
+    assert_eq!(creator.ok(Action::Room(room))["mls_epoch"], 3);
 
     first.wait_epoch(room, 3);
     let sent = creator.ok(Action::Send(room));
@@ -350,6 +537,20 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
     assert_eq!(second.ok(Action::Room(room))["last_received"], previous);
     let after = creator.ok(Action::Room(room));
     assert_eq!(after["state"], "active");
+    let snapshot = refresh_group_admin(&mut operator, creator_agent, creator_peer);
+    let managed = snapshot
+        .rooms
+        .iter()
+        .find(|entry| entry.room == room_hex)
+        .expect("the room must return to the operator roster after removal");
+    assert_eq!(managed.epoch, 3);
+    assert_admin_roster(
+        managed,
+        &[
+            (creator_agent, creator_peer, true),
+            (first_agent, first_peer, false),
+        ],
+    );
 
     creator.inbound(false, &creator_ready);
     creator.close();
@@ -482,7 +683,9 @@ fn group_core_child() {
         }
         Ok(())
     };
-    let result = if registry.scenario != Scenario::Messages {
+    let result = if registry.scenario == Scenario::Letters {
+        letters::run(supervisor, tick)
+    } else if registry.scenario != Scenario::Messages {
         files::run(supervisor, file_commands, tick, registry.scenario)
     } else {
         supervisor.run_loop(
@@ -560,6 +763,62 @@ fn parse_hex<const N: usize>(value: &Value) -> [u8; N] {
         .unwrap()
 }
 
+fn refresh_group_admin(store: &mut Store, agent: AgentId, device: &PeerId) -> AdminSnapshot {
+    run_group_admin(
+        store,
+        agent,
+        device,
+        AdminRequest::Refresh,
+        AdminOutcome::Ready,
+    );
+    store
+        .local_group_admin_snapshot(agent, device, unix_time_ms().unwrap())
+        .unwrap()
+        .expect("refresh must publish the operator snapshot")
+}
+
+fn assert_admin_roster(room: &AdminRoom, expected: &[(AgentId, &PeerId, bool)]) {
+    assert_eq!(room.members.len(), expected.len(), "{room:?}");
+    for &(agent, device, creator) in expected {
+        let agent = bs58::encode(agent.as_bytes()).into_string();
+        let device = super::peer_text(device);
+        assert!(
+            room.members.iter().any(|member| {
+                member.agent == agent && member.device == device && member.creator == creator
+            }),
+            "missing {agent}/{device} (creator: {creator}) from {room:?}"
+        );
+    }
+}
+
+fn run_group_admin(
+    store: &mut Store,
+    agent: AgentId,
+    device: &PeerId,
+    request: AdminRequest,
+    expected: AdminOutcome,
+) {
+    store
+        .queue_group_admin(agent, device, request, unix_time_ms().unwrap())
+        .unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let outcome = store
+            .local_group_admin_status(unix_time_ms().unwrap())
+            .unwrap();
+        match outcome {
+            Some(actual) if actual == expected => return,
+            Some(AdminOutcome::Queued | AdminOutcome::Applying) => {}
+            _ => panic!("group admin expected {expected:?}, got {outcome:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "group admin expected {expected:?}, last status: {outcome:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 struct CoreProcess {
     node: String,
     net_program: Option<PathBuf>,
@@ -609,6 +868,15 @@ fn fixture_reader_skips_localized_output_and_reports_broken_replies() {
 
 impl CoreProcess {
     fn start(home: &Path, registry: &Path, loopback_fixture: bool) -> (Self, Value) {
+        Self::start_with_grant(home, registry, loopback_fixture, None)
+    }
+
+    fn start_with_grant(
+        home: &Path,
+        registry: &Path,
+        loopback_fixture: bool,
+        grant: Option<[u8; 32]>,
+    ) -> (Self, Value) {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--ignored", "--exact", CHILD, "--nocapture"])
@@ -619,6 +887,14 @@ impl CoreProcess {
             .stderr(Stdio::inherit());
         if loopback_fixture {
             command.env("ASL_APPCONTAINER_LOOPBACK_FIXTURE", "1");
+        }
+        if let Some(key) = grant {
+            command
+                .env("ASL_MCP_KEY", alloy_primitives::hex::encode(key))
+                .env("ASL_MCP_SCOPE", "contacts_only")
+                .env("ASL_MCP_AGENT_PUSH", "1")
+                .env("ASL_MCP_EXPRESSIONS", "send")
+                .env_remove("ASL_MCP_INBOX_GRANT");
         }
         let mut child = command.spawn().unwrap();
         let input = child.stdin.take();
@@ -734,8 +1010,18 @@ impl CoreProcess {
     }
 
     fn invite(&mut self, room: Hash32, connection: [u8; 16], member: &mut Self, epoch: u64) {
+        let invite = self.offer_membership(room, connection, member);
+        assert_eq!(member.ok(Action::Approve(invite))["queued"], true);
+        member.wait_epoch(room, epoch);
+    }
+
+    fn offer_membership(&mut self, room: Hash32, connection: [u8; 16], member: &mut Self) -> Id128 {
         assert_eq!(self.ok(Action::Invite(room, connection))["queued"], true);
-        let pending = member.until(
+        member.wait_membership_offer(room)
+    }
+
+    fn wait_membership_offer(&mut self, room: Hash32) -> Id128 {
+        let pending = self.until(
             "targeted invite",
             || Action::List,
             |v| v["pending"].as_array().is_some_and(|list| list.len() == 1),
@@ -744,9 +1030,7 @@ impl CoreProcess {
             pending["pending"][0]["room"],
             alloy_primitives::hex::encode(room.0)
         );
-        let invite = Id128(parse_hex(&pending["pending"][0]["id"]));
-        assert_eq!(member.ok(Action::Approve(invite))["queued"], true);
-        member.wait_epoch(room, epoch);
+        Id128(parse_hex(&pending["pending"][0]["id"]))
     }
 
     fn wait_epoch(&mut self, room: Hash32, epoch: u64) {
