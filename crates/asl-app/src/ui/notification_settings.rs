@@ -16,6 +16,12 @@ pub(super) struct Settings {
     pub(super) language: Language,
     pub(super) minimize_on_close: bool,
     pub(super) sound_enabled: bool,
+    #[serde(default = "animations_on")]
+    pub(super) animations_enabled: bool,
+}
+
+fn animations_on() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -25,6 +31,7 @@ impl Default for Settings {
             language: Language::Zh,
             minimize_on_close: true,
             sound_enabled: true,
+            animations_enabled: true,
         }
     }
 }
@@ -163,6 +170,18 @@ impl Editor {
                     Language::En => "Play the Windows system sound when a message or file arrives. You can turn it off at any time.",
                 },
             );
+            setting_row(
+                ui,
+                &mut self.settings.animations_enabled,
+                match self.settings.language {
+                    Language::Zh => "播放讲解小动画",
+                    Language::En => "Play explainer animations",
+                },
+                match self.settings.language {
+                    Language::Zh => "关闭后只显示静止画面，不影响任何提醒。",
+                    Language::En => "When off, a still frame is shown. Alerts are not affected.",
+                },
+            );
 
             if let Some(error) = self.error {
                 super::banner(ui, super::tokens::Tone::Danger, error);
@@ -211,6 +230,11 @@ impl Editor {
     pub(super) fn should_play_sound(&self) -> bool {
         self.settings.sound_enabled
     }
+
+    /// Uses the saved value so an unsaved checkbox does not change the page.
+    pub(super) fn animations_enabled(&self) -> bool {
+        self.saved.animations_enabled
+    }
 }
 
 pub(super) enum Decision {
@@ -244,6 +268,19 @@ mod tests {
         assert_eq!(settings.language, Language::Zh);
         assert!(settings.minimize_on_close);
         assert!(!settings.sound_enabled);
+        assert!(settings.animations_enabled);
+    }
+
+    #[test]
+    fn animation_switch_round_trips_without_a_version_bump() {
+        let settings = Settings {
+            animations_enabled: false,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, VERSION);
+        assert!(!back.animations_enabled);
     }
 
     #[test]
@@ -252,5 +289,6 @@ mod tests {
         assert_eq!(settings.language, Language::Zh);
         assert!(settings.minimize_on_close);
         assert!(settings.sound_enabled);
+        assert!(settings.animations_enabled);
     }
 }

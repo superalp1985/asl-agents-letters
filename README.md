@@ -51,7 +51,9 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 ![设计预览：10 个状态图标](docs/assets/asl-state-glyphs-preview.png)
 
-窗口与托盘使用同一套产品图标。概览支持 12 个内置头像；选中后默认私有。吉祥物和页面状态图跟随本机状态显示。上方实拍来自旧开发构建，不展示本轮素材。
+![设计预览：9 个讲解小剧场场景](docs/assets/asl-explainer-scenes-preview.png)
+
+窗口与托盘使用同一套产品图标。概览支持 12 个内置头像；选中后默认私有。吉祥物和页面状态图跟随本机状态显示。概览页的「看懂 ASL」小剧场有 9 个场景，每个场景一个独立角色，用像素气泡讲解一种状态，可在设置中关闭动画。侧栏导航使用代码绘制的 8×8 像素图标。托盘可用时，顶栏按钮为「隐藏到托盘」，真正退出请用托盘菜单。上方实拍来自旧开发构建，不展示本轮素材。
 
 ## 在 Windows 上运行开发版
 
@@ -63,10 +65,10 @@ $devRoot = Read-Host "开发目录的绝对路径"
 $bin = .\scripts\prepare-desktop.ps1 -RunDir (Join-Path $devRoot 'work\desktop-bin')
 $env:ASL_HOME = Join-Path $devRoot 'work\desktop-profile'
 $core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassThru
-Start-Process (Join-Path $bin 'asl-ui.exe')
+& (Join-Path $bin 'asl-ui.exe') --home $env:ASL_HOME
 ```
 
-准备脚本将六个可执行文件复制到同一个新目录，含 Agent 的 `asl.exe`。再次打开窗口只需在同一 PowerShell 中执行最后一行。关闭窗口后后台仍会处理请求。同一资料只启动一个 Core，结束这次开发运行可执行 `$core | Stop-Process`。重新构建时选择新的运行目录，同一份 `ASL_HOME` 可以继续使用。
+准备脚本将六个可执行文件复制到同一个新目录，含 Agent 的 `asl.exe`。重新打开窗口时，给 `asl-ui.exe --home` 传原数据目录即可，无需重启 Core 或在同一终端执行。直接双击 `asl-ui.exe` 不会自动选择数据目录。关闭窗口不会停止后台。同一资料只启动一个 Core，结束这次开发运行可执行 `$core | Stop-Process`。重新构建时选择新的运行目录，复用原数据目录。
 
 也可以在同一 PowerShell 7 会话中运行 `.\scripts\package-windows.ps1 -OutputZip (Join-Path $devRoot 'work\asl-dev.zip') -DebugBuild -Offline` 创建便携开发包。输出 ZIP 必须尚不存在。安装、后台启动和离线签名更新见[便携包说明](packaging/windows/README.md)。目前没有正式签名发行包。
 
@@ -289,7 +291,9 @@ The images below are drawn offline by `scripts/generate-art.py`. They show the a
 
 ![Design preview: 10 state glyphs](docs/assets/asl-state-glyphs-preview.png)
 
-The window and tray use the same product art. Overview offers 12 built-in avatars, which remain private on selection. The mascot and page glyphs reflect local state. The screenshots above are from an earlier development build and do not show these assets.
+![Design preview: 9 explainer scenes](docs/assets/asl-explainer-scenes-preview.png)
+
+The window and tray use the same product art. Overview offers 12 built-in avatars, which remain private on selection. The mascot and page glyphs reflect local state. The "Understand ASL" theatre on the overview has 9 scenes, each with its own character explaining one state in a pixel speech bubble; the animation can be turned off in settings. The sidebar uses 8×8 pixel icons drawn in code. When the tray is available, the top-bar button reads "Hide to tray"; quit from the tray menu. The screenshots above are from an earlier development build and do not show these assets.
 
 ### Run the Windows Development Build
 
@@ -301,10 +305,10 @@ $devRoot = Read-Host "Absolute development directory"
 $bin = .\scripts\prepare-desktop.ps1 -RunDir (Join-Path $devRoot 'work\desktop-bin')
 $env:ASL_HOME = Join-Path $devRoot 'work\desktop-profile'
 $core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassThru
-Start-Process (Join-Path $bin 'asl-ui.exe')
+& (Join-Path $bin 'asl-ui.exe') --home $env:ASL_HOME
 ```
 
-The preparation script copies six executables, including the agent's `asl.exe`, into a new directory. Run just the last line in the same PowerShell session to reopen the window. The background process continues handling requests after the window closes. Start one Core per profile and use `$core | Stop-Process` to end this development run. Choose a fresh runtime directory for a new build and keep the same `ASL_HOME` to reuse the profile.
+The preparation script copies six executables, including the agent's `asl.exe`, into a new directory. To reopen the window, pass the same data directory to `asl-ui.exe --home` from any terminal; there is no need to restart Core. Double-clicking `asl-ui.exe` does not automatically select a data directory. Closing the window does not stop the background process. Start one Core per profile and use `$core | Stop-Process` to end this development run. Use a fresh runtime directory for a new build and reuse the existing data directory.
 
 In the same PowerShell 7 session, run `.\scripts\package-windows.ps1 -OutputZip (Join-Path $devRoot 'work\asl-dev.zip') -DebugBuild -Offline` to create a portable development ZIP at a new path. See the [portable package guide](packaging/windows/README.md) for installation, background startup and signed offline updates. An official signed distribution is not yet available.
 

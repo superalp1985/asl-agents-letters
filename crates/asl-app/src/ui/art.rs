@@ -39,6 +39,62 @@ impl Mood {
     }
 }
 
+/// One explainer scene: a distinct character acting out one ASL state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(super) enum Scene {
+    Idle,
+    Message,
+    Transfer,
+    Waiting,
+    Done,
+    Warning,
+    Browse,
+    Silent,
+    Answer,
+}
+
+/// Frames per explainer scene.
+pub(super) const SCENE_FRAMES: usize = 4;
+
+macro_rules! scene_frames {
+    ($name:literal) => {
+        [
+            include_bytes!(concat!("../../assets/mascot/anim-", $name, "-0-128.png")),
+            include_bytes!(concat!("../../assets/mascot/anim-", $name, "-1-128.png")),
+            include_bytes!(concat!("../../assets/mascot/anim-", $name, "-2-128.png")),
+            include_bytes!(concat!("../../assets/mascot/anim-", $name, "-3-128.png")),
+        ]
+    };
+}
+
+impl Scene {
+    pub(super) const ALL: [Self; 9] = [
+        Self::Idle,
+        Self::Message,
+        Self::Transfer,
+        Self::Waiting,
+        Self::Done,
+        Self::Warning,
+        Self::Browse,
+        Self::Silent,
+        Self::Answer,
+    ];
+
+    fn frames(self) -> [&'static [u8]; SCENE_FRAMES] {
+        match self {
+            Self::Idle => scene_frames!("idle"),
+            Self::Message => scene_frames!("message"),
+            Self::Transfer => scene_frames!("transfer"),
+            Self::Waiting => scene_frames!("waiting"),
+            Self::Done => scene_frames!("done"),
+            Self::Warning => scene_frames!("warning"),
+            Self::Browse => scene_frames!("browse"),
+            Self::Silent => scene_frames!("silent"),
+            Self::Answer => scene_frames!("answer"),
+        }
+    }
+}
+
 /// Small pixel glyphs for empty, mode and identity states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Glyph {
@@ -149,6 +205,16 @@ pub(super) fn mascot_state(ctx: &egui::Context, mood: Mood) -> TextureHandle {
     texture(ctx, "asl-mascot-state", mood, mood.bytes())
 }
 
+pub(super) fn scene_frame(ctx: &egui::Context, scene: Scene, index: usize) -> TextureHandle {
+    let index = index % SCENE_FRAMES;
+    texture(
+        ctx,
+        "asl-explainer-scene",
+        (scene, index),
+        scene.frames()[index],
+    )
+}
+
 fn texture(
     ctx: &egui::Context,
     namespace: &'static str,
@@ -183,6 +249,11 @@ mod tests {
             Mood::Warning,
         ] {
             assert_eq!(png(mood.bytes()).size, [128, 128]);
+        }
+        for scene in Scene::ALL {
+            for bytes in scene.frames() {
+                assert_eq!(png(bytes).size, [128, 128], "{scene:?}");
+            }
         }
         assert_eq!(asl_app::avatar::presets::PNGS.len(), 12);
         for bytes in asl_app::avatar::presets::PNGS {

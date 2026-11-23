@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "move-build-output.ps1")
 if (-not $env:CARGO_TARGET_DIR -or -not $env:CARGO_HOME -or -not $env:RUSTUP_HOME) {
     throw "Run scripts/dev-env.ps1 in this PowerShell session first."
 }
@@ -45,7 +46,7 @@ try {
     foreach ($name in $names) {
         [IO.File]::Copy($binaries[$name], (Join-Path $staging "$name.exe"))
     }
-    [IO.Directory]::Move($staging, $destination)
+    Move-AslBuildOutput -Source $staging -Destination $destination -Directory
 }
 finally {
     if ([IO.Directory]::Exists($staging)) {

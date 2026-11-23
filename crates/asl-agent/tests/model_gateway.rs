@@ -82,6 +82,8 @@ impl MockServer {
                     Err(_) => return false,
                 }
             };
+            // Windows inherits nonblocking mode from the listening socket.
+            stream.set_nonblocking(false).unwrap();
             let request = read_request(&mut stream);
             let _ = sender.send(request);
             thread::sleep(response.delay);
@@ -359,6 +361,30 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         }
     }
     request
+}
+
+#[test]
+fn mock_server_waits_for_the_request_body_after_accepting() {
+    let server = MockServer::start(success_response());
+    let mut client = TcpStream::connect(
+        reqwest::Url::parse(&server.endpoint)
+            .unwrap()
+            .socket_addrs(|| None)
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    client
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n",
+        )
+        .unwrap();
+    assert!(matches!(
+        server.request.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    client.write_all(b"test").unwrap();
+    assert_eq!(request_body(&server.join()), b"test");
 }
 
 fn trap_listener() -> (SocketAddr, JoinHandle<bool>) {

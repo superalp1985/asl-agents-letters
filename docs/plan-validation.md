@@ -948,3 +948,19 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - Windows x64、Rust 1.100.0、锁定依赖离线；`cargo test --workspace --all-targets --features asl-app/desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：859 通过、1 失败、11 忽略。收件审批跨 Core 重启的 MCP 回归通过。
 - 失败为 `asl-agent` 的 `model_gateway::authorized_prompt_uses_only_registered_endpoint_and_returns_model_text`，本机模拟服务返回路径出现 `ProviderUnavailable`。前一次遇错停止的运行在同一测试目标中有两条不同用例报相同错误。没有定位根因，不能标记工作区测试全绿。
 - 同配置的工作区全目标严格 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。未执行真实外部模型、公网双节点、72 小时长跑或提权 AppContainer 验收。
+
+### 2026-11-24 桌面启动与美术改动复检
+
+- `asl-ui.exe --home <目录>` 可显式打开已有资料，优先于继承的 `ASL_HOME`；无参数仍兼容原启动器。参数缺失或不完整时不回退到其他资料目录。未读取到资料时不会先弹出无法保存的语言设置。
+- Windows x64、Rust 1.100.0；沿用上一轮全工作区串行命令：**865 通过、0 失败、11 忽略**。工作区严格 Clippy、格式和差异检查通过。此前日志中的传输 `PermissionDenied` 和模拟网关 `ProviderUnavailable` 本轮未复现，尚未确认根因。
+- 调试便携 ZIP 核对 17 项散列。在含空格的解包路径、不预设 `ASL_HOME` 的环境下通过 `Start-ASL.ps1 -DataDirectory` 启动，确认 SQLite 建在指定临时资料目录；不重启 Core 时可用显式 `--home` 重新打开窗口。渲染器直接截图确认无数据目录时显示指引、没有语言弹窗。新头像与动画帧通过编译内嵌资源的解码检查。
+- 未操作用户已有资料，未逐项人工检查新界面与托盘，也未重跑需手动启用的 AppContainer 或公网验收。
+
+### 2026-11-24 Windows 优化版测试候选
+
+- `Start-ASL.ps1 -ViewerOnly` 只打开当前激活版本的界面。Cargo 路径由本机脚本或环境变量指定；独立 checkout 不需要 `E:` 盘。构建发布动作只对 Windows 文件共享冲突限时重试，不覆盖已有输出，不更改签名更新器。
+- 本地模型 HTTP 夹具显式将已接受的连接设为阻塞，依旧受既有读超时限制。分段发送请求头／请求体的回归在修改前失败，修改后通过。正式模型网关、网络授权没有变更；真实模型服务未验收。
+- `cargo test --workspace --all-targets --features asl-app/desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：各 Cargo 目标共 **865 通过、0 失败、13 忽略**；另有一个成功的子进程夹具摘要。单独运行并通过 5 项显式测试：便携窗口入口、打包共享冲突、两次签名更新预检与激活、跨 Core 头像隔离解码、30 秒生产补扫计时。
+- 全目标严格 Clippy、格式与 Git 差异检查通过。CDDL 语法通过，24 个向量中 19 个接受、5 个拒绝，符合预期。
+- Windows x64 优化版测试 ZIP：`ASL-Windows-x64-Test-2026-11-24.zip`。SHA-256：`0cb2e88910947e6850198d686fbcc5db9f714de6386eb7ff7a08be5ef6118881`。解包验证 18 个文件和 17 项散列；用新资料启动后，`-ViewerOnly` 重开界面时 Core 进程号不变。未使用用户旧资料。
+- 这是供[单机人工验收](windows-test-checklist.md)的未签名包，不是正式 1.0。真实用户托盘与 DPI、提权容器多来源、真实链注册及撤销、跨机互通和长时间运行仍待验。

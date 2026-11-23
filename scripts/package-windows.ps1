@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'move-build-output.ps1')
 if ($OutputZip -notmatch '^[A-Za-z]:[\\/]' -or [IO.Path]::GetExtension($OutputZip) -ne '.zip') {
     throw 'Specify an absolute local .zip output path.'
 }
@@ -40,7 +41,7 @@ try {
     }
     [IO.File]::WriteAllLines((Join-Path $package 'SHA256SUMS.txt'), $hashes, [Text.Encoding]::ASCII)
     [IO.Compression.ZipFile]::CreateFromDirectory($package, $stagingZip)
-    [IO.File]::Move($stagingZip, $archive)
+    Move-AslBuildOutput -Source $stagingZip -Destination $archive
 }
 finally {
     [IO.File]::Delete($stagingZip)

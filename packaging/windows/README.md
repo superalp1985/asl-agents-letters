@@ -7,6 +7,14 @@
 ```
 
 请把示例路径替换为实际数据目录。现有资料和迁移后的资料都从指定目录加载。
+不要直接双击 `asl-ui.exe`：它不会自动选择资料目录。
+如果同一资料的后台已运行，只打开当前版本的界面：
+
+```powershell
+.\Start-ASL.ps1 -ViewerOnly -DataDirectory 'E:\Your-Asl-Data'
+```
+
+此模式不启动或重启后台。
 
 需要登录后后台运行时，在解压后的目录执行：
 
@@ -40,6 +48,10 @@ Do not run from a shared-writable directory. The scripts do not configure or
 audit ACLs. Keep the bundled `active-release.txt`. In PowerShell, run
 `.\Start-ASL.ps1 -DataDirectory '<absolute data directory>'` from the extracted
 directory. Use the same data directory to reopen an existing profile.
+Do not double-click `asl-ui.exe`; it does not automatically select a profile.
+When Core is already running for that profile, use
+`.\Start-ASL.ps1 -ViewerOnly -DataDirectory '<absolute data directory>'`
+to reopen the active version's viewer without restarting Core.
 
 `.\Set-ASLLogin.ps1 -Enable -DataDirectory '<absolute data directory>'` registers
 background startup for the current Windows user. Running it without arguments
