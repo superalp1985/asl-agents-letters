@@ -84,6 +84,42 @@ pub(super) fn pin_executable(path: &Path) -> Result<ExecutablePin, AslError> {
     })
 }
 
+pub(crate) fn read_local_selection(
+    path: &Path,
+    protected_root: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AslError> {
+    let parent = pin_directory(path.parent().ok_or(AslError::NotFound)?)?;
+    let protected = pin_directory(protected_root)?;
+    if path_contains(&protected.name, &parent.name) {
+        return Err(AslError::PolicyDenied);
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(AslError::NotFound)?;
+    let components = validated_relative(Path::new(name))?;
+    if components.len() != 1 {
+        return Err(AslError::NotFound);
+    }
+    let file = relative_open(parent.pins.last().ok_or(AslError::NotFound)?, name, false)?;
+    let information = inspect(&file, false)?;
+    check_long_name(&file, &parent.name, name)?;
+    if information.identity.volume_serial != parent.identity.volume_serial {
+        return Err(AslError::NotFound);
+    }
+    let len = usize::try_from(information.standard.EndOfFile).map_err(|_| AslError::NotFound)?;
+    if len > max_bytes {
+        return Err(AslError::QuotaExceeded);
+    }
+    let mut bytes = Vec::with_capacity(len);
+    file.take(len as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() != len {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(bytes)
+}
+
 pub(crate) struct SourceRoot {
     directory: PinnedDirectory,
     protected: PinnedDirectory,

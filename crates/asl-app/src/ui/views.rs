@@ -1,4 +1,7 @@
 mod conversations;
+mod group_invites;
+mod local_selection;
+mod remote_avatars;
 
 use std::{
     ffi::OsString,
@@ -7,9 +10,10 @@ use std::{
 };
 
 use asl_store::dashboard::{Dashboard, GroupRow};
-use eframe::egui::{self, RichText, Ui, Vec2};
+use eframe::egui::{self, RichText, Ui};
+pub(super) use remote_avatars::RemoteAvatars;
 
-use super::{ACCENT, MUTED};
+use super::{ACCENT, MUTED, art::Glyph, locale::Language};
 
 pub(super) struct AccessForm {
     pub(super) share_path: String,
@@ -24,6 +28,8 @@ pub(super) struct AccessForm {
     pub(super) derived_path: String,
     pub(super) derived_limit_mib: String,
     pub(super) pending_revoke: Option<(String, String, String)>,
+    import: Option<(String, String)>,
+    selection_error: Option<&'static str>,
 }
 
 impl Default for AccessForm {
@@ -41,11 +47,14 @@ impl Default for AccessForm {
             derived_path: String::new(),
             derived_limit_mib: "256".into(),
             pending_revoke: None,
+            import: None,
+            selection_error: None,
         }
     }
 }
 
 pub(super) struct Interaction<'a> {
+    pub(super) avatar: &'a mut super::avatar::Preview,
     pub(super) code_input: &'a mut String,
     pub(super) access_form: &'a mut AccessForm,
     pub(super) retention: &'a mut super::retention::RetentionForm,
@@ -57,11 +66,14 @@ pub(super) struct Interaction<'a> {
     >,
     pub(super) actions_enabled: bool,
     pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) group_admin: &'a mut super::group_admin::Form,
     pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
+    pub(super) remote_avatars: &'a mut RemoteAvatars,
     pub(super) checkpoints: &'a Result<
         Option<asl_app::checkpoint_access::CheckpointStatus>,
         asl_types::error::AslError,
     >,
+    pub(super) language: Language,
     pub(super) action: &'a mut Option<super::LocalAction>,
 }
 
@@ -100,20 +112,6 @@ impl Page {
         Self::Access,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Overview => "概览",
-            Self::Activity => "活动",
-            Self::Nodes => "节点",
-            Self::Contacts => "联系人",
-            Self::Groups => "群组",
-            Self::Transfers => "传输",
-            Self::Knowledge => "资源与经验",
-            Self::Trust => "信任与贡献",
-            Self::Access => "授权",
-        }
-    }
-
     pub fn show(
         self,
         ui: &mut Ui,
@@ -122,14 +120,18 @@ impl Page {
         interaction: &mut Interaction<'_>,
     ) {
         let Interaction {
+            avatar,
             code_input,
             access_form,
             retention,
             network_config,
             model_endpoints,
             checkpoint_form,
+            group_admin,
             profile_form,
+            remote_avatars,
             checkpoints,
+            language,
             actions_enabled,
             action,
         } = interaction;
@@ -142,81 +144,151 @@ impl Page {
             .id_salt(self)
             .show(ui, |ui| match self {
                 Self::Overview => {
-                    overview(ui, data, mascot, *actions_enabled, action);
+                    overview(
+                        ui,
+                        data,
+                        mascot,
+                        avatar,
+                        *language,
+                        *actions_enabled,
+                        action,
+                    );
                 }
                 Self::Activity => {
-                    retention.show(ui, data, *actions_enabled, action);
-                    ui.label(RichText::new("近期结构化直连请求").strong());
+                    retention.show(ui, data, *language, *actions_enabled, action);
+                    ui.label(
+                        RichText::new(ui_text(
+                            *language,
+                            "近期结构化直连请求",
+                            "Recent structured direct requests",
+                        ))
+                        .strong(),
+                    );
                     table(
                         ui,
                         [
-                            "收到",
-                            "意图",
-                            "主题编号",
-                            "约束数",
-                            "结果类型",
+                            ui_text(*language, "收到", "Received"),
+                            ui_text(*language, "意图", "Intent"),
+                            ui_text(*language, "主题编号", "Topics"),
+                            ui_text(*language, "约束数", "Constraints"),
+                            ui_text(*language, "结果类型", "Result"),
                             "AgentId",
-                            "设备 PeerId",
+                            ui_text(*language, "设备 PeerId", "Device PeerId"),
                         ],
                         [0.8, 1.0, 1.5, 0.7, 1.0, 2.0, 2.0],
                         &data.direct_observations,
-                        "暂无直连请求",
+                        ui_text(*language, "暂无直连请求", "No direct requests"),
                         |row| {
                             [
-                                age(row.observed_at_ms, now),
-                                inbound_intent(row.intent).into(),
+                                age(row.observed_at_ms, now, *language),
+                                inbound_intent(row.intent, *language).into(),
                                 row.topic_ids
                                     .iter()
                                     .map(|(vocabulary, concept)| format!("{vocabulary}:{concept}"))
                                     .collect::<Vec<_>>()
                                     .join(", "),
                                 row.constraint_count.to_string(),
-                                inbound_result_shape(row.result_shape).into(),
+                                inbound_result_shape(row.result_shape, *language).into(),
                                 row.agent_id.clone(),
                                 row.peer_id.clone(),
                             ]
                         },
                     );
                     ui.add_space(12.0);
-                    ui.label(RichText::new("会话活动").strong());
-                    conversations::show(ui, data, now);
+                    ui.label(
+                        RichText::new(ui_text(*language, "会话活动", "Session activity")).strong(),
+                    );
+                    conversations::show(ui, data, now, *language);
                 }
                 Self::Nodes => {
                     super::network_privacy::show(
                         ui,
                         network_config,
                         data,
+                        *language,
                         *actions_enabled,
                         action,
                     );
                     ui.separator();
-                    checkpoint_form.show(ui, checkpoints, *actions_enabled, action);
+                    checkpoint_form.show(ui, checkpoints, *language, *actions_enabled, action);
                     ui.separator();
-                    profile_form.show(ui, data, now.max(0) as u64, *actions_enabled, action);
+                    profile_form.show(
+                        ui,
+                        data,
+                        now.max(0) as u64,
+                        *language,
+                        *actions_enabled,
+                        action,
+                    );
                     ui.separator();
+                    ui.label(
+                        RichText::new(ui_text(
+                            *language,
+                            "已收到的公开资料",
+                            "Verified public profiles",
+                        ))
+                        .strong(),
+                    );
+                    profile_form.lookup(ui, data, *language, *actions_enabled, action);
+                    remote_avatars.show(ui, data, now, *actions_enabled, *language, action);
+                    ui.separator();
+                    empty_glyph(ui, data.nodes.is_empty(), Glyph::EmptyNode);
                     table(
                         ui,
-                        ["AgentId", "设备 PeerId", "已记录的身份状态", "最近见过"],
+                        [
+                            "AgentId",
+                            ui_text(*language, "设备 PeerId", "Device PeerId"),
+                            ui_text(*language, "已记录的身份状态", "Identity state"),
+                            ui_text(*language, "最近见过", "Last seen"),
+                        ],
                         [2.0, 2.0, 1.5, 1.0],
                         &data.nodes,
-                        "暂无节点记录",
+                        ui_text(*language, "暂无节点记录", "No node records"),
                         |row| {
                             [
                                 row.agent_id.clone(),
                                 row.peer_id.clone(),
-                                text(&row.identity_state).into(),
-                                age(row.last_seen_ms, now),
+                                text(&row.identity_state, *language).into(),
+                                age(row.last_seen_ms, now, *language),
                             ]
                         },
                     );
                 }
-                Self::Contacts => contacts(ui, data, now, code_input, *actions_enabled, action),
+                Self::Contacts => contacts(
+                    ui,
+                    data,
+                    now,
+                    code_input,
+                    *language,
+                    *actions_enabled,
+                    action,
+                ),
                 Self::Groups => {
+                    let mut group_admin_context = super::group_admin::ShowContext {
+                        data,
+                        loopback_enabled: super::group_admin::enabled(network_config, data),
+                        language: *language,
+                        actions_enabled: *actions_enabled,
+                        now: u64::try_from(now).unwrap_or(u64::MAX),
+                        action,
+                    };
+                    group_admin.show(ui, &mut group_admin_context);
+                    ui.separator();
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("所有群组").strong());
+                        ui.label(
+                            RichText::new(ui_text(*language, "所有群组", "All groups")).strong(),
+                        );
                         for (field, label, mut value) in [
-                            ("browse", "浏览来信", data.group_inbound.browse_enabled),
-                            ("answer", "允许自动回答", data.group_inbound.answer_enabled),
+                            (
+                                "browse",
+                                ui_text(*language, "允许浏览", "Allow browsing"),
+                                data.group_inbound.browse_enabled,
+                            ),
+                            (
+                                "answer",
+                                ui_text(*language, "允许回答", "Allow answers"),
+                                data.group_inbound.answer_enabled,
+                            ),
                         ] {
                             if ui
                                 .add_enabled(
@@ -231,41 +303,82 @@ impl Page {
                                 ));
                             }
                         }
+                        if data.group_inbound.browse_enabled && !data.group_inbound.answer_enabled {
+                            inline_glyph(ui, Glyph::NoAnswer);
+                            ui.label(
+                                RichText::new(ui_text(
+                                    *language,
+                                    "只浏览，不回答",
+                                    "Browse only, no answers",
+                                ))
+                                .color(MUTED),
+                            );
+                        }
                     });
                     ui.add_space(12.0);
+                    empty_glyph(ui, data.groups.is_empty(), Glyph::EmptyGroup);
                     table(
                         ui,
-                        ["群组", "状态", "成员", "MLS / 成员版本", "群组 ID"],
+                        [
+                            ui_text(*language, "群组", "Group"),
+                            ui_text(*language, "状态", "State"),
+                            ui_text(*language, "成员", "Members"),
+                            "MLS / Membership",
+                            "Group ID",
+                        ],
                         [2.2, 1.1, 0.7, 1.6, 1.4],
                         &data.groups,
-                        "暂无群组",
+                        ui_text(*language, "暂无群组", "No groups"),
                         |row| {
                             [
                                 row.name.clone(),
-                                text(&row.state).into(),
+                                text(&row.state, *language).into(),
                                 row.active_members.to_string(),
                                 format!("{} / {}", row.mls_epoch, row.membership_epoch),
                                 row.group_id.clone(),
                             ]
                         },
                     );
+                    group_invites::show(
+                        ui,
+                        data,
+                        *language,
+                        *actions_enabled
+                            && network_config.as_ref().is_ok_and(|cfg| cfg.loopback_groups),
+                        action,
+                    );
                 }
                 Self::Transfers => {
-                    transfers(ui, data, now, *actions_enabled, action);
+                    transfers(ui, data, now, *language, *actions_enabled, action);
                 }
                 Self::Knowledge => table(
                     ui,
-                    ["标题", "来源", "证据状态", "索引", "更新"],
+                    [
+                        ui_text(*language, "标题", "Title"),
+                        ui_text(*language, "来源", "Origin"),
+                        ui_text(*language, "证据状态", "Evidence"),
+                        ui_text(*language, "索引", "Index"),
+                        ui_text(*language, "更新", "Updated"),
+                    ],
                     [2.4, 0.8, 1.3, 0.7, 0.9],
                     &data.knowledge,
-                    "暂无资源或经验",
+                    ui_text(
+                        *language,
+                        "暂无资源或经验",
+                        "No resources or derived knowledge",
+                    ),
                     |row| {
                         [
                             row.title.clone(),
-                            text(&row.origin).into(),
-                            text(&row.evidence_status).into(),
-                            if row.active { "有效" } else { "停用" }.into(),
-                            age(row.updated_at_ms, now),
+                            text(&row.origin, *language).into(),
+                            text(&row.evidence_status, *language).into(),
+                            if row.active {
+                                ui_text(*language, "有效", "Active")
+                            } else {
+                                ui_text(*language, "停用", "Inactive")
+                            }
+                            .into(),
+                            age(row.updated_at_ms, now, *language),
                         ]
                     },
                 ),
@@ -273,16 +386,16 @@ impl Page {
                     ui,
                     [
                         "AgentId",
-                        "完整性",
-                        "可用性",
-                        "证据",
-                        "履约",
-                        "贡献",
-                        "偏好",
+                        ui_text(*language, "完整性", "Integrity"),
+                        ui_text(*language, "可用性", "Availability"),
+                        ui_text(*language, "证据", "Evidence"),
+                        ui_text(*language, "履约", "Reliability"),
+                        ui_text(*language, "贡献", "Contribution"),
+                        ui_text(*language, "偏好", "Preferred"),
                     ],
                     [1.8, 1.0, 1.0, 0.8, 0.8, 0.7, 0.7],
                     &data.trust,
-                    "暂无本机信任记录",
+                    ui_text(*language, "暂无本机信任记录", "No local trust records"),
                     |row| {
                         [
                             row.agent_id.clone(),
@@ -291,14 +404,25 @@ impl Page {
                             votes(row.evidence),
                             votes(row.promise),
                             row.contributions.to_string(),
-                            if row.preferred { "是" } else { "否" }.into(),
+                            if row.preferred {
+                                ui_text(*language, "是", "Yes")
+                            } else {
+                                ui_text(*language, "否", "No")
+                            }
+                            .into(),
                         ]
                     },
                 ),
                 Self::Access => {
-                    super::model_endpoints::show(ui, model_endpoints, *actions_enabled, action);
+                    super::model_endpoints::show(
+                        ui,
+                        model_endpoints,
+                        *language,
+                        *actions_enabled,
+                        action,
+                    );
                     ui.separator();
-                    access(ui, data, access_form, *actions_enabled, action);
+                    access(ui, data, access_form, *language, *actions_enabled, action);
                 }
             });
     }
@@ -308,20 +432,88 @@ fn transfers(
     ui: &mut Ui,
     data: &Dashboard,
     now: i64,
+    language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
     mode_control(
         ui,
-        "接收",
+        ui_text(language, "接收", "Receive"),
         "downloads",
         &data.download_mode,
+        language,
         actions_enabled,
         action,
     );
-    ui.label(RichText::new("待处理的接收请求").strong());
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "待处理的接收请求",
+            "Pending receive requests",
+        ))
+        .strong(),
+    );
+    if let Some(request) = data.host_inbox_request {
+        let request = alloy_primitives::hex::encode(request.0);
+        ui.label(ui_text(
+            language,
+            "本地 Agent 请求本次会话的收件目录",
+            "The local Agent requests an inbox for this session",
+        ));
+        let mut directories = data
+            .access
+            .iter()
+            .filter(|r| r.kind == "inbox" && r.state == "active")
+            .peekable();
+        if directories.peek().is_none() {
+            ui.label(ui_text(
+                language,
+                "尚无收件目录，可先在授权页添加。",
+                "No inbox grant is available. Add one on the Access page.",
+            ));
+        }
+        for row in directories {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(&row.directory_path);
+                if ui
+                    .add_enabled(
+                        actions_enabled && action.is_none(),
+                        egui::Button::new(ui_text(
+                            language,
+                            "允许本次会话使用",
+                            "Allow for this session",
+                        )),
+                    )
+                    .clicked()
+                {
+                    *action = Some(super::LocalAction::new(
+                        "downloads",
+                        [
+                            "bind-host-inbox".into(),
+                            request.clone().into(),
+                            row.id.clone().into(),
+                        ],
+                    ));
+                }
+            });
+        }
+        if ui
+            .add_enabled(
+                actions_enabled && action.is_none(),
+                egui::Button::new(ui_text(language, "拒绝目录请求", "Reject inbox request")),
+            )
+            .clicked()
+        {
+            *action = Some(super::LocalAction::new(
+                "downloads",
+                ["deny-host-inbox".into(), request.into()],
+            ));
+        }
+    }
     if data.download_approvals.is_empty() {
-        ui.label(RichText::new("暂无待处理请求").color(MUTED));
+        ui.label(
+            RichText::new(ui_text(language, "暂无待处理请求", "No pending requests")).color(MUTED),
+        );
     }
     for approval in &data.download_approvals {
         ui.group(|ui| {
@@ -329,26 +521,30 @@ fn transfers(
                 .destination_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("接收文件");
+                .unwrap_or(ui_text(language, "接收文件", "Received file"));
             ui.horizontal_wrapped(|ui| {
                 ui.add(egui::Label::new(RichText::new(filename).strong()).truncate())
                     .on_hover_text(approval.destination_path.display().to_string());
                 ui.label(bytes(approval.file_size));
-                ui.label(if approval.approved {
-                    "已批准"
-                } else {
-                    "等待确认"
-                });
-                ui.label(format!("剩余 {}", remaining(approval.expires_at_ms, now)));
-                ui.label(format!("来源 × {}", approval.sources.len()))
-                    .on_hover_text(
-                        approval
-                            .sources
-                            .iter()
-                            .map(peer_text)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
+                approval_state(ui, approval.approved, "已批准", "Approved", language);
+                ui.label(format!(
+                    "{} {}",
+                    ui_text(language, "剩余", "Remaining"),
+                    remaining(approval.expires_at_ms, now, language)
+                ));
+                ui.label(format!(
+                    "{} × {}",
+                    ui_text(language, "来源", "Sources"),
+                    approval.sources.len()
+                ))
+                .on_hover_text(
+                    approval
+                        .sources
+                        .iter()
+                        .map(|peer| peer_text(peer, language))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label(compact(&alloy_primitives::hex::encode(
@@ -362,6 +558,7 @@ fn transfers(
                     approval.approved,
                     actions_enabled,
                     action,
+                    language,
                 );
             });
         });
@@ -370,15 +567,25 @@ fn transfers(
     ui.add_space(12.0);
     mode_control(
         ui,
-        "发送",
+        ui_text(language, "发送", "Send"),
         "uploads",
         &data.upload_mode,
+        language,
         actions_enabled,
         action,
     );
-    ui.label(RichText::new("待处理的发送请求").strong());
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "待处理的发送请求",
+            "Pending send requests",
+        ))
+        .strong(),
+    );
     if data.upload_approvals.is_empty() {
-        ui.label(RichText::new("暂无待处理请求").color(MUTED));
+        ui.label(
+            RichText::new(ui_text(language, "暂无待处理请求", "No pending requests")).color(MUTED),
+        );
     }
     for approval in &data.upload_approvals {
         ui.group(|ui| {
@@ -386,20 +593,26 @@ fn transfers(
                 ui.add(egui::Label::new(RichText::new(&approval.filename).strong()).truncate())
                     .on_hover_text(&approval.filename);
                 ui.label(bytes(approval.file_size));
-                ui.label(if approval.approved {
-                    "已批准，等待对方重试"
-                } else {
-                    "等待确认"
-                });
-                ui.label(format!("剩余 {}", remaining(approval.expires_at_ms, now)));
+                approval_state(
+                    ui,
+                    approval.approved,
+                    "已批准，等待对方重试",
+                    "Approved, waiting for retry",
+                    language,
+                );
+                ui.label(format!(
+                    "{} {}",
+                    ui_text(language, "剩余", "Remaining"),
+                    remaining(approval.expires_at_ms, now, language)
+                ));
                 if let Some(agent) = approval.target_agent_id.as_ref() {
                     let agent = bs58::encode(agent.as_bytes()).into_string();
                     ui.label(compact(&agent)).on_hover_text(agent);
                 }
-                let peer = peer_text(&approval.target_peer_id);
+                let peer = peer_text(&approval.target_peer_id, language);
                 ui.label(compact(&peer)).on_hover_text(peer);
                 if approval.group.is_some() {
-                    ui.label("群组请求");
+                    ui.label(ui_text(language, "群组请求", "Group request"));
                 }
             });
             ui.horizontal_wrapped(|ui| {
@@ -414,26 +627,47 @@ fn transfers(
                     approval.approved,
                     actions_enabled,
                     action,
+                    language,
                 );
             });
         });
     }
 
+    for row in data
+        .transfers
+        .iter()
+        .filter(|row| matches!(row.state.as_str(), "running" | "verifying") && row.file_size > 0)
+    {
+        let progress = (row.durable_bytes as f64 / row.file_size as f64).clamp(0.0, 1.0) as f32;
+        let id: String = row.transfer_id.chars().take(12).collect();
+        ui.add(egui::ProgressBar::new(progress).fill(ACCENT).text(format!(
+            "{id} · {} · {:.0}%",
+            text(&row.state, language),
+            progress * 100.0
+        )));
+    }
     ui.add_space(12.0);
-    ui.label(RichText::new("传输记录").strong());
+    ui.label(RichText::new(ui_text(language, "传输记录", "Transfer history")).strong());
+    empty_glyph(ui, data.transfers.is_empty(), Glyph::TransferComplete);
     table(
         ui,
-        ["传输 ID", "状态", "已校验 / 总量", "来源", "更新"],
+        [
+            ui_text(language, "传输 ID", "Transfer ID"),
+            ui_text(language, "状态", "State"),
+            ui_text(language, "已校验 / 总量", "Verified / total"),
+            ui_text(language, "来源", "Sources"),
+            ui_text(language, "更新", "Updated"),
+        ],
         [1.5, 0.9, 2.1, 0.6, 0.9],
         &data.transfers,
-        "暂无下载记录",
+        ui_text(language, "暂无下载记录", "No transfer records"),
         |row| {
             [
                 row.transfer_id.clone(),
-                text(&row.state).into(),
+                text(&row.state, language).into(),
                 format!("{} / {}", bytes(row.durable_bytes), bytes(row.file_size)),
                 row.source_count.to_string(),
-                age(row.updated_at_ms, now),
+                age(row.updated_at_ms, now, language),
             ]
         },
     );
@@ -444,12 +678,19 @@ fn mode_control(
     label: &str,
     command: &'static str,
     mode: &str,
+    language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).strong());
-        for (value, name) in [("automatic", "自动"), ("ask", "逐次询问")] {
+        for (value, name) in [
+            (
+                "automatic",
+                ui_text(language, "自动接收", "Receive automatically"),
+            ),
+            ("ask", ui_text(language, "每次询问", "Ask each time")),
+        ] {
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
@@ -474,13 +715,14 @@ fn decision_buttons(
     approved: bool,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
+    language: Language,
 ) {
     let id = alloy_primitives::hex::encode(approval_id);
     if !approved
         && ui
             .add_enabled(
                 actions_enabled && action.is_none(),
-                egui::Button::new("批准"),
+                egui::Button::new(ui_text(language, "批准", "Approve")),
             )
             .clicked()
     {
@@ -489,11 +731,15 @@ fn decision_buttons(
             [OsString::from("approve"), OsString::from(&id)],
         ));
     }
-    let label = if approved { "撤销批准" } else { "拒绝" };
+    let label = if approved {
+        ui_text(language, "撤销批准", "Revoke approval")
+    } else {
+        ui_text(language, "拒绝", "Reject")
+    };
     if ui
         .add_enabled(
             actions_enabled && action.is_none(),
-            egui::Button::new(label),
+            egui::Button::new(RichText::new(label).color(super::tokens::DANGER)),
         )
         .clicked()
     {
@@ -504,10 +750,10 @@ fn decision_buttons(
     }
 }
 
-fn peer_text(peer: &asl_types::ids::PeerId) -> String {
+fn peer_text(peer: &asl_types::ids::PeerId, language: Language) -> String {
     libp2p_identity::PeerId::from_bytes(peer.as_bytes())
         .map(|peer| peer.to_base58())
-        .unwrap_or_else(|_| "无效设备 ID".into())
+        .unwrap_or_else(|_| ui_text(language, "无效设备 ID", "Invalid device ID").into())
 }
 
 fn compact(value: &str) -> String {
@@ -520,15 +766,16 @@ fn compact(value: &str) -> String {
     }
 }
 
-fn remaining(expires_at_ms: i64, now_ms: i64) -> String {
+fn remaining(expires_at_ms: i64, now_ms: i64, language: Language) -> String {
     let seconds = expires_at_ms.saturating_sub(now_ms).max(0) / 1000;
-    if seconds < 60 {
-        format!("{seconds} 秒")
+    let (value, zh, en) = if seconds < 60 {
+        (seconds, "秒", "s")
     } else if seconds < 3600 {
-        format!("{} 分钟", seconds / 60)
+        (seconds / 60, "分钟", "min")
     } else {
-        format!("{} 小时", seconds / 3600)
-    }
+        (seconds / 3600, "小时", "h")
+    };
+    format!("{value} {}", ui_text(language, zh, en))
 }
 
 fn contacts(
@@ -536,23 +783,28 @@ fn contacts(
     data: &Dashboard,
     now: i64,
     code_input: &mut String,
+    language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.label(format!(
-            "本机短码：{}",
+            "{}: {}",
+            ui_text(language, "本机短码", "Local short code"),
             data.identity
                 .binding_code
                 .as_deref()
                 .map(format_code)
-                .unwrap_or_else(|| "不可用".into())
+                .unwrap_or_else(|| ui_text(language, "不可用", "Unavailable").into())
         ));
         let mut publish = data.binding_code_public;
         if ui
             .add_enabled(
                 actions_enabled && action.is_none(),
-                egui::Checkbox::new(&mut publish, "公开短码"),
+                egui::Checkbox::new(
+                    &mut publish,
+                    ui_text(language, "公开短码", "Publish short code"),
+                ),
             )
             .changed()
         {
@@ -568,7 +820,7 @@ fn contacts(
     ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(code_input)
-                .hint_text("输入 16 位短码")
+                .hint_text(ui_text(language, "输入 16 位短码", "Enter 16-digit code"))
                 .desired_width(190.0),
         );
         if ui
@@ -577,7 +829,7 @@ fn contacts(
                     && action.is_none()
                     && code_input.len() == 16
                     && code_input.bytes().all(|byte| byte.is_ascii_digit()),
-                egui::Button::new("查找"),
+                egui::Button::new(ui_text(language, "查找", "Find")),
             )
             .clicked()
         {
@@ -591,14 +843,14 @@ fn contacts(
         }
     });
     ui.add_space(12.0);
-    ui.label(RichText::new("待确认候选").strong());
+    ui.label(RichText::new(ui_text(language, "待确认候选", "Pending candidates")).strong());
     let pending = data
         .binding_candidates
         .iter()
         .filter(|candidate| !candidate.dismissed)
         .collect::<Vec<_>>();
     if pending.is_empty() {
-        ui.label(RichText::new("暂无候选").color(MUTED));
+        ui.label(RichText::new(ui_text(language, "暂无候选", "No candidates")).color(MUTED));
     }
     for candidate in pending {
         ui.horizontal_wrapped(|ui| {
@@ -607,20 +859,21 @@ fn contacts(
                     "{}  {}  {}",
                     candidate.agent_id,
                     candidate.peer_id,
-                    age(candidate.first_seen_ms, now)
+                    age(candidate.first_seen_ms, now, language)
                 ))
                 .truncate(),
             )
             .on_hover_text(format!(
-                "AgentId: {}\nPeerId: {}\n短码: {}",
+                "AgentId: {}\nPeerId: {}\n{}: {}",
                 candidate.agent_id,
                 candidate.peer_id,
+                ui_text(language, "短码", "Code"),
                 format_code(&candidate.code)
             ));
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
-                    egui::Button::new("绑定"),
+                    egui::Button::new(ui_text(language, "绑定", "Bind")),
                 )
                 .clicked()
             {
@@ -637,7 +890,7 @@ fn contacts(
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
-                    egui::Button::new("忽略"),
+                    egui::Button::new(ui_text(language, "忽略", "Dismiss")),
                 )
                 .clicked()
             {
@@ -654,9 +907,10 @@ fn contacts(
         });
     }
     ui.add_space(12.0);
-    ui.label(RichText::new("本机绑定").strong());
+    ui.label(RichText::new(ui_text(language, "本机绑定", "Local bindings")).strong());
     if data.contact_bindings.is_empty() {
-        ui.label(RichText::new("暂无绑定").color(MUTED));
+        empty_glyph(ui, true, Glyph::EmptyContacts);
+        ui.label(RichText::new(ui_text(language, "暂无绑定", "No bindings")).color(MUTED));
     }
     for binding in &data.contact_bindings {
         ui.horizontal_wrapped(|ui| {
@@ -664,20 +918,64 @@ fn contacts(
                 egui::Label::new(format!(
                     "{}  {}  {}",
                     binding.agent_id,
-                    binding.peer_id.as_deref().unwrap_or("设备未记录"),
-                    text(&binding.state)
+                    binding.peer_id.as_deref().unwrap_or(ui_text(
+                        language,
+                        "设备未记录",
+                        "Device unavailable"
+                    )),
+                    text(&binding.state, language)
                 ))
                 .truncate(),
             )
             .on_hover_text(format!(
                 "AgentId: {}\nPeerId: {}",
                 binding.agent_id,
-                binding.peer_id.as_deref().unwrap_or("设备未记录")
+                binding.peer_id.as_deref().unwrap_or(ui_text(
+                    language,
+                    "设备未记录",
+                    "Device unavailable"
+                ))
             ));
+            if binding.authorized || (binding.state == "bound" && binding.peer_id.is_some()) {
+                let mut enabled = binding.authorized;
+                if ui
+                    .add_enabled(
+                        actions_enabled && action.is_none(),
+                        egui::Checkbox::new(
+                            &mut enabled,
+                            ui_text(language, "联系人授权", "Contact access"),
+                        ),
+                    )
+                    .on_hover_text(
+                        ui_text(
+                            language,
+                            "允许联系人范围的问询与文件读取；文件仍受目录、额度及逐项审批限制。",
+                            "Allows contact-scoped queries and file reads. Directory, quota, and per-transfer approval limits still apply.",
+                        ),
+                    )
+                    .changed()
+                {
+                    let mut args: Vec<OsString> = vec![
+                        "access".into(),
+                        (if enabled { "on" } else { "off" }).into(),
+                        binding.agent_id.clone().into(),
+                    ];
+                    if enabled && let Some(peer) = &binding.peer_id {
+                        args.extend([
+                            OsString::from(peer),
+                            binding.updated_at_ms.to_string().into(),
+                        ]);
+                    }
+                    *action = Some(super::LocalAction {
+                        command: "bindings",
+                        args,
+                    });
+                }
+            }
             let (label, command) = if binding.state == "revoked" {
-                ("遗忘", "forget")
+                (ui_text(language, "遗忘", "Forget"), "forget")
             } else {
-                ("撤销", "revoke")
+                (ui_text(language, "撤销", "Revoke"), "revoke")
             };
             if ui
                 .add_enabled(
@@ -695,16 +993,23 @@ fn contacts(
     }
     if !data.binding_actions.is_empty() {
         ui.add_space(12.0);
-        ui.label(RichText::new("最近的本机操作").strong());
+        ui.label(
+            RichText::new(ui_text(language, "最近的本机操作", "Recent local actions")).strong(),
+        );
         table(
             ui,
-            ["提交时间", "操作", "短码", "进展"],
+            [
+                ui_text(language, "提交时间", "Submitted"),
+                ui_text(language, "操作", "Action"),
+                ui_text(language, "短码", "Code"),
+                ui_text(language, "进展", "Progress"),
+            ],
             [0.9, 1.1, 1.5, 2.2],
             &data.binding_actions,
             "",
             |row| {
                 [
-                    age(row.requested_at_ms, now),
+                    age(row.requested_at_ms, now, language),
                     super::binding_feedback::kind(&row.kind).into(),
                     row.code.as_deref().map(format_code).unwrap_or_default(),
                     super::binding_feedback::progress(&row.state, row.result.as_deref()).into(),
@@ -718,23 +1023,28 @@ fn access(
     ui: &mut Ui,
     data: &Dashboard,
     form: &mut AccessForm,
+    language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
-    ui.label(RichText::new("共享目录").strong());
-    ui.add(
-        egui::TextEdit::singleline(&mut form.share_path)
-            .hint_text("本机目录的完整路径")
-            .desired_width(ui.available_width().min(560.0)),
+    ui.label(RichText::new(ui_text(language, "共享目录", "Shared directory")).strong());
+    if let Some(error) = form.selection_error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    local_selection::directory(
+        ui,
+        &mut form.share_path,
+        &mut form.selection_error,
+        language,
     );
     ui.horizontal_wrapped(|ui| {
-        ui.label("文件类型");
+        ui.label(ui_text(language, "文件类型", "File types"));
         ui.add(
             egui::TextEdit::singleline(&mut form.extensions)
                 .hint_text("md,pdf,rs")
                 .desired_width(220.0),
         );
-        ui.label("单文件上限 MiB");
+        ui.label(ui_text(language, "单文件上限 MiB", "Per-file limit MiB"));
         ui.add(
             egui::TextEdit::singleline(&mut form.share_limit_mib)
                 .hint_text("1024")
@@ -742,28 +1052,28 @@ fn access(
         );
     });
     ui.horizontal_wrapped(|ui| {
-        egui::ComboBox::from_label("可读取范围")
-            .selected_text(audience_name(form.audience))
+        egui::ComboBox::from_label(ui_text(language, "可读取范围", "Read scope"))
+            .selected_text(audience_name(form.audience, language))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut form.audience,
                     ShareAudience::Public,
-                    audience_name(ShareAudience::Public),
+                    audience_name(ShareAudience::Public, language),
                 );
                 ui.selectable_value(
                     &mut form.audience,
                     ShareAudience::Contacts,
-                    audience_name(ShareAudience::Contacts),
+                    audience_name(ShareAudience::Contacts, language),
                 );
                 ui.selectable_value(
                     &mut form.audience,
                     ShareAudience::Agent,
-                    audience_name(ShareAudience::Agent),
+                    audience_name(ShareAudience::Agent, language),
                 );
                 ui.selectable_value(
                     &mut form.audience,
                     ShareAudience::Group,
-                    audience_name(ShareAudience::Group),
+                    audience_name(ShareAudience::Group, language),
                 );
             });
         match form.audience {
@@ -777,14 +1087,24 @@ fn access(
             ShareAudience::Group => {
                 if !data.groups.iter().any(|group| group.state == "active") {
                     form.selected_group = None;
-                    ui.label(RichText::new("没有可选的活动群组").color(MUTED));
+                    ui.label(
+                        RichText::new(ui_text(
+                            language,
+                            "没有可选的活动群组",
+                            "No active groups available",
+                        ))
+                        .color(MUTED),
+                    );
                 } else {
                     let selected = selected_active_group(form, data);
                     if selected.is_none() {
                         form.selected_group = None;
                     }
                     egui::ComboBox::from_id_salt("access-group")
-                        .selected_text(selected.map_or("请选择群组", |group| group.name.as_str()))
+                        .selected_text(selected.map_or(
+                            ui_text(language, "请选择群组", "Select a group"),
+                            |group| group.name.as_str(),
+                        ))
                         .show_ui(ui, |ui| {
                             for group in data.groups.iter().filter(|group| group.state == "active")
                             {
@@ -812,10 +1132,14 @@ fn access(
         form.audience == ShareAudience::Public,
         egui::Checkbox::new(
             &mut form.allow_derived,
-            "允许由此目录生成的经验沿用公开范围",
+            ui_text(
+                language,
+                "允许由此目录生成的经验沿用公开范围",
+                "Allow derived knowledge to use the public scope",
+            ),
         ),
     );
-    ui.label(RichText::new(share_disclosure(form, data)).color(MUTED));
+    ui.label(RichText::new(share_disclosure(form, data, language)).color(MUTED));
     let max_bytes = parse_mib(&form.share_limit_mib);
     let extensions_valid =
         !form.extensions.trim().is_empty() && form.extensions.split(',').all(valid_extension);
@@ -832,7 +1156,7 @@ fn access(
                 && extensions_valid
                 && max_bytes.is_some()
                 && scope_valid,
-            egui::Button::new("授权并共享"),
+            egui::Button::new(ui_text(language, "授权并共享", "Grant and share")),
         )
         .clicked()
     {
@@ -862,14 +1186,19 @@ fn access(
 
     ui.add_space(20.0);
     ui.separator();
-    ui.label(RichText::new("接收文件目录").strong());
-    ui.add(
-        egui::TextEdit::singleline(&mut form.inbox_path)
-            .hint_text("本机目录的完整路径")
-            .desired_width(ui.available_width().min(560.0)),
+    ui.label(RichText::new(ui_text(language, "接收文件目录", "Receive directory")).strong());
+    local_selection::directory(
+        ui,
+        &mut form.inbox_path,
+        &mut form.selection_error,
+        language,
     );
     ui.horizontal_wrapped(|ui| {
-        ui.label("单目录上限 MiB");
+        ui.label(ui_text(
+            language,
+            "单目录上限 MiB",
+            "Per-directory limit MiB",
+        ));
         ui.add(
             egui::TextEdit::singleline(&mut form.inbox_limit_mib)
                 .hint_text("10240")
@@ -881,7 +1210,11 @@ fn access(
                     && action.is_none()
                     && Path::new(form.inbox_path.trim()).is_absolute()
                     && parse_mib(&form.inbox_limit_mib).is_some(),
-                egui::Button::new("授权为收件目录"),
+                egui::Button::new(ui_text(
+                    language,
+                    "授权为收件目录",
+                    "Authorize as inbox directory",
+                )),
             )
             .clicked()
         {
@@ -901,20 +1234,36 @@ fn access(
     });
     ui.label(
         RichText::new(
-            "共享授权本身不会自动导入或发布文件。收件授权只允许在选定目录内新建接收文件。",
+            ui_text(
+                language,
+                "共享授权本身不会自动导入或发布文件。收件授权只允许在选定目录内新建接收文件。",
+                "A share grant does not import or publish files by itself. An inbox grant only allows new received files inside the selected directory.",
+            ),
         )
         .color(MUTED),
     );
 
     ui.add_space(14.0);
-    ui.label(RichText::new("经验保存目录").strong());
-    ui.add(
-        egui::TextEdit::singleline(&mut form.derived_path)
-            .hint_text("本机目录的完整路径")
-            .desired_width(ui.available_width().min(560.0)),
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "经验保存目录",
+            "Knowledge output directory",
+        ))
+        .strong(),
+    );
+    local_selection::directory(
+        ui,
+        &mut form.derived_path,
+        &mut form.selection_error,
+        language,
     );
     ui.horizontal_wrapped(|ui| {
-        ui.label("单目录上限 MiB");
+        ui.label(ui_text(
+            language,
+            "单目录上限 MiB",
+            "Per-directory limit MiB",
+        ));
         ui.add(
             egui::TextEdit::singleline(&mut form.derived_limit_mib)
                 .hint_text("256")
@@ -926,7 +1275,11 @@ fn access(
                     && action.is_none()
                     && Path::new(form.derived_path.trim()).is_absolute()
                     && parse_mib(&form.derived_limit_mib).is_some(),
-                egui::Button::new("授权经验保存"),
+                egui::Button::new(ui_text(
+                    language,
+                    "授权经验保存",
+                    "Authorize knowledge output",
+                )),
             )
             .clicked()
         {
@@ -945,41 +1298,86 @@ fn access(
         }
     });
     ui.label(
-        RichText::new("该目录只作为 Agent 保存派生经验的本机写入目标，不会因此获得对外共享权限。")
-            .color(MUTED),
+        RichText::new(ui_text(
+            language,
+            "该目录只作为 Agent 保存派生经验的本机写入目标，不会因此获得对外共享权限。",
+            "This directory is a local write target for derived knowledge. It does not grant external sharing access.",
+        ))
+        .color(MUTED),
     );
 
     ui.add_space(20.0);
     ui.separator();
-    ui.label(RichText::new("当前授权").strong());
+    ui.label(RichText::new(ui_text(language, "当前授权", "Current grants")).strong());
     if data.access.is_empty() {
-        ui.label(RichText::new("暂无目录授权").color(MUTED));
+        ui.label(
+            RichText::new(ui_text(language, "暂无目录授权", "No directory grants")).color(MUTED),
+        );
     }
     for row in data.access.iter().filter(|row| row.kind != "diagnostics") {
         ui.group(|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&row.directory).strong());
-                ui.label(text(&row.kind));
-                ui.label(text(&row.state));
-                ui.label(format!("版本 {}", row.epoch));
+                ui.label(text(&row.kind, language));
+                ui.label(text(&row.state, language));
+                ui.label(format!(
+                    "{} {}",
+                    ui_text(language, "版本", "Version"),
+                    row.epoch
+                ));
                 if row.kind == "share" {
-                    ui.label(format!("范围：{}", display_scope(&row.scope)))
-                        .on_hover_text(scope_details(&row.scope));
-                    ui.label(format!("类型：{}", row.extensions));
-                    ui.label(format!("单文件上限：{}", bytes(row.max_bytes)));
-                    ui.label(format!("模型：{}", text(&row.model_policy)));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "已纳入索引", "Indexed"),
+                        row.indexed_files
+                    ));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "范围", "Scope"),
+                        display_scope(&row.scope, language)
+                    ))
+                        .on_hover_text(scope_details(&row.scope, language));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "类型", "Types"),
+                        row.extensions
+                    ));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "单文件上限", "Per-file limit"),
+                        bytes(row.max_bytes)
+                    ));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "模型", "Model"),
+                        text(&row.model_policy, language)
+                    ));
                     if row.allow_derived_disclosure {
-                        ui.label("派生经验可公开");
+                        ui.label(ui_text(language, "派生经验可公开", "Derived knowledge may be public"));
+                    }
+                    if row.state == "active"
+                        && ui
+                            .add_enabled(
+                                actions_enabled && action.is_none(),
+                                egui::Button::new(ui_text(language, "纳入文件", "Import file")),
+                            )
+                            .clicked()
+                    {
+                        form.import = Some((row.id.clone(), String::new()));
                     }
                 } else {
-                    ui.label(format!("容量：{}", bytes(row.max_bytes)));
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "容量", "Capacity"),
+                        bytes(row.max_bytes)
+                    ));
                 }
                 if row.state == "active"
                     && matches!(row.kind.as_str(), "share" | "inbox" | "derived")
                     && ui
                         .add_enabled(
                             actions_enabled && action.is_none(),
-                            egui::Button::new("撤销"),
+                            egui::Button::new(ui_text(language, "撤销", "Revoke")),
                         )
                         .clicked()
                 {
@@ -989,52 +1387,115 @@ fn access(
             });
             ui.label(RichText::new(&row.directory_path).small().color(MUTED));
             ui.label(RichText::new(&row.id).small().color(MUTED));
-        });
-    }
-
-    if let Some((kind, id, directory)) = form.pending_revoke.clone() {
-        let mut open = true;
-        egui::Window::new("确认撤销目录授权")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ui.ctx(), |ui| {
-                ui.label(format!("撤销“{directory}”后，不再允许新的读取或写入。"));
-                ui.horizontal(|ui| {
+            if row.kind == "share"
+                && row.state == "active"
+                && let Some((grant, relative)) = &mut form.import
+                && grant == &row.id
+            {
+                let mut close = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(egui::TextEdit::singleline(relative).hint_text(ui_text(
+                        language,
+                        "相对于此目录的文件路径",
+                        "Path relative to this directory",
+                    )));
+                    local_selection::file(
+                        ui,
+                        Path::new(&row.directory_path),
+                        relative,
+                        &mut form.selection_error,
+                        language,
+                    );
                     if ui
                         .add_enabled(
-                            actions_enabled && action.is_none(),
-                            egui::Button::new("确认撤销"),
+                            actions_enabled && action.is_none() && !relative.is_empty(),
+                            egui::Button::new(ui_text(language, "确认纳入", "Import file")),
                         )
+                        .on_hover_text(ui_text(
+                            language,
+                            "建立本机快照，并按此目录现有的授权范围提供检索。",
+                            "Create a local snapshot and make it searchable under this directory's existing grant.",
+                        ))
                         .clicked()
                     {
                         *action = Some(super::LocalAction::new(
                             "access",
                             [
-                                OsString::from("revoke"),
-                                OsString::from(&kind),
-                                OsString::from(&id),
+                                "import".into(),
+                                row.id.clone().into(),
+                                relative.as_str().into(),
                             ],
                         ));
-                        form.pending_revoke = None;
+                        close = true;
                     }
-                    if ui.button("取消").clicked() {
-                        form.pending_revoke = None;
-                    }
+                    close |= ui
+                        .button(ui_text(language, "取消", "Cancel"))
+                        .clicked();
                 });
+                if close {
+                    form.import = None;
+                }
+            }
+        });
+    }
+
+    if let Some((kind, id, directory)) = form.pending_revoke.clone() {
+        let mut open = true;
+        egui::Window::new(ui_text(
+            language,
+            "确认撤销目录授权",
+            "Confirm directory grant revocation",
+        ))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(format!(
+                "{} “{directory}” {}",
+                ui_text(language, "撤销", "Revoking"),
+                ui_text(
+                    language,
+                    "后，不再允许新的读取或写入。",
+                    "will prevent new reads or writes."
+                )
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        actions_enabled && action.is_none(),
+                        egui::Button::new(ui_text(language, "确认撤销", "Confirm revocation")),
+                    )
+                    .clicked()
+                {
+                    *action = Some(super::LocalAction::new(
+                        "access",
+                        [
+                            OsString::from("revoke"),
+                            OsString::from(&kind),
+                            OsString::from(&id),
+                        ],
+                    ));
+                    form.pending_revoke = None;
+                }
+                if ui.button(ui_text(language, "取消", "Cancel")).clicked() {
+                    form.pending_revoke = None;
+                }
             });
+        });
         if !open {
             form.pending_revoke = None;
         }
     }
 }
 
-fn audience_name(audience: ShareAudience) -> &'static str {
+fn audience_name(audience: ShareAudience, language: Language) -> &'static str {
     match audience {
-        ShareAudience::Public => "所有已核验节点",
-        ShareAudience::Contacts => "本机已授权联系人",
-        ShareAudience::Agent => "指定 Agent",
-        ShareAudience::Group => "指定活动群组",
+        ShareAudience::Public => ui_text(language, "所有已核验节点", "All verified nodes"),
+        ShareAudience::Contacts => {
+            ui_text(language, "本机已授权联系人", "Authorized local contacts")
+        }
+        ShareAudience::Agent => ui_text(language, "指定 Agent", "Specific Agent"),
+        ShareAudience::Group => ui_text(language, "指定活动群组", "Specific active group"),
     }
 }
 
@@ -1045,47 +1506,93 @@ fn selected_active_group<'a>(form: &AccessForm, data: &'a Dashboard) -> Option<&
         .find(|group| group.group_id == id && group.state == "active")
 }
 
-fn share_disclosure(form: &AccessForm, data: &Dashboard) -> String {
+fn share_disclosure(form: &AccessForm, data: &Dashboard, language: Language) -> String {
     let scope = match form.audience {
-        ShareAudience::Public => "所有已核验节点可读取已导入并公告的匹配资源".to_owned(),
-        ShareAudience::Contacts => "只有本机已授权联系人可读取已导入并公告的匹配资源".to_owned(),
-        ShareAudience::Agent => "只有指定 Agent 可读取已导入并公告的匹配资源".to_owned(),
+        ShareAudience::Public => ui_text(
+            language,
+            "所有已核验节点可读取已导入并公告的匹配资源",
+            "All verified nodes can read imported and announced matching resources",
+        )
+        .to_owned(),
+        ShareAudience::Contacts => ui_text(
+            language,
+            "只有本机已授权联系人可读取已导入并公告的匹配资源",
+            "Only authorized local contacts can read imported and announced matching resources",
+        )
+        .to_owned(),
+        ShareAudience::Agent => ui_text(
+            language,
+            "只有指定 Agent 可读取已导入并公告的匹配资源",
+            "Only the selected Agent can read imported and announced matching resources",
+        )
+        .to_owned(),
         ShareAudience::Group => selected_active_group(form, data)
-            .map(|group| format!("仅群组“{}”当前成员可读取已导入并公告的匹配资源", group.name))
-            .unwrap_or_else(|| "未选择活动群组".into()),
+            .map(|group| {
+                format!(
+                    "{} “{}” {}",
+                    ui_text(language, "仅群组", "Only group"),
+                    group.name,
+                    ui_text(
+                        language,
+                        "当前成员可读取已导入并公告的匹配资源",
+                        "current members can read imported and announced matching resources",
+                    )
+                )
+            })
+            .unwrap_or_else(|| {
+                ui_text(language, "未选择活动群组", "No active group selected").into()
+            }),
     };
     format!(
-        "披露范围：{scope}。不会发送给任何模型。目录授权本身不会自动导入或公告文件。{}",
+        "{}: {scope}. {}. {} {}",
+        ui_text(language, "披露范围", "Disclosure scope"),
+        ui_text(language, "不会发送给任何模型", "Nothing is sent to a model"),
+        ui_text(
+            language,
+            "目录授权本身不会自动导入或公告文件。",
+            "A directory grant does not import or announce files by itself.",
+        ),
         if form.allow_derived {
-            "由此目录派生的经验也可能按同一公开范围披露。"
+            ui_text(
+                language,
+                "由此目录派生的经验也可能按同一公开范围披露。",
+                "Derived knowledge from this directory may use the same public scope.",
+            )
         } else {
-            "派生经验不会继承公开权限。"
+            ui_text(
+                language,
+                "派生经验不会继承公开权限。",
+                "Derived knowledge does not inherit public access.",
+            )
         }
     )
 }
 
-fn display_scope(scope: &str) -> String {
+fn display_scope(scope: &str, language: Language) -> String {
     if let Some(group) = scope.strip_prefix("group:") {
-        format!("群组 {}", &group[..group.len().min(12)])
+        let label = ui_text(language, "群组", "Group");
+        format!("{label} {}", &group[..group.len().min(12)])
     } else if let Some(peers) = scope.strip_prefix("peers:")
         && let Some((count, _)) = peers.split_once('|')
     {
-        format!("指定节点 × {count}")
+        let label = ui_text(language, "指定节点", "Selected nodes");
+        format!("{label} × {count}")
     } else {
-        text(scope).to_owned()
+        text(scope, language).to_owned()
     }
 }
 
-fn scope_details(scope: &str) -> String {
+fn scope_details(scope: &str, language: Language) -> String {
     if let Some(peers) = scope.strip_prefix("peers:")
         && let Some((count, agents)) = peers.split_once('|')
     {
         let suffix = if count.parse::<usize>().is_ok_and(|count| count > 8) {
-            "，仅显示前 8 个"
+            ui_text(language, "，仅显示前 8 个", " (first 8 shown)")
         } else {
             ""
         };
-        return format!("AgentId：{}{suffix}", agents.replace(',', "\n"));
+        let label = ui_text(language, "AgentId：", "AgentId: ");
+        return format!("{label}{}{suffix}", agents.replace(',', "\n"));
     }
     scope.to_owned()
 }
@@ -1110,46 +1617,60 @@ fn overview(
     ui: &mut Ui,
     data: &Dashboard,
     mascot: &egui::TextureHandle,
+    avatar: &mut super::avatar::Preview,
+    language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.image((mascot.id(), Vec2::splat(72.0)));
+        avatar.image(ui, mascot);
         ui.vertical(|ui| {
-            ui.label(RichText::new("本机身份").strong().size(16.0));
+            ui.label(
+                RichText::new(ui_text(language, "本机身份", "Local identity"))
+                    .strong()
+                    .size(16.0),
+            );
             let identity = &data.identity;
             let rows = [
                 [
-                    "Agent 身份 ID",
-                    identity.agent_id.as_deref().unwrap_or("未记录"),
+                    ui_text(language, "Agent 身份 ID", "Agent identity ID"),
+                    identity.agent_id.as_deref().unwrap_or(ui_text(
+                        language,
+                        "未记录",
+                        "Not recorded",
+                    )),
                 ],
                 [
-                    "本机设备 PeerId",
-                    identity.peer_id.as_deref().unwrap_or("未记录"),
+                    ui_text(language, "本机设备 PeerId", "Local device PeerId"),
+                    identity.peer_id.as_deref().unwrap_or(ui_text(
+                        language,
+                        "未记录",
+                        "Not recorded",
+                    )),
                 ],
                 [
-                    "身份状态",
+                    ui_text(language, "身份状态", "Identity status"),
                     identity
                         .identity_state
                         .as_deref()
-                        .map(text)
-                        .unwrap_or("未记录"),
+                        .map(|value| text(value, language))
+                        .unwrap_or(ui_text(language, "未记录", "Not recorded")),
                 ],
                 [
-                    "链注册状态",
+                    ui_text(language, "链注册状态", "Chain registry"),
                     identity
                         .chain_state
                         .as_deref()
-                        .map(text)
-                        .unwrap_or("未记录"),
+                        .map(|value| text(value, language))
+                        .unwrap_or(ui_text(language, "未记录", "Not recorded")),
                 ],
                 [
-                    "网络准入状态",
+                    ui_text(language, "网络准入状态", "Network admission"),
                     identity
                         .network_state
                         .as_deref()
-                        .map(text)
-                        .unwrap_or("未记录"),
+                        .map(|value| text(value, language))
+                        .unwrap_or(ui_text(language, "未记录", "Not recorded")),
                 ],
             ];
             for [label, value] in rows {
@@ -1158,23 +1679,46 @@ fn overview(
                     .on_hover_text(label);
             }
             if let Some(height) = identity.finalized_height {
-                ui.label(format!("本机已记录的最终区块：{height}"));
+                ui.label(format!(
+                    "{}: {height}",
+                    ui_text(language, "本机已记录的最终区块", "Local finalized block")
+                ));
             }
         });
     });
+    avatar.controls(ui, actions_enabled, language, action);
     ui.add_space(16.0);
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("直连接收").strong());
-        for (mode, label) in [
-            ("off", "关闭"),
-            ("browse", "只浏览"),
-            ("answer", "允许回答"),
+        ui.label(RichText::new(ui_text(language, "直连接收", "Direct inbound")).strong());
+        for (mode, label, glyph) in [
+            ("off", ui_text(language, "不接收", "Don't receive"), None),
+            (
+                "browse",
+                ui_text(language, "只浏览（不回答）", "Browse only (no answers)"),
+                Some(Glyph::BrowseOnly),
+            ),
+            (
+                "answer",
+                ui_text(language, "浏览并回答", "Browse and answer"),
+                None,
+            ),
         ] {
+            let selected = data.direct_inbound_mode == mode;
+            let button = match glyph {
+                Some(kind) => egui::Button::selectable(
+                    selected,
+                    (
+                        egui::Image::new((
+                            super::art::glyph(ui.ctx(), kind).id(),
+                            egui::Vec2::splat(16.0),
+                        )),
+                        label,
+                    ),
+                ),
+                None => egui::Button::selectable(selected, label),
+            };
             if ui
-                .add_enabled(
-                    actions_enabled && action.is_none(),
-                    egui::Button::selectable(data.direct_inbound_mode == mode, label),
-                )
+                .add_enabled(actions_enabled && action.is_none(), button)
                 .clicked()
                 && data.direct_inbound_mode != mode
             {
@@ -1187,10 +1731,19 @@ fn overview(
     });
     ui.add_space(16.0);
     let counts = [
-        ("最近节点", data.nodes.len()),
-        ("群组", data.groups.len()),
-        ("最近下载", data.transfers.len()),
-        ("目录授权", data.access.len()),
+        (
+            ui_text(language, "最近节点", "Recent nodes"),
+            data.nodes.len(),
+        ),
+        (ui_text(language, "群组", "Groups"), data.groups.len()),
+        (
+            ui_text(language, "最近下载", "Recent transfers"),
+            data.transfers.len(),
+        ),
+        (
+            ui_text(language, "目录授权", "Directory grants"),
+            data.access.len(),
+        ),
     ];
     ui.horizontal_wrapped(|ui| {
         for (label, count) in counts {
@@ -1201,6 +1754,27 @@ fn overview(
             );
         }
     });
+}
+
+fn empty_glyph(ui: &mut Ui, empty: bool, kind: Glyph) {
+    if empty {
+        illustration(ui, kind, 48.0);
+        ui.add_space(4.0);
+    }
+}
+
+pub(super) fn inline_glyph(ui: &mut Ui, kind: Glyph) {
+    illustration(ui, kind, 16.0);
+}
+
+/// Draws a state glyph at the given size, capped so it never overflows a
+/// narrow window.
+fn illustration(ui: &mut Ui, kind: Glyph, size: f32) {
+    let texture = super::art::glyph(ui.ctx(), kind);
+    ui.image((
+        texture.id(),
+        egui::Vec2::splat(size.min(ui.available_width())),
+    ));
 }
 
 fn table<T, const N: usize>(
@@ -1252,89 +1826,96 @@ fn line<const N: usize>(ui: &mut Ui, values: [&str; N], widths: [f32; N], gap: f
     });
 }
 
-fn text(value: &str) -> &str {
-    match value {
-        "direct" => "直连",
-        "group" => "群组",
-        "query" => "查询",
-        "answer" => "回答",
-        "offer" => "资源候选",
-        "error" => "错误",
-        "ack" => "回执",
-        "fetch_request" => "文件请求",
-        "fetch_grant" => "文件许可",
-        "fetch_pending" => "等待文件审批",
-        "application" => "群消息",
-        "commit" => "群状态更新",
-        "pending_anchor" => "待锚定",
-        "network_active" => "已核验",
-        "trust_configuration_missing" => "未配置链信任",
-        "device_directory_missing" => "缺少设备目录",
-        "device_directory_unavailable" => "设备目录不可用",
-        "chain_unavailable" => "链不可用",
-        "registry_anchor_missing" => "身份尚未登记",
-        "verified" => "已核验",
-        "stale" => "已失效",
-        "changed" => "身份已变更",
-        "active" => "有效",
-        "revoked" => "已撤销",
-        "needs_sync" => "待同步",
-        "left" => "已退出",
-        "removed" => "已移除",
-        "pending" => "待开始",
-        "running" => "传输中",
-        "paused" => "已暂停",
-        "verifying" => "校验中",
-        "complete" => "已完成",
-        "failed" => "已失败",
-        "cancelled" => "已取消",
-        "local" => "本机",
-        "remote" => "远端",
-        "derived" => "派生",
-        "source_backed" => "有来源",
-        "derived_unverified" => "派生未核验",
-        "share" => "共享",
-        "receive" => "写入",
-        "inbox" => "收件",
-        "diagnostics" => "诊断",
-        "never" => "禁止",
-        "public" => "公开",
-        "contacts" => "已授权联系人",
-        "peers" => "指定节点",
-        _ => value,
-    }
+fn text(value: &str, language: Language) -> &str {
+    let (zh, en) = match value {
+        "direct" => ("直连", "Direct"),
+        "group" => ("群组", "Group"),
+        "query" => ("查询", "Query"),
+        "answer" => ("回答", "Answer"),
+        "offer" => ("资源候选", "Resource offer"),
+        "error" => ("错误", "Error"),
+        "ack" => ("回执", "Receipt"),
+        "fetch_request" => ("文件请求", "File request"),
+        "fetch_grant" => ("文件许可", "File grant"),
+        "fetch_pending" => ("等待文件审批", "Awaiting file approval"),
+        "application" => ("群消息", "Group message"),
+        "commit" => ("群状态更新", "Group state update"),
+        "pending_anchor" => ("待锚定", "Awaiting anchor"),
+        "network_active" => ("已核验", "Verified"),
+        "trust_configuration_missing" => ("未配置链信任", "Chain trust not configured"),
+        "device_directory_missing" => ("缺少设备目录", "Device directory missing"),
+        "device_directory_unavailable" => ("设备目录不可用", "Device directory unavailable"),
+        "chain_unavailable" => ("链不可用", "Chain unavailable"),
+        "registry_anchor_missing" => ("身份尚未登记", "Identity not registered"),
+        "verified" => ("已核验", "Verified"),
+        "stale" => ("已失效", "Stale"),
+        "changed" => ("身份已变更", "Identity changed"),
+        "active" => ("有效", "Active"),
+        "revoked" => ("已撤销", "Revoked"),
+        "needs_sync" => ("待同步", "Needs sync"),
+        "left" => ("已退出", "Left"),
+        "removed" => ("已移除", "Removed"),
+        "pending" => ("待开始", "Pending"),
+        "running" => ("传输中", "Transferring"),
+        "paused" => ("已暂停", "Paused"),
+        "verifying" => ("校验中", "Verifying"),
+        "complete" => ("已完成", "Complete"),
+        "failed" => ("已失败", "Failed"),
+        "cancelled" => ("已取消", "Cancelled"),
+        "local" => ("本机", "Local"),
+        "remote" => ("远端", "Remote"),
+        "derived" => ("派生", "Derived"),
+        "source_backed" => ("有来源", "Source-backed"),
+        "derived_unverified" => ("派生未核验", "Derived, unverified"),
+        "share" => ("共享", "Share"),
+        "receive" => ("写入", "Receive"),
+        "inbox" => ("收件", "Inbox"),
+        "diagnostics" => ("诊断", "Diagnostics"),
+        "never" => ("禁止", "Never"),
+        "public" => ("公开", "Public"),
+        "contacts" => ("已授权联系人", "Authorized contacts"),
+        "peers" => ("指定节点", "Selected nodes"),
+        _ => return value,
+    };
+    ui_text(language, zh, en)
 }
 
-fn inbound_intent(code: u8) -> &'static str {
-    match code {
-        1 => "查找证据",
-        2 => "定位资源",
-        3 => "核验声明",
-        4 => "识别 Agent",
-        5 => "提供资源",
-        6 => "群组审阅",
-        _ => "未知意图",
-    }
+fn inbound_intent(code: u8, language: Language) -> &'static str {
+    let (zh, en) = match code {
+        1 => ("查找证据", "Find evidence"),
+        2 => ("定位资源", "Locate resource"),
+        3 => ("核验声明", "Verify claim"),
+        4 => ("识别 Agent", "Identify agent"),
+        5 => ("提供资源", "Offer resource"),
+        6 => ("群组审阅", "Group review"),
+        _ => ("未知意图", "Unknown intent"),
+    };
+    ui_text(language, zh, en)
 }
 
-fn inbound_result_shape(code: u8) -> &'static str {
-    match code {
-        1 => "结构化声明",
-        2 => "资源",
-        3 => "Agent",
-        _ => "未知结果",
-    }
+fn inbound_result_shape(code: u8, language: Language) -> &'static str {
+    let (zh, en) = match code {
+        1 => ("结构化声明", "Structured claim"),
+        2 => ("资源", "Resource"),
+        3 => ("Agent", "Agent"),
+        _ => ("未知结果", "Unknown result"),
+    };
+    ui_text(language, zh, en)
 }
 
-fn age(at: i64, now: i64) -> String {
+fn age(at: i64, now: i64, language: Language) -> String {
     if at <= 0 || at > now {
-        return "未知".into();
+        return ui_text(language, "未知", "Unknown").into();
     }
+    let zh = matches!(language, Language::Zh);
     match (now - at) / 1000 {
-        0..=59 => "不到 1 分钟".into(),
-        seconds @ 60..=3599 => format!("{} 分钟前", seconds / 60),
-        seconds @ 3600..=86399 => format!("{} 小时前", seconds / 3600),
-        seconds => format!("{} 天前", seconds / 86400),
+        0..=59 => ui_text(language, "不到 1 分钟", "Under 1 min").into(),
+        seconds @ 60..=3599 if zh => format!("{} 分钟前", seconds / 60),
+        seconds @ 60..=3599 => format!("{} min ago", seconds / 60),
+        seconds @ 3600..=86399 if zh => format!("{} 小时前", seconds / 3600),
+        seconds @ 3600..=86399 => format!("{} h ago", seconds / 3600),
+        seconds if zh => format!("{} 天前", seconds / 86400),
+        seconds => format!("{} d ago", seconds / 86400),
     }
 }
 
@@ -1366,6 +1947,39 @@ fn format_code(value: &str) -> String {
 
 fn votes(counts: [u64; 2]) -> String {
     format!("+{} / -{}", counts[0], counts[1])
+}
+
+fn ui_text(language: Language, zh: &'static str, en: &'static str) -> &'static str {
+    match language {
+        Language::Zh => zh,
+        Language::En => en,
+    }
+}
+
+fn approval_state(
+    ui: &mut Ui,
+    approved: bool,
+    zh: &'static str,
+    en: &'static str,
+    language: Language,
+) {
+    let (tone, label, glyph) = if approved {
+        (
+            super::tokens::Tone::Success,
+            ui_text(language, zh, en),
+            Glyph::TransferComplete,
+        )
+    } else {
+        (
+            super::tokens::Tone::Warning,
+            ui_text(language, "等待确认", "Awaiting approval"),
+            Glyph::AwaitingApproval,
+        )
+    };
+    ui.horizontal(|ui| {
+        inline_glyph(ui, glyph);
+        ui.label(RichText::new(label).color(tone.colors().1).strong());
+    });
 }
 
 #[cfg(test)]

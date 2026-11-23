@@ -82,7 +82,9 @@ impl LocalTransport {
         let RecordPayload::Profile(profile) = signed.record.payload else {
             return Err(io::ErrorKind::InvalidInput.into());
         };
-        if profile.agent_id != pending.agent || profile.avatar.is_some() {
+        // Core authorized the exact signed payload before IPC. Net forwards a
+        // typed reference only; it never resolves it or reads any file.
+        if profile.agent_id != pending.agent {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let now_ms = u64::try_from(
@@ -186,7 +188,7 @@ mod tests {
     use super::*;
     use crate::transport::TransportKind;
     use asl_types::{
-        ids::Signature65,
+        ids::{Hash32, Signature65},
         protocol::{ConceptRef, Profile},
         record::{SignedRecord, UnsignedRecord, encode_record},
     };
@@ -194,6 +196,20 @@ mod tests {
 
     #[tokio::test]
     async fn profile_publication_over_tcp_needs_explicit_put_and_leaves_no_local_copy() {
+        profile_exchange(false, None).await;
+    }
+
+    #[tokio::test]
+    async fn profile_lookup_over_tcp_returns_candidate_not_automatic_local_storage() {
+        profile_exchange(true, None).await;
+    }
+
+    #[tokio::test]
+    async fn avatar_reference_survives_profile_put_and_get_over_tcp() {
+        profile_exchange(true, Some(Hash32([9; 32]))).await;
+    }
+
+    async fn profile_exchange(serve: bool, avatar: Option<Hash32>) {
         let mut source = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
         let mut receiver = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
         receiver
@@ -242,7 +258,7 @@ mod tests {
                     agent_id: agent,
                     sequence: 1,
                     capabilities: vec![ConceptRef::RUST],
-                    avatar: None,
+                    avatar,
                 }),
                 sequence: 1,
                 issued_at_ms: now_ms,
@@ -278,10 +294,12 @@ mod tests {
                         }
                     }
                     event = receiver.next_event() => {
-                        if let TransportEvent::DhtRecordCandidate { key: received_key, value: received, .. } = event.unwrap() {
+                        if let TransportEvent::DhtRecordCandidate { candidate_id, key: received_key, value: received } = event.unwrap() {
                             assert!(submitted);
                             assert_eq!(received_key.as_slice(), key.as_ref());
                             assert_eq!(received, value);
+                            // Transport fixture only. Production decides after Core verifies the signature.
+                            receiver.decide_dht_record(candidate_id, serve).unwrap();
                             has_candidate = true;
                         }
                     }
@@ -297,14 +315,44 @@ mod tests {
                 .get(&key)
                 .is_none()
         );
-        assert!(
+        assert_eq!(
             receiver
                 .swarm
                 .behaviour_mut()
                 .dht
                 .store_mut()
                 .get(&key)
-                .is_none()
+                .is_some(),
+            serve
         );
+        if serve {
+            source
+                .get_record(identity_record_key(agent, RecordKind::Profile).unwrap())
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                loop {
+                    tokio::select! {
+                        event = source.next_event() => {
+                            if let TransportEvent::DhtRecordCandidate {candidate_id,key: found,value: received} = event.unwrap() {
+                                assert_eq!(found.as_slice(), key.as_ref());
+                                assert_eq!(received, value);
+                                source.decide_dht_record(candidate_id,false).unwrap();
+                                break;
+                            }
+                        }
+                        event = receiver.next_event() => { event.unwrap(); }
+                    }
+                }
+            }).await.unwrap();
+            assert!(
+                source
+                    .swarm
+                    .behaviour_mut()
+                    .dht
+                    .store_mut()
+                    .get(&key)
+                    .is_none()
+            );
+        }
     }
 }

@@ -5,7 +5,7 @@ use asl_types::{
 use rusqlite::TransactionBehavior;
 
 use super::{
-    MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, RoomVersion,
+    GroupInboundPolicy, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, RoomVersion,
     recovery::require_member,
     sql_number,
     sync_authority::{member_ids, room_version},
@@ -50,13 +50,14 @@ impl Store {
     }
 
     /// Advance a paused room's ratchet and journal its ciphertext together.
-    /// This is not an authorization or delivery operation.
+    /// Return the browse flag for incoming messages as observed at commit,
+    /// independent of retention. This is not authorization to send a reply.
     pub fn commit_verified_mls_application(
         &mut self,
         update: MlsRoomUpdate<'_>,
         authority: MlsApplicationAuthority<'_>,
         mut current_time: impl FnMut() -> Result<u64, AslError>,
-    ) -> Result<RoomVersion, AslError> {
+    ) -> Result<(RoomVersion, bool), AslError> {
         if !update.event.as_ref().is_some_and(|event| {
             matches!(
                 event.kind,
@@ -77,6 +78,10 @@ impl Store {
         for member in authority.members {
             require_member(&tx, member, authority.chain_id, now)?;
         }
+        let browse_enabled = matches!(
+            update.event.as_ref().map(|event| event.kind),
+            Some(MlsJournalKind::ReceivedApplication(..))
+        ) && GroupInboundPolicy::read(&tx)?.browse_enabled;
         let version = commit_candidate(&tx, update, None, sql_number(now)?)?;
         let now = current_time()?;
         if authority
@@ -87,6 +92,6 @@ impl Store {
             return Err(AslError::ExpiredMessage);
         }
         tx.commit().map_err(database_error)?;
-        Ok(version)
+        Ok((version, browse_enabled))
     }
 }

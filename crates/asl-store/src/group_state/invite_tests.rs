@@ -287,6 +287,48 @@ fn pending_invites_list_only_live_prompts_for_the_exact_local_device() {
             .unwrap(),
         std::slice::from_ref(approved),
     );
+    use super::invite_review::{Choice, Outcome};
+    let review = store
+        .local_group_invitations(recipient_agent, &recipient, start)
+        .unwrap();
+    let tag = &review.iter().find(|r| r.id == approved.id).unwrap().tag;
+    assert!(
+        store
+            .queue_group_decision(recipient_agent, &recipient, tag, Choice::Approve, start)
+            .is_err()
+    );
+    store
+        .queue_group_decision(recipient_agent, &recipient, tag, Choice::Retry, start)
+        .unwrap();
+    let request = store
+        .claim_group_decision(recipient_agent, &recipient, start)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .claim_group_decision(recipient_agent, &recipient, start)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .finish_group_decision(&request, Outcome::JoinQueued, start)
+        .unwrap();
+    let tag = &review.iter().find(|r| r.id == pending.id).unwrap().tag;
+    store
+        .queue_group_decision(recipient_agent, &recipient, tag, Choice::Reject, start)
+        .unwrap();
+    assert!(
+        store
+            .claim_group_decision(recipient_agent, &approved.inviter_device, start)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_group_decision(recipient_agent, &recipient, start)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

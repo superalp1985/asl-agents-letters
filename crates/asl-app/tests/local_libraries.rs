@@ -42,6 +42,60 @@ fn active(db: &Connection, name: &str) -> bool {
 }
 
 #[test]
+fn local_access_cli_indexes_only_an_active_grants_selected_files() {
+    use asl_store::dashboard::Dashboard;
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    let paths = AppPaths::open(&home).unwrap();
+    let source = fixture.0.join("shared files");
+    fs::create_dir_all(source.join("notes")).unwrap();
+    for name in ["notes/one.rs", "notes/two.rs", "notes/not-shared.bin"] {
+        fs::write(source.join(name), b"sample").unwrap();
+    }
+    let cli = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_asl-core"))
+            .env("ASL_HOME", &home)
+            .arg("--access")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let grant = cli(&[
+        "share",
+        source.to_str().unwrap(),
+        "rs",
+        "contacts",
+        "-",
+        "2048",
+        "no",
+    ]);
+    assert!(grant.status.success(), "{:?}", grant.stderr);
+    let json: serde_json::Value = serde_json::from_slice(&grant.stdout).unwrap();
+    let grant = json["grant_id"].as_str().unwrap();
+    let count = || {
+        Dashboard::load(&paths.state().join("asl.sqlite3"))
+            .unwrap()
+            .access
+            .into_iter()
+            .find(|r| r.id == grant)
+            .unwrap()
+            .indexed_files
+    };
+    assert_eq!(count(), 0);
+    assert!(cli(&["import", grant, "notes/one.rs"]).status.success());
+    assert!(
+        !cli(&["import", grant, "notes/not-shared.bin"])
+            .status
+            .success()
+    );
+    assert!(!cli(&["import", grant, "../other.rs"]).status.success());
+    assert_eq!(count(), 1);
+    assert!(cli(&["revoke", "share", grant]).status.success());
+    assert_eq!(count(), 0);
+    assert!(!cli(&["import", grant, "notes/two.rs"]).status.success());
+}
+
+#[test]
 fn local_cli_can_review_and_decide_while_the_download_broker_stays_open() {
     use asl_store::transfers::{DownloadBroker, DownloadRequest, DownloadStart};
     use asl_types::{

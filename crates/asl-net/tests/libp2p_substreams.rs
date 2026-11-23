@@ -91,13 +91,19 @@ async fn control_codec_runs_over_tcp_and_quic_request_response_substreams() {
         let mut dialer = swarm(Keypair::generate_ed25519(), ControlCodec, CONTROL_PROTOCOL);
         let dialer_peer = *dialer.local_peer_id();
         dialer.dial(address).unwrap();
-        let request = WireFrame::Ack(Ack {
-            message_id: [1; 16].into(),
-            received_id: [2; 16].into(),
-        });
+        // Use the independent fixed bytes so the network test covers a real
+        // expression on each transport without relying on local JSON syntax.
+        let expression = include_str!("../../../schemas/vectors/expression-letter-v1.hex")
+            .split_ascii_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect::<Vec<_>>();
+        let request = asl_types::protocol::decode_control(&expression).unwrap();
+        let WireFrame::Expression(letter) = &request else {
+            panic!("expected expression");
+        };
         let response = WireFrame::Ack(Ack {
             message_id: [3; 16].into(),
-            received_id: [4; 16].into(),
+            received_id: letter.message_id,
         });
         let mut request_id = None;
         let mut received_request = false;

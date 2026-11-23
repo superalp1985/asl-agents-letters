@@ -135,7 +135,7 @@ impl Store {
     }
 }
 
-fn delete_expired(db: &Connection, now_ms: i64) -> Result<(), AslError> {
+pub(crate) fn delete_expired(db: &Connection, now_ms: i64) -> Result<(), AslError> {
     db.execute(
         "DELETE FROM direct_inbound_observations WHERE expires_at_ms <= ?1",
         [now_ms],

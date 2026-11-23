@@ -2,6 +2,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use alloy_primitives::hex;
 use asl_agent::{MAX_QUERY_PEERS, OutgoingTask, QUERY_WINDOW_MS, QueryScope, QueryStatus};
+use asl_store::mcp_recovery::{RecoveryReservation, RecoverySubmission, State as RecoveryState};
 use asl_types::{
     error::{AslError, ErrorCode},
     ids::{Hash32, Id128},
@@ -23,8 +24,10 @@ use crate::{
     supervisor::unix_time_ms,
 };
 
-use super::contract::{FetchArgs, QueryArgs, Request, parse_id};
+use super::contract::{FetchArgs, QueryArgs, RecoveryQueryArgs, Request, parse_id};
+use super::recovery::{Recovery, ResultSnapshot};
 
+mod notices;
 mod selection;
 
 const MAX_TASKS: usize = 16;
@@ -39,8 +42,10 @@ pub(super) struct Session<'a> {
     queries: &'a OutgoingQueryPort,
     downloads: &'a DownloadPort,
     scope: QueryScope,
-    inbox: Option<Id128>,
+    pub(super) inbox: Option<Id128>,
+    pub(super) recovery: Option<&'a Recovery>,
     tasks: VecDeque<Task>,
+    received: VecDeque<Download>,
 }
 
 impl<'a> Session<'a> {
@@ -55,20 +60,46 @@ impl<'a> Session<'a> {
             downloads,
             scope,
             inbox,
+            recovery: None,
             tasks: VecDeque::new(),
+            received: VecDeque::new(),
         }
     }
 
     pub(super) async fn call(&mut self, request: Request) -> Result<Value, ErrorCode> {
         match request {
             Request::Query(args) => self.query(args),
+            Request::RecoveryQuery(args) => self.recovery_query(args),
             Request::TaskStatus(args) => self.report(&args.task_id, false),
             Request::Fetch(args) => self.fetch(args).await,
             Request::Result(args) => self.report(&args.task_id, true),
+            _ => Err(ErrorCode::InvalidMessage),
         }
     }
 
     fn query(&mut self, args: QueryArgs) -> Result<Value, ErrorCode> {
+        self.submit_query(args, None)
+    }
+
+    fn recovery_query(&mut self, args: RecoveryQueryArgs) -> Result<Value, ErrorCode> {
+        self.recovery.ok_or(ErrorCode::PolicyDenied)?;
+        let request_id = parse_id(&args.request_id)?;
+        let mut hash = blake3::Hasher::new_derive_key("ASL MCP recoverable query v1");
+        hash.update(&args.valid_until_ms.to_le_bytes());
+        hash.update(&serde_json::to_vec(&args.request).map_err(|_| ErrorCode::InternalError)?);
+        let submission = RecoverySubmission {
+            request_id,
+            digest: *hash.finalize().as_bytes(),
+            valid_until_ms: args.valid_until_ms,
+        };
+        self.submit_query(args.request, Some(submission))
+    }
+
+    fn submit_query(
+        &mut self,
+        args: QueryArgs,
+        submission: Option<RecoverySubmission>,
+    ) -> Result<Value, ErrorCode> {
         if !(1..=MAX_TERMS).contains(&args.terms.len())
             || !(1..=QUERY_WINDOW_MS).contains(&args.deadline_ms)
         {
@@ -96,30 +127,114 @@ impl<'a> Session<'a> {
         )
         .with_expiry(now.saturating_add(args.deadline_ms));
         task.validate().map_err(error_code)?;
+        self.refresh_recovery().map_err(error_code)?;
 
         let replace = if self.tasks.len() == MAX_TASKS {
-            Some(
-                self.tasks
-                    .iter_mut()
-                    .position(|task| {
+            let ephemeral = self.recovery.is_none();
+            self.tasks
+                .iter_mut()
+                .position(|task| {
+                    if ephemeral {
                         task.poll();
-                        task.can_evict(now)
-                    })
-                    .ok_or(ErrorCode::QuotaExceeded)?,
-            )
+                    }
+                    task.can_evict(now)
+                })
+                .map(Some)
+                .ok_or(ErrorCode::QuotaExceeded)
         } else {
-            None
+            Ok(None)
         };
         let id = fresh_id(|id| self.tasks.iter().any(|task| task.id == id))?;
-        let ticket = self.queries.submit_scoped(task).map_err(error_code)?;
+        if let Some(submission) = submission.as_ref() {
+            let recovery = self.recovery.ok_or(ErrorCode::PolicyDenied)?;
+            if let RecoveryReservation::Existing(previous) =
+                recovery.reserve(id, submission, replace.is_ok())?
+            {
+                return Ok(submission_result(previous, true));
+            }
+        } else {
+            if replace.is_err() {
+                return Err(ErrorCode::QuotaExceeded);
+            }
+            if let Some(recovery) = self.recovery {
+                recovery.start(id)?;
+            }
+        }
+        let replace = replace?;
+        let ticket = match self.queries.submit_scoped(task) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                if let Some(recovery) = self.recovery {
+                    if recovery.retains_results() {
+                        recovery
+                            .save_result(
+                                id,
+                                RecoveryState::Failed,
+                                ResultSnapshot {
+                                    answers: &[],
+                                    answers_truncated: false,
+                                },
+                            )
+                            .map_err(error_code)?;
+                    } else {
+                        recovery
+                            .update(id, RecoveryState::Failed)
+                            .map_err(error_code)?;
+                    }
+                }
+                if submission.is_some() {
+                    return Ok(submission_result(id, false));
+                }
+                return Err(error_code(error));
+            }
+        };
         if let Some(index) = replace {
             self.tasks.remove(index);
         }
         self.tasks.push_back(Task::new(id, ticket));
-        Ok(json!({ "task_id": hex::encode(id.0) }))
+        Ok(if submission.is_some() {
+            submission_result(id, false)
+        } else {
+            json!({ "task_id": hex::encode(id.0) })
+        })
+    }
+
+    pub(super) fn has_live_recovery_tasks(&self) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.query.is_some() || task.needs_recovery_save(self.recovery))
+    }
+
+    pub(super) fn refresh_recovery(&mut self) -> Result<(), AslError> {
+        let Some(recovery) = self.recovery else {
+            return Ok(());
+        };
+        for task in &mut self.tasks {
+            task.poll();
+            let state = task.recovery_state();
+            if task.needs_recovery_save(Some(recovery)) {
+                if recovery.retains_results() {
+                    recovery.save_result(
+                        task.id,
+                        state,
+                        ResultSnapshot {
+                            answers: &task.answers,
+                            answers_truncated: task.answers_truncated,
+                        },
+                    )?;
+                    task.persisted_answers = task.answers.len();
+                    task.persisted_truncated = task.answers_truncated;
+                } else {
+                    recovery.update(task.id, state)?;
+                }
+                task.persisted_state = state;
+            }
+        }
+        Ok(())
     }
 
     fn report(&mut self, id: &str, final_result: bool) -> Result<Value, ErrorCode> {
+        self.refresh_recovery().map_err(error_code)?;
         let task = find_task(&mut self.tasks, id)?;
         task.poll();
         if final_result && task.query.is_some() {
@@ -137,7 +252,22 @@ impl<'a> Session<'a> {
     }
 }
 
+fn submission_result(id: Id128, replayed: bool) -> Value {
+    json!({ "task_id": hex::encode(id.0), "replayed": replayed })
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        if let Some(recovery) = self.recovery {
+            let _ = self.refresh_recovery();
+            let _ = recovery.interrupt();
+        }
+    }
+}
+
 struct Task {
+    notified_answers: usize,
+    notified_offers: usize,
     id: Id128,
     query: Option<OutgoingQueryTicket>,
     state: QueryState,
@@ -146,6 +276,9 @@ struct Task {
     answers: Vec<Value>,
     answer_bytes: usize,
     answers_truncated: bool,
+    persisted_state: RecoveryState,
+    persisted_answers: usize,
+    persisted_truncated: bool,
 }
 
 enum QueryState {
@@ -159,6 +292,8 @@ enum QueryState {
 impl Task {
     fn new(id: Id128, ticket: OutgoingQueryTicket) -> Self {
         Self {
+            notified_answers: 0,
+            notified_offers: 0,
             id,
             query: Some(ticket),
             state: QueryState::Queued,
@@ -167,6 +302,26 @@ impl Task {
             answers: Vec::new(),
             answer_bytes: 0,
             answers_truncated: false,
+            persisted_state: RecoveryState::Queued,
+            persisted_answers: 0,
+            persisted_truncated: false,
+        }
+    }
+
+    fn needs_recovery_save(&self, recovery: Option<&Recovery>) -> bool {
+        self.persisted_state != self.recovery_state()
+            || (recovery.is_some_and(Recovery::retains_results)
+                && (self.persisted_answers != self.answers.len()
+                    || self.persisted_truncated != self.answers_truncated))
+    }
+
+    fn recovery_state(&self) -> RecoveryState {
+        match self.state {
+            QueryState::Queued => RecoveryState::Queued,
+            QueryState::Active(_) => RecoveryState::Active,
+            QueryState::Complete => RecoveryState::Complete,
+            QueryState::Expired => RecoveryState::Expired,
+            QueryState::Failed(_) => RecoveryState::Failed,
         }
     }
 
@@ -362,6 +517,7 @@ impl LocalOffer {
 }
 
 struct Download {
+    notices: VecDeque<Value>,
     content_id: Hash32,
     offer_ids: Vec<Id128>,
     ticket: Option<DownloadTicket>,
@@ -411,11 +567,13 @@ impl Download {
             self.ticket = None;
         }
         self.state = next;
+        self.remember_notice();
     }
 
     fn fail(&mut self, code: ErrorCode) {
         self.state = DownloadState::Failed(self.state.transfer_id().cloned(), code);
         self.ticket = None;
+        self.remember_notice();
     }
 
     async fn wait_for_reference(&mut self) -> Result<Value, ErrorCode> {
@@ -530,7 +688,7 @@ fn typed_value(value: TypedValue) -> Value {
     }
 }
 
-fn error_code(error: AslError) -> ErrorCode {
+pub(super) fn error_code(error: AslError) -> ErrorCode {
     match error {
         AslError::InvalidMessage => ErrorCode::InvalidMessage,
         AslError::IncompatibleVersion => ErrorCode::IncompatibleVersion,

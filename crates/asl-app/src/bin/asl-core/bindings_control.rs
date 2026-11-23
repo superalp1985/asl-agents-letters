@@ -2,7 +2,7 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
-use asl_store::{contact_bindings::ContactBindingActionKind, open_store};
+use asl_store::{contact_bindings::ContactBindingActionKind, open_store, open_store_read_only};
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
@@ -80,11 +80,40 @@ impl Command {
 
 pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let root = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
-    let paths = AppPaths::open(&root)?;
+    let paths = AppPaths::open_existing(&root)?;
     let _pin = PinnedHome::open(&root)?;
-    let mut store = open_store(&paths.state().join("asl.sqlite3"))?;
-    Command::parse(args)?.enqueue(&mut store, unix_time_ms()?)?;
-    println!("{}", json!({"queued": true}));
+    let database = paths.state().join("asl.sqlite3");
+    fn text(v: &OsString) -> Result<&str, AslError> {
+        v.to_str().ok_or(AslError::InvalidMessage)
+    }
+    match args {
+        [command] if command == "list" => {
+            let rows = open_store_read_only(&database)?.recent_contact_bindings()?;
+            println!("{}", json!({"bindings": rows}));
+        }
+        [command, mode, agent, peer, at] if command == "access" && mode == "on" => {
+            let agent = parse_agent(text(agent)?)?;
+            if asl_app::identity::AgentIdentity::load_protected(&paths.agent_root_key())?.agent_id()
+                == agent
+            {
+                return Err(AslError::PolicyDenied);
+            }
+            open_store(&database)?.grant_contact_access(
+                agent,
+                &parse_peer(text(peer)?)?,
+                text(at)?.parse().map_err(|_| AslError::InvalidMessage)?,
+            )?;
+            println!("{}", json!({"authorized": true}));
+        }
+        [command, mode, agent] if command == "access" && mode == "off" => {
+            open_store(&database)?.remove_contact_access(parse_agent(text(agent)?)?)?;
+            println!("{}", json!({"authorized": false}));
+        }
+        _ => {
+            Command::parse(args)?.enqueue(&mut open_store(&database)?, unix_time_ms()?)?;
+            println!("{}", json!({"queued": true}));
+        }
+    }
     Ok(())
 }
 
@@ -98,7 +127,7 @@ fn parse_code(text: &str) -> Result<u64, AslError> {
         .ok_or(AslError::InvalidMessage)
 }
 
-fn parse_agent(text: &str) -> Result<AgentId, AslError> {
+pub(super) fn parse_agent(text: &str) -> Result<AgentId, AslError> {
     let bytes = bs58::decode(text)
         .into_vec()
         .map_err(|_| AslError::InvalidMessage)?;

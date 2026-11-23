@@ -1,6 +1,7 @@
 use asl_policy::{AccessOperation, AccessRequest, PolicyService, Principal};
 use asl_types::{
     error::AslError,
+    ids::Hash32,
     protocol::{ConceptRef, Profile},
     record::RecordPayload,
     task::{GrantId, ResourceKey, TaskId},
@@ -20,6 +21,8 @@ const PROFILE_LIFETIME_MS: u64 = 30 * 60 * 1_000;
 pub struct AvatarReference {
     pub grant_id: GrantId,
     pub resource_key: ResourceKey,
+    pub epoch: u64,
+    pub content_id: Hash32,
 }
 
 #[derive(Clone, Debug)]
@@ -96,15 +99,23 @@ impl<'a> ProfilePublisher<'a> {
             .avatar
             .as_ref()
             .map(|avatar| {
-                policy.authorize(
-                    &AccessRequest {
-                        grant_id: avatar.grant_id.clone(),
-                        resource_key: avatar.resource_key.clone(),
-                        principal: Principal::LocalTask(task),
-                        operation: AccessOperation::PublishRecord,
-                    },
-                    now_ms,
-                )
+                let request = AccessRequest {
+                    grant_id: avatar.grant_id.clone(),
+                    resource_key: avatar.resource_key.clone(),
+                    principal: Principal::LocalTask(task),
+                    operation: AccessOperation::PublishRecord,
+                };
+                let permit = policy.authorize(&request, now_ms)?;
+                if permit.grant_id() != &request.grant_id
+                    || permit.resource_key() != &request.resource_key
+                    || permit.grant_epoch() != avatar.epoch
+                    || permit.content_id() != avatar.content_id
+                    || permit.operation() != request.operation
+                    || permit.principal() != &request.principal
+                {
+                    return Err(AslError::PolicyDenied);
+                }
+                Ok(permit)
             })
             .transpose()?;
         let bytes = sign_record(

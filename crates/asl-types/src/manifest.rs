@@ -14,6 +14,21 @@ pub struct Manifest {
     pub chunk_hashes: Vec<[u8; 32]>,
 }
 
+impl Manifest {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ManifestError> {
+        let file_size = u64::try_from(bytes.len()).map_err(|_| ManifestError::FileTooLarge)?;
+        chunk_count(file_size)?;
+        Ok(Self {
+            file_size,
+            file_hash: *blake3::hash(bytes).as_bytes(),
+            chunk_hashes: bytes
+                .chunks(CHUNK_SIZE as usize)
+                .map(|chunk| *blake3::hash(chunk).as_bytes())
+                .collect(),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManifestError {
     TooShort,

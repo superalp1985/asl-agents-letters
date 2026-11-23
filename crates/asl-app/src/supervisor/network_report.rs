@@ -18,6 +18,11 @@ pub(super) struct NetworkStatus {
 }
 
 impl NetworkStatus {
+    #[cfg(windows)]
+    pub(super) fn store(&self) -> &Store {
+        &self.store
+    }
+
     pub(super) fn new(store: Store, settings: &NetworkSettingsV1) -> Self {
         Self {
             store,

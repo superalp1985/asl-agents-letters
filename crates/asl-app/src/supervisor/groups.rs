@@ -34,6 +34,7 @@ use super::{
     unix_time_ms,
 };
 
+mod operator;
 #[cfg(test)]
 mod process_tests;
 
@@ -61,6 +62,7 @@ pub enum LocalGroupAction {
         peer: PeerId,
     },
     /// Trusted in-process callers only; not parsed by the local console.
+    /// Sending an expression requires an explicit action through this path.
     SendApplication {
         room: Hash32,
         application: Box<GroupApplication>,
@@ -85,6 +87,8 @@ pub struct LocalGroupCommand {
 pub(super) struct LoopbackGroups {
     store: Store,
     next_prune: Instant,
+    next_review: Instant,
+    operator_view: Option<asl_store::group_state::operator::AdminSnapshot>,
     cleanup_failed: bool,
     join_diagnostics: VecDeque<(Id128, &'static str)>,
     recent_applications: VecDeque<ReceivedApplication>,
@@ -111,12 +115,38 @@ struct PendingGroupTransfer {
 }
 
 impl LoopbackGroups {
+    pub(super) fn dispatch_letter(
+        &mut self,
+        admission: &mut crate::profile::CoreAdmission,
+        room: Hash32,
+        letter: asl_types::protocol::ExpressionLetter,
+        now: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<(), AslError> {
+        if self.cleanup_failed || !GroupInboundPolicy::load(&self.store)?.answer_enabled {
+            return Err(AslError::PolicyDenied);
+        }
+        let sent = admission.send_loopback_mls_application(
+            &mut self.store,
+            room,
+            GroupApplication::Expression(letter),
+            now,
+            enqueue,
+        )?;
+        if sent.queued == 0 {
+            return Err(AslError::PolicyDenied);
+        }
+        Ok(())
+    }
+
     pub(super) fn open(path: &Path, now_ms: u64) -> Result<Self, AslError> {
         let mut store = open_mls_runtime_store(path)?;
         store.prune_mls_expired(now_ms)?;
         Ok(Self {
             store,
             next_prune: Instant::now() + PRUNE_INTERVAL,
+            next_review: Instant::now(),
+            operator_view: None,
             cleanup_failed: false,
             join_diagnostics: VecDeque::new(),
             recent_applications: VecDeque::new(),
@@ -202,6 +232,34 @@ impl Supervisor {
                         membership_epoch: snapshot.version.membership_epoch,
                     })
                 });
+            if self.mailbox.interested()
+                && let Some(member) = requester.as_ref()
+                && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
+            {
+                let frame = match application.as_ref() {
+                    GroupApplication::Query(q) => Some(WireFrame::Query(q.clone())),
+                    GroupApplication::Answer(a) => Some(WireFrame::Answer(a.clone())),
+                    GroupApplication::Offer(o) => Some(WireFrame::Offer(o.clone())),
+                    GroupApplication::Expression(e) => Some(WireFrame::Expression(e.clone())),
+                    _ => None,
+                };
+                if let Some(frame) = frame {
+                    let group = asl_store::transfers::GroupTransferBinding {
+                        group_id: member.group_id.clone(),
+                        membership_epoch: member.membership_epoch,
+                    };
+                    self.mailbox.observe(
+                        crate::downloads::DownloadSource {
+                            agent_id: member.direct.agent,
+                            peer_id: sender.clone(),
+                        },
+                        *connection_id,
+                        Some((*wire_id, *epoch, group)),
+                        &frame,
+                        now_ms,
+                    );
+                }
+            }
             if matches!(
                 application.as_ref(),
                 GroupApplication::FetchRequest(_)
@@ -393,12 +451,13 @@ impl Supervisor {
                 }
                 GroupApplication::Query(_)
                 | GroupApplication::Answer(_)
-                | GroupApplication::Offer(_) => {}
+                | GroupApplication::Offer(_)
+                | GroupApplication::Expression(_) => {}
             }
         }
     }
 
-    fn current_group_requester(
+    pub(super) fn current_group_requester(
         &self,
         connection_id: [u8; 16],
         sender: &PeerId,
@@ -494,6 +553,7 @@ impl Supervisor {
     pub(super) fn clear_group_transport(&mut self) {
         if let Some(groups) = &mut self.groups {
             groups.pending_transfers.clear();
+            groups.operator_view = None;
         }
     }
 
@@ -512,6 +572,7 @@ impl Supervisor {
                 groups.poll_sync(admission, &self.net, now, unix_time_ms()?);
             }
         }
+        self.poll_group_review();
         let Some(controls) = &self.group_controls else {
             return Ok(());
         };
@@ -524,6 +585,44 @@ impl Supervisor {
             Err(TryRecvError::Disconnected) => self.group_controls = None,
         }
         Ok(())
+    }
+
+    fn poll_group_review(&mut self) {
+        use asl_store::group_state::invite_review::{Choice, Outcome};
+        let agent = self.agent_id();
+        let Some(groups) = self.groups.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if now < groups.next_review || groups.cleanup_failed {
+            return;
+        }
+        groups.next_review = now + Duration::from_secs(1);
+        let Ok(now_ms) = unix_time_ms() else { return };
+        self.poll_group_operator(now_ms);
+        let Some(groups) = self.groups.as_mut() else {
+            return;
+        };
+        let Ok(Some(d)) = groups
+            .store
+            .claim_group_decision(agent, &self.device_peer_id, now_ms)
+        else {
+            return;
+        };
+        let action = match d.choice {
+            Choice::Approve => LocalGroupAction::Approve(d.invite),
+            Choice::Reject => LocalGroupAction::Reject(d.invite),
+            Choice::Retry => LocalGroupAction::Retry(d.invite),
+        };
+        let outcome = match self.apply_local_group_action(action, now_ms) {
+            Ok(_) if d.choice == Choice::Reject => Outcome::Declined,
+            Ok(view) if view["queued"] == true => Outcome::JoinQueued,
+            Ok(_) => Outcome::ApprovedNotSent,
+            Err(_) => Outcome::Failed,
+        };
+        if let Some(groups) = &mut self.groups {
+            let _ = groups.store.finish_group_decision(&d, outcome, now_ms);
+        }
     }
 
     fn apply_local_group_action(

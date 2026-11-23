@@ -29,6 +29,10 @@ impl GroupInboundPolicy {
     }
 
     pub(crate) fn read(db: &Connection) -> Result<Self, AslError> {
+        Ok(Self::read_saved(db)?.unwrap_or_default())
+    }
+
+    pub(crate) fn read_saved(db: &Connection) -> Result<Option<Self>, AslError> {
         db.query_row(
             "SELECT value_json FROM settings WHERE key=?1",
             [POLICY_KEY],
@@ -38,7 +42,6 @@ impl GroupInboundPolicy {
         .map_err(database_error)?
         .map(|value| serde_json::from_str(&value).map_err(|_| AslError::InvalidPolicyState))
         .transpose()
-        .map(Option::unwrap_or_default)
     }
 
     pub fn save(self, store: &Store, now_ms: u64) -> Result<(), AslError> {

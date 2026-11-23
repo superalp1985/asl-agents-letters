@@ -92,6 +92,12 @@
       "accepted": true
     },
     {
+      "name": "expression-letter-v1",
+      "root": "expression-letter",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
       "name": "signed-profile-record-v1",
       "root": "signed-profile-record",
       "codec": "record",
@@ -124,6 +130,18 @@
     {
       "name": "ack-unknown-kind-v1",
       "root": "ack",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "expression-text-literal-v1",
+      "root": "expression-letter",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "expression-wrong-operator-arity-v1",
+      "root": "expression-letter",
       "codec": "frame",
       "accepted": false
     }

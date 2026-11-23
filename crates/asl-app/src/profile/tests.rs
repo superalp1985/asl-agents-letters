@@ -304,6 +304,8 @@ fn avatar_reference() -> AvatarReference {
     AvatarReference {
         grant_id: GrantId(Id128([1; 16])),
         resource_key: ResourceKey(Id128([2; 16])),
+        epoch: 1,
+        content_id: AVATAR,
     }
 }
 
@@ -1525,6 +1527,26 @@ fn publisher_includes_only_the_publicly_authorized_avatar_content_reference() {
         .unwrap()
         .unwrap();
     published_profile(&next, &root, NOW + LIFETIME, 2, None);
+}
+
+#[test]
+fn publisher_rejects_a_different_avatar_at_the_same_resource_key() {
+    let root = AgentIdentity::generate().unwrap();
+    for (epoch, content_id) in [(2, AVATAR), (1, Hash32([6; 32]))] {
+        let mut snapshot = avatar_snapshot(Audience::Public);
+        let avatar = avatar_reference();
+        snapshot.grants.get_mut(&avatar.grant_id).unwrap().epoch = epoch;
+        let resource = snapshot.resources.get_mut(&avatar.resource_key).unwrap();
+        resource.grant_epoch = epoch;
+        resource.content_id = content_id;
+        let policy = PolicyEngine::new(snapshot, 60_000).unwrap();
+        let mut publisher = ProfilePublisher::new(&root, 1);
+        publisher.configure(configuration(true));
+        assert!(matches!(
+            publisher.poll_record(NOW, task(), &policy, &mut active(&root)),
+            Err(AslError::PolicyDenied)
+        ));
+    }
 }
 
 #[test]

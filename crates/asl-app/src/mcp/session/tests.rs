@@ -19,6 +19,89 @@ fn args() -> QueryArgs {
     }
 }
 
+#[test]
+fn received_answer_survives_reopen_but_not_disabling_retention() {
+    use crate::mcp::grant::{HostGrant, Key};
+    use asl_types::protocol::{Answer, AnswerStatus, ResultStatus};
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("recovery.sqlite3");
+    let mut grant = HostGrant {
+        key: Key::new([1; 32]),
+        recovery_key: Some(Key::new([2; 32])),
+        recovery_results: true,
+        scope: QueryScope::ContactsOnly,
+        inbox: None,
+        agent_push: false,
+        expressions: false,
+    };
+    let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
+    let (queries, _query_runtime) = outgoing_query_channel();
+    let (downloads, _download_runtime) = download_channel();
+    let mut session = Session::new(&queries, &downloads, QueryScope::ContactsOnly, None);
+    session.recovery = Some(&recovery);
+    let query = session.query(args()).unwrap();
+    let local_id = query["task_id"].as_str().unwrap();
+    let network_id = TaskId(Id128([3; 16]));
+    session.tasks[0].accept(OutgoingQueryEvent::TaskStarted {
+        task_id: network_id.clone(),
+    });
+    session.refresh_recovery().unwrap();
+
+    let mut peer = vec![0x12, 0x20];
+    peer.extend([4; 32]);
+    let now = unix_time_ms().unwrap();
+    session.tasks[0].accept(OutgoingQueryEvent::Response {
+        task_id: network_id.clone(),
+        agent_id: AgentId([5; 32]),
+        peer_id: PeerId::from_bytes(peer).unwrap(),
+        frame: Box::new(WireFrame::Answer(Answer {
+            message_id: Id128([6; 16]),
+            root_task_id: network_id.0,
+            status: AnswerStatus::Answered,
+            claims: vec![Claim {
+                subject: TypedValue::Concept(ConceptRef::RUST),
+                predicate: ConceptRef::RUST,
+                object: TypedValue::Integer(42),
+                evidence: None,
+            }],
+            evidence_ids: vec![],
+            result_status: ResultStatus::Partial,
+            created_at_ms: now,
+            expires_at_ms: now + QUERY_WINDOW_MS,
+        })),
+    });
+    session.refresh_recovery().unwrap();
+    let active = recovery.result(local_id).unwrap();
+    assert_eq!(active["status"], "active");
+    assert_eq!(active["answers"][0]["claims"][0]["object"]["value"], 42);
+    session.tasks[0].accept(OutgoingQueryEvent::TaskFinished {
+        task_id: network_id,
+        status: QueryStatus::Complete,
+    });
+    drop(session);
+    drop(recovery);
+
+    let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
+    let complete = recovery.result(local_id).unwrap();
+    assert_eq!(complete["status"], "complete");
+    assert_eq!(complete["answers"], active["answers"]);
+    assert!(complete.get("offers").is_none());
+    assert!(complete.get("downloads").is_none());
+    drop(recovery);
+
+    grant.recovery_results = false;
+    let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
+    assert_eq!(recovery.result(local_id), Err(ErrorCode::PolicyDenied));
+    assert_eq!(recovery.task(local_id).unwrap()["status"], "complete");
+    drop(recovery);
+    grant.recovery_results = true;
+    let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
+    let cleared = recovery.result(local_id).unwrap();
+    assert_eq!(cleared["recorded"], false);
+    assert_eq!(cleared["answers"], json!([]));
+}
+
 fn offer_response(task_id: TaskId, root: Id128) -> OutgoingQueryEvent {
     let mut encoded_peer = vec![0x12, 0x20];
     encoded_peer.extend([2; 32]);

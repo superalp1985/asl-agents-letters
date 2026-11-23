@@ -18,6 +18,9 @@ const TAG_BYTES: usize = 16;
 pub(super) struct SecurePipe<S> {
     stream: S,
     noise: TransportState,
+    header: [u8; 2],
+    encrypted: Vec<u8>,
+    read: usize,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
@@ -67,7 +70,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
         let noise = timeout(HANDSHAKE_DEADLINE, exchange)
             .await
             .map_err(|_| AslError::PolicyDenied)??;
-        Ok(Self { stream, noise })
+        Ok(Self {
+            stream,
+            noise,
+            header: [0; 2],
+            encrypted: Vec::new(),
+            read: 0,
+        })
     }
 
     pub async fn send(&mut self, value: &impl Serialize) -> Result<(), AslError> {
@@ -87,18 +96,40 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
     }
 
     pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, AslError> {
-        let len = self.stream.read_u16().await? as usize;
-        if len <= TAG_BYTES {
-            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+        // A select may stop polling this reader for a write. Keep framing
+        // progress on the pipe and advance the Noise nonce only on a full record.
+        while self.read < self.header.len() {
+            let n = self.stream.read(&mut self.header[self.read..]).await?;
+            self.add_read(n)?;
         }
-        let mut encrypted = vec![0; len];
-        self.stream.read_exact(&mut encrypted).await?;
-        let mut plain = vec![0; len - TAG_BYTES];
+        if self.encrypted.is_empty() {
+            let len = u16::from_be_bytes(self.header) as usize;
+            if len <= TAG_BYTES {
+                return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+            }
+            self.encrypted.resize(len, 0);
+        }
+        while self.read - self.header.len() < self.encrypted.len() {
+            let offset = self.read - self.header.len();
+            let n = self.stream.read(&mut self.encrypted[offset..]).await?;
+            self.add_read(n)?;
+        }
+        let mut plain = vec![0; self.encrypted.len() - TAG_BYTES];
         let len = self
             .noise
-            .read_message(&encrypted, &mut plain)
+            .read_message(&self.encrypted, &mut plain)
             .map_err(|_| AslError::PolicyDenied)?;
+        self.read = 0;
+        self.encrypted.clear();
         serde_json::from_slice(&plain[..len]).map_err(|_| AslError::InvalidMessage)
+    }
+
+    fn add_read(&mut self, n: usize) -> Result<(), AslError> {
+        if n == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        }
+        self.read += n;
+        Ok(())
     }
 }
 
@@ -127,5 +158,27 @@ mod tests {
         );
         assert!(a.is_err());
         assert!(matches!(b, Err(AslError::PolicyDenied)));
+    }
+
+    #[tokio::test]
+    async fn receive_resumes_after_select_interrupts_a_partial_record() {
+        let (a, b) = tokio::io::duplex(8);
+        let key = [42; 32];
+        let (a, b) = tokio::join!(SecurePipe::initiate(a, &key), SecurePipe::respond(b, &key));
+        let (mut a, mut b) = (a.unwrap(), b.unwrap());
+        let message = "message longer than the pipe buffer";
+        let mut send = std::pin::pin!(a.send(&message));
+        // Each side runs until blocked on the other side. Interrupt the read
+        // after consuming bytes, without closing the authenticated pipe.
+        tokio::select! {
+            biased;
+            _ = &mut send => panic!("record unexpectedly fit in pipe"),
+            _ = b.receive::<String>() => panic!("record unexpectedly arrived"),
+            _ = std::future::ready(()) => {}
+        }
+        assert!(b.read > b.header.len());
+        let (send, received) = tokio::join!(send, b.receive::<String>());
+        send.unwrap();
+        assert_eq!(received.unwrap(), "message longer than the pipe buffer");
     }
 }

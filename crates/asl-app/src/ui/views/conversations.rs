@@ -4,6 +4,7 @@ use asl_store::dashboard::{ActivityRow, Dashboard};
 use eframe::egui::{CollapsingHeader, RichText, Ui};
 
 use super::{MUTED, age, table, text};
+use crate::ui::locale::Language;
 
 type SessionKey<'a> = (&'a str, &'a str, Option<&'a str>);
 
@@ -25,14 +26,14 @@ fn sessions(rows: &[ActivityRow]) -> Vec<(SessionKey<'_>, Vec<&ActivityRow>)> {
     groups
 }
 
-pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64) {
+pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64, language: Language) {
     if data.activity.is_empty() {
-        ui.label(RichText::new("暂无活动").color(MUTED));
+        ui.label(RichText::new(label(language, "暂无活动", "No activity")).color(MUTED));
         return;
     }
     for (key @ (scope, id, peer), events) in sessions(&data.activity) {
         let short_id = || id.chars().take(12).collect::<String>();
-        let label = match peer {
+        let session_label = match peer {
             Some(peer) => {
                 let suffix = peer.get(peer.len().saturating_sub(8)..).unwrap_or(peer);
                 format!("{} / {suffix}", short_id())
@@ -46,41 +47,63 @@ pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64) {
         };
         let latest = events[0];
         let title = format!(
-            "{} · {} · {} 条 · {}",
-            text(scope),
-            label,
+            "{} · {} · {} {} · {}",
+            scope_text(scope, language),
+            session_label,
             events.len(),
-            age(latest.created_at_ms, now)
+            label(language, "条", "events"),
+            age(latest.created_at_ms, now, language)
         );
         CollapsingHeader::new(title).id_salt(key).show(ui, |ui| {
             let context = if peer.is_some() {
-                "任务 ID"
+                label(language, "任务 ID", "Task ID")
             } else {
-                "群组 ID"
+                label(language, "群组 ID", "Group ID")
             };
             ui.label(format!("{context}  {id}"));
             table(
                 ui,
-                ["时间", "方向", "类型", "AgentId", "设备 PeerId"],
+                [
+                    label(language, "时间", "Time"),
+                    label(language, "方向", "Direction"),
+                    label(language, "类型", "Type"),
+                    "AgentId",
+                    label(language, "设备 PeerId", "Device PeerId"),
+                ],
                 [1.0, 0.7, 1.0, 2.0, 2.0],
                 &events,
                 "",
                 |row| {
                     [
-                        age(row.created_at_ms, now),
+                        age(row.created_at_ms, now, language),
                         match row.direction.as_deref() {
-                            Some("in") => "收到",
-                            Some("out") => "发出",
-                            _ => "群状态",
+                            Some("in") => label(language, "收到", "Received"),
+                            Some("out") => label(language, "发出", "Sent"),
+                            _ => label(language, "群状态", "Group state"),
                         }
                         .into(),
-                        text(&row.kind).into(),
+                        text(&row.kind, language).into(),
                         row.agent_id.clone().unwrap_or_default(),
                         row.peer_id.clone(),
                     ]
                 },
             );
         });
+    }
+}
+
+fn scope_text(scope: &str, language: Language) -> String {
+    match scope {
+        "direct" => label(language, "直连", "Direct").into(),
+        "group" => label(language, "群组", "Group").into(),
+        _ => text(scope, language).to_owned(),
+    }
+}
+
+fn label(language: Language, zh: &'static str, en: &'static str) -> &'static str {
+    match language {
+        Language::Zh => zh,
+        Language::En => en,
     }
 }
 

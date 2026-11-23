@@ -1,6 +1,10 @@
+#[cfg(windows)]
+mod agent_mail;
+pub mod avatar;
 pub mod chain;
 mod chain_refresh;
 pub mod checkpoint_access;
+pub mod diagnostics;
 mod direct_inbound;
 mod direct_outbound;
 mod documents;
@@ -11,6 +15,8 @@ pub mod ipc;
 pub mod libraries;
 #[cfg(windows)]
 pub mod mcp;
+#[cfg(windows)]
+pub mod migration;
 pub mod model_endpoint_access;
 pub mod network;
 pub mod network_identity;
@@ -21,6 +27,7 @@ pub mod profile;
 pub mod providers;
 pub mod supervisor;
 mod transfer;
+pub mod update;
 
 pub use direct_outbound::{
     OutgoingQueryEvent, OutgoingQueryPort, OutgoingQueryRuntime, OutgoingQueryTicket,

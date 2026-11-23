@@ -11,6 +11,4 @@ bs58.workspace = true
 blake3.workspace = true
 libp2p-identity.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

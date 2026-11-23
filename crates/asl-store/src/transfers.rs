@@ -22,11 +22,16 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use crate::{Store, current_time_ms, database_error, open_store};
 
 mod consent;
+mod mcp_decision;
+mod mcp_resume;
+mod retention;
 use consent::{Admission, ConsentBinding, StartIntent};
 pub use consent::{
     DownloadConsent, DownloadMode, DownloadStart, UploadAdmission, UploadBinding, UploadConsent,
     UploadMode,
 };
+pub use mcp_decision::RecoveryDownloadDecision;
+pub use mcp_resume::RecoveryDownload;
 
 pub const DOWNLOAD_IDLE_MS: i64 = 300_000;
 pub const DOWNLOAD_COOLDOWN_MS: i64 = 86_400_000;
@@ -133,6 +138,8 @@ pub struct RecoveryReport {
 pub struct DownloadBroker {
     store: Store,
     home: PathBuf,
+    failed_part_cursor: String,
+    received_file_cursor: String,
     _owner: ProfileOwner,
 }
 
@@ -143,6 +150,8 @@ impl DownloadBroker {
         let mut broker = Self {
             store,
             home: home.to_owned(),
+            failed_part_cursor: String::new(),
+            received_file_cursor: String::new(),
             _owner: owner,
         };
         broker.recover_downloads(current_time_ms())?;
@@ -1042,6 +1051,7 @@ impl DownloadBroker {
             params![row.task, now],
         )
         .map_err(database_error)?;
+        retention::record_received_file(&tx, row, &output, now)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -1355,6 +1365,14 @@ fn group_binding_current(
     let Some(group) = row.group_binding()? else {
         return Ok(true);
     };
+    group_membership_current(db, &group, now_ms)
+}
+
+fn group_membership_current(
+    db: &Connection,
+    group: &GroupTransferBinding,
+    now_ms: i64,
+) -> Result<bool, AslError> {
     db.query_row(
         "SELECT EXISTS(
                 SELECT 1 FROM asl_groups

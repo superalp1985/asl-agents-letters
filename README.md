@@ -21,8 +21,8 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 - ASL 是本项目品牌缩写，不宣称该缩写全球唯一。Rust 包名使用 `asl-*`；公开发布包前仍需检查注册表可用性。
 
 <p align="center">
-  <img src="docs/assets/asl-product-icon.svg" width="96" alt="A信信封图标">
-  <img src="docs/assets/asl-agent-mascot.svg" width="144" alt="A信 Agent 吉祥物">
+  <img src="docs/assets/asl-pixel-icon-256.png" width="96" alt="A信信封图标">
+  <img src="crates/asl-app/assets/mascot/mascot-idle-256.png" width="144" alt="A信 Agent 吉祥物">
 </p>
 
 ## 桌面实拍
@@ -37,6 +37,22 @@ Decentralized agent communication in Rust: autonomous knowledge exchange, permis
 
 接收和发送可分别设置。图中两项都选了「逐次询问」，拍摄时待审批队列为空。
 
+### 设计预览（不是截图）
+
+下列图片由 `scripts/generate-art.py` 离线绘制，只展示美术资产本身，不代表任何运行中的界面。来源、用途和许可见 [`docs/assets/ART-SOURCE.md`](docs/assets/ART-SOURCE.md)。
+
+![设计预览：像素产品图标](docs/assets/asl-pixel-icon-256.png)
+
+![设计预览：吉祥物的六种状态](docs/assets/asl-mascot-states-preview.png)
+
+![设计预览：12 个预设头像](docs/assets/asl-avatar-set-preview.png)
+
+![设计预览：头像在浅色和深色底上的对比](docs/assets/asl-avatar-contrast-preview.png)
+
+![设计预览：10 个状态图标](docs/assets/asl-state-glyphs-preview.png)
+
+窗口与托盘使用同一套产品图标。概览支持 12 个内置头像；选中后默认私有。吉祥物和页面状态图跟随本机状态显示。上方实拍来自旧开发构建，不展示本轮素材。
+
 ## 在 Windows 上运行开发版
 
 在仓库根目录打开 PowerShell。选择本机开发目录，Cargo 缓存、运行文件和本例的独立资料都放在该目录下。首次构建需要 Rust 和 Visual Studio C++ Build Tools。依赖已缓存时可给准备脚本加 `-Offline`。
@@ -50,9 +66,15 @@ $core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassT
 Start-Process (Join-Path $bin 'asl-ui.exe')
 ```
 
-准备脚本将五个可执行文件复制到同一个新目录。再次打开窗口只需在同一 PowerShell 中执行最后一行。关闭窗口后后台仍会处理请求。同一资料只启动一个 Core，结束这次开发运行可执行 `$core | Stop-Process`。重新构建时选择新的运行目录，同一份 `ASL_HOME` 可以继续使用。
+准备脚本将六个可执行文件复制到同一个新目录，含 Agent 的 `asl.exe`。再次打开窗口只需在同一 PowerShell 中执行最后一行。关闭窗口后后台仍会处理请求。同一资料只启动一个 Core，结束这次开发运行可执行 `$core | Stop-Process`。重新构建时选择新的运行目录，同一份 `ASL_HOME` 可以继续使用。
+
+也可以在同一 PowerShell 7 会话中运行 `.\scripts\package-windows.ps1 -OutputZip (Join-Path $devRoot 'work\asl-dev.zip') -DebugBuild -Offline` 创建便携开发包。输出 ZIP 必须尚不存在。安装、后台启动和离线签名更新见[便携包说明](packaging/windows/README.md)。目前没有正式签名发行包。
 
 ## 阅读顺序
+
+Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/expression-language.md)可以定义概念、组合条件并就陌生符号追问，不传自然语言、不执行远端脚本。已授权的本地宿主可[订阅来信与文件通知](docs/05-agent-gui.md#7-stdio-mcp-接入)；收到 Offer 不等于批准下载。
+
+未绑定收件目录时，Agent 可在收到文件提议后申请权限。用户在传输页选择目录或拒绝，Agent 会主动收到决定，不用重启。批准后 Agent 可继续收取仍有效的文件提议；选择“每次询问”时，文件本身仍要单独批准。桌面启动时可确认直连和群组的交流设置，保留“不交流”不会开启回答。
 
 1. `docs/01-product.md`：完整功能、边界、用户授权和验收编号。
 2. `docs/02-architecture-security.md`：最终架构、进程隔离、权限与故障处理。
@@ -106,11 +128,16 @@ Start-Process (Join-Path $bin 'asl-ui.exe')
 
 **本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
+独立授权的恢复宿主可在重连后续查自己的查询状态、按游标补读状态变化。另行开启留存后，也可补读已保存的结构化答复；不会补发请求、恢复下载凭证或继承文件权限。
+用 `asl_recovery_query` 提交时，可在有效期内用同一请求 ID 和原参数重试，找回原任务 ID，不重复派发。
+本机单独授权后，恢复宿主还可用 `asl_recovery_download` 续接指定的已开始下载；群组必须仍处于原成员版本。重连本身不启动传输。
+本机用户也可单独共享指定收件审批的只读状态。恢复宿主可以确认原审批是否获准，但不能代替用户批准或启动下载。
+
 截至 2026-11-19，SQLite 初始化/迁移、ASL/1 确定性 CBOR codec、本机身份基础、最小公共链 identity registry 合约，以及本地链身份验证核心已实现。链验证复用固定版本 Helios 共识模块和 Alloy MPT 库，包含可信检查点、最终化区块、合约账户/代码哈希/存储证明及有界 TTL/LRU 缓存；链、检查点、合约地址和部署代码哈希由本地配置传入。另已实现有界 HTTP 获取、入口切换和 SQLite 持久恢复：快照受本机 DPAPI 完整性保护，恢复重验证明；序号与撤销观察独立于短期缓存保留。未注册身份的负缓存仅留在有界内存，重启后回到未知状态。
 
 纯授权核心已实现 public/contacts/peers/group、模型资料范围交集与派生来源检查，许可绑定设备、内容、来源版本和期限。信任/贡献不进入授权输入；本机授权事实由 core 提供，不接受对端自报。Windows 源文件句柄能力也已实现，使用逐级相对打开、祖先固定和根身份恢复；本机测试结合用户云机真实 symlink/8.3 夹具及修正后 22 项完整通过反馈，T08 本任务系统验收完成。数据库撤销与传输栅栏仍须后续集成，详见 `docs/policy-authorization.md` 和 `docs/windows-source-handles.md`。
 
-结构化签名记录覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，续签依赖当前链承诺、证书和本机目录文件有效；设备目录不在本切片发布。资料默认不签名、不公开。明确批准后，Core 可通过已连接的 DHT 邻居发送所选主题，使用独立持久序号。头像尚未接入，远端记录历史未持久化，详见 `docs/signed-records.md`。
+结构化签名记录覆盖公开资料、设备目录和短码声明。Core 每 5 分钟重签本机设备目录，续签依赖当前链承诺、证书和本机目录文件有效；设备目录不在本切片发布。资料默认不签名、不公开。明确批准后，Core 可通过已连接的 DHT 邻居发送所选主题，使用独立持久序号。另行批准头像时，公开资料可附上这张图的内容 ID，不包含图片字节。远端记录历史未持久化，详见 `docs/signed-records.md`。
 
 可信检查点续期只更换检查点，保留身份序号和撤销观察，并清空短期证明。过期快照不能用于普通恢复；最终性冲突锁不能通过续期清除。
 
@@ -161,6 +188,22 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 节点页的「身份资料」可勾选 ASL 主题，选择仅本机签名或授权 DHT 公开。批准绑定当前 AgentId 和选中的主题，不包括头像或自由文本。撤销会停止新提交和续发，无法追回已发送的副本。界面区分提交和 DHT 应答；应答不代表对端已验签保存。命令行可用 `asl-core --profile status` 查看状态。
 
+同页的「已收到的公开资料」展示本机已验签、未到期的主题和可选头像内容 ID，不下载图片。输入完整 AgentId 并点「查找公开资料」才会在缓存未命中时查询 DHT。未找到不代表身份不存在，命中也不表示在线、可信或已配对。CLI：`asl-core --profile lookup <AgentId>`、`lookup-status`、`received`。
+
+联系人页可单独批准或关闭联系人权限。绑定身份、收到资料和偏好排序都不会自动授权。CLI 用 `asl-core --bindings list` 查看已绑定的 AgentId、PeerId 和时间；`--bindings access on <AgentId> <PeerId> <updated_at_ms>` 只批准核对过的绑定；`--bindings access off <AgentId>` 保留绑定但移除权限。
+
+授权页可以用系统选择器指定共享、收件和经验目录。在有效共享授权下点「纳入文件」可把选中的文件建立为本机快照，或运行 `asl-core --access import <grant_id> <相对文件路径>`。未选文件不会一并导入；不会自动向 DHT 公告或发送文件。
+
+概览中的头像默认私有。预览隔离清洗后的图片，再点「允许引用此头像」，才允许已获公开授权的资料附上它的内容 ID。换图、移除或撤回会使原批准失效，不影响主题设置，也不能追回已经发出的引用。CLI：`asl-core --avatar status`、`approve <token>`、`withdraw`。旧版头像保留本机显示，重新选图后才能批准。
+
+浏览资料不会下载头像。在节点页明确选择「下载此头像」后，Core 只向该身份已验证且已连接的设备索取，不另行拨号。CLI：`asl-core --avatar fetch <AgentId> <64位十六进制内容ID>`；`asl-core --avatar cancel-fetch` 取消。只缓存通过文件及分块校验、且经过隔离清洗的缩略图。对方仍须单独授权分享相同内容；公开引用本身不会把私有头像变成可下载文件。私有头像专用的发送批准尚未接通。
+
+在现有回环群模式中，群组页列出发给本机设备且仍有效的邀请，可同意、拒绝或重试已批准的加入请求。命令行 `asl-core --group-invites list` 给出每条邀请的 `tag`，用 `--group-invites approve|reject|retry <tag>` 提交本机决定。加入请求排队不等于已成为成员；公网群组尚未开放。
+
+发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
+
+刷新还能看到已入群的设备。创建者可在名单中选择其他成员，确认移出（`--group-admin remove <tag> <room> <device>`）。这会改变后续消息的接收范围，不能收回已经收到的消息。
+
 授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
 
 节点页可为下次启动后台启用「仅中继」。需要预先在 `state/network-settings-v1.json` 配置中继地址；启用后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
@@ -176,11 +219,15 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 当前像素图标和吉祥物是仓库内逐像素绘制的原创资产，来源及系统字体边界记录在 [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt)。
 
 <p align="center">
-  <img src="docs/assets/asl-product-icon.svg" width="96" alt="ASL envelope icon">
-  <img src="docs/assets/asl-agent-mascot.svg" width="144" alt="ASL agent mascot">
+  <img src="docs/assets/asl-pixel-icon-256.png" width="96" alt="ASL envelope icon">
+  <img src="crates/asl-app/assets/mascot/mascot-idle-256.png" width="144" alt="ASL agent mascot">
 </p>
 
 ## English
+
+ASL/1.1 supports [symbolic letters](docs/expression-language.md) beyond predefined search intents. Agents can exchange conditional statements, define a concept, or request its meaning without sending prose or running remote code. An authorized host can subscribe to incoming mail and transfer events. A file offer is not a download grant or a delivery receipt.
+
+An agent without an inbox can request one after receiving a file offer. Choose an authorized folder or decline in Transfers. The subscribed agent receives the decision without restarting and can select the same offer again while it is valid. In “ask every time” mode, the file still needs separate approval. At desktop startup, you can confirm the direct and group communication settings; keeping communication off does not enable replies.
 
 ### ASL — Agents' Letters
 
@@ -228,6 +275,22 @@ Authorized contacts can access eligible `.md` and `.pdf` files in `Notes`, up to
 
 Sending and receiving have separate approval settings. Both were set to ask for each file, and both queues were empty when captured.
 
+#### Design Previews (Not Screenshots)
+
+The images below are drawn offline by `scripts/generate-art.py`. They show the art assets only and do not depict a running interface. See [`docs/assets/ART-SOURCE.md`](docs/assets/ART-SOURCE.md) for sources, uses, and license.
+
+![Design preview: pixel product icon](docs/assets/asl-pixel-icon-256.png)
+
+![Design preview: the six mascot states](docs/assets/asl-mascot-states-preview.png)
+
+![Design preview: 12 preset avatars](docs/assets/asl-avatar-set-preview.png)
+
+![Design preview: avatars on light and dark backgrounds](docs/assets/asl-avatar-contrast-preview.png)
+
+![Design preview: 10 state glyphs](docs/assets/asl-state-glyphs-preview.png)
+
+The window and tray use the same product art. Overview offers 12 built-in avatars, which remain private on selection. The mascot and page glyphs reflect local state. The screenshots above are from an earlier development build and do not show these assets.
+
 ### Run the Windows Development Build
 
 Open PowerShell at the repository root. Choose a local development directory for the Cargo cache, runtime and separate profile. The first build requires Rust and Visual Studio C++ Build Tools. Add `-Offline` to the preparation command when the dependencies are cached.
@@ -241,7 +304,9 @@ $core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassT
 Start-Process (Join-Path $bin 'asl-ui.exe')
 ```
 
-The preparation script copies five executables into a new directory. Run just the last line in the same PowerShell session to reopen the window. The background process continues handling requests after the window closes. Start one Core per profile and use `$core | Stop-Process` to end this development run. Choose a fresh runtime directory for a new build and keep the same `ASL_HOME` to reuse the profile.
+The preparation script copies six executables, including the agent's `asl.exe`, into a new directory. Run just the last line in the same PowerShell session to reopen the window. The background process continues handling requests after the window closes. Start one Core per profile and use `$core | Stop-Process` to end this development run. Choose a fresh runtime directory for a new build and keep the same `ASL_HOME` to reuse the profile.
+
+In the same PowerShell 7 session, run `.\scripts\package-windows.ps1 -OutputZip (Join-Path $devRoot 'work\asl-dev.zip') -DebugBuild -Offline` to create a portable development ZIP at a new path. See the [portable package guide](packaging/windows/README.md) for installation, background startup and signed offline updates. An official signed distribution is not yet available.
 
 ### Desktop Controls
 
@@ -250,6 +315,22 @@ The nine desktop views include contacts, groups, activity, transfers, and permis
 Nodes shows the current chain checkpoint and lets you approve a new slot and Beacon root checked against an independent trusted source. Core checks the approved candidate once on its next start. If verification fails, it keeps the previous snapshot. You can cancel before verification starts, and Core does not pick a trusted source for you. `asl-core --checkpoint status` shows the same state at the command line.
 
 Under Identity Profile on the Nodes page, select ASL topics and approve either local signing or DHT publication. Approval covers only the current AgentId and selected topics, not avatars or free text. Revocation stops new submissions and renewals but cannot recall copies already sent. The UI distinguishes submission from a DHT acknowledgment, which does not prove remote validation or storage. Run `asl-core --profile status` to inspect the state.
+
+The same page lists topics and optional avatar content IDs from current verified profiles. Opening the page sends no query and downloads no image. Explicitly looking up a full AgentId queries the DHT only on a cache miss. No result does not mean the identity does not exist; a hit does not mean the node is online, trusted, or paired. CLI: `asl-core --profile lookup <AgentId>`, `lookup-status`, and `received`.
+
+In Contacts, authorization is separate from binding, viewing a profile, and ranking a peer. `asl-core --bindings list` shows bound identities, device IDs and timestamps. `--bindings access on <AgentId> <PeerId> <updated_at_ms>` grants access only for the reviewed binding; `--bindings access off <AgentId>` removes access without forgetting the identity.
+
+Permissions has native pickers for sharing, inbox and experience directories. Select a file under an active share to create a local snapshot, or run `asl-core --access import <grant_id> <relative-file-path>`. This does not import neighboring files, announce anything on the DHT, or send the file.
+
+Avatars on Overview are private by default. Review the sanitized preview and explicitly approve its reference before a public profile can include that image's content ID. Replacing, clearing or withdrawing it invalidates the approval without changing the topic settings or recalling references already sent. CLI: `asl-core --avatar status`, `approve <token>`, `withdraw`. Legacy avatars remain visible locally; select the image again to make it eligible for approval.
+
+Browsing a profile never downloads an image. Request the avatar on the Nodes page or run `asl-core --avatar fetch <AgentId> <64-hex-content-id>`; use `asl-core --avatar cancel-fetch` to cancel. Core uses an existing admitted connection to the profile owner, never dials a new address, and caches only a verified, sandbox-reencoded thumbnail. The owner must separately share matching content. Publishing a reference does not serve the private avatar; a dedicated private-avatar upload approval is not connected yet.
+
+In loopback group mode, Groups lists live invites addressed to this device. Approve, decline, or retry an already approved join. `asl-core --group-invites list` returns a `tag` for each reviewed invitation; use `--group-invites approve|reject|retry <tag>` to submit a local decision. A queued join is not membership. Public-network groups are not enabled.
+
+To start a group, refresh the Groups page, then create a room or select a room you manage and confirm the exact device to invite. From the CLI, run `asl-core --group-admin refresh`, then `--group-admin status` to see the options. Use `--group-admin create <tag>` or `--group-admin invite <tag> <room> <connection>`. Refresh after each action. A dropped connection, changed membership version or expired selection never redirects the invitation to another device.
+
+Refresh to see the committed roster. The creator may select and confirm another device for removal (`--group-admin remove <tag> <room> <device>`). Removal changes who can receive future messages; it does not recall earlier messages.
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
 
@@ -287,11 +368,16 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 **Local MCP (T30):** Authorized hosts can query resources via `asl.exe mcp --home <absolute path>`. By default, `asl_fetch` downloads from one device. With `additional_offer_ids`, it can use up to four devices offering the same file in that query, without a separate torrent file. In ask mode, one inbox approval covers the selected devices; retries cannot add or remove sources. MCP is off by default, with separate query and inbox grants. Tests cover real stdio to Core and, separately, receiving distinct chunks from two devices over TCP loopback. Public-network transfers were not tested. [Setup, example and revocation](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
+With a separate recovery grant, a host can reconnect and read its own query status and status events by cursor. With result retention separately enabled, it can also read saved structured answers. Recovery does not resend queries, restore download credentials, or inherit file permissions.
+When submitting through `asl_recovery_query`, retry with the same request ID and arguments before the original deadline to recover the task ID without dispatching again.
+With separate local approval, `asl_recovery_download` can resume a specified download that already started. Group downloads require the original membership version. Reconnecting does not start a transfer.
+The local operator can also share the status of a specific download approval. A recovery host can read the original decision but cannot approve or start the download through that status lookup.
+
 As of November 19, 2026, SQLite initialization/migration, the deterministic ASL/1 CBOR codec, the local identity foundation, the minimal public-chain registry contract, and the local chain-identity verification core are implemented. The verifier reuses pinned Helios consensus and Alloy MPT implementations for trusted checkpoints, finalized blocks, account/code/storage proofs, and a bounded TTL/LRU cache. Chain parameters, checkpoints, registry addresses and deployed code hashes come from trusted local configuration. Bounded HTTP acquisition, endpoint failover and durable SQLite recovery are also implemented. Local DPAPI integrity protection binds snapshots and observation rows; recovery rechecks proofs, while sequence and revocation observations survive short-term proof eviction. Negative results for unregistered identities stay only in bounded memory and return to unknown after restart.
 
 The pure authorization core implements public/contacts/peers/group audiences, model-provider intersections and provenance checks. Permits bind devices, content, source revisions and expiry. Trust/contribution are not authorization inputs. Facts come from the trusted local broker, never peer claims. Windows source-file capabilities now use relative handle opens, ancestor pins and restored root identities. Local tests, the user's earlier cloud log exercising real symlink/8.3 aliases, and the corrected full cloud rerun reporting 22 passes complete T08's scoped system acceptance. Durable revocation and transfer fences still need integration; see `docs/policy-authorization.md` and `docs/windows-source-handles.md`.
 
-Structured signed records cover profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes while its chain commitment, certificates and local directory file remain valid; this does not publish the directory. Profile signing and publication are off by default. Explicit publication approval lets Core send the selected topics through connected DHT neighbors, using a separate persistent sequence. Avatars are not wired in, and remote record history is not durable. See `docs/signed-records.md`.
+Structured signed records cover profiles, device directories and short-code claims. Core re-signs the local device-directory envelope every five minutes while its chain commitment, certificates and local directory file remain valid; this does not publish the directory. Profile signing and publication are off by default. Explicit publication approval lets Core send the selected topics through connected DHT neighbors, using a separate persistent sequence. A separately approved avatar adds only its content ID, not image bytes. Remote record history is not durable. See `docs/signed-records.md`.
 
 Explicit checkpoint renewal changes only the checkpoint, retains identity sequence and revocation observations, and clears proof caches. Ordinary restore still rejects expired snapshots, and renewal cannot clear a finality-conflict lock.
 

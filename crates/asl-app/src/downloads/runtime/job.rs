@@ -1,5 +1,6 @@
 use asl_store::transfers::DOWNLOAD_IDLE_MS;
 use asl_transfer::bulk::MAX_INLINE_BYTES;
+use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::protocol::WireFrame;
 
 use super::{
@@ -25,6 +26,7 @@ pub(super) struct ActiveJob {
     group: Option<asl_store::transfers::GroupTransferBinding>,
     state: State,
     events: SyncSender<DownloadEvent>,
+    host_resume: Option<(TransferId, [u8; 32])>,
 }
 
 enum State {
@@ -67,19 +69,54 @@ struct PendingFetch {
 impl ActiveJob {
     pub(super) fn start(queued: QueuedJob, local: &mut LocalDownloads, now: u64) -> Option<Self> {
         let result = (|| {
-            let resume_schedule = match &queued.job {
+            let (job, host_resume) = match queued.job {
+                DownloadJob::ResumeForHost {
+                    transfer_id,
+                    subject,
+                } => {
+                    let selected = local.broker.recovery_sources(
+                        &transfer_id,
+                        &subject,
+                        (MAX_ACTIVE_SOURCES + 1) as i64,
+                    )?;
+                    let Some(selected) = selected else {
+                        let info = local.broker.info(&transfer_id)?;
+                        let _ = queued.events.try_send(DownloadEvent::Completed(info));
+                        return Ok(None);
+                    };
+                    if selected.is_empty() || selected.len() > MAX_ACTIVE_SOURCES {
+                        return Err(AslError::PolicyDenied);
+                    }
+                    let sources = selected
+                        .into_iter()
+                        .map(|(agent_id, peer_id)| DownloadSource { agent_id, peer_id })
+                        .collect();
+                    let binding = (transfer_id.clone(), subject);
+                    (
+                        DownloadJob::Resume {
+                            transfer_id,
+                            sources,
+                        },
+                        Some(binding),
+                    )
+                }
+                job => (job, None),
+            };
+            let resume_schedule = match &job {
                 DownloadJob::Resume { transfer_id, .. } => {
                     Some(local.broker.schedule(transfer_id)?)
                 }
                 DownloadJob::Fetch(_) => None,
+                DownloadJob::ResumeForHost { .. } => unreachable!("resolved host job"),
             };
-            let group = match &queued.job {
+            let group = match &job {
                 DownloadJob::Fetch(selection) => selection.group.clone(),
                 DownloadJob::Resume { .. } => resume_schedule
                     .as_ref()
                     .and_then(|schedule| schedule.group.clone()),
+                DownloadJob::ResumeForHost { .. } => unreachable!("resolved host job"),
             };
-            let selected = match &queued.job {
+            let selected = match &job {
                 DownloadJob::Fetch(selection) => {
                     local.broker.ensure_retry_allowed(
                         selection.content_id,
@@ -88,6 +125,7 @@ impl ActiveJob {
                     &selection.sources
                 }
                 DownloadJob::Resume { sources, .. } => sources,
+                DownloadJob::ResumeForHost { .. } => unreachable!("resolved host job"),
             };
             let sources = selected
                 .iter()
@@ -101,7 +139,7 @@ impl ActiveJob {
                     Ok(Source::new(source, registered))
                 })
                 .collect::<Result<_, AslError>>()?;
-            let (content, state) = match queued.job {
+            let (content, state) = match job {
                 DownloadJob::Fetch(selection) => (
                     selection.content_id,
                     State::Selecting {
@@ -131,6 +169,7 @@ impl ActiveJob {
                     let state = begin(local, &queued.events, info)?;
                     (content, state)
                 }
+                DownloadJob::ResumeForHost { .. } => unreachable!("resolved host job"),
             };
             Ok(Some(Self {
                 root: Id128(rand::random()),
@@ -139,6 +178,7 @@ impl ActiveJob {
                 group,
                 state,
                 events: queued.events.clone(),
+                host_resume,
             }))
         })();
         match result {
@@ -148,6 +188,24 @@ impl ActiveJob {
                 None
             }
         }
+    }
+
+    pub(super) fn check_host_resume(&self, local: &LocalDownloads) -> Result<(), AslError> {
+        if let Some((transfer, subject)) = &self.host_resume {
+            local.broker.check_recovery_download(transfer, subject)?;
+            if let Some(group) = &self.group {
+                for source in &self.sources {
+                    if !local.broker.source_is_current(
+                        source.identity.agent_id,
+                        &source.identity.peer_id,
+                        Some(group),
+                    )? {
+                        return Err(AslError::PolicyDenied);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn step(

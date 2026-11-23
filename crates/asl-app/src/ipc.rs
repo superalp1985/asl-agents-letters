@@ -64,7 +64,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=58)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=59)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -316,6 +316,11 @@ pub enum IpcMessage {
     },
     CancelProfile {
         operation_id: [u8; 16],
+        receipt_id: [u8; 16],
+    },
+    LookupProfile {
+        operation_id: [u8; 16],
+        agent: AgentId,
     },
     DhtProviders {
         lookup_id: [u8; 16],
@@ -1106,11 +1111,26 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(value);
             57
         }
-        IpcMessage::CancelProfile { operation_id } => {
+        IpcMessage::LookupProfile {
+            operation_id,
+            agent,
+        } => {
             if *operation_id == [0; 16] {
                 return Err(AslError::InvalidMessage);
             }
             body.extend_from_slice(operation_id);
+            body.extend_from_slice(agent.as_bytes());
+            59
+        }
+        IpcMessage::CancelProfile {
+            operation_id,
+            receipt_id,
+        } => {
+            if *operation_id == [0; 16] || *receipt_id == [0; 16] || operation_id == receipt_id {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(receipt_id);
             58
         }
         IpcMessage::DhtProviders {
@@ -1495,9 +1515,20 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 value: body[16..].to_vec(),
             })
         }
-        58 if body.len() == 16 && body != [0; 16] => Ok(IpcMessage::CancelProfile {
-            operation_id: body.try_into().unwrap(),
+        59 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::LookupProfile {
+            operation_id: body[..16].try_into().unwrap(),
+            agent: AgentId(body[16..].try_into().unwrap()),
         }),
+        58 if body.len() == 32
+            && body[..16] != [0; 16]
+            && body[16..] != [0; 16]
+            && body[..16] != body[16..] =>
+        {
+            Ok(IpcMessage::CancelProfile {
+                operation_id: body[..16].try_into().unwrap(),
+                receipt_id: body[16..].try_into().unwrap(),
+            })
+        }
         45 if body.len() >= 18 && body[..16] != [0; 16] => {
             let status = match body[16] {
                 1 => DhtLookupStatus::Completed,
@@ -2011,7 +2042,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         44 => 48,
         54..=56 => 48,
         57 => 16 + MAX_DHT_VALUE_BYTES,
-        58 => 16,
+        58 => 32,
+        59 => 48,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2396,6 +2428,11 @@ mod tests {
             },
             IpcMessage::CancelProfile {
                 operation_id: [39; 16],
+                receipt_id: [40; 16],
+            },
+            IpcMessage::LookupProfile {
+                operation_id: [41; 16],
+                agent: AgentId([42; 32]),
             },
             IpcMessage::DhtProviders {
                 lookup_id: [34; 16],
@@ -2565,6 +2602,7 @@ mod tests {
                 | IpcMessage::PrepareProfile { .. }
                 | IpcMessage::PublishProfile { .. }
                 | IpcMessage::CancelProfile { .. }
+                | IpcMessage::LookupProfile { .. }
                 | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)
@@ -2591,6 +2629,17 @@ mod tests {
                 .unwrap_or_else(|error| panic!("failed to decode {message:?}: {error:?}"));
             assert_eq!(decoded.message, message);
             assert_eq!(decoded.sequence, 7);
+            let mut stream = Vec::new();
+            FrameWriter::new(&mut stream, sender, receiver)
+                .send(&message)
+                .unwrap();
+            assert_eq!(
+                FrameReader::new(stream.as_slice(), sender, receiver)
+                    .receive()
+                    .unwrap()
+                    .message,
+                message
+            );
         }
     }
 

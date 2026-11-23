@@ -42,6 +42,7 @@ pub struct LocalDownloads {
     chunks: Option<chunks::ChunkDownload>,
     retired_chunks: HashMap<Id128, chunks::PendingChunk>,
     next_idle_sweep_ms: u64,
+    next_file_prune_ms: u64,
 }
 
 impl LocalDownloads {
@@ -54,6 +55,7 @@ impl LocalDownloads {
             chunks: None,
             retired_chunks: Default::default(),
             next_idle_sweep_ms: 0,
+            next_file_prune_ms: 0,
         })
     }
 

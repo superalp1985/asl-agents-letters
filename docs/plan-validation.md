@@ -792,3 +792,159 @@ Windows x64、Rust 1.100.0、E 盘缓存、`--locked --offline`：`asl-app` prof
 两个同机 libp2p TCP transport 通过已按策略建立的连接验证：查找阶段无资料候选、取消后旧操作无法提交、批准的 PUT 到达对端待验证入口、DHT 应答可以在对端不落库时成立、发送端不留自动续发副本。夹具传送结构合法的合成签名封装，不代表接收端已完成真实链身份验证。SQLite 和 Core 的定向测试覆盖仅本机授权不公开、暂停和授权版本更替拦截入队、查找应答不算发布、旧应答不写入新批准。
 
 Windows x64、Rust 1.100.0、`--locked --offline`：同机 TCP 1 项、SQLite 2 项、IPC 21 项、Core 状态 1 项、真实 CLI 1 项通过。`asl-net`、`asl-store` 和 `asl-app` 含桌面目标的全目标严格 Clippy 通过。未在真实 AppContainer、公网、真实链 RPC 或原生桌面执行端到端发布，未接通远端资料浏览或头像。
+
+### 2026-11-22 结构化来信与宿主收件
+
+- `expression_hosts_exchange_a_definition_across_core_processes`：两个独立 Core、两套身份和 SQLite、两个 MCP 客户端，通过各自的加密本机管道和真实回环 TCP 完成 `meaning` → `meaning_is`。两个空闲接收方都由资源更新通知唤起；接收者读到原表达式，回复有独立消息 ID 并保留原任务 ID。联系人授权前，已连接和离线的非联系人均返回 `policy_denied`；授权后，只浏览可以收信，仍不能回复。改为允许回答才可发信。
+- 同一进程夹具从接收目录未授权的宿主发起检索：另一端实际导入本地授权的 `.rs` 文件并返回 Offer。宿主被主动通知；`asl_fetch` 只创建本机目录权限提醒，没有创建下载任务、目录授权或待审批传输。另有被动 Offer 的邮箱边界用例；三项真实回环 TCP 下载分别覆盖单源、双源和断源替补，核对审批通知、批准前目标为空、完成通知和最终字节。
+- Windows x64、Rust 1.100.0、`--locked --offline`：`asl-app --lib` 定向 20 项通过（MCP、双 Core、旧 minor 准入、三成员 MLS 和 TCP 下载）；`asl-store --lib` 定向 3 项通过（权限提醒合并/到期不授予权限、群活动保留、v22 → v23 迁移）。
+- `asl-ui` 5 项与 `mcp_contract` 3 项通过，共 31 项定向测试。6 个相关 crate（`asl-types`、`asl-net`、`asl-agent`、`asl-groups`、`asl-store`、`asl-app`）全目标严格 Clippy、工作区格式和差异空白检查通过。Clippy 仍报告既有第三方 `proc-macro-error2` 的未来兼容性提示。
+- 双 Core 用例使用合成链证明，Net 驱动器经帧化 IPC 运行在各 Core 的专用线程；不是跨机器、生产链、真实模型或 AppContainer 新协议互通验收。通知需要运行中的已订阅宿主，不承诺离线补投；入队不是送达，结构化定义也不等于对方已理解或接受。此轮不处理 DHT 公开资料撤权竞态。
+
+追加验收：在上述双 Core 用例中，宿主没有预设收件目录。选择 Offer 后只出现本地申请，没有下载任务。运行中绑定目录后，原会话收到 `inbox_permission: granted`，重用同一个 Offer 得到逐文件审批。审批前目标目录为空；批准后收到 `file_received`，落盘的 17 字节与发送方原文件完全一致。发送方未预填接收设备，登记来自当前已验证连接。两端均未重启。
+
+### 2026-11-22 资料撤权与在途发布
+
+SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数据库后仍不可提交；错误的完成 ID 不会激活新授权。Core 状态机测试在取消期间投递旧 PUT 的成功应答和无关回执，均不会结束等待。Net 驱动测试通过帧编码读回独立取消回执，并确认原操作不能再次提交。三项测试分别覆盖不同边界，不等同于真实 AppContainer 故障注入、公网 DHT 传播或对远端副本的删除。此次修改涉及私有 Core/Net IPC，需配套升级两个二进制文件。
+
+### 2026-11-22 本机授权、资料 GET 与群邀请
+
+- 两个 libp2p transport 经 TCP 实际执行 PUT、GET。GET 返回与发送字节相同的候选，拒绝后查询方没有本机副本。此夹具用合成签名，只验证传输，不证明生产链验签或公网发现。流式 IPC round-trip 包含两 ID 的取消帧及按 AgentId 查找帧。
+- SQLite 覆盖缓存命中不发 GET、重复请求合并、暂停、超时、链撤销及过期后不再显示命中；联系人覆盖审核设备/绑定时间、独立撤权、重复操作不增加策略版本。两个 Core 的结构化来信与收件夹具通过正式绑定和显式联系人授权接口，不再手写联系人授权表。
+- `local_access_cli_indexes_only_an_active_grants_selected_files` 运行真实 `asl-core`：授权本身不导入文件，选中的嵌套 `.rs` 成为唯一索引项，扩展名不符及目录越界不导入，撤销后数量归零且不能继续导入。本机头像的独立 Windows AppContainer 定向用例覆盖清洗、替换、清除与失败保留原头像；没有将头像上传。
+- `group_file_crosses_core_processes_with_two_approvals` 在回环 TCP 上由第二个本机数据库连接提交邀请决定，Core 领取、核对并发送加入请求，随后房间进入预期 epoch，文件传输仍须原来的审批。Store 定向用例覆盖批准与重试不能互换、同一请求不能二次领取、错误设备不生效。没有重跑提权 AppContainer 群场景、真实桌面窗口、公网或跨机迁移。
+- Windows x64、Rust 1.100.0、锁定依赖离线编译：桌面启动确认 3 项及资料命令行（含拒查本机 AgentId）通过。`asl-policy`、`asl-store`、`asl-net`、`asl-app` 含桌面功能的全目标严格 Clippy 通过；未运行全工作区测试。
+
+### 2026-11-22 本机群管理与远端头像引用
+
+- 回环 TCP、合成链证明、独立 Core：双 Core 从本机操作队列创建 MLS 房间，选择已验证设备邀请；批准前两边均无新增成员，批准后成员名单一致，文件仍走原有收发审批。三 Core 场景通过同一入口移出成员，创建者不能自移；被移出设备连接尚在，后续消息只交给剩余成员。不是公网或新一轮提权 AppContainer 验收。
+- 发送端 Core、Store 及上述两个进程场景共 4 项通过。覆盖目标身份、连接或群版本变化时拒绝操作，选项不能跨本机身份、跨设备、跨期限或重复使用。桌面表单 4 项及 CLI 参数 1 项通过，包含选择失效、离线设备移除、排除已有成员和 PeerId 校验；未操作真实桌面窗口。
+- 远端资料与数据库升级定向测试 9 项通过，包括 v23 → v24 不补填头像、仅有头像引用的有效资料、新序号替换或撤回、较早序号不能恢复，以及既有群历史升级用例。不验证头像图片下载、对外公开或跨机器传播。
+- Windows x64、Rust 1.100.0、锁定依赖离线运行。`asl-app`、`asl-store` 含 `desktop-ui` 的全目标严格 Clippy 通过；未跑工作区全量测试。
+
+### 2026-11-22 本机头像引用授权与撤回
+
+- Windows x64、Rust 1.100.0，锁定依赖离线。38 项定向测试通过：SQLite 头像及旧版本升级 7 项、索引保留 7 项、资料授权状态 6 项、Core/Extractor/传输权限和签名 12 项、CLI/桌面逻辑/真实本机 CLI 3 项、TCP 回环资料传输 3 项。`asl-types`、`asl-policy`、`asl-store`、`asl-net`、`asl-app`（含 `desktop-ui`）全目标严格 Clippy 通过；未跑全工作区测试。
+- 真实 CLI 调用隔离 Extractor 选图并生成预览，再用本机保护身份批准或撤回。旧 token 在换图或撤回后不能批准，旧库保留私有预览但不补授权。GUI 逻辑只提交当前纹理匹配的 token；此次未人工验收原生窗口。
+- 同一身份的主题公开与头像批准顺序无关。仅本机签名、另一身份、缺少单独批准均无头像。通过真实身份根签名、独立 resolver 和合成链证明验证了先附上内容 ID、撤回后签发较新无头像的记录，以及旧记录不能恢复。单独的并发连接/回执测试覆盖在途发布、错误操作 ID、撤回、待变更主题和整体资料撤销。
+- 两个实际 libp2p TCP 回环节点 PUT/GET 签名记录，收到的候选与发送字节一致；该传输夹具使用合成签名，不能替代上一项验签证据。已准入请求方知道真实头像内容 ID，仍无法通过普通 Fetch 或未获许可的 Bulk Manifest/Chunk/Inline 获得图片。没有对外开放头像文件读取，没有测试公网 DHT、跨机器传输或 AppContainer 网络。
+
+### 2026-11-22 T34 明确索取远端头像
+
+- Windows x64、Rust 1.100.0，锁定依赖离线。按不重复用例计：Store 12 项、App 库 15 项、Core CLI 2 项、桌面逻辑 4 项，另显式执行跨进程回环 1 项。`asl-policy`、`asl-store`、`asl-app`（含 `desktop-ui`）全目标严格 Clippy 通过。
+- `explicit_avatar_crosses_core_processes_and_an_isolated_extractor` 使用两个独立 Core、进程内 Net 协议夹具、真实 TCP 回环和隔离 Extractor。接收端从已验签资料的投影入口开始；发送端另行授权一个普通图片文件并启用上传询问。查看资料没有排入请求；发起索取后，发送方看到正确的接收身份和内容 ID。批准前无缓存，批准后经清单、单块传输和隔离解码，把 256×192 图片变成 128×96，只存清洗结果。这个场景不验证公网、DHT 收录、私有头像专用上传或沙箱 Net。
+- Store/接收逻辑覆盖 v25 → v26 不自动下载、并发取消与入队的先后顺序、暂停后不复活旧请求、错来源或错误回执通道、等待时间和重试上限、头像替换与资料版本变化、空或超限文件、清单与块散列不符。GUI/CLI 测试覆盖精确目标、过期预览与迟到本地读取。本轮未运行全工作区测试或人工界面验收。
+### 2026-11-22 UI 语言、托盘与头像观察窗
+
+- 接入 `state/ui-settings-v1.json`，默认中文，首次启动显示中文/English 选择，设置可切换语言、关闭窗口隐藏和提醒音。
+- Windows GUI 尝试创建通知区域图标。关闭窗口在托盘可用时隐藏观察窗，双击恢复，右键菜单提供显示和退出。托盘创建失败时 GUI 仍可启动。
+- 提醒音按活动、收发审批、入群邀请和本机操作完成的状态标记去重触发，设置关闭后不播放。
+- 统一 egui 主题、间距、按钮状态、头像容器和默认像素信使视觉。远端头像仍保持明确选择、下载和本机缓存校验流程。
+- 本轮继续把本机头像、远端头像、群组管理、群邀请、操作通知、错误状态和启动设置接入中文/English 本地化。协议字段名、AgentId、PeerId、内容 ID 和结构化消息内容保持原样。
+- 定向验证范围：
+
+  ```text
+  cargo +1.100.0 fmt --all -- --check
+  cargo +1.100.0 check -p asl-app --bin asl-ui --features desktop-ui --locked --offline
+  cargo +1.100.0 clippy -p asl-app --bin asl-ui --features desktop-ui --locked --offline -- -D warnings
+  cargo +1.100.0 clippy -p asl-policy --all-targets --locked --offline -- -D warnings
+  cargo +1.100.0 test -p asl-app --bin asl-ui --features desktop-ui --locked --offline
+  git diff --check
+  ```
+
+- 上述 GUI 单测为 15 项通过。尚未进行真实窗口截图、DPI 矩阵、托盘交互手测或完整工作区验收。
+
+### 2026-11-23 UI 本地化收口
+
+- 继续覆盖传输审批、联系人绑定、共享目录、收件目录、派生经验目录、启动设置和界面设置错误状态。English 模式下这些页面的操作标签、空状态、授权提示和失败提示不再依赖中文固定文案。
+- 保留 Agent 间结构化通信约束，协议字段名、身份标识、PeerId、内容 ID 和模型状态码不因界面语言切换而改变。
+- 本轮验证：
+
+  ```text
+  cargo +1.100.0 fmt --all -- --check
+  cargo +1.100.0 check -p asl-app --bin asl-ui --features desktop-ui --locked --offline
+  cargo +1.100.0 clippy -p asl-app --bin asl-ui --features desktop-ui --locked --offline -- -D warnings
+  cargo +1.100.0 test -p asl-app --bin asl-ui --features desktop-ui --locked --offline
+  cargo +1.100.0 clippy -p asl-policy --all-targets --locked --offline -- -D warnings
+  git diff --check
+  ```
+
+- UI 单测 15 项通过。未进行真实窗口截图、DPI 矩阵、托盘人工交互和完整工作区验收。
+
+### 2026-11-23 T35 活动与失败分片清理、诊断导出
+
+- Windows x64、Rust 1.100.0、E 盘缓存。离线定向测试共 32 项通过。`diagnostics` 1 项，`activity_retention` 1 项，`conversation_lifecycle` 3 项，`transfer_resume` 27 项。`asl-app` 与 `asl-store` 的库、`asl-core` 和相关测试目标的严格 Clippy 通过。
+- SQLite 回归覆盖到期边界、重复清理、保留活跃任务的去重记录和待发引用、保留 MLS 密文。NTFS 回归覆盖失败分片恰好三天回收、新近失败分片和活跃分片保留、同名替换文件保留。
+- 诊断测试启动真实 `asl-core` 子进程，核对版本化内容、受保护目录拒绝和无覆盖写入。报告在特定测试目录生成。完整工作区、原生窗口、长时间定时运行和身份迁移仍待验收。
+
+### 2026-11-23 T35 收件期限与本机身份迁移
+
+- `transfer_resume` 28 项通过；收件期限测试覆盖默认关闭、只登记新收件、缩短期限、延长不追溯、关闭后不重新纳入旧文件、保留改动过的内容，以及成功回收后释放额度。SQLite v27 的 Store 单测 112 项通过。App 库同轮完成 279 项，5 项按既有标记忽略；之后没有重跑全库。
+- `identity_migration` 与 `diagnostics` 各 1 项通过；相关库、`asl-core` 和定向测试目标严格 Clippy 通过。迁移测试使用真实 age 加密、Windows DPAPI 与 SQLite，覆盖口令错误、新目录限制、保留 AgentId、生成新 PeerId、选定联系人（含撤销）、本地信任记录及未到期直连观察。未执行链注册、证书签发、不同设备/账户互迁或 MLS 重新入组。
+
+### 2026-11-23 T36 便携开发包与更新验证
+
+- PowerShell 7 在 Windows 本机生成开发版便携 ZIP。打开归档核对 15 项条目；清单列出的 14 项 SHA-256 全部相符。ZIP 包含 5 个桌面运行二进制、启动/登录脚本、许可证、CycloneDX 运行依赖清单及三个锁定 MPL 组件的原始 `.crate` 源码。
+- `cargo deny --offline check licenses` 通过（仍有数据集中未使用的许可规则提示）；Ed25519 更新验证单测通过，涵盖修改签名清单、替换公钥、包长度变化以及同版本/回滚拒绝。使用测试签名，不代表正式发行；未执行安装、失败回滚、真实登录启动、SBOM 外部校验或原生 UI 视觉验收。
+
+### 2026-11-23 T36 连续签名更新与便携启动
+
+- Windows x64、Rust 1.100.0、E 盘缓存，锁定依赖离线。更新验签单测 1 项、`windows_update` 显式集成测试 1 项通过，`asl-app` 库、Core 及测试目标严格 Clippy 通过。集成测试使用 PowerShell 7、真实根 Core 验签、只实现 `--version` 的候选夹具。覆盖固定公钥不可覆盖、坏签名、版本不符、额外 ZIP 成员、激活指针被占用时保留旧指向且不遗留候选目录、现用 Core 已缺失时仍能应用更高版本、拒绝同版本与降级，以及指针丢失时拒绝重新应用。独立测试资料文件未被修改。
+- 独立静态复核指出原先的缺失指针回退、候选兼任验签、共享写权限和引导层兼容问题。新版显式分发初装指针，固定初装 Core 验签，以稳定的 `MPL-SOURCES.zip` 容纳依赖换版；双语安装说明区分常规更新与全包引导层更换。工作目录继承了较宽的 NTFS 权限；本机开发验证不等同于部署 ACL 审核。
+- 重打调试 ZIP，核对 16 个包内文件及 15 项 SHA-256，确认含 7 个 MPL 源码归档。从含空格的解压路径用 `Start-ASL.ps1 -Background` 启动真实 Core 与 Net，并创建独立临时 SQLite 资料库。未修改真实登录启动项、启动 GUI、部署正式签名密钥或网络镜像。
+- 这轮证明启用前故障不切换版本；未证明新版本打开原资料库后的故障回滚，也没有跨账户安装权限、正式发行、公网或异机迁移验收。
+
+### 2026-11-23 工作区串行基线
+
+- `cargo +1.100.0 test --workspace --all-targets --features asl-app/desktop-ui --locked --offline -- --test-threads=1`：本次编译产物累计 845 项通过、0 项失败、11 项忽略、7 项在对应测试进程中过滤。单独显式运行的 Windows 更新集成测试不计入 845 项。
+- Funplay 同期更新了 GUI 素材和调用代码。该结果对应工作区测试开始时编译的快照，不覆盖编译后写入的 UI 变更，不能当作新 UI 或原生视觉验收。
+- 之后从同期 GUI 快照重新生成开发 ZIP，核对 16 个包内文件及 15 项 SHA-256。该快照可打包，但全工作区严格 Clippy 未通过：UI 的 `tokens.rs` 有两处常量断言告警，`views.rs` 有一处测试模块后定义函数告警。Core 和更新测试目标的定向严格 Clippy 通过；本轮没有把两次快照的结果合写为全绿。
+
+### 2026-11-23 Opus 美术与稳定 Agent 入口
+
+- Windows x64、Rust 1.100.0、锁定依赖离线。桌面测试 17 项、头像 CLI 2 项、真实 MCP 契约 3 项通过；`asl-app` 与 `asl-policy` 含桌面功能的全目标严格 Clippy 通过。头像测试覆盖内置预设尺寸、私有默认值、切换后旧批准失效、非法预设编号不覆盖选择。
+- 显式执行 `windows_update` 1 项通过。两次各自签名的更新由相同根 `asl.exe` 启动对应版本的候选夹具，原 `mcp --home` 参数不变；缺失激活指针时拒绝启动。候选使用测试夹具，不代表真实跨版本 Core/MCP 的业务互操作。
+- 便携 ZIP 布局 v2 核对 18 个文件与 17 项散列。从含空格的解压目录运行真实 `asl.exe`，未启动 GUI 或配置授权也能完成 MCP `initialize`／`tools/list`，没有创建资料目录。未跑全工作区、未手测 Windows 托盘和 DPI，也未验证断线后任务续查。
+
+### 2026-11-23 T36a 查询状态恢复与宿主兼容
+
+- Windows x64、Rust 1.100.0、锁定依赖离线。`mcp_contract` 4 项、`asl-app` MCP 库定向 15 项、`asl-policy` 的 `local_ipc` 5 项通过；`asl-app`、`asl-policy`、`asl-store` 全目标严格 Clippy 通过。
+- 真实 Core 和 stdio 宿主覆盖普通订阅与恢复宿主并行、Core 重启后通过任务号和游标续查、普通密钥拒绝、密钥轮换隔离，以及恢复宿主无下载权限。旧 Core 行为夹具覆盖功能探测拒绝后重新连接，已开始的旧版任务不因再次列工具或调用不支持的扩展而断开。
+- Store 库 113 项通过；随后再次跑恢复日志用例，验证实际 SQLite 重开、未完成状态中断、分页和到期后时钟回拨不复活。静态复核发现的问题按本机管道隔离、向下兼容和到期处理分别修正；不把复核视为完整安全审计。
+- 恢复读取不重发；原查询可能已排队或已发送。未实现正文恢复、推送回放、跨断线传输、用户主动重试幂等，也未验收真实跨版本节点互通或全工作区。
+
+### 2026-11-23 T36a 恢复查询提交去重
+
+- Windows x64、Rust 1.100.0、锁定依赖离线。`mcp_contract` 4 项、`asl-app` MCP 库定向 15 项、`asl-store` 库 115 项通过；`asl-app` 和 `asl-store` 全目标严格 Clippy 通过。
+- 真实 Core 与 stdio 宿主验证同 ID 同参数在同会话和 Core 重启后返回原任务 ID，日志仅一条排队记录；同 ID 改参数、到期及普通密钥请求均被拒绝。旧工具列表与禁止恢复宿主下载的回归仍通过。
+- SQLite 文件夹具验证 v28 旧任务升级到 v29 后保留原状态、不生成请求 ID；续查不占用新槽，清理后时钟回拨不能让原提交再次生效。预留成功不代表网络送达；未测试公网传输、真实跨版本节点或全工作区。
+
+### 2026-11-23 T36a 结构化答复补读
+
+- Windows x64、Rust 1.100.0、锁定依赖离线。MCP 库定向 16 项、`mcp_contract` 4 项、Store 库 115 项通过；`asl-app` 和 `asl-store` 含桌面的全目标严格 Clippy 通过。
+- 注入已关联到查询的非空结构化答复，验证运行中保存部分结果、终态与结果跨 SQLite 重开保留；关闭单独的留存开关并重开后，任务状态仍可查，再开启不会恢复旧快照。真实 Core 与 stdio 覆盖工具发现、普通宿主拒绝及重启后读取已记录的空答复快照。未做远端非空答复跨机验收。
+- Windows 调试 ZIP 核对 18 个文件和 17 项散列。未运行全工作区、公网测试、推送回放或断线续传验收。
+
+### 2026-11-23 T36a 显式直连续传
+
+- Windows x64、Rust 1.100.0、锁定依赖离线：下载工作线程 10 项、Core CLI 11 项、真实 MCP 契约 4 项、Store 库 115 项、NTFS/SQLite 下载恢复 29 项通过。`asl-app` 和 `asl-store` 含桌面功能的全目标严格 Clippy 通过。
+- 真实下载工作线程和 SQLite/NTFS 夹具覆盖重启后读取原传输、拒绝未绑定或错误恢复身份、收件撤权后不主动请求、重新取得来源许可、只发缺块请求、核对最终字节和已完成任务重复请求不传文件。网络事件由夹具提供；MCP 进程测试单独覆盖工具发现、拒绝普通密钥和未知传输，不等同于公网端到端续传。
+- 独立静态复核发现到期授权有时钟回拨复活风险；现以受限删除记住首次观察到的到期，NTFS/SQLite 夹具确认过期绑定已删除。未验收跨机公网、跨版本节点、未批准 Offer 回放或群组传输转交。
+
+### 2026-11-23 T36a 显式群组续传
+
+- Windows x64、Rust 1.100.0、锁定依赖离线：下载工作线程 13 项、NTFS/SQLite 下载恢复 29 项、真实 MCP 契约 4 项通过。`asl-app` 和 `asl-store` 含桌面功能的全目标严格 Clippy 通过。
+- 工作线程和 NTFS/SQLite 夹具验证群组续接保留原成员版本和原来源，只请求缺失块并使用新许可。群版本变动或来源设备在运行中撤销，即使已经收到 Fetch 回应，也不继续请求分块或发布文件。依据独立静态复核，沿用设备身份表和注册逻辑固定的 PeerId/AgentId 映射，并在处理群组续传响应前重新检查当前来源成员资格及证书。
+- 本机 TCP 的双 Core 群文件测试 1 项通过，验证原双端审批仍可用；它不是群组续传的端到端验收。未重跑提权 AppContainer 测试，未验收跨机器公网、跨版本节点或待批准 Offer 回放。
+
+### 2026-11-23 T36a 收件审批状态补读
+
+- Windows x64、Rust 1.100.0、锁定依赖离线：Store 库 115 项、NTFS/SQLite 下载 31 项、Core CLI 11 项、MCP 契约 4 项通过。`asl-app` 与 `asl-store` 含桌面功能的全目标严格 Clippy 通过。
+- SQLite 夹具通过下载器产生待审批记录，覆盖未共享、等待、批准、拒绝、过期、收件撤权、群版本改变和恢复身份轮换。真实 Core 与 MCP 使用已存在审批夹具，验证通过本机 CLI 共享后跨 Core 重启读取、普通密钥无权读取，以及撤销共享后不可读。即使已批准，状态查询不创建下载，恢复工具也不能把尚未开始的下载当作断点续传。
+- 未验收完整 Offer 或推送回放、跨版本双节点和公网传输；本轮没有修改线上协议。
+
+### 2026-11-23 Windows 工作区收尾验证
+
+- Windows x64、Rust 1.100.0、锁定依赖离线；`cargo test --workspace --all-targets --features asl-app/desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：859 通过、1 失败、11 忽略。收件审批跨 Core 重启的 MCP 回归通过。
+- 失败为 `asl-agent` 的 `model_gateway::authorized_prompt_uses_only_registered_endpoint_and_returns_model_text`，本机模拟服务返回路径出现 `ProviderUnavailable`。前一次遇错停止的运行在同一测试目标中有两条不同用例报相同错误。没有定位根因，不能标记工作区测试全绿。
+- 同配置的工作区全目标严格 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。未执行真实外部模型、公网双节点、72 小时长跑或提权 AppContainer 验收。

@@ -43,7 +43,9 @@ struct MlsApplicationDelivery {
 impl CoreAdmission {
     /// Trusted Core caller only. A creator fans out against its durable head;
     /// a non-creator may only address the creator, which checks its own head.
-    /// Nothing is forwarded, retried or queued for offline devices.
+    /// An expression requires this explicit trusted send; local inbound browse
+    /// and answer settings do not authorize a send. Nothing is forwarded,
+    /// retried or queued for offline devices.
     pub fn send_loopback_mls_application(
         &mut self,
         store: &mut Store,
@@ -141,6 +143,7 @@ impl CoreAdmission {
         )?;
         let local = self.local_hello.peer_id.clone();
         let mut routes = Vec::new();
+        let mut incompatible = false;
         for (agent, connection, peer) in self.admitted_connections(clock.now_ms()?) {
             if target_connection.is_some_and(|target| target != connection)
                 || peer == local
@@ -159,12 +162,22 @@ impl CoreAdmission {
                     .verify_group_route_leaf(connection, wire_id, &key, clock.now_ms()?)
                     .is_ok()
                 {
-                    routes.push((peer, connection, key));
+                    if matches!(application, GroupApplication::Expression(_))
+                        && !self.peer_supports_expression(connection)
+                    {
+                        incompatible = true;
+                    } else {
+                        routes.push((peer, connection, key));
+                    }
                 }
             }
         }
         if routes.is_empty() {
-            return Err(AslError::NotFound);
+            return Err(if incompatible {
+                AslError::IncompatibleVersion
+            } else {
+                AslError::NotFound
+            });
         }
         let message_id = application.message_id();
         let (packet, version) =
@@ -225,7 +238,7 @@ impl CoreAdmission {
         packet: &GroupPacket,
         deadline_ms: u64,
         now_ms: u64,
-    ) -> Result<([u8; 16], PeerId, GroupApplication), AslError> {
+    ) -> Result<([u8; 16], PeerId, Option<GroupApplication>), AslError> {
         if self.group_directories.is_none() {
             return Err(AslError::PolicyDenied);
         }

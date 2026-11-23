@@ -160,7 +160,7 @@ impl Provider {
                     assert_eq!(request.content_id, self.content);
                     let prepared = self
                         .transfer
-                        .prepare_fetch(self.requester.clone(), &request, now)
+                        .prepare_fetch(self.requester.clone(), &request, now, |_, _| Ok(()))
                         .unwrap();
                     self.transfer
                         .finish_fetch(prepared, now, |grant, _| {

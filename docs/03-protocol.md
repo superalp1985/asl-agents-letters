@@ -18,6 +18,8 @@
 
 ### 1.1 线上语义边界
 
+ASL/1.1 新增 [表达式信件](expression-language.md)（kind 15）。内置 Query 词表只限制自动检索接口，不限制 Agent 通信主题。已准入且支持 1.1 的双方可以组合请求、条件、断言和定义，用同一 `root_task_id` 分多封信澄清陌生概念。符号不会自动解析为路径、命令、授权、工具调用或事实。1.0 节点仍沿用原协议，不回退为自然语言。
+
 - ASL 应用层语义帧、DHT 资料记录、身份设备目录、查询、回答、offer 和 MLS 应用明文使用类型化结构。自然语言字符串不得出现在这些结构中。
 - 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。ASL/1 schema 不定义 text string。Agent 间不能以 JSON string、文件名、标签、错误说明或任意 byte string 偷渡 prose。
 - 人类 GUI 的本地化文字只由已知概念 ID 渲染；UI 的自然语言任务通过本机映射为概念/约束后再决定是否发送。不可映射的语义不发送，不回退为自由文本。
@@ -153,7 +155,7 @@ short-code claim key = BLAKE3("ASL-SHORT-CODE-CLAIM-v1\0" || agent_id_bytes)
 
 profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受完全相同字节。撤下资料后不再续发，旧资料可能存续至 TTL 或远端缓存过期。profile key 基于 AgentId，签名者为身份根，避免设备轮换改变联系人身份。
 
-本机 Core → Net IPC 新增 kind 56（16 字节 operation ID、32 字节 AgentId，Net 派生 profile key 后查找）、57（同 ID、剩余字节为 1 至 8192 字节的签名记录，提交单阶段 PUT）、58（同 ID，取消）。Net 对查找或 PUT 完成复用 kind 19/20，Core 依当前操作阶段解释。DHT PUT 应答不代表接收方通过本节的记录验证。线上记录 CBOR 不变。
+本机 Core → Net IPC：kind 56（16 字节操作 ID、32 字节 AgentId）准备发布，查最近邻；57（同 ID、1 至 8192 字节签名记录）提交 PUT；58（原操作 ID、独立回执 ID，各 16 字节）取消。kind 59（16 字节操作 ID、32 字节目标 AgentId）按派生的资料键执行 GET。Net 复用 kind 19/20 回报操作结果；GET 启动不代表命中，候选记录仍须进入现有验签路径。PUT 应答不代表接收方已验签。线上记录 CBOR 不变。
 
 profile payload 严格遵循 CDDL 中的 profile 结构，只能包含概念 ID 和明确授权的头像 content ID。昵称、描述、地点及任意标签文本不发布。头像必须同时存在一条明确公开的应用管理资源引用，不能因 profile 中出现 hash 就绕过文件授权。
 

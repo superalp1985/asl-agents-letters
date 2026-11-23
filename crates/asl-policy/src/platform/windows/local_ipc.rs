@@ -45,6 +45,14 @@ impl LocalPipeServer {
     /// Bind within a Tokio runtime with I/O enabled. Never join an existing
     /// listener; callers must report a conflicting endpoint instead.
     pub fn bind(root: &Path) -> Result<Self, AslError> {
+        Self::bind_endpoint(root, false)
+    }
+
+    pub fn bind_recovery(root: &Path) -> Result<Self, AslError> {
+        Self::bind_endpoint(root, true)
+    }
+
+    fn bind_endpoint(root: &Path, recovery: bool) -> Result<Self, AslError> {
         let root = pin_directory(root)?;
         let sid = process_user_sid()?;
         let descriptor = private_descriptor(&sid)?;
@@ -61,7 +69,7 @@ impl LocalPipeServer {
                 .max_instances(1)
                 .reject_remote_clients(true)
                 .create_with_security_attributes_raw(
-                    endpoint_name(root.identity(), &sid),
+                    endpoint_name(root.identity(), &sid, recovery),
                     (&raw mut attributes).cast(),
                 )
         }?;
@@ -111,9 +119,17 @@ impl Drop for LocalPipeConnection<'_> {
 /// Open only the local endpoint for this data root, within a Tokio runtime.
 /// A matching Windows owner SID does not identify a particular executable.
 pub fn connect_local_pipe(root: &Path) -> Result<NamedPipeClient, AslError> {
+    connect_endpoint(root, false)
+}
+
+pub fn connect_recovery_pipe(root: &Path) -> Result<NamedPipeClient, AslError> {
+    connect_endpoint(root, true)
+}
+
+fn connect_endpoint(root: &Path, recovery: bool) -> Result<NamedPipeClient, AslError> {
     let root = pin_directory(root)?;
     let sid = process_user_sid()?;
-    let name = HSTRING::from(endpoint_name(root.identity(), &sid));
+    let name = HSTRING::from(endpoint_name(root.identity(), &sid, recovery));
     let handle = unsafe {
         CreateFileW(
             &name,
@@ -133,12 +149,17 @@ pub fn connect_local_pipe(root: &Path) -> Result<NamedPipeClient, AslError> {
     Ok(unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }?)
 }
 
-fn endpoint_name(identity: &FileIdentity, sid: &str) -> String {
+fn endpoint_name(identity: &FileIdentity, sid: &str, recovery: bool) -> String {
     let mut digest = blake3::Hasher::new_derive_key("ASL local IPC endpoint v1");
     digest.update(&identity.volume_serial.to_le_bytes());
     digest.update(&identity.file_id);
     digest.update(sid.as_bytes());
-    format!(r"\\.\pipe\asl-local-v1-{}", digest.finalize().to_hex())
+    let prefix = if recovery {
+        "asl-recovery-v1"
+    } else {
+        "asl-local-v1"
+    };
+    format!(r"\\.\pipe\{prefix}-{}", digest.finalize().to_hex())
 }
 
 fn private_descriptor(sid: &str) -> Result<LocalAllocation, AslError> {

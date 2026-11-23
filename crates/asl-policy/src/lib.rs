@@ -20,7 +20,17 @@ pub use paths::{
     open_authorized_source,
 };
 #[cfg(windows)]
-pub use platform::windows::local_ipc::{LocalPipeConnection, LocalPipeServer, connect_local_pipe};
+pub use platform::windows::file_dialog::{
+    choose_avatar_file, choose_local_directory, choose_local_file,
+};
+#[cfg(windows)]
+pub use platform::windows::local_ipc::{
+    LocalPipeConnection, LocalPipeServer, connect_local_pipe, connect_recovery_pipe,
+};
+#[cfg(windows)]
+pub use platform::windows::notification::play_notification_sound;
+#[cfg(windows)]
+pub use platform::windows::tray::{TrayCommand, TrayHandle, set_tray_language, start_tray};
 pub use platform::{protect_secret, unprotect_secret, validate_storage_root};
 pub use service::{Permit, PolicyEngine, PolicyService, ScopedPolicy};
 pub use types::*;

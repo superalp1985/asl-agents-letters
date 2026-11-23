@@ -4,13 +4,13 @@
 ; non-preferred integers, trailing bytes, and non-deterministic encodings.
 
 control-frame = hello / query / answer / offer / fetch-request /
-                fetch-grant / error / ack / profile / fetch-pending
+                fetch-grant / error / ack / profile / fetch-pending / expression-letter
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
 ; Authenticated plaintext inside an MLS application message, not an outer frame.
 group-application = query / answer / offer / fetch-request /
-                    fetch-grant / fetch-pending / error
+                    fetch-grant / fetch-pending / error / expression-letter
 
 id128 = bstr .size 16
 hash32 = bstr .size 32
@@ -138,6 +138,37 @@ fetch-pending = {
   4: time-ms,
   5: time-ms
 }
+
+; ASL/1.1 control frame. See docs/expression-language.md for lexical
+; scope, reference/argument checks, time ordering, and tree limits.
+expression-letter = {
+  0: 1,
+  1: 15,
+  2: id128,
+  3: id128,
+  4: time-ms,
+  5: time-ms,
+  6: expression-term
+}
+
+expression-term = [0, expression-i64] / [1, expression-i64, 1..18] / [2, bool] /
+                  [3, expression-unary-op, expression-term] /
+                  [3, expression-binary-op, expression-term, expression-term] /
+                  [4, expression-index] / [5, expression-term, expression-term] /
+                  [6, expression-arity, expression-term, expression-term] /
+                  [7, expression-index, expression-items] /
+                  [8, expression-term, expression-term, expression-term] /
+                  [9, expression-term] / [10, expression-term] / [11, expression-items] /
+                  expression-concept / [13, expression-concept] /
+                  [14, expression-concept, expression-arity, expression-term] /
+                  [15, expression-concept, expression-items]
+expression-i64 = -9223372036854775808..9223372036854775807
+expression-index = 0..255
+expression-arity = 0..16
+expression-items = [0*16 expression-term]
+expression-concept = [12, agent-id, uint .le 4294967295, uint .le 65535, uint .le 4294967295]
+expression-unary-op = 4 / 13
+expression-binary-op = 0..3 / 5..12
 
 error = {
   0: 1,

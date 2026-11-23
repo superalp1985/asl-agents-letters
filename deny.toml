@@ -20,6 +20,11 @@ allow = [
     "Ubuntu-font-1.0",
     "Zlib",
 ]
+exceptions = [
+    { crate = "hpke-rs@=0.7.0", allow = ["MPL-2.0"] },
+    { crate = "hpke-rs-crypto@=0.7.0", allow = ["MPL-2.0"] },
+    { crate = "hpke-rs-rust-crypto@=0.7.0", allow = ["MPL-2.0"] },
+]
 
 [sources]
 unknown-registry = "deny"

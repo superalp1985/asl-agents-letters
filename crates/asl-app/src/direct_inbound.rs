@@ -45,12 +45,8 @@ pub(crate) struct PreparedReply {
 
 impl DirectInbound {
     pub(crate) fn open(path: &Path) -> Result<Self, AslError> {
-        let mut store = open_direct_store(path)?;
-        store.prune_direct_inbound_observations(
-            i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidMessage)?,
-        )?;
         Ok(Self {
-            store,
+            store: open_direct_store(path)?,
             runner: InboundRunner::default(),
             next_query: None,
             agent_cooldowns: HashMap::new(),
@@ -217,7 +213,7 @@ impl DirectInbound {
     }
 }
 
-fn read_mode(store: &Store) -> Result<InboundMode, AslError> {
+pub(crate) fn read_mode(store: &Store) -> Result<InboundMode, AslError> {
     let value = store.get_setting(MODE_KEY)?;
     Ok(match value.as_deref() {
         Some("\"answer\"") => InboundMode::Answer,

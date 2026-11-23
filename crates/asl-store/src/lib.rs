@@ -7,24 +7,33 @@ use std::{
 use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub mod avatar_publication;
+pub mod avatar_receipts;
 pub mod chain;
 pub mod contact_bindings;
 pub mod conversation;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod evidence;
 mod group_observations;
 pub mod group_state;
+mod host_inbox;
 pub mod inbound_observations;
+pub mod mcp_recovery;
+pub mod migration;
 pub mod network_privacy;
 pub mod paired_contacts;
+pub mod profile_lookup;
 pub mod public_profile;
 mod publication;
+mod remote_profiles;
 pub mod resources;
+mod retention;
 pub mod search;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 32;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -46,6 +55,17 @@ const SCHEMA_V18: &str = include_str!("../../../specs/schema-v18.sql");
 const SCHEMA_V19: &str = include_str!("../../../specs/schema-v19.sql");
 const SCHEMA_V20: &str = include_str!("../../../specs/schema-v20.sql");
 const SCHEMA_V21: &str = include_str!("../../../specs/schema-v21.sql");
+const SCHEMA_V22: &str = include_str!("../../../specs/schema-v22.sql");
+const SCHEMA_V23: &str = include_str!("../../../specs/schema-v23.sql");
+const SCHEMA_V24: &str = include_str!("../../../specs/schema-v24.sql");
+const SCHEMA_V25: &str = include_str!("../../../specs/schema-v25.sql");
+const SCHEMA_V26: &str = include_str!("../../../specs/schema-v26.sql");
+const SCHEMA_V27: &str = include_str!("../../../specs/schema-v27.sql");
+const SCHEMA_V28: &str = include_str!("../../../specs/schema-v28.sql");
+const SCHEMA_V29: &str = include_str!("../../../specs/schema-v29.sql");
+const SCHEMA_V30: &str = include_str!("../../../specs/schema-v30.sql");
+const SCHEMA_V31: &str = include_str!("../../../specs/schema-v31.sql");
+const SCHEMA_V32: &str = include_str!("../../../specs/schema-v32.sql");
 
 pub struct Store {
     connection: Connection,
@@ -231,6 +251,39 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 21 {
             apply_migration_in_transaction(&transaction, SCHEMA_V21, 21, now)?;
+        }
+        if version < 22 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V22, 22, now)?;
+        }
+        if version < 23 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V23, 23, now)?;
+        }
+        if version < 24 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V24, 24, now)?;
+        }
+        if version < 25 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V25, 25, now)?;
+        }
+        if version < 26 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V26, 26, now)?;
+        }
+        if version < 27 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V27, 27, now)?;
+        }
+        if version < 28 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V28, 28, now)?;
+        }
+        if version < 29 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V29, 29, now)?;
+        }
+        if version < 30 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V30, 30, now)?;
+        }
+        if version < 31 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V31, 31, now)?;
+        }
+        if version < 32 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V32, 32, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

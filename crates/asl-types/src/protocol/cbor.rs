@@ -8,10 +8,11 @@ use crate::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
-        DeviceCertificate, Feature, FetchGrant, FetchPending, FetchRequest, GroupEnvelope,
-        GroupOperation, Hello, IdentityProof, IdentityProofRequest, Intent, MAX_PAIRING_NOTE_BYTES,
-        MediaKind, Offer, PairingExchange, PairingInvite, Profile, ProtocolError, Query,
-        ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame, validate_pairing_note,
+        DeviceCertificate, Expression, ExpressionLetter, Feature, FetchGrant, FetchPending,
+        FetchRequest, GroupEnvelope, GroupOperation, Hello, IdentityProof, IdentityProofRequest,
+        Intent, MAX_PAIRING_NOTE_BYTES, MediaKind, Offer, PairingExchange, PairingInvite, Profile,
+        ProtocolError, Query, ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame,
+        validate_pairing_note,
     },
 };
 
@@ -985,6 +986,26 @@ fn decode_group_envelope(mut fields: Fields) -> Result<WireFrame, AslError> {
     }))
 }
 
+fn decode_expression(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6])?;
+    let message_id = Id128(fixed_bytes(take(&mut fields, 2)?)?);
+    let root_task_id = Id128(fixed_bytes(take(&mut fields, 3)?)?);
+    let created_at_ms = as_u64(take(&mut fields, 4)?)?;
+    let expires_at_ms = as_u64(take(&mut fields, 5)?)?;
+    if expires_at_ms > MAX_TIME_MS || created_at_ms > expires_at_ms {
+        return invalid();
+    }
+    let expression = Expression::from_cbor(&take(&mut fields, 6)?)?;
+    finish(fields)?;
+    Ok(WireFrame::Expression(ExpressionLetter {
+        message_id,
+        root_task_id,
+        created_at_ms,
+        expires_at_ms,
+        expression,
+    }))
+}
+
 fn frame_kind(frame: &WireFrame) -> u64 {
     match frame {
         WireFrame::Hello(_) => 0,
@@ -1002,12 +1023,13 @@ fn frame_kind(frame: &WireFrame) -> u64 {
         WireFrame::PairingInvite(_) => 11,
         WireFrame::PairingExchange(_) => 12,
         WireFrame::GroupEnvelope(_) => 13,
+        WireFrame::Expression(_) => 15,
     }
 }
 
 fn frame_limit(kind: u64) -> usize {
     match kind {
-        0..=8 | 14 => MAX_CONTROL_FRAME_BYTES,
+        0..=8 | 14..=15 => MAX_CONTROL_FRAME_BYTES,
         9..=10 | 13 => MAX_EXTENDED_FRAME_BYTES,
         11..=12 => MAX_PAIRING_FRAME_BYTES,
         _ => 0,
@@ -1022,7 +1044,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     if version != 1 {
         return Err(AslError::IncompatibleVersion);
     }
-    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 14)?;
+    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 15)?;
     let frame = match kind {
         0 => decode_hello(fields)?,
         1 => decode_query(fields)?,
@@ -1039,6 +1061,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
         12 => decode_pairing_exchange(fields)?,
         13 => decode_group_envelope(fields)?,
         14 => decode_fetch_pending(fields)?,
+        15 => decode_expression(fields)?,
         _ => return invalid(),
     };
     if bytes.len() > frame_limit(u64::from(kind)) {
@@ -1234,6 +1257,13 @@ fn encode_value(frame: &WireFrame) -> Value {
             (4, uint(value.epoch)),
             (5, uint(group_operation_code(value.operation))),
             (6, Value::Bytes(value.ciphertext.clone())),
+        ]),
+        WireFrame::Expression(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.root_task_id.0.to_vec())),
+            (4, uint(value.created_at_ms)),
+            (5, uint(value.expires_at_ms)),
+            (6, value.expression.to_cbor()),
         ]),
     }
     map(entries)

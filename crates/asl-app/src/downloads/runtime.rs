@@ -58,6 +58,10 @@ pub enum DownloadJob {
         transfer_id: TransferId,
         sources: Vec<DownloadSource>,
     },
+    ResumeForHost {
+        transfer_id: TransferId,
+        subject: [u8; 32],
+    },
 }
 
 #[derive(Debug)]
@@ -104,18 +108,20 @@ impl DownloadPort {
         let sources = match &job {
             DownloadJob::Fetch(selection) => {
                 WriteGrant::filename(Path::new(&selection.filename))?;
-                &selection.sources
+                Some(&selection.sources)
             }
-            DownloadJob::Resume { sources, .. } => sources,
+            DownloadJob::Resume { sources, .. } => Some(sources),
+            DownloadJob::ResumeForHost { .. } => None,
         };
-        if sources.is_empty()
-            || sources.len() > MAX_ACTIVE_SOURCES
-            || sources.iter().enumerate().any(|(index, source)| {
-                sources[..index]
-                    .iter()
-                    .any(|other| other.peer_id == source.peer_id)
-            })
-        {
+        if sources.is_some_and(|sources| {
+            sources.is_empty()
+                || sources.len() > MAX_ACTIVE_SOURCES
+                || sources.iter().enumerate().any(|(index, source)| {
+                    sources[..index]
+                        .iter()
+                        .any(|other| other.peer_id == source.peer_id)
+                })
+        }) {
             return Err(AslError::InvalidMessage);
         }
         // A job reports at most one consent, one start and one terminal outcome.
@@ -340,17 +346,23 @@ fn run(
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         };
         let now = unix_time_ms()?;
-        let routed = event
-            .as_ref()
-            .map_or(Ok(()), |event| local.handle_chunk_event(event));
         if let Some(job) = &mut active {
-            let result = routed.and_then(|()| job.step(&mut local, event.as_ref(), now, &send));
+            let result = job
+                .check_host_resume(&local)
+                .and_then(|()| {
+                    event
+                        .as_ref()
+                        .map_or(Ok(()), |event| local.handle_chunk_event(event))
+                })
+                .and_then(|()| job.step(&mut local, event.as_ref(), now, &send));
             if job.report_terminal(result) {
                 local.pause_chunks()?;
                 active = None;
             }
         } else {
-            routed?;
+            if let Some(event) = &event {
+                local.handle_chunk_event(event)?;
+            }
             local.poll_chunks(|_| Ok(false))?;
         }
     }

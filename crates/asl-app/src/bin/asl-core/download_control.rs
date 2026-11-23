@@ -4,14 +4,29 @@ use alloy_primitives::hex;
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::{Store, open_store, resources::SnapshotBroker, transfers::DownloadMode};
-use asl_types::{error::AslError, ids::Id128};
+use asl_types::{error::AslError, ids::Id128, task::TransferId};
 use serde_json::{Value, json};
 
 enum Command {
     List,
     Mode,
     SetMode(DownloadMode),
-    Decide { id: Id128, approve: bool },
+    AuthorizeRecovery(TransferId),
+    RevokeRecovery(TransferId),
+    AuthorizeRecoveryDecision(Id128),
+    RevokeRecoveryDecision(Id128),
+    Retention {
+        grant: Id128,
+        days: Option<u8>,
+    },
+    Decide {
+        id: Id128,
+        approve: bool,
+    },
+    HostInbox {
+        request: Id128,
+        grant: Option<Id128>,
+    },
 }
 
 impl Command {
@@ -25,6 +40,31 @@ impl Command {
             ["mode"] => Ok(Self::Mode),
             ["mode", "ask"] => Ok(Self::SetMode(DownloadMode::Ask)),
             ["mode", "automatic"] => Ok(Self::SetMode(DownloadMode::Automatic)),
+            ["authorize-recovery", id] => Ok(Self::AuthorizeRecovery(TransferId(parse_id(id)?))),
+            ["revoke-recovery", id] => Ok(Self::RevokeRecovery(TransferId(parse_id(id)?))),
+            ["authorize-recovery-decision", id] => {
+                Ok(Self::AuthorizeRecoveryDecision(parse_id(id)?))
+            }
+            ["revoke-recovery-decision", id] => Ok(Self::RevokeRecoveryDecision(parse_id(id)?)),
+            ["retention", grant] => Ok(Self::Retention {
+                grant: parse_id(grant)?,
+                days: None,
+            }),
+            ["retention", grant, days] => Ok(Self::Retention {
+                grant: parse_id(grant)?,
+                days: Some(match *days {
+                    "off" => 0,
+                    _ => days.parse::<u8>().map_err(|_| AslError::InvalidMessage)?,
+                }),
+            }),
+            ["bind-host-inbox", request, grant] => Ok(Self::HostInbox {
+                request: parse_id(request)?,
+                grant: Some(parse_id(grant)?),
+            }),
+            ["deny-host-inbox", request] => Ok(Self::HostInbox {
+                request: parse_id(request)?,
+                grant: None,
+            }),
             [action @ ("approve" | "deny"), id] if id.len() == 32 => Ok(Self::Decide {
                 id: parse_id(id)?,
                 approve: *action == "approve",
@@ -66,10 +106,52 @@ impl Command {
                 store.set_download_mode(mode)?;
                 Self::Mode.apply(store)
             }
+            Self::AuthorizeRecovery(id) => Ok(json!({
+                "transfer_id": hex::encode(id.0.0),
+                "expires_at_ms": store.authorize_recovery_download(&id)?,
+            })),
+            Self::RevokeRecovery(id) => {
+                store.revoke_recovery_download(&id)?;
+                Ok(json!({"transfer_id": hex::encode(id.0.0), "state": "revoked"}))
+            }
+            Self::AuthorizeRecoveryDecision(id) => {
+                let decision = store.authorize_recovery_download_decision(id)?;
+                Ok(json!({
+                    "approval_id": hex::encode(id.0),
+                    "transfer_id": hex::encode(decision.transfer_id.0.0),
+                    "state": decision.state,
+                    "expires_at_ms": decision.expires_at_ms,
+                }))
+            }
+            Self::RevokeRecoveryDecision(id) => {
+                store.revoke_recovery_download_decision(id)?;
+                Ok(json!({"approval_id": hex::encode(id.0), "state": "revoked"}))
+            }
+            Self::Retention { grant, days } => {
+                if let Some(days) = days {
+                    store.set_inbox_retention_days(grant, days)?;
+                }
+                Ok(json!({
+                    "inbox_grant_id": hex::encode(grant.0),
+                    "retention_days": store.inbox_retention_days(grant)?
+                }))
+            }
             Self::Decide { id, approve } => {
                 store.decide_download(id, approve)?;
                 Ok(
                     json!({"id": hex::encode(id.0), "state": if approve { "approved" } else { "denied" }}),
+                )
+            }
+            Self::HostInbox { request, grant } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| AslError::InvalidPolicyState)?
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| AslError::InvalidPolicyState)?;
+                store.decide_host_inbox(request, grant, now)?;
+                Ok(
+                    json!({"request_id":hex::encode(request.0),"state":if grant.is_some() { "bound" } else { "denied" }}),
                 )
             }
         }

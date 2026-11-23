@@ -379,7 +379,8 @@ fn frame_metadata(
         | WireFrame::IdentityProof(_)
         | WireFrame::PairingInvite(_)
         | WireFrame::PairingExchange(_)
-        | WireFrame::GroupEnvelope(_) => None,
+        | WireFrame::GroupEnvelope(_)
+        | WireFrame::Expression(_) => None,
     }
 }
 
