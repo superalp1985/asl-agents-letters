@@ -994,5 +994,5 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 新增 ASL/1.3 `group-policy` MLS application plaintext：群创建者是群主，策略包含单调递增 revision、成员文字/文件/邀请权限位、管理员 PeerId 和有期限的禁言设备集合。编码器使用确定性 CBOR；解码器拒绝零 revision、未知权限位、重复/乱序 PeerId、超限列表和非 canonical CBOR。
 - SQLite v36 增量迁移新增 `group_access_policies` 与 `group_access_members`，不改 v1–v35。群主策略只能由当前 MLS room creator 的 sender leaf 应用；非群主、revision 回退、非活动成员、禁言群主均被拒绝。入站 act/查询/表达式/文件 Offer、出站 act/Offer/邀请和响应 Offer 均检查当前策略；目录授权、收件目录、设备证书和传输审批仍是独立硬边界。
 - MCP 增加 `asl_group_members` 和 owner-only `asl_group_set_access`。GUI 群管理成员列表显示群主/管理员/成员、禁言和文字/文件/邀请权限。本轮未实现群主转移、管理员代管成员的独立策略编辑、跨设备策略同步人工验收或公网群组验收。
-- 定向测试：`asl-types` 库 3 项、`asl-groups` 库 12 项、`asl-store` 库 123 项（含 group_access 2 项和 v36 迁移）、MCP stdio 7 项、UI 22 项、schema exporter 35 个向量（25 接受、10 拒绝）通过。修复了旧 v32 升级夹具未清理 v36 表的问题后，单独语义上下文集成测试 1 项通过。
+- 定向测试：`asl-types` 库 3 项、`asl-groups` 库 12 项、`asl-store` 库 123 项（含 group_access 2 项和 v36 迁移）、MCP stdio 7 项、UI 23 项、schema exporter 35 个向量（25 接受、10 拒绝）通过。修复了旧 v32 升级夹具未清理 v36 表的问题后，单独语义上下文集成测试 1 项通过。
 - 最终统一运行：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **904 通过、0 失败、13 忽略**。工作区严格 Clippy、格式、schema exporter 和 `git diff --check` 通过。`scripts/validate-cddl.ps1` 仍因本机 PATH 没有 `cddl` 命令未执行；此前独立 CDDL 结果不代表本轮 35 个向量。

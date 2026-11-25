@@ -901,7 +901,7 @@ SQLite v32 接入收件审批状态补读。用户可将一个仍有效的原审
 
 依赖 T31/T32 和现有 MCP 群管理授权。
 
-完成：群主由 MLS room creator 绑定；`group-policy` 只作为 MLS application plaintext；成员文字/文件/邀请权限、管理员和禁言设备使用确定性 CBOR；SQLite v36 投影保存 revision 和角色；入站 act/查询/表达式/Offer、出站 act/Offer/邀请和响应 Offer 都检查策略；MCP `asl_group_members`、`asl_group_set_access` 和 GUI 成员权限显示已接入。
+完成：群主由 MLS room creator 绑定；`group-policy` 只作为 MLS application plaintext；成员文字/文件/邀请权限、管理员和禁言设备使用确定性 CBOR；SQLite v36 投影保存 revision 和角色；入站 act/查询/表达式/Offer、出站 act/Offer/邀请和响应 Offer 都检查策略；MCP `asl_group_members`、`asl_group_set_access`、GUI 成员权限显示和群主权限编辑已接入。
 
 验收已覆盖策略 codec、非群主伪造、revision 回退、禁言、默认成员权限、v36 升级、MCP 参数和 UI 显示。仍待两台真实设备验证策略同步、群主转移、管理员管理动作、策略媒体/历史保留和公网群组。
 

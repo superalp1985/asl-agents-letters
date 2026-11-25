@@ -1,4 +1,5 @@
 use super::{LocalGroupAction, NetworkAdmissionStatus, Supervisor, fresh_id};
+use crate::agent_mail::GroupAccessUpdate;
 use alloy_primitives::hex;
 use asl_store::group_state::operator::{
     AdminOutcome, AdminPeer, AdminRequest, AdminRoom, AdminSnapshot, SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
@@ -22,9 +23,12 @@ impl Supervisor {
         };
         // Local storage transports requests; only the running Core owns the selectable view.
         let issued = groups.operator_view.take();
-        let (outcome, view) = self
-            .apply_group_operator(&ticket.request, issued, now)
-            .unwrap_or((AdminOutcome::Failed, None));
+        let applied = self.apply_group_operator(&ticket.request, issued, now);
+        #[cfg(test)]
+        if let Err(error) = &applied {
+            eprintln!("group operator failed: {error:?}");
+        }
+        let (outcome, view) = applied.unwrap_or((AdminOutcome::Failed, None));
         if let Some(groups) = &mut self.groups
             && groups
                 .store
@@ -102,6 +106,47 @@ impl Supervisor {
                     AdminOutcome::MemberRemoved,
                 )
             }
+            AdminRequest::SetAccess {
+                room,
+                policy_revision,
+                allow_member_text,
+                allow_member_files,
+                allow_member_invite,
+                admins,
+                muted,
+                ..
+            } => {
+                let live = groups.store.managed_mls_rooms(&self.device_peer_id)?;
+                let selected = current_room(&issued, room, &live)?;
+                if selected.policy_revision != *policy_revision {
+                    return Err(AslError::PolicyVersionConflict);
+                }
+                let mut admins = admins
+                    .iter()
+                    .map(|peer| peer_from_text(peer))
+                    .collect::<Result<Vec<_>, _>>()?;
+                admins.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                admins.dedup();
+                let mut muted = muted
+                    .iter()
+                    .map(|peer| peer_from_text(peer))
+                    .collect::<Result<Vec<_>, _>>()?;
+                muted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                muted.dedup();
+                (
+                    LocalGroupAction::SetAccess {
+                        room: wire_id(&selected.room)?,
+                        update: GroupAccessUpdate {
+                            allow_member_text: *allow_member_text,
+                            allow_member_files: *allow_member_files,
+                            allow_member_invite: *allow_member_invite,
+                            admins,
+                            muted,
+                        },
+                    },
+                    AdminOutcome::AccessUpdated,
+                )
+            }
             AdminRequest::Refresh => unreachable!(),
         };
         self.apply_local_group_action(action, now)?;
@@ -157,6 +202,11 @@ fn wire_id(text: &str) -> Result<Hash32, AslError> {
     Ok(Hash32(wire))
 }
 
+fn peer_from_text(text: &str) -> Result<PeerId, AslError> {
+    let peer: libp2p_identity::PeerId = text.parse().map_err(|_| AslError::InvalidDatabase)?;
+    PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidDatabase)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +218,10 @@ mod tests {
             name: "Group".into(),
             epoch: 4,
             membership_epoch: 8,
+            policy_revision: 1,
+            allow_member_text: true,
+            allow_member_files: true,
+            allow_member_invite: false,
             members: vec![],
         };
         let peer = AdminPeer {

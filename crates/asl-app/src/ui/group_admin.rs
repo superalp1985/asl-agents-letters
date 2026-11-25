@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use asl_app::network_settings::NetworkSettingsV1;
 use asl_store::{
     dashboard::Dashboard,
@@ -15,6 +17,17 @@ pub(super) struct Form {
     peer: Option<(String, String, String)>,
     confirmation: Option<Confirmation>,
     selection_reset: bool,
+    access: Option<AccessDraft>,
+}
+
+struct AccessDraft {
+    room: String,
+    revision: u64,
+    allow_member_text: bool,
+    allow_member_files: bool,
+    allow_member_invite: bool,
+    admins: BTreeSet<String>,
+    muted: BTreeSet<String>,
 }
 
 pub(super) struct ShowContext<'a> {
@@ -131,6 +144,7 @@ impl Form {
                 room.membership_epoch
             ));
             identifier(ui, *language, "群组 ID", "Group ID", &room.room);
+            self.ensure_access(room);
         }
         if let Some(peer) = peer {
             identifier(ui, *language, "Agent ID", "Agent ID", &peer.agent);
@@ -218,6 +232,7 @@ impl Form {
                 action,
             };
             self.show_roster(ui, room, snapshot, &mut view);
+            self.show_access(ui, room, snapshot, *language, ready, action);
         }
     }
 
@@ -243,6 +258,7 @@ impl Form {
         self.room = None;
         self.peer = None;
         self.confirmation = None;
+        self.access = None;
     }
 
     fn selected_room<'a>(&self, snapshot: &'a AdminSnapshot) -> Option<&'a AdminRoom> {
@@ -274,6 +290,51 @@ impl Form {
             self.peer = None;
             self.confirmation = None;
             self.selection_reset = false;
+            self.access = Some(AccessDraft {
+                room: room.room.clone(),
+                revision: room.policy_revision,
+                allow_member_text: room.allow_member_text,
+                allow_member_files: room.allow_member_files,
+                allow_member_invite: room.allow_member_invite,
+                admins: room
+                    .members
+                    .iter()
+                    .filter(|member| member.role == "admin")
+                    .map(|member| member.device.clone())
+                    .collect(),
+                muted: room
+                    .members
+                    .iter()
+                    .filter(|member| member.muted)
+                    .map(|member| member.device.clone())
+                    .collect(),
+            });
+        }
+    }
+
+    fn ensure_access(&mut self, room: &AdminRoom) {
+        if self.access.as_ref().is_none_or(|access| {
+            access.room != room.room || access.revision != room.policy_revision
+        }) {
+            self.access = Some(AccessDraft {
+                room: room.room.clone(),
+                revision: room.policy_revision,
+                allow_member_text: room.allow_member_text,
+                allow_member_files: room.allow_member_files,
+                allow_member_invite: room.allow_member_invite,
+                admins: room
+                    .members
+                    .iter()
+                    .filter(|member| member.role == "admin")
+                    .map(|member| member.device.clone())
+                    .collect(),
+                muted: room
+                    .members
+                    .iter()
+                    .filter(|member| member.muted)
+                    .map(|member| member.device.clone())
+                    .collect(),
+            });
         }
     }
 
@@ -413,10 +474,12 @@ impl Form {
                 let reviewing = self.removal_member(room) == Some(member);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    let role = match member.role.as_str() {
-                        "owner" => label(view.language, "群主", "Owner"),
-                        "admin" => label(view.language, "管理员", "Admin"),
-                        _ => label(view.language, "成员", "Member"),
+                    let role = if member.creator || member.role == "owner" {
+                        label(view.language, "群主", "Owner")
+                    } else if member.role == "admin" {
+                        label(view.language, "管理员", "Admin")
+                    } else {
+                        label(view.language, "成员", "Member")
                     };
                     ui.label(role);
                     if member.muted {
@@ -497,6 +560,92 @@ impl Form {
             });
         }
     }
+
+    fn show_access(
+        &mut self,
+        ui: &mut egui::Ui,
+        room: &AdminRoom,
+        snapshot: &AdminSnapshot,
+        language: Language,
+        ready: bool,
+        action: &mut Option<LocalAction>,
+    ) {
+        let Some(access) = &mut self.access else {
+            return;
+        };
+        ui.separator();
+        ui.label(RichText::new(label(language, "群成员权限", "Member permissions")).strong());
+        ui.checkbox(
+            &mut access.allow_member_text,
+            label(language, "成员可发送文字", "Members may send text"),
+        );
+        ui.checkbox(
+            &mut access.allow_member_files,
+            label(language, "成员可发送文件", "Members may send files"),
+        );
+        ui.checkbox(
+            &mut access.allow_member_invite,
+            label(language, "成员可邀请", "Members may invite"),
+        );
+        for member in room.members.iter().filter(|member| !member.creator) {
+            ui.push_id(format!("access-{}", member.device), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(short(&member.agent, 12));
+                    let mut admin = access.admins.contains(&member.device);
+                    if ui
+                        .checkbox(&mut admin, label(language, "管理员", "Admin"))
+                        .changed()
+                    {
+                        if admin {
+                            access.admins.insert(member.device.clone());
+                        } else {
+                            access.admins.remove(&member.device);
+                        }
+                    }
+                    let mut muted = access.muted.contains(&member.device);
+                    if ui
+                        .checkbox(&mut muted, label(language, "禁言", "Muted"))
+                        .changed()
+                    {
+                        if muted {
+                            access.muted.insert(member.device.clone());
+                        } else {
+                            access.muted.remove(&member.device);
+                        }
+                    }
+                });
+            });
+        }
+        if ui
+            .add_enabled(
+                ready && action.is_none(),
+                egui::Button::new(label(language, "应用群权限", "Apply group permissions")),
+            )
+            .clicked()
+        {
+            let switch = |value| if value { "on" } else { "off" };
+            let admins = access.admins.iter().cloned().collect::<Vec<_>>().join(",");
+            let muted = access.muted.iter().cloned().collect::<Vec<_>>().join(",");
+            *action = Some(LocalAction::new(
+                "group-admin",
+                [
+                    "access".into(),
+                    snapshot.tag.as_str().into(),
+                    room.room.as_str().into(),
+                    access.revision.to_string().into(),
+                    switch(access.allow_member_text).into(),
+                    switch(access.allow_member_files).into(),
+                    switch(access.allow_member_invite).into(),
+                    admins.into(),
+                    muted.into(),
+                ],
+            ));
+            self.room = None;
+            self.peer = None;
+            self.access = None;
+            self.confirmation = None;
+        }
+    }
 }
 
 fn invite_candidates<'a>(
@@ -574,6 +723,11 @@ fn outcome_text(outcome: &AdminOutcome, language: Language) -> &'static str {
             "上次操作：成员移除已在本机提交",
             "Member removal submitted locally",
         ),
+        AdminOutcome::AccessUpdated => label(
+            language,
+            "上次操作：群权限已提交",
+            "Group permissions submitted",
+        ),
         AdminOutcome::Failed => label(language, "上次操作：失败", "Failed"),
         AdminOutcome::Unconfirmed => label(
             language,
@@ -604,6 +758,10 @@ mod tests {
                 name: "Room one".into(),
                 epoch: 8,
                 membership_epoch: 5,
+                policy_revision: 1,
+                allow_member_text: true,
+                allow_member_files: true,
+                allow_member_invite: false,
                 members: vec![
                     AdminMember {
                         agent: "owner-agent".into(),
@@ -641,6 +799,19 @@ mod tests {
         form.select_room(&snapshot.rooms[0]);
         form.review_removal(&snapshot.rooms[0].members[1]);
         form
+    }
+
+    #[test]
+    fn room_selection_seeds_owner_policy_editor() {
+        let snapshot = snapshot();
+        let mut form = Form::default();
+        form.observe(Some(&snapshot));
+        form.select_room(&snapshot.rooms[0]);
+        let access = form.access.as_ref().unwrap();
+        assert_eq!(access.revision, 1);
+        assert!(access.allow_member_text);
+        assert!(!access.admins.contains("offline-device"));
+        assert!(access.muted.contains("offline-device"));
     }
 
     #[test]

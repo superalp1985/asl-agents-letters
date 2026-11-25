@@ -32,6 +32,16 @@ pub enum AdminRequest {
         room: String,
         device: String,
     },
+    SetAccess {
+        tag: String,
+        room: String,
+        policy_revision: u64,
+        allow_member_text: bool,
+        allow_member_files: bool,
+        allow_member_invite: bool,
+        admins: Vec<String>,
+        muted: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +53,7 @@ pub enum AdminOutcome {
     Created,
     InviteQueued,
     MemberRemoved,
+    AccessUpdated,
     Failed,
     Unconfirmed,
 }
@@ -53,6 +64,14 @@ pub struct AdminRoom {
     pub name: String,
     pub epoch: u64,
     pub membership_epoch: u64,
+    #[serde(default)]
+    pub policy_revision: u64,
+    #[serde(default = "default_true")]
+    pub allow_member_text: bool,
+    #[serde(default = "default_true")]
+    pub allow_member_files: bool,
+    #[serde(default)]
+    pub allow_member_invite: bool,
     pub members: Vec<AdminMember>,
 }
 
@@ -61,10 +80,15 @@ pub struct AdminMember {
     pub agent: String,
     pub device: String,
     pub creator: bool,
+    #[serde(default)]
     pub role: String,
+    #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
     pub can_send_text: bool,
+    #[serde(default)]
     pub can_send_files: bool,
+    #[serde(default)]
     pub can_invite: bool,
 }
 
@@ -116,6 +140,30 @@ impl AdminSnapshot {
                                 r.members.iter().any(|m| !m.creator && &m.device == device)
                             })
                 }
+                AdminRequest::SetAccess {
+                    tag,
+                    room,
+                    policy_revision,
+                    admins,
+                    muted,
+                    ..
+                } => {
+                    tag == &self.tag
+                        && self
+                            .rooms
+                            .iter()
+                            .find(|r| &r.room == room && r.policy_revision == *policy_revision)
+                            .is_some_and(|r| {
+                                let mut peers = admins.iter().chain(muted).collect::<Vec<_>>();
+                                peers.sort_unstable();
+                                peers.dedup();
+                                peers.into_iter().all(|peer| {
+                                    r.members
+                                        .iter()
+                                        .any(|member| !member.creator && &member.device == peer)
+                                })
+                            })
+                }
             }
     }
 }
@@ -138,6 +186,10 @@ impl AdminTicket {
     fn owned_by(&self, agent: AgentId, device: &PeerId) -> bool {
         self.agent == agent && self.device == bs58::encode(device.as_bytes()).into_string()
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn read(db: &Connection, now: u64) -> Result<Option<AdminTicket>, AslError> {
@@ -199,14 +251,20 @@ impl Store {
     }
 
     pub fn managed_mls_rooms(&self, device: &PeerId) -> Result<Vec<AdminRoom>, AslError> {
-        let mut statement = self.connection.prepare(
-            "WITH owned AS (
-               SELECT g.group_id,g.local_name,g.mls_epoch,g.membership_epoch,g.created_at_ms,s.wire_group_id
+        let mut statement = self
+            .connection
+            .prepare(
+                "WITH owned AS (
+               SELECT g.group_id,g.local_name,g.mls_epoch,g.membership_epoch,g.created_at_ms,
+                      coalesce(gp.permissions,3) AS permissions,
+                      coalesce(gp.revision,0) AS revision,s.wire_group_id
                FROM asl_groups g JOIN mls_room_states s ON s.local_group_id=g.group_id
+               LEFT JOIN group_access_policies gp ON gp.group_id=g.group_id
                WHERE g.creator_peer_id=?1 AND g.state='active'
                ORDER BY g.created_at_ms DESC,g.group_id LIMIT ?2
              )
              SELECT lower(hex(o.wire_group_id)),o.local_name,o.mls_epoch,o.membership_epoch,
+                    o.permissions,o.revision,
                     p.agent_id,m.peer_id,m.role='creator',
                     coalesce(r.role,'member'),coalesce(r.muted,0),
                     coalesce(gp.permissions,3)
@@ -215,8 +273,9 @@ impl Store {
              LEFT JOIN group_access_members r
                ON r.group_id=o.group_id AND r.peer_id=m.peer_id
              LEFT JOIN group_access_policies gp ON gp.group_id=o.group_id
-             ORDER BY o.created_at_ms DESC,o.group_id,m.role,m.peer_id"
-        ).map_err(database_error)?;
+             ORDER BY o.created_at_ms DESC,o.group_id,m.role,m.peer_id",
+            )
+            .map_err(database_error)?;
         let mut rows = statement
             .query(rusqlite::params![
                 bs58::encode(device.as_bytes()).into_string(),
@@ -232,6 +291,10 @@ impl Store {
                     name: row.get(1).map_err(database_error)?,
                     epoch: super::unsigned(row.get(2).map_err(database_error)?)?,
                     membership_epoch: super::unsigned(row.get(3).map_err(database_error)?)?,
+                    policy_revision: super::unsigned(row.get(5).map_err(database_error)?)?,
+                    allow_member_text: row.get::<_, i64>(4).map_err(database_error)? & 1 != 0,
+                    allow_member_files: row.get::<_, i64>(4).map_err(database_error)? & 2 != 0,
+                    allow_member_invite: row.get::<_, i64>(4).map_err(database_error)? & 4 != 0,
                     members: vec![],
                 });
             }
@@ -239,20 +302,20 @@ impl Store {
             if members.len() >= asl_types::protocol::MAX_GROUP_MEMBERS {
                 return Err(AslError::InvalidDatabase);
             }
-            let creator: bool = row.get(6).map_err(database_error)?;
+            let creator: bool = row.get(8).map_err(database_error)?;
             let role: String = if creator {
                 "owner".into()
             } else {
-                row.get(7).map_err(database_error)?
+                row.get(9).map_err(database_error)?
             };
-            let muted: bool = row.get::<_, i64>(8).map_err(database_error)? != 0;
-            let permissions: u8 = u8::try_from(row.get::<_, i64>(9).map_err(database_error)?)
+            let muted: bool = row.get::<_, i64>(10).map_err(database_error)? != 0;
+            let permissions: u8 = u8::try_from(row.get::<_, i64>(11).map_err(database_error)?)
                 .map_err(|_| AslError::InvalidDatabase)?;
             let admin = role == "admin";
             let can_send = !muted && (admin || role == "owner");
             members.push(AdminMember {
-                agent: row.get(4).map_err(database_error)?,
-                device: row.get(5).map_err(database_error)?,
+                agent: row.get(6).map_err(database_error)?,
+                device: row.get(7).map_err(database_error)?,
                 creator,
                 role,
                 muted,

@@ -137,7 +137,7 @@ pub(crate) enum MailCommand {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GroupAccessUpdate {
+pub struct GroupAccessUpdate {
     pub allow_member_text: bool,
     pub allow_member_files: bool,
     pub allow_member_invite: bool,

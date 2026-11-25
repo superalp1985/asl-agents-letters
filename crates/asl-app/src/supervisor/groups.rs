@@ -76,6 +76,10 @@ pub enum LocalGroupAction {
         room: Hash32,
         application: Box<GroupApplication>,
     },
+    SetAccess {
+        room: Hash32,
+        update: GroupAccessUpdate,
+    },
     ConfigureInbound {
         browse_enabled: bool,
         answer_enabled: bool,
@@ -1138,6 +1142,7 @@ impl Supervisor {
                     "available": sent.available
                 }))
             }
+            LocalGroupAction::SetAccess { room, update } => self.set_group_access(room, update),
             LocalGroupAction::Dial { address, peer } => {
                 if !address.ip().is_loopback() {
                     return Err(AslError::PolicyDenied);
@@ -1156,9 +1161,7 @@ impl Supervisor {
             LocalGroupAction::List
             | LocalGroupAction::Room(_)
             | LocalGroupAction::Reject(_)
-            | LocalGroupAction::ConfigureInbound { .. } => {
-                unreachable!()
-            }
+            | LocalGroupAction::ConfigureInbound { .. } => unreachable!(),
         }
     }
 }

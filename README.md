@@ -211,9 +211,9 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 在现有回环群模式中，群组页列出发给本机设备且仍有效的邀请，可同意、拒绝或重试已批准的加入请求。命令行 `asl-core --group-invites list` 给出每条邀请的 `tag`，用 `--group-invites approve|reject|retry <tag>` 提交本机决定。加入请求排队不等于已成为成员；公网群组尚未开放。
 
-发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
+发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。群主成员区可以设置成员文字/文件/邀请权限、管理员和禁言设备；这些设置通过 MLS 加密的 `group-policy` 下发，不是本地标签。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
 
-刷新还能看到已入群的设备。创建者可在名单中选择其他成员，确认移出（`--group-admin remove <tag> <room> <device>`）。这会改变后续消息的接收范围，不能收回已经收到的消息。
+刷新还能看到已入群的设备、角色、禁言和发送权限。群主可在名单中确认移出成员（`--group-admin remove <tag> <room> <device>`），也可用 `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>` 提交群权限；三个开关分别填 `on` 或 `off`，后两项是逗号分隔的完整 base58 设备 ID，空串表示清空。这会改变后续消息和 Offer 范围，不能收回已经收到的消息。
 
 授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份输入仍需独立的资源披露许可；撤销不能追回已发送数据，也不会开启自动模型调用。`asl-core --providers list` 可从命令行查看同一状态。
 
@@ -347,9 +347,9 @@ Browsing a profile never downloads an image. Request the avatar on the Nodes pag
 
 In loopback group mode, Groups lists live invites addressed to this device. Approve, decline, or retry an already approved join. `asl-core --group-invites list` returns a `tag` for each reviewed invitation; use `--group-invites approve|reject|retry <tag>` to submit a local decision. A queued join is not membership. Public-network groups are not enabled.
 
-To start a group, refresh the Groups page, then create a room or select a room you manage and confirm the exact device to invite. From the CLI, run `asl-core --group-admin refresh`, then `--group-admin status` to see the options. Use `--group-admin create <tag>` or `--group-admin invite <tag> <room> <connection>`. Refresh after each action. A dropped connection, changed membership version or expired selection never redirects the invitation to another device.
+To start a group, refresh the Groups page, then create a room or select a room you manage and confirm the exact device to invite. The owner policy editor sets member text/file/invite permissions, admins and muted devices; the resulting `group-policy` is sent inside MLS rather than treated as a local label. From the CLI, run `asl-core --group-admin refresh`, then `--group-admin status` to see the options. Use `--group-admin create <tag>` or `--group-admin invite <tag> <room> <connection>`. Refresh after each action. A dropped connection, changed membership version or expired selection never redirects the invitation to another device.
 
-Refresh to see the committed roster. The creator may select and confirm another device for removal (`--group-admin remove <tag> <room> <device>`). Removal changes who can receive future messages; it does not recall earlier messages.
+Refresh to see the committed roster, roles, mute state and send permissions. The creator may remove another device with `--group-admin remove <tag> <room> <device>` or publish the current policy with `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>`, where the three switches are `on` or `off`, and the last two arguments are comma-separated full base58 device IDs with an empty string clearing the list. Removal and policy changes affect future messages and offers; they do not recall earlier messages.
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approving an endpoint does not enable automatic model calls. `asl-core --providers list` shows the same status at the command line.
 

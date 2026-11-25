@@ -35,6 +35,28 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             room: hex_id(room, 64)?,
             device: device_peer(device)?,
         }),
+        [
+            op,
+            tag,
+            room,
+            revision,
+            text_flag,
+            file_flag,
+            invite_flag,
+            admins,
+            muted,
+        ] if op == "access" => Some(AdminRequest::SetAccess {
+            tag: text(tag)?.into(),
+            room: hex_id(room, 64)?,
+            policy_revision: text(revision)?
+                .parse()
+                .map_err(|_| AslError::InvalidMessage)?,
+            allow_member_text: switch(text(text_flag)?)?,
+            allow_member_files: switch(text(file_flag)?)?,
+            allow_member_invite: switch(text(invite_flag)?)?,
+            admins: peer_list(text(admins)?)?,
+            muted: peer_list(text(muted)?)?,
+        }),
         _ => return Err(AslError::InvalidMessage),
     };
     let home = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
@@ -91,6 +113,31 @@ fn device_peer(value: &OsStr) -> Result<String, AslError> {
         return Err(AslError::InvalidMessage);
     }
     Ok(canonical)
+}
+
+fn switch(value: &str) -> Result<bool, AslError> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn peer_list(value: &str) -> Result<Vec<String>, AslError> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|peer| device_peer(OsStr::new(peer)))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|peers| {
+            if peers.len() <= 512 {
+                Ok(peers)
+            } else {
+                Err(AslError::InvalidMessage)
+            }
+        })
 }
 
 #[cfg(test)]
