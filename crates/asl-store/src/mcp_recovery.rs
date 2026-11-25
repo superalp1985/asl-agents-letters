@@ -513,7 +513,7 @@ mod tests {
              DROP TABLE semantic_context_candidates;
              DROP TABLE group_access_members;
              DROP TABLE group_access_policies;
-             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35,36);",
+             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35,36,37);",
             )
             .unwrap();
         drop(store);

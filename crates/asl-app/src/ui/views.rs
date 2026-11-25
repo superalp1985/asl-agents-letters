@@ -66,6 +66,7 @@ pub(super) struct Interaction<'a> {
     >,
     pub(super) actions_enabled: bool,
     pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) contact_invites: &'a mut super::contact_invites::Form,
     pub(super) group_admin: &'a mut super::group_admin::Form,
     pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
     pub(super) remote_avatars: &'a mut RemoteAvatars,
@@ -130,6 +131,7 @@ impl Page {
             network_config,
             model_endpoints,
             checkpoint_form,
+            contact_invites,
             group_admin,
             profile_form,
             remote_avatars,
@@ -268,6 +270,7 @@ impl Page {
                     data,
                     now,
                     code_input,
+                    contact_invites,
                     *language,
                     *actions_enabled,
                     action,
@@ -814,15 +817,19 @@ fn remaining(expires_at_ms: i64, now_ms: i64, language: Language) -> String {
     format!("{value} {}", ui_text(language, zh, en))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn contacts(
     ui: &mut Ui,
     data: &Dashboard,
     now: i64,
     code_input: &mut String,
+    contact_invites: &mut super::contact_invites::Form,
     language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
+    contact_invites.show(ui, data, now, language, actions_enabled, action);
+    ui.separator();
     ui.label(
         RichText::new(ui_text(language, "添加联系人", "Add contact"))
             .strong()
@@ -1873,6 +1880,7 @@ fn pending_decisions(
         .iter()
         .filter(|item| !item.approved)
         .count();
+    let contacts = data.contact_invite_prompts.len();
     let rows = [
         (
             ui_text(language, "文件授权", "File access"),
@@ -1884,8 +1892,13 @@ fn pending_decisions(
             invites,
             Page::Groups,
         ),
+        (
+            ui_text(language, "联系人请求", "Contact requests"),
+            contacts,
+            Page::Contacts,
+        ),
     ];
-    let waiting = transfers + invites > 0;
+    let waiting = transfers + invites + contacts > 0;
     let fill = if waiting {
         super::tokens::WARNING_SOFT
     } else {

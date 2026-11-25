@@ -43,6 +43,8 @@ pub struct Dashboard {
     pub binding_candidates: Vec<BindingCandidateRow>,
     pub binding_actions: Vec<BindingActionRow>,
     pub binding_code_public: bool,
+    pub contact_invites: Vec<crate::contact_invites::ContactInvite>,
+    pub contact_invite_prompts: Vec<crate::contact_invites::ContactInvitePrompt>,
     pub groups: Vec<GroupRow>,
     pub group_invitations: Vec<crate::group_state::invite_review::ReviewedInvite>,
     pub group_admin_snapshot: Option<crate::group_state::operator::AdminSnapshot>,
@@ -244,6 +246,7 @@ impl Dashboard {
             (Some(a), Some(p)) => crate::group_state::invite_review::list(database, a, &p, now)?,
             _ => Vec::new(),
         };
+        let now_i64 = i64::try_from(now).map_err(|_| AslError::InvalidMessage)?;
         Ok(Self {
             identity,
             group_admin_snapshot,
@@ -265,6 +268,12 @@ impl Dashboard {
             binding_candidates: read_binding_candidates(database)?,
             binding_actions: read_binding_actions(database)?,
             binding_code_public: read_binding_code_public(database)?,
+            contact_invites: crate::contact_invites::active_invites_for_dashboard(
+                database, now_i64,
+            )?,
+            contact_invite_prompts: crate::contact_invites::prompts_for_dashboard(
+                database, now_i64,
+            )?,
             groups: read_groups(database)?,
             group_inbound: group_inbound.unwrap_or_default(),
             group_inbound_unset: group_inbound.is_none(),

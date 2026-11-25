@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, time::Instant};
 
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32},
+    ids::{AgentId, Hash32, Id128},
     protocol::ConceptRef,
     record::{RecordKind, RecordPayload, decode_record},
 };
@@ -57,6 +57,13 @@ pub fn handle_key(code: u64) -> Result<RecordKey, AslError> {
     }
     let digits = format!("{code:016}");
     Ok(domain_key(b"ASL-HANDLE-v1\0", digits.as_bytes()))
+}
+
+pub fn contact_invite_key(token: Id128) -> Result<RecordKey, AslError> {
+    if token.0 == [0; 16] {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(domain_key(b"ASL-CONTACT-INVITE-v1\0", token.as_bytes()))
 }
 
 pub fn identity_record_key(agent: AgentId, kind: RecordKind) -> Result<RecordKey, AslError> {
@@ -308,6 +315,8 @@ mod tests {
         );
         assert!(handle_key(9_999_999_999_999_999).is_ok());
         assert!(handle_key(10_000_000_000_000_000).is_err());
+        assert!(contact_invite_key(Id128([1; 16])).is_ok());
+        assert!(contact_invite_key(Id128([0; 16])).is_err());
     }
 
     #[test]

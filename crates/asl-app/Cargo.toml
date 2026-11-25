@@ -40,6 +40,7 @@ pdf-extract = "=0.12.1"
 openmls.workspace = true
 openmls_basic_credential = "=0.6.0"
 curve25519-dalek = { version = "=4.1.3", default-features = false }
+qrcodegen = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 age = { version = "=0.11.4", default-features = false }
@@ -57,7 +58,7 @@ rusqlite.workspace = true
 openmls_rust_crypto = "=0.6.0"
 
 [features]
-desktop-ui = ["dep:eframe"]
+desktop-ui = ["dep:eframe", "dep:qrcodegen"]
 
 [target.'cfg(windows)'.dependencies.eframe]
 workspace = true

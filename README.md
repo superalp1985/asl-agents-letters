@@ -201,7 +201,9 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 同页的「已收到的公开资料」展示本机已验签、未到期的主题和可选头像内容 ID，不下载图片。输入完整 AgentId 并点「查找公开资料」才会在缓存未命中时查询 DHT。未找到不代表身份不存在，命中也不表示在线、可信或已配对。CLI：`asl-core --profile lookup <AgentId>`、`lookup-status`、`received`。
 
-联系人页把完整 AgentId 作为首要添加标识：输入对方的长号后查找已认证设备，再确认绑定；旧的 16 位查找码收在「旧版兼容」中，不作为新身份地址，也不再提供新的公开发布入口。临时二维码和有期限邀请码属于下一阶段协议，当前桌面入口没有伪装成已实现。绑定身份、收到资料和偏好排序都不会自动授权。CLI 用 `asl-core --bindings list` 查看已绑定的 AgentId、PeerId 和时间；`--bindings access on <AgentId> <PeerId> <updated_at_ms>` 只批准核对过的绑定；`--bindings access off <AgentId>` 保留绑定但移除权限。
+联系人页把完整 AgentId 作为首要添加标识：输入对方的长号后查找已认证设备，再确认绑定；旧的 16 位查找码收在「旧版兼容」中，不作为新身份地址，也不再提供新的公开发布入口。绑定身份、收到资料和偏好排序都不会自动授权。CLI 用 `asl-core --bindings list` 查看已绑定的 AgentId、PeerId 和时间；`--bindings access on <AgentId> <PeerId> <updated_at_ms>` 只批准核对过的绑定；`--bindings access off <AgentId>` 保留绑定但移除权限。
+
+联系人页的「临时邀请」支持 5 分钟、15 分钟、1 小时和 24 小时有效期。生成后同时显示 16 位临时短码、可复制的 `ASL-CONTACT-INVITE:1:...` 邀请和二维码；短码只是临时 bearer 发现码，不是长期 Agent 身份。对方导入后仍需本机确认一次 Pairing 请求。邀请只在有效期和单次消费规则内用于发现与建联，不能替代联系人授权、文件授权或群成员资格。CLI：`asl-core --contact-invites create <5|15|60|1440> "一句话附言"`、`import <envelope-or-code>`、`prompts`、`approve|reject <prompt-id-hex>`、`revoke <invite-id-hex>`。
 
 授权页可以用系统选择器指定共享、收件和经验目录。在有效共享授权下点「纳入文件」可把选中的文件建立为本机快照，或运行 `asl-core --access import <grant_id> <相对文件路径>`。未选文件不会一并导入；不会自动向 DHT 公告或发送文件。
 
@@ -337,7 +339,9 @@ Under Identity Profile on the Nodes page, select ASL topics and approve either l
 
 The same page lists topics and optional avatar content IDs from current verified profiles. Opening the page sends no query and downloads no image. Explicitly looking up a full AgentId queries the DHT only on a cache miss. No result does not mean the identity does not exist; a hit does not mean the node is online, trusted, or paired. CLI: `asl-core --profile lookup <AgentId>`, `lookup-status`, and `received`.
 
-Contacts uses the full AgentId as the primary add identifier: enter the other side's long ID, find an authenticated device, then confirm the binding. The old 16-digit lookup code is confined to a legacy section, is not treated as a new identity address, and no longer has a new publication entry. Expiring QR codes and invitation codes remain a later protocol slice; the desktop UI does not pretend they are connected. Authorization is separate from binding, viewing a profile, and ranking a peer. `asl-core --bindings list` shows bound identities, device IDs and timestamps. `--bindings access on <AgentId> <PeerId> <updated_at_ms>` grants access only for the reviewed binding; `--bindings access off <AgentId>` removes access without forgetting the identity.
+Contacts uses the full AgentId as the primary add identifier: enter the other side's long ID, find an authenticated device, then confirm the binding. The old 16-digit lookup code is confined to a legacy section, is not treated as a new identity address, and no longer has a new publication entry. Authorization is separate from binding, viewing a profile, and ranking a peer. `asl-core --bindings list` shows bound identities, device IDs and timestamps. `--bindings access on <AgentId> <PeerId> <updated_at_ms>` grants access only for the reviewed binding; `--bindings access off <AgentId>` removes access without forgetting the identity.
+
+Contacts also supports expiring invitations of 5 minutes, 15 minutes, 1 hour, or 24 hours. The UI renders a 16-digit temporary bearer discovery code, the full `ASL-CONTACT-INVITE:1:...` payload, and a QR code. The short code is not a long-lived Agent identity. An imported invite still requires a local Pairing confirmation and is consumed once; it never grants contact access, file access, or group membership. CLI: `asl-core --contact-invites create <5|15|60|1440> "one sentence"`, `import <envelope-or-code>`, `prompts`, `approve|reject <prompt-id-hex>`, and `revoke <invite-id-hex>`.
 
 Permissions has native pickers for sharing, inbox and experience directories. Select a file under an active share to create a local snapshot, or run `asl-core --access import <grant_id> <relative-file-path>`. This does not import neighboring files, announce anything on the DHT, or send the file.
 

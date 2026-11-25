@@ -799,11 +799,43 @@ impl CoreAdmission {
                 connection_id,
                 proof,
             } => self.queue_proof(connection_id, proof, &mut batch),
-            NetworkEvent::UnverifiedPairingInvite { connection_id, .. } => {
-                self.close(connection_id, &mut batch);
+            NetworkEvent::UnverifiedPairingInvite {
+                connection_id,
+                response_id,
+                invite,
+            } => {
+                if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingInviteReceived {
+                            connection_id,
+                            agent_id,
+                            response_id,
+                            invite,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
             }
-            NetworkEvent::UnverifiedPairingExchangeResponse { connection_id, .. } => {
-                self.close(connection_id, &mut batch);
+            NetworkEvent::UnverifiedPairingExchangeResponse {
+                connection_id,
+                request_id,
+                invite,
+                exchange,
+            } => {
+                if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingExchangeReceived {
+                            connection_id,
+                            agent_id,
+                            request_id,
+                            invite,
+                            exchange,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
             }
             NetworkEvent::UnverifiedControlRequest {
                 connection_id,

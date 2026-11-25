@@ -42,6 +42,7 @@ impl Supervisor {
                 self.clear_group_transport();
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);
                 self.reset_binding_transport()?;
+                self.reset_contact_invite_transport()?;
             }
             (true, NetworkRuntimeState::ResumeFailed) => {
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);

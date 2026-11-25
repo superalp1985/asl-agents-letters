@@ -53,7 +53,7 @@ use crate::network_settings::NetworkSettingsV1;
 use crate::pairing::{self, PairingAuthorization};
 use crate::paths::AppPaths;
 use crate::profile::{
-    AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS,
+    AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS, fresh_id,
 };
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
@@ -64,6 +64,7 @@ use asl_store::{
 
 mod avatar_download;
 mod bindings;
+mod contact_invites;
 mod directory;
 #[cfg(windows)]
 mod groups;
@@ -111,6 +112,7 @@ pub struct Supervisor {
     directory_removed: bool,
     directory_renewal_retry_at: Instant,
     contact_bindings: bindings::ContactBindingRuntime,
+    contact_invites: contact_invites::ContactInviteRuntime,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -204,6 +206,7 @@ impl Supervisor {
             directory_removed: false,
             directory_renewal_retry_at: Instant::now(),
             contact_bindings: bindings::ContactBindingRuntime::default(),
+            contact_invites: contact_invites::ContactInviteRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -259,23 +262,47 @@ impl Supervisor {
 
     pub fn issue_pairing_invite(
         &mut self,
-        _connection_id: [u8; 16],
-        _target: AgentId,
-        _note: &str,
-        _now_ms: u64,
+        connection_id: [u8; 16],
+        target: AgentId,
+        note: &str,
+        now_ms: u64,
     ) -> Result<PairingInvite, AslError> {
-        Err(AslError::PolicyDenied)
+        let invite = pairing::issue_signed_invite(&self.agent_identity, target, note, now_ms)?;
+        let request_id = fresh_id()?;
+        self.send_network_command(NetworkCommand::RequestPairing {
+            connection_id,
+            request_id,
+            invite: invite.clone(),
+        })?;
+        Ok(invite)
     }
 
     pub(crate) fn answer_pairing_invite(
         &mut self,
-        _connection_id: [u8; 16],
-        _response_id: [u8; 16],
-        _invite: PairingInvite,
-        _authorization: PairingAuthorization,
-        _now_ms: u64,
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+        authorization: PairingAuthorization,
+        now_ms: u64,
     ) -> Result<PairingExchange, AslError> {
-        Err(AslError::PolicyDenied)
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let mut store = open_store(&self.state_database)?;
+        let exchange = pairing::answer_signed_invite(
+            &self.agent_identity,
+            admission,
+            &mut store,
+            &self.device_peer_id,
+            connection_id,
+            &invite,
+            authorization,
+            now_ms,
+        )?;
+        self.send_network_command(NetworkCommand::ReplyPairing {
+            connection_id,
+            response_id,
+            exchange: exchange.clone(),
+        })?;
+        Ok(exchange)
     }
 
     pub(crate) fn verify_pairing_response(
@@ -283,11 +310,10 @@ impl Supervisor {
         event: AdmittedNetworkEvent,
         _now_ms: u64,
     ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
-        let AdmittedNetworkEvent::PairingExchangeReceived { connection_id, .. } = event else {
+        if !matches!(event, AdmittedNetworkEvent::PairingExchangeReceived { .. }) {
             return Ok(Some(event));
-        };
-        self.send_network_command(NetworkCommand::CloseConnection { connection_id })?;
-        Ok(None)
+        }
+        Ok(Some(event))
     }
 
     pub fn activate_network_admission(
@@ -523,6 +549,7 @@ impl Supervisor {
             },
             |supervisor, observation| {
                 supervisor.observe_contact_binding_network(observation.clone())?;
+                supervisor.observe_contact_invite_network(observation.clone())?;
                 match observation {
                     LocalNetworkObservation::DhtProviders { .. } => {
                         outbound
@@ -843,6 +870,7 @@ impl Supervisor {
             },
             |supervisor, observation| {
                 supervisor.observe_contact_binding_network(observation.clone())?;
+                supervisor.observe_contact_invite_network(observation.clone())?;
                 observer(observation);
                 Ok(())
             },
@@ -1234,6 +1262,7 @@ impl Supervisor {
                 #[cfg(windows)]
                 self.poll_local_groups()?;
                 self.poll_contact_bindings()?;
+                self.poll_contact_invites()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
@@ -1415,17 +1444,40 @@ impl Supervisor {
         }
         for event in batch.events {
             self.observe_contact_binding_event(&event)?;
+            self.observe_contact_invite_operation(&event);
             self.profile_signing
                 .observe_remote_record(self.agent_identity.agent_id(), &event);
-            match &event {
-                AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } => {
-                    self.pending_pairing_prompts
-                        .remove_connection(*connection_id);
-                    self.send_network_command(NetworkCommand::CloseConnection {
-                        connection_id: *connection_id,
-                    })?;
-                    continue;
+            match self.handle_contact_invite_event(&event, unix_time_ms()?) {
+                Ok(Some(command)) => self.send_network_command(command)?,
+                Ok(None) => {}
+                Err(error)
+                    if matches!(
+                        event,
+                        AdmittedNetworkEvent::PairingInviteReceived { .. }
+                            | AdmittedNetworkEvent::PairingExchangeReceived { .. }
+                            | AdmittedNetworkEvent::PeerAdmitted { .. }
+                    ) =>
+                {
+                    if let Some(connection_id) = admitted_event_connection(&event) {
+                        self.send_network_command(NetworkCommand::CloseConnection {
+                            connection_id,
+                        })?;
+                    }
+                    if !matches!(
+                        error,
+                        AslError::InvalidIdentity
+                            | AslError::InvalidMessage
+                            | AslError::ExpiredMessage
+                            | AslError::PolicyDenied
+                    ) {
+                        return Err(error);
+                    }
                 }
+                Err(error) => return Err(error),
+            }
+            match &event {
+                AdmittedNetworkEvent::PairingInviteReceived { .. } => continue,
+                AdmittedNetworkEvent::PairingExchangeReceived { .. } => continue,
                 AdmittedNetworkEvent::PairingAccepted { .. }
                 | AdmittedNetworkEvent::PairingDeclined { .. } => continue,
                 AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
@@ -2079,6 +2131,16 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::GossipReceived { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
+    }
+}
+
+fn admitted_event_connection(event: &AdmittedNetworkEvent) -> Option<[u8; 16]> {
+    match event {
+        AdmittedNetworkEvent::PeerAdmitted { connection_id, .. }
+        | AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. }
+        | AdmittedNetworkEvent::PairingExchangeReceived { connection_id, .. }
+        | AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => Some(*connection_id),
+        _ => None,
     }
 }
 

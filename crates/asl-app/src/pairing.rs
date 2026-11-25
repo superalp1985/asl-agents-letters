@@ -14,9 +14,8 @@ use crate::{
 
 const INVITE_DOMAIN: &[u8] = b"ASL-PAIR-INVITE-v1\0";
 const ACCEPT_DOMAIN: &[u8] = b"ASL-PAIR-DECISION-v1\0";
-const INVITE_LIFETIME_MS: u64 = 3 * 60 * 1_000;
-const MAX_INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
-#[cfg(test)]
+pub(crate) const INVITE_LIFETIME_MS: u64 = 3 * 60 * 1_000;
+const MAX_INVITE_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_PENDING_PAIRING_PROMPTS: usize = 5;
 
 #[derive(Default)]
@@ -31,12 +30,10 @@ struct PendingPairingPrompt {
 }
 
 impl PendingPairingPrompts {
-    #[cfg(test)]
     pub(crate) fn can_insert(&self, invite_id: [u8; 16]) -> bool {
         self.entries.len() < MAX_PENDING_PAIRING_PROMPTS && !self.entries.contains_key(&invite_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn insert(
         &mut self,
         connection_id: [u8; 16],
@@ -101,28 +98,46 @@ pub fn issue_signed_invite(
     note: &str,
     now_ms: u64,
 ) -> Result<PairingInvite, AslError> {
+    let mut nonce = [0; 32];
+    SysRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| AslError::InvalidIdentity)?;
+    issue_signed_invite_with_nonce(
+        identity,
+        target,
+        note,
+        now_ms,
+        now_ms
+            .checked_add(INVITE_LIFETIME_MS)
+            .ok_or(AslError::InvalidMessage)?,
+        Hash32(nonce),
+    )
+}
+
+pub(crate) fn issue_signed_invite_with_nonce(
+    identity: &AgentIdentity,
+    target: AgentId,
+    note: &str,
+    now_ms: u64,
+    expires_at_ms: u64,
+    nonce: Hash32,
+) -> Result<PairingInvite, AslError> {
     if target == identity.agent_id() || now_ms > i64::MAX as u64 {
         return Err(AslError::InvalidMessage);
     }
     validate_pairing_note(note)?;
-    let expires_at_ms = now_ms
-        .checked_add(INVITE_LIFETIME_MS)
-        .filter(|expires| *expires <= i64::MAX as u64)
-        .ok_or(AslError::InvalidMessage)?;
-    let mut random = [0; 16 + 32];
+    if expires_at_ms <= now_ms
+        || expires_at_ms - now_ms > INVITE_LIFETIME_MS
+        || expires_at_ms > i64::MAX as u64
+        || nonce.0 == [0; 32]
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut random = [0; 16];
     SysRng
         .try_fill_bytes(&mut random)
         .map_err(|_| AslError::InvalidIdentity)?;
-    let invite_id = Id128(
-        random[..16]
-            .try_into()
-            .map_err(|_| AslError::InvalidIdentity)?,
-    );
-    let nonce = Hash32(
-        random[16..]
-            .try_into()
-            .map_err(|_| AslError::InvalidIdentity)?,
-    );
+    let invite_id = Id128(random);
     if invite_id.0 == [0; 16] || nonce.0 == [0; 32] {
         return Err(AslError::InvalidIdentity);
     }
@@ -298,6 +313,26 @@ fn validate_invite(
         });
     }
     verify_root_signature(&invite_signing_bytes(invite)?, invite.signature, controller)
+}
+
+pub(crate) fn validate_incoming_invite(
+    invite: &PairingInvite,
+    authenticated_inviter: AgentId,
+    expected_target: AgentId,
+    now_ms: u64,
+    controller: [u8; 20],
+    expected_nonce: Option<Hash32>,
+) -> Result<(), AslError> {
+    if expected_nonce.is_some_and(|expected| expected != invite.nonce) {
+        return Err(AslError::InvalidIdentity);
+    }
+    validate_invite(
+        invite,
+        authenticated_inviter,
+        expected_target,
+        now_ms,
+        controller,
+    )
 }
 
 fn invite_signing_bytes(invite: &PairingInvite) -> Result<Vec<u8>, AslError> {

@@ -908,9 +908,9 @@ mod tests {
     }
 
     #[test]
-    fn v35_and_v36_migrations_create_all_new_tables() {
+    fn v35_through_v37_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
-        assert_eq!(store.schema_version(), 36);
+        assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         for table in [
             "mailbox_slots",
             "mailbox_shards",
@@ -921,6 +921,10 @@ mod tests {
             "local_capacity_measurements",
             "group_access_policies",
             "group_access_members",
+            "contact_invites",
+            "contact_invite_receipts",
+            "contact_invite_prompts",
+            "contact_invite_actions",
         ] {
             let exists: bool = store
                 .connection
@@ -953,20 +957,20 @@ mod tests {
                  DROP TABLE local_capacity_measurements;
                  DROP TABLE group_access_members;
                  DROP TABLE group_access_policies;
-                 DELETE FROM schema_migrations WHERE version IN (35,36);",
+                 DELETE FROM schema_migrations WHERE version IN (35,36,37);",
             )
             .unwrap();
         drop(connection);
 
         let store = open_store(&path).unwrap();
-        assert_eq!(store.schema_version(), 36);
+        assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         let migration_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 36);
+        assert_eq!(migration_count, crate::SCHEMA_VERSION);
         let budget_table_exists: bool = store
             .connection
             .query_row(

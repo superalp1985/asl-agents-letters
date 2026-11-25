@@ -3,6 +3,7 @@ mod avatar;
 mod binding_feedback;
 mod bubble;
 mod checkpoint;
+mod contact_invites;
 mod group_admin;
 mod locale;
 mod model_endpoints;
@@ -10,6 +11,7 @@ mod nav_icon;
 mod network_privacy;
 mod notification_settings;
 mod profile_signing;
+mod qr;
 mod retention;
 mod startup_settings;
 mod tokens;
@@ -70,6 +72,7 @@ struct Viewer {
     retention: retention::RetentionForm,
     checkpoint_form: checkpoint::CheckpointForm,
     group_admin: group_admin::Form,
+    contact_invites: contact_invites::Form,
     profile_form: profile_signing::ProfileForm,
     show_startup_settings: bool,
     code_input: String,
@@ -98,6 +101,7 @@ struct NoticeMarker {
     downloads: usize,
     uploads: usize,
     invites: usize,
+    contacts: usize,
     host_inbox: bool,
 }
 
@@ -127,6 +131,7 @@ impl Viewer {
             retention: retention::RetentionForm::default(),
             checkpoint_form: checkpoint::CheckpointForm::default(),
             group_admin: group_admin::Form::default(),
+            contact_invites: contact_invites::Form::default(),
             profile_form: profile_signing::ProfileForm::default(),
             show_startup_settings: true,
             code_input: String::new(),
@@ -229,6 +234,11 @@ impl Viewer {
                 "Profile lookup request processed",
             ),
             "bindings" => label(language, "本机操作已排队", "Local operation queued"),
+            "contact-invites" => label(
+                language,
+                "联系人邀请操作已排队",
+                "Contact invite operation queued",
+            ),
             "group-admin" => label(language, "群组操作已排队", "Group operation queued"),
             "group-invites" => label(
                 language,
@@ -335,6 +345,7 @@ impl Viewer {
             if data.download_approvals.iter().any(|item| !item.approved)
                 || data.upload_approvals.iter().any(|item| !item.approved)
                 || data.group_invitations.iter().any(|item| !item.approved)
+                || !data.contact_invite_prompts.is_empty()
                 || data.host_inbox_request.is_some()
             {
                 return Mood::Waiting;
@@ -669,6 +680,7 @@ impl eframe::App for Viewer {
                             model_endpoints: &snapshot.model_endpoints,
                             checkpoint_form: &mut self.checkpoint_form,
                             group_admin: &mut self.group_admin,
+                            contact_invites: &mut self.contact_invites,
                             profile_form: &mut self.profile_form,
                             remote_avatars: &mut self.remote_avatars,
                             checkpoints: &snapshot.checkpoints,
@@ -776,6 +788,7 @@ impl From<&Dashboard> for NoticeMarker {
             downloads: dashboard.download_approvals.len(),
             uploads: dashboard.upload_approvals.len(),
             invites: dashboard.group_invitations.len(),
+            contacts: dashboard.contact_invite_prompts.len(),
             host_inbox: dashboard.host_inbox_request.is_some(),
         }
     }

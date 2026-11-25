@@ -179,9 +179,25 @@ impl NetworkCommand {
                 response_id,
                 proof,
             },
-            Self::RequestPairing { .. }
-            | Self::ReplyPairing { .. }
-            | Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
+            Self::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            } => IpcMessage::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            },
+            Self::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            } => IpcMessage::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            },
+            Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
             Self::SendControl {
                 connection_id,
                 request_id,
@@ -720,12 +736,6 @@ impl Supervisor {
         let mut events = Vec::with_capacity(batch.events.len());
         for event in batch.events {
             self.observe_contact_binding_event(&event)?;
-            if let AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } = &event {
-                self.send_network_command(NetworkCommand::CloseConnection {
-                    connection_id: *connection_id,
-                })?;
-                continue;
-            }
             if matches!(
                 &event,
                 AdmittedNetworkEvent::PairingAccepted { .. }

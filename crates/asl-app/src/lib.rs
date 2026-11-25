@@ -4,6 +4,7 @@ pub mod avatar;
 pub mod chain;
 mod chain_refresh;
 pub mod checkpoint_access;
+pub mod contact_invite;
 pub mod diagnostics;
 mod direct_inbound;
 mod direct_outbound;

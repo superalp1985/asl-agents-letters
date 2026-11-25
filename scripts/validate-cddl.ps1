@@ -10,19 +10,24 @@ if ($version -ne "cddl 0.10.7") {
 
 $root = Split-Path -Parent $PSScriptRoot
 $schema = Join-Path $root "schemas\asl-v1.cddl"
+$contactInviteSchema = Join-Path $root "schemas\contact-invite-v1.cddl"
 $vectors = Join-Path $root "schemas\vectors"
 $index = Get-Content -LiteralPath (Join-Path $vectors "index.json") -Raw | ConvertFrom-Json
-if ($index.version -ne 1 -or $index.vectors.Count -ne 34) {
-    throw "Expected schema corpus version 1 with 34 vectors."
+if ($index.version -ne 1 -or $index.vectors.Count -ne 35) {
+    throw "Expected schema corpus version 1 with 35 vectors."
 }
-if (@($index.vectors | Where-Object { $_.accepted -eq $true }).Count -ne 24 -or
+if (@($index.vectors | Where-Object { $_.accepted -eq $true }).Count -ne 25 -or
     @($index.vectors | Where-Object { $_.accepted -eq $false }).Count -ne 10) {
-    throw "Expected 24 accepted and 10 rejected vectors."
+    throw "Expected 25 accepted and 10 rejected vectors."
 }
 
 & $tool.Source compile-cddl --cddl $schema
 if ($LASTEXITCODE -ne 0) {
     throw "CDDL grammar validation failed."
+}
+& $tool.Source compile-cddl --cddl $contactInviteSchema
+if ($LASTEXITCODE -ne 0) {
+    throw "Contact invite CDDL grammar validation failed."
 }
 
 $scratchParent = Join-Path $root "work"
@@ -37,7 +42,7 @@ try {
     foreach ($vector in $index.vectors) {
         if ($vector.name -notmatch '^[a-z][a-z0-9-]*$' -or
             $vector.root -notmatch '^[a-z][a-z0-9-]*$' -or
-            $vector.codec -notin @("frame", "record", "value") -or
+            $vector.codec -notin @("frame", "group-policy", "record", "value") -or
             $vector.accepted -isnot [bool] -or -not $seen.Add($vector.name)) {
             throw "Invalid or duplicate schema corpus entry."
         }
@@ -87,7 +92,7 @@ try {
             $process.Dispose()
         }
     }
-    Write-Output "CDDL corpus: 24 accepted, 10 rejected as expected."
+    Write-Output "CDDL corpus: 25 accepted, 10 rejected as expected."
 }
 finally {
     if (Test-Path -LiteralPath $wrapper) {
