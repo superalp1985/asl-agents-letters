@@ -996,3 +996,11 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - MCP 增加 `asl_group_members` 和 owner-only `asl_group_set_access`。GUI 群管理成员列表显示群主/管理员/成员、禁言和文字/文件/邀请权限。本轮未实现群主转移、管理员代管成员的独立策略编辑、跨设备策略同步人工验收或公网群组验收。
 - 定向测试：`asl-types` 库 3 项、`asl-groups` 库 12 项、`asl-store` 库 123 项（含 group_access 2 项和 v36 迁移）、MCP stdio 7 项、UI 23 项、schema exporter 35 个向量（25 接受、10 拒绝）通过。修复了旧 v32 升级夹具未清理 v36 表的问题后，单独语义上下文集成测试 1 项通过。
 - 最终统一运行：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **904 通过、0 失败、13 忽略**。工作区严格 Clippy、格式、schema exporter 和 `git diff --check` 通过。`scripts/validate-cddl.ps1` 仍因本机 PATH 没有 `cddl` 命令未执行；此前独立 CDDL 结果不代表本轮 35 个向量。
+
+### 2026-11-26 有期限联系人邀请与二维码
+
+- 新增 SQLite v37：`contact_invites` 保存完整签名、token、创建/到期时间、状态和绑定 AgentId；`contact_invite_receipts` 持久化单次消费；`contact_invite_prompts` 投影待确认 Pairing 请求；`contact_invite_actions` 承载 CLI/Core 的 import/decide 动作。v1–v36 迁移保持不改写。
+- 新增独立 `ASL-CONTACT-INVITE:1:<base58>` canonical CBOR envelope，签名绑定 inviter、invite/token、时间、单句附言和 24 小时上限；二维码与完整 envelope 使用同一载荷。16 位临时短码只编码受限期 token，不代替长期 AgentId；二维码使用 vendored `qrcodegen 1.8.0`。
+- Contacts 页展示完整 AgentId、临时短码、完整邀请和二维码；导入必须经本机 Pairing 确认。DHT provider 只提供 token 发现，实际建联仍由双方签名 Pairing、设备证书和链身份核验完成。邀请消费不创建 `authorized_contacts`、文件授权或群成员资格。
+- 定向验证：`asl-types` 6 项 contact invite、`asl-store` 9 项 contact invite、`asl-app` 1 项邀请类型、CLI 1 项、桌面 UI/二维码 28 项通过；真实临时资料执行 `--initialize-profile`、`--contact-invites create 5 "..."`、`list`、短码 `import` 成功。`cargo +1.100.0 clippy -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings`、格式、schema exporter 和 `git diff --check` 通过。
+- 最终统一运行：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；本轮 `--list` 枚举 929 项，忽略项仍为显式环境门槛/子进程入口。先前一次失败来自 `agent_setup` 仍断言 schema v36，修正为 v37 后重跑通过。跨两台真实设备、公网 DHT 可达性、二维码被真实摄像头扫描和跨机邀请确认仍未验收。
