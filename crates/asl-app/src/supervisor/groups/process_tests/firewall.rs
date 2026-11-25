@@ -40,10 +40,11 @@ impl ReceiverRule {
         let guard = Self(child);
         let mut line = String::new();
         BufReader::new(output).read_line(&mut line)?;
-        if line.trim_end() != "READY" {
-            return Err(io::Error::other(
-                "Windows did not confirm the receiver rule",
-            ));
+        match helper_status(&line)? {
+            true => {}
+            false => eprintln!(
+                "Host firewall profiles are disabled; relying on the verified AppContainer WFP loopback permit."
+            ),
         }
         Ok(guard)
     }
@@ -58,6 +59,16 @@ impl ReceiverRule {
     }
 }
 
+fn helper_status(line: &str) -> io::Result<bool> {
+    match line.trim_end() {
+        "READY" => Ok(true),
+        "FIREWALL_DISABLED" => Ok(false),
+        _ => Err(io::Error::other(
+            "Windows did not confirm the receiver rule",
+        )),
+    }
+}
+
 impl Drop for ReceiverRule {
     fn drop(&mut self) {
         if self.0.stdin.is_some()
@@ -65,5 +76,17 @@ impl Drop for ReceiverRule {
         {
             eprintln!("Closing fixture firewall rule: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_status_distinguishes_enforced_rules_from_disabled_host_firewall() {
+        assert!(matches!(helper_status("READY\r\n"), Ok(true)));
+        assert!(matches!(helper_status("FIREWALL_DISABLED\r\n"), Ok(false)));
+        assert!(helper_status("unexpected output\r\n").is_err());
     }
 }

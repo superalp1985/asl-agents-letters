@@ -130,6 +130,10 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
+**结构化语义（T41）：** ASL/1.2 直连可请求精确版本的签名定义包，通过既有文件授权同步并返回结构化求值结果。缺少定义时标为 `unresolved`，不回退为自然语言。已验证独立 Core 的 TCP 回环；自主制包、群组同步和公网验收仍待完成。[协议与 MCP 用法](docs/05-agent-gui.md#7-stdio-mcp-接入)
+
+**Agent 初始化（T42，部分实现）：** `asl.exe setup` 创建或复用本机身份。连接同一资料并独立获准的 MCP 宿主可读 `asl://agent/bootstrap-v1`，区分本机身份就绪、可信网络配置缺失和链身份准入，不必搜索资料目录。首次链上注册和宿主配置生成仍待完成。
+
 独立授权的恢复宿主可在重连后续查自己的查询状态、按游标补读状态变化。另行开启留存后，也可补读已保存的结构化答复；不会补发请求、恢复下载凭证或继承文件权限。
 用 `asl_recovery_query` 提交时，可在有效期内用同一请求 ID 和原参数重试，找回原任务 ID，不重复派发。
 本机单独授权后，恢复宿主还可用 `asl_recovery_download` 续接指定的已开始下载；群组必须仍处于原成员版本。重连本身不启动传输。
@@ -371,6 +375,10 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 
 **Local MCP (T30):** Authorized hosts can query resources via `asl.exe mcp --home <absolute path>`. By default, `asl_fetch` downloads from one device. With `additional_offer_ids`, it can use up to four devices offering the same file in that query, without a separate torrent file. In ask mode, one inbox approval covers the selected devices; retries cannot add or remove sources. MCP is off by default, with separate query and inbox grants. Tests cover real stdio to Core and, separately, receiving distinct chunks from two devices over TCP loopback. Public-network transfers were not tested. [Setup, example and revocation](docs/05-agent-gui.md#7-stdio-mcp-接入)
+
+**Structured semantics (T41):** ASL/1.2 direct peers can request exact signed context packages, transfer them under existing file grants, and return typed evaluation results to the receiving host. Missing definitions stay `unresolved`, with no natural-language fallback. Verified between independent Core processes on TCP loopback. Autonomous package authoring, group synchronization, and public-network acceptance are pending. [Protocol and MCP usage](docs/05-agent-gui.md#7-stdio-mcp-接入)
+
+**Agent Setup (T42, partial):** `asl.exe setup` creates or reuses a local identity. A separately authorized MCP host connected to the same profile can read `asl://agent/bootstrap-v1` to distinguish local identity readiness, missing network trust configuration, and verified chain admission without searching for profile paths. First-device chain registration and host configuration generation are pending.
 
 With a separate recovery grant, a host can reconnect and read its own query status and status events by cursor. With result retention separately enabled, it can also read saved structured answers. Recovery does not resend queries, restore download credentials, or inherit file permissions.
 When submitting through `asl_recovery_query`, retry with the same request ID and arguments before the original deadline to recover the task ID without dispatching again.

@@ -22,6 +22,15 @@ if ($Cleanup) {
 
 $file = Get-Item -LiteralPath $Program
 if ($file.Name -ne 'asl-net.exe' -or $file.PSIsContainer) { throw 'Expected the fixture Net executable.' }
+$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+$enabledProfiles = @($profiles | Where-Object { $_.Enabled -eq $true })
+if ($profiles.Count -gt 0 -and $enabledProfiles.Count -eq 0) {
+    [Console]::Out.WriteLine('FIREWALL_DISABLED')
+    [Console]::Out.Flush()
+    $null = [Console]::In.ReadLine()
+    exit 0
+}
+
 $settings = @{
     Name = $name
     DisplayName = $name
