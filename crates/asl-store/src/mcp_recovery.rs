@@ -502,7 +502,16 @@ mod tests {
              ALTER TABLE mcp_recovery_tasks DROP COLUMN request_digest;
              ALTER TABLE mcp_recovery_tasks DROP COLUMN request_id;
              ALTER TABLE mcp_recovery_grant DROP COLUMN replay_floor_ms;
-             DELETE FROM schema_migrations WHERE version IN (29,30,31,32);",
+             DROP TABLE conversation_attachment_refs;
+             DROP TABLE conversation_act_events;
+             DROP TABLE conversation_budget_grants;
+             DROP TABLE mailbox_shards;
+             DROP TABLE mailbox_slots;
+             DROP TABLE gossip_topic_state;
+             DROP TABLE local_capacity_measurements;
+             DROP TABLE semantic_context_resources;
+             DROP TABLE semantic_context_candidates;
+             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35);",
             )
             .unwrap();
         drop(store);

@@ -978,7 +978,13 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 完成 ASL/1.3 `Act` 确定性 CBOR 编解码：外层 map 键 1-10，唯一文本字段为 `act[5] nl-body`（1..32 KiB），总 act 上限 60 KiB；`request` 必须带结构化 action，其他 act 类型不得伪装 action。`GroupApplication` 只能把 act 作为 MLS application plaintext 编解码，不新增外层 `WireFrame`。
 - `asl-app` 已接入 act 入站事件：可信控制字段与 `act_cbor_hex` 分开推送，自然语言只放在 `untrusted_remote_data`。已接入 `asl_send_act`、`asl_group_list/create/invite`、`asl_direct_open`；群管理工具只有 `ASL_MCP_GROUPS=admin` 时出现，收件方仍需本机批准邀请。
 - 单 MLS 群编译硬上限从 64 调整为 512；这是资源上限，不是跨机大群验收。libp2p gossipsub 网络层、Net IPC 命令/事件、Core 订阅/发布以及 gossip act 的 MLS/房间成员重验路径已接线；尚无跨机多跳群聊收敛验收。
-- 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项，以及原三 Core 群消息进程测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 通过；`scripts/validate-cddl.ps1` 语法通过（23 接受、10 拒绝）。该 CDDL 语料尚未包含独立 act 向量。
+- 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项、三 Core 群消息进程测试 1 项和双 Core 群文件双端审批测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 与工作区全目标编译通过；`scripts/validate-cddl.ps1` 语法通过（24 接受、10 拒绝，含独立 act 向量）。
 - 群消息进程测试首次运行发现 active room 列表把 TEXT `local_group_id` 当 BLOB 读取；修复为严格 32-hex 解码后重跑通过。`group_file_crosses_core_processes_with_two_approvals` 也通过，验证双 Core 群文件双端审批、分块下载和最终内容。两测试验证 direct 路径，不是 gossipsub 多跳或跨机。
 - v35 迁移和 opaque 邮箱/预算仓储已实现并测试，但尚未接入远程 DHT 托管、邮箱收发、Core/Agent 预算 UI 或离线补收。
 - 未运行最新工作区全量测试、严格 Clippy、真实两设备建群/邀请/act 互通、群文件回归、提示注入红队、离线邮箱投递、512 人大群或公网/链 RPC。上述功能不得仅凭本轮编译和局部测试标为完整验收。
+
+### 2026-11-26 Agent 文件 Offer MCP 入口与工作区基线
+
+- 新增 `asl_send_file`，仅在本机宿主获得 `ASL_MCP_GROUPS=admin` 且 Core/MLS 会话可用时暴露。参数绑定现有 MLS room、已导入本机快照 content ID、媒体类型和有界 ASL topic；Core 先验证快照与 active room，再发送结构化 `Offer`，不会接受任意路径、文件名、目录或自然语言。接收方仍走现有的成员/epoch、收件目录、传输审批和分块校验。
+- `cargo +1.100.0 check -p asl-app --all-targets --locked --offline` 通过；`cargo +1.100.0 clippy -p asl-app --all-targets --locked --offline -- -D warnings` 通过。新增 MCP 参数单测 1 项通过：合法 `document` Offer 可解析，未知媒体类型、非 topic concept 和错误 content ID 被拒绝。
+- 本轮变更后完整工作区测试已重跑：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **899 通过、0 失败、13 忽略**。`asl-app` 库 295 项通过、`asl-store` 203 项通过、`asl-net` 62 项通过、`asl-policy` 119 项通过、`asl-types` 76 项通过、`asl-agent` 42 项通过；忽略项均来自显式环境门槛或子进程入口。`scripts/validate-cddl.ps1` 本轮未执行成功，本机当前 PATH 没有 `cddl` 命令；schema exporter 通过并核对 34 个向量（24 接受、10 拒绝）。`asl_send_file` 的 Core→MLS→接收方端到端尚未单独验收，不能把它等同于公网文件传输完成。

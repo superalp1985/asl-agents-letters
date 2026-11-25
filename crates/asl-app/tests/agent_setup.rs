@@ -111,7 +111,7 @@ fn core_owns_first_identity_creation_and_setup_only_returns_its_report() {
     );
     let peer_id: libp2p_identity::PeerId = first["peer_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(peer_id.to_string(), first["peer_id"].as_str().unwrap());
-    assert_eq!(first["schema_version"].as_u64(), Some(33));
+    assert_eq!(first["schema_version"].as_u64(), Some(35));
     assert!(profile.join("identity/agent-root.dpapi").is_file());
     assert!(profile.join("identity/device-key.dpapi").is_file());
     assert!(profile.join("state/asl.sqlite3").is_file());

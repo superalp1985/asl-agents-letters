@@ -270,71 +270,71 @@ mod tests {
 
     #[tokio::test]
     async fn two_local_transports_deliver_anonymous_gossip() {
-        let listener_identity = Keypair::generate_ed25519();
-        let listener_peer = device_peer(listener_identity.public().to_peer_id()).unwrap();
-        let mut listener = LocalTransport::new(listener_identity).unwrap();
-        listener
-            .listen(
-                TransportKind::Tcp,
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into(),
-            )
-            .unwrap();
-        let endpoint = loop {
-            match listener.next_event().await.unwrap() {
-                TransportEvent::Listening(TransportKind::Tcp, endpoint) => break endpoint,
-                _ => continue,
-            }
-        };
-
-        let dialer_identity = Keypair::generate_ed25519();
-        let dialer_peer = device_peer(dialer_identity.public().to_peer_id()).unwrap();
-        let mut dialer = LocalTransport::new(dialer_identity).unwrap();
-        dialer
-            .dial(TransportKind::Tcp, endpoint, &listener_peer)
-            .unwrap();
-        let (dialer_connected, listener_connected) =
-            tokio::join!(dialer.next_event(), listener.next_event());
-        assert!(matches!(
-            dialer_connected.unwrap(),
-            TransportEvent::Connected { connection } if connection.peer_id() == &listener_peer
-        ));
-        assert!(matches!(
-            listener_connected.unwrap(),
-            TransportEvent::Connected { connection } if connection.peer_id() == &dialer_peer
-        ));
-
-        let topic = GossipTopic::new([0x42; 32]);
-        assert!(dialer.subscribe_gossip(topic).unwrap());
-        assert!(listener.subscribe_gossip(topic).unwrap());
-
-        let payload = b"bounded anonymous gossip".to_vec();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match dialer.publish_gossip(topic, payload.clone()) {
-                Ok(_) => break,
-                Err(error)
-                    if error.kind() == io::ErrorKind::NotConnected && Instant::now() < deadline =>
-                {
-                    drive_for(&mut dialer, Duration::from_millis(100)).await;
-                    drive_for(&mut listener, Duration::from_millis(100)).await;
-                }
-                Err(error) => panic!("gossip publish failed: {error}"),
-            }
-        }
-
-        drive_for(&mut dialer, Duration::from_millis(100)).await;
-        loop {
-            let event = timeout_at(deadline, listener.next_event())
-                .await
-                .expect("gossip delivery timed out")
+        for kind in [TransportKind::Tcp, TransportKind::Quic] {
+            let listener_identity = Keypair::generate_ed25519();
+            let listener_peer = device_peer(listener_identity.public().to_peer_id()).unwrap();
+            let mut listener = LocalTransport::new(listener_identity).unwrap();
+            listener
+                .listen(kind, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
                 .unwrap();
-            let TransportEvent::GossipMessage(message) = event else {
-                continue;
+            let endpoint = loop {
+                match listener.next_event().await.unwrap() {
+                    TransportEvent::Listening(observed, endpoint) if observed == kind => {
+                        break endpoint;
+                    }
+                    _ => continue,
+                }
             };
-            assert_eq!(message.topic, topic);
-            assert_eq!(message.propagation_source, dialer_peer);
-            assert_eq!(message.data, payload);
-            break;
+
+            let dialer_identity = Keypair::generate_ed25519();
+            let dialer_peer = device_peer(dialer_identity.public().to_peer_id()).unwrap();
+            let mut dialer = LocalTransport::new(dialer_identity).unwrap();
+            dialer.dial(kind, endpoint, &listener_peer).unwrap();
+            let (dialer_connected, listener_connected) =
+                tokio::join!(dialer.next_event(), listener.next_event());
+            assert!(matches!(
+                dialer_connected.unwrap(),
+                TransportEvent::Connected { connection } if connection.peer_id() == &listener_peer
+            ));
+            assert!(matches!(
+                listener_connected.unwrap(),
+                TransportEvent::Connected { connection } if connection.peer_id() == &dialer_peer
+            ));
+
+            let topic = GossipTopic::new([0x42; 32]);
+            assert!(dialer.subscribe_gossip(topic).unwrap());
+            assert!(listener.subscribe_gossip(topic).unwrap());
+
+            let payload = b"bounded anonymous gossip".to_vec();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match dialer.publish_gossip(topic, payload.clone()) {
+                    Ok(_) => break,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::NotConnected
+                            && Instant::now() < deadline =>
+                    {
+                        drive_for(&mut dialer, Duration::from_millis(100)).await;
+                        drive_for(&mut listener, Duration::from_millis(100)).await;
+                    }
+                    Err(error) => panic!("gossip publish failed: {error}"),
+                }
+            }
+
+            drive_for(&mut dialer, Duration::from_millis(100)).await;
+            loop {
+                let event = timeout_at(deadline, listener.next_event())
+                    .await
+                    .expect("gossip delivery timed out")
+                    .unwrap();
+                let TransportEvent::GossipMessage(message) = event else {
+                    continue;
+                };
+                assert_eq!(message.topic, topic);
+                assert_eq!(message.propagation_source, dialer_peer);
+                assert_eq!(message.data, payload);
+                break;
+            }
         }
     }
 

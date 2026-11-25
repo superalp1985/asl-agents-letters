@@ -297,7 +297,13 @@ mod tests {
     use asl_types::ids::AgentId;
 
     pub(super) fn test_peer(seed: u8) -> PeerId {
-        let key = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
+        test_peer_u64(seed.into())
+    }
+
+    pub(super) fn test_peer_u64(seed: u64) -> PeerId {
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&seed.to_be_bytes());
+        let key = libp2p_identity::Keypair::ed25519_from_bytes(bytes).unwrap();
         PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap()
     }
 

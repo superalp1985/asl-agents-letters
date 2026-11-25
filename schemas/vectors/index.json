@@ -122,6 +122,12 @@
       "accepted": true
     },
     {
+      "name": "act-v1",
+      "root": "act",
+      "codec": "value",
+      "accepted": true
+    },
+    {
       "name": "signed-profile-record-v1",
       "root": "signed-profile-record",
       "codec": "record",

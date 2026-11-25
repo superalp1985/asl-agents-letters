@@ -28,7 +28,7 @@ use super::{
         ActArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs, ContextRequestArgs,
         EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, QueryArgs, ReceiveOfferArgs,
         RecoveryDownloadArgs, RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs,
-        RenewActBudgetArgs, Request, TaskArgs,
+        RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -40,6 +40,7 @@ const RESULT: &str = "asl_result";
 const SEND: &str = "asl_send_expression";
 const SEND_CONTEXT: &str = "asl_send_context_expression";
 const SEND_ACT: &str = "asl_send_act";
+const SEND_FILE: &str = "asl_send_file";
 const GROUP_LIST: &str = "asl_group_list";
 const GROUP_CREATE: &str = "asl_group_create";
 const GROUP_INVITE: &str = "asl_group_invite";
@@ -253,6 +254,11 @@ impl ServerHandler for ToolServer {
             }
             if caps["groups_admin"] == true {
                 tools.push(Tool::new(
+                    SEND_FILE,
+                    "Offer one already-authorized local library resource to an existing MLS conversation. The offer carries only a content ID, size and bounded topic refs; the receiver must still obtain file authorization.",
+                    schema_for_input::<SendFileArgs>().map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
                     GROUP_LIST,
                     "List local MLS rooms and pending/approved invitations. Requires explicit ASL_MCP_GROUPS=admin authorization.",
                     schema_for_input::<EmptyArgs>().map_err(|_| invalid_arguments())?,
@@ -441,6 +447,11 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
         SEND => Ok(Request::SendExpression(parse_arguments(arguments)?)),
         SEND_CONTEXT => Ok(Request::SendContextExpression(parse_arguments(arguments)?)),
         SEND_ACT => Ok(Request::SendAct(parse_arguments(arguments)?)),
+        SEND_FILE => {
+            let args: SendFileArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::SendFile(args))
+        }
         GROUP_LIST if arguments.is_empty() => Ok(Request::GroupList),
         GROUP_CREATE if arguments.is_empty() => Ok(Request::GroupCreate),
         GROUP_LIST | GROUP_CREATE => Err(invalid_arguments()),
@@ -603,6 +614,39 @@ mod tests {
         assert!(matches!(parse_request(status), Ok(Request::TaskStatus(_))));
         assert!(matches!(parse_request(fetch), Ok(Request::Fetch(_))));
         assert!(matches!(parse_request(result), Ok(Request::Result(_))));
+    }
+
+    #[test]
+    fn send_file_accepts_only_bounded_topics_and_known_media_kinds() {
+        let valid = CallToolRequestParams::new(SEND_FILE).with_arguments(object(json!({
+            "room": "11".repeat(32),
+            "content_id": "22".repeat(32),
+            "media_kind": "document",
+            "concepts": [[1, 100]]
+        })));
+        assert!(matches!(parse_request(valid), Ok(Request::SendFile(_))));
+
+        for invalid in [
+            json!({
+                "room": "11".repeat(32),
+                "content_id": "22".repeat(32),
+                "media_kind": "executable"
+            }),
+            json!({
+                "room": "11".repeat(32),
+                "content_id": "22".repeat(32),
+                "media_kind": "other",
+                "concepts": [[1, 1]]
+            }),
+            json!({
+                "room": "11".repeat(32),
+                "content_id": "33".repeat(31),
+                "media_kind": "other"
+            }),
+        ] {
+            let request = CallToolRequestParams::new(SEND_FILE).with_arguments(object(invalid));
+            assert!(parse_request(request).is_err());
+        }
     }
 
     #[test]

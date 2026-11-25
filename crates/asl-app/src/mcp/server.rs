@@ -218,6 +218,7 @@ async fn serve(
         "send_expression": !is_recovery && grant.expressions && mail.is_some(),
         "send_context_expression": !is_recovery && grant.expressions && mail.is_some(),
         "send_act": !is_recovery && grant.expressions && mail.is_some(),
+        "send_file": !is_recovery && grant.groups_admin && mail.is_some(),
         "groups_admin": !is_recovery && grant.groups_admin && mail.is_some(),
         "request_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "confirm_context": !is_recovery && grant.expressions && push && mail.is_some(),
@@ -296,6 +297,7 @@ async fn serve(
                     Request::SendExpression(_)
                     | Request::SendContextExpression(_)
                     | Request::SendAct(_)
+                    | Request::SendFile(_)
                     | Request::GroupList
                     | Request::GroupCreate
                     | Request::GroupInvite(_)
@@ -311,6 +313,7 @@ async fn serve(
                         send_context_expression(mail, grant, args).await
                     }
                     Request::SendAct(args) => send_act(mail, grant, args).await,
+                    Request::SendFile(args) => send_file(mail, grant, args).await,
                     Request::GroupList => group_list(mail, grant).await,
                     Request::GroupCreate => group_create(mail, grant).await,
                     Request::GroupInvite(args) => group_invite(mail, grant, args).await,
@@ -473,6 +476,20 @@ async fn send_act(
     let (room, act) = args.validate()?;
     let id = mail.send_act(room, act).await.map_err(error_code)?;
     Ok(json!({ "message_id": alloy_primitives::hex::encode(id.0) }))
+}
+
+async fn send_file(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::SendFileArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, content_id, media_kind, concepts) = args.validate()?;
+    mail.send_file(room, content_id, media_kind, concepts)
+        .await
+        .map_err(error_code)
 }
 
 async fn group_list(mail: Option<&MailPort>, grant: &HostGrant) -> Result<Value, ErrorCode> {

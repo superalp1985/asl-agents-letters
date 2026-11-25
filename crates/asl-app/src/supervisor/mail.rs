@@ -186,6 +186,15 @@ impl Supervisor {
             MailCommand::SendAct { room, act, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.send_group_act(room, act));
             }
+            MailCommand::SendFile {
+                room,
+                content_id,
+                media_kind,
+                concepts,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.send_group_file(room, content_id, media_kind, concepts));
+            }
             MailCommand::GroupList { reply } if !reply.is_closed() => {
                 let _ = reply
                     .send(unix_time_ms().and_then(|now| {
@@ -757,6 +766,75 @@ impl Supervisor {
             .into_ipc()?,
         );
         Ok(message_id)
+    }
+
+    fn send_group_file(
+        &mut self,
+        room: Hash32,
+        content_id: Hash32,
+        media_kind: asl_types::protocol::MediaKind,
+        concepts: Vec<asl_types::protocol::ConceptRef>,
+    ) -> Result<Value, AslError> {
+        let now = unix_time_ms()?;
+        if !self.net.is_running()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+            || self.network_report.store().network_pause_requested()?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        if concepts.len() > 16 || concepts.iter().any(|concept| !concept.is_topic()) {
+            return Err(AslError::InvalidMessage);
+        }
+        let snapshot = self.libraries.open_snapshot(content_id)?;
+        let file_size = snapshot.manifest().file_size;
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let room_state = groups.store.mls_room_progress(room)?;
+        if room_state.is_none_or(|(state, _)| state != "active") {
+            return Err(AslError::PolicyDenied);
+        }
+        let expires_at_ms = now.saturating_add(10 * 60 * 1_000);
+        let offer = asl_types::protocol::Offer {
+            message_id: Id128(fresh_id()?),
+            root_task_id: Id128(fresh_id()?),
+            content_id,
+            file_size,
+            media_kind,
+            concepts,
+            expires_at_ms,
+        };
+        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let sent = admission.send_loopback_mls_application_with_gossip(
+            &mut groups.store,
+            room,
+            GroupApplication::Offer(offer.clone()),
+            now,
+            |command| {
+                if self.net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        )?;
+        let envelope = sent.packet.into_envelope()?;
+        let payload = encode_frame(&WireFrame::GroupEnvelope(envelope))?;
+        let _ = self.net.try_send(
+            &NetworkCommand::GossipPublish {
+                operation_id: fresh_id()?,
+                key: room.0,
+                payload,
+            }
+            .into_ipc()?,
+        );
+        Ok(json!({
+            "room": alloy_primitives::hex::encode(room.0),
+            "offer_id": alloy_primitives::hex::encode(offer.message_id.0),
+            "content_id": alloy_primitives::hex::encode(content_id.0),
+            "file_size": file_size,
+            "queued": sent.queued,
+            "available": sent.available,
+            "expires_at_ms": expires_at_ms,
+        }))
     }
 
     fn invite_group_agent(&mut self, room: Hash32, agent: AgentId) -> Result<Value, AslError> {

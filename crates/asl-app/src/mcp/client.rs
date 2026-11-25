@@ -93,6 +93,9 @@ impl Client {
             Request::SendAct(_) if connection.capabilities["send_act"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
+            Request::SendFile(_) if connection.capabilities["send_file"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
             Request::GroupList
             | Request::GroupCreate
             | Request::GroupInvite(_)

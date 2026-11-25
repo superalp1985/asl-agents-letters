@@ -8,8 +8,8 @@ use asl_types::{
     protocol::{
         Act, ActAction, ActType, ConceptRef, ContextExpression, Expression, Intent,
         MAX_ACT_ACTION_ARGS, MAX_ACT_ATTACHMENTS, MAX_ACT_NL_BYTES,
-        MAX_SEMANTIC_CONTEXT_DEPENDENCIES, ResultShape, SemanticContextRef, TypedValue, WireFrame,
-        encode_control,
+        MAX_SEMANTIC_CONTEXT_DEPENDENCIES, MediaKind, ResultShape, SemanticContextRef, TypedValue,
+        WireFrame, encode_control,
     },
 };
 use rmcp::schemars::{self, JsonSchema};
@@ -44,6 +44,7 @@ pub(super) enum Request {
     SendExpression(ExpressionArgs),
     SendContextExpression(ContextExpressionArgs),
     SendAct(ActArgs),
+    SendFile(SendFileArgs),
     GroupList,
     GroupCreate,
     GroupInvite(GroupInviteArgs),
@@ -229,6 +230,62 @@ pub(super) struct ActActionArgs {
 pub(super) struct ActArgumentArgs {
     pub key: u32,
     pub value: Vec<Value>,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SendFileArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    #[schemars(length(equal = 64))]
+    pub content_id: String,
+    pub media_kind: String,
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub concepts: Vec<(u16, u32)>,
+}
+
+impl SendFileArgs {
+    pub(super) fn validate(
+        self,
+    ) -> Result<(Hash32, Hash32, MediaKind, Vec<ConceptRef>), ErrorCode> {
+        let room = parse_hash32(&self.room)?;
+        let content_id = parse_hash32(&self.content_id)?;
+        let media_kind = match self.media_kind.as_str() {
+            "other" => MediaKind::Other,
+            "document" => MediaKind::Document,
+            "image" => MediaKind::Image,
+            "audio" => MediaKind::Audio,
+            "video" => MediaKind::Video,
+            "archive" => MediaKind::Archive,
+            "structured_data" => MediaKind::StructuredData,
+            _ => return Err(ErrorCode::InvalidMessage),
+        };
+        if self.concepts.len() > 16 {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let concepts = self
+            .concepts
+            .into_iter()
+            .map(|(vocabulary_id, concept_id)| {
+                let concept = ConceptRef {
+                    vocabulary_id,
+                    concept_id,
+                };
+                concept
+                    .is_topic()
+                    .then_some(concept)
+                    .ok_or(ErrorCode::InvalidMessage)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((room, content_id, media_kind, concepts))
+    }
+}
+
+fn parse_hash32(value: &str) -> Result<Hash32, ErrorCode> {
+    alloy_primitives::hex::decode_to_array(value)
+        .map(Hash32)
+        .map_err(|_| ErrorCode::InvalidMessage)
 }
 
 impl ActArgs {

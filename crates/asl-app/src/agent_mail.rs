@@ -73,6 +73,13 @@ pub(crate) enum MailCommand {
         act: Act,
         reply: oneshot::Sender<Result<Id128, AslError>>,
     },
+    SendFile {
+        room: Hash32,
+        content_id: Hash32,
+        media_kind: asl_types::protocol::MediaKind,
+        concepts: Vec<asl_types::protocol::ConceptRef>,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     GroupList {
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
@@ -199,6 +206,24 @@ impl MailPort {
     pub(crate) async fn send_act(&self, room: Hash32, act: Act) -> Result<Id128, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::SendAct { room, act, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn send_file(
+        &self,
+        room: Hash32,
+        content_id: Hash32,
+        media_kind: asl_types::protocol::MediaKind,
+        concepts: Vec<asl_types::protocol::ConceptRef>,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::SendFile {
+            room,
+            content_id,
+            media_kind,
+            concepts,
+            reply,
+        })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 

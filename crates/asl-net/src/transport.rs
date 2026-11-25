@@ -367,7 +367,7 @@ impl LocalTransport {
             .map_err(|_| io::Error::other("cannot configure authenticated TCP"))?
             .with_quic_config(|mut config| {
                 config.handshake_timeout = HANDSHAKE_TIMEOUT;
-                config.max_concurrent_stream_limit = 1;
+                config.max_concurrent_stream_limit = 8;
                 config.max_stream_data = 16 * 1024;
                 config.max_connection_data = 16 * 1024;
                 config
@@ -378,7 +378,7 @@ impl LocalTransport {
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
-                    .with_max_negotiating_inbound_streams(1)
+                    .with_max_negotiating_inbound_streams(4)
                     .with_idle_connection_timeout(IDLE_TIMEOUT)
             })
             .with_connection_timeout(HANDSHAKE_TIMEOUT)

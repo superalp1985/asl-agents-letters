@@ -95,6 +95,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 13. `docs/chain-verification.md`：当前链验证核心、依赖探针与尚未完成的接入验收。
 14. `docs/protocol-vectors.md`：固定 CBOR 样例和独立 CDDL 校验范围。
 15. [群组接线记录](docs/group-rooms.md)：OpenMLS、设备身份绑定与邀请持久化的当前范围。
+16. [实现状态](docs/implementation-status.md)：按“已完成 / 部分完成 / 尚未实现”核对代码与真实测试。
 
 `schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
@@ -110,7 +111,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 - 后台状态机决定权限、路由和限额，模型不能直接执行动作，也不获得终端、任意路径或自主改权限的能力。每次模型上下文按当前会话 audience 裁剪；A 与 B 的对话不得带入只授权给 C 的资料。
 - 直连请求默认关闭。已加入的群组默认允许浏览来信，自动回答须单独开启。文件上传和下载分别可设为授权内自动执行或每次先询问，确认绑定文件内容、接收方和群成员版本。
 - 私聊定义为两人 MLS 组，与群聊共用 act 编解码、预算、密文邮箱、历史和文件路径。没有中心群服务器，群没有固定 64 人业务上限：小群 direct fan-out，中大群使用 gossipsub 传播 MLS 密文，万人级需要分层拓扑；本机实测容量决定能否创建、加入或转发。离线消息使用只存密文的分布式邮箱，支持 TTL、填充、分片和 topic 轮换。群组成员身份本身不扩大文件权限。
-- 协议不写死 3 回合或 6 条消息。主体、会话、有效期、消息数、字节数、模型调用和邮箱配额由用户授予的预算约束；续期产生新版本，换设备、重连或清空内存不能重置旧额度。预算耗尽后进入等待授权，不静默丢失。
+- 协议不写死 3 回合或 6 条消息。目标预算覆盖主体、会话、有效期、消息数、字节数、模型调用和邮箱配额；当前已实现并接入发送路径的是持久消息数预算与有限续期，其他复合额度仍需后续接线。预算耗尽后拒绝新 act，不静默丢失。群管理宿主在 `ASL_MCP_GROUPS=admin` 时还可调用 `asl_send_file`，把本机已导入、已授权的快照作为结构化 `Offer` 发到现有 MLS 会话；接收方仍要经过成员资格、epoch、文件内容和收件目录授权，Offer 本身不是下载许可。
 - `act` 附件只携带 `blob-ref`，文件继续走 `offer -> fetch -> chunk -> hash` 路径；实际读取每个块都重新检查共享、接收、群成员版本、epoch 和路径授权，文件字节不进入 `nl-body` 或模型提示。
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
@@ -132,7 +133,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
-**本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
+**本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。群管理宿主可用 `asl_send_file` 将已导入的本机快照发为结构化 Offer；Offer 只包含内容 ID、大小、媒体类型和有界主题引用。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询、群管理、发 Offer 与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
 **结构化语义（T41）：** ASL/1.2 直连可请求精确版本的签名定义包，通过既有文件授权同步并返回结构化求值结果。缺少定义时标为 `unresolved`，不回退为自然语言。已验证独立 Core 的 TCP 回环；自主制包、群组同步和公网验收仍待完成。[协议与 MCP 用法](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
@@ -245,7 +246,7 @@ A decentralized, Rust-based communication and knowledge-exchange system for auto
 
 This repository is the full 1.0 specification and implementation project. It is not a released application or an MVP.
 
-The current code has ASL/1.1 symbolic letters, ASL/1.2 semantic context, act encoding/decoding, MLS application delivery, MCP act sending, explicitly authorized group/direct-room tools, persistent budget storage and libp2p gossipsub with a Core act path. A v35 local encrypted-mailbox store exists, but remote DHT hosting/retrieval and cross-machine scale acceptance remain pending.
+The current code has ASL/1.1 symbolic letters, ASL/1.2 semantic context, act encoding/decoding, MLS application delivery, MCP act sending, explicitly authorized group/direct-room tools, a bounded `asl_send_file` offer path for already-authorized local snapshots, persistent budget storage and libp2p gossipsub with a Core act path. A v35 local encrypted-mailbox store exists, but remote DHT hosting/retrieval and cross-machine scale acceptance remain pending.
 
 ### Identity and Security
 

@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, error::Error, fs, path::Path};
 
 use asl_types::{
-    ids::Signature65,
-    protocol::{WireFrame, decode_frame, encode_frame},
+    ids::{Hash32, Id128, Signature65},
+    protocol::{Act, ActType, WireFrame, decode_frame, encode_frame},
     record::{
         DeviceDirectory, RecordPayload, ShortCodeClaim, SignedRecord, UnsignedRecord,
         decode_record, encode_record, short_code,
@@ -16,8 +16,8 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 33;
-pub const ACCEPTED_COUNT: usize = 23;
+pub const VECTOR_COUNT: usize = 34;
+pub const ACCEPTED_COUNT: usize = 24;
 pub const REJECTED_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,6 +25,7 @@ pub const REJECTED_COUNT: usize = 10;
 pub enum Codec {
     Frame,
     Record,
+    Value,
 }
 
 #[derive(Debug)]
@@ -41,6 +42,7 @@ impl VectorCase {
         let reencoded = match self.codec {
             Codec::Frame => decode_frame(bytes).and_then(|value| encode_frame(&value)),
             Codec::Record => decode_record(bytes).and_then(|value| encode_record(&value)),
+            Codec::Value => Act::decode(bytes).and_then(|value| value.encode()),
         };
         match (self.accepted, reencoded) {
             (true, Ok(encoded)) if encoded == bytes => Ok(()),
@@ -121,6 +123,27 @@ pub fn vector_cases() -> Vec<VectorCase> {
             }
         })
         .collect();
+
+    cases.push(VectorCase {
+        name: "act-v1",
+        root: "act",
+        codec: Codec::Value,
+        accepted: true,
+        bytes: Act {
+            message_id: Id128([1; 16]),
+            conversation_id: Id128([2; 16]),
+            act_type: ActType::Inform,
+            reply_to: None,
+            nl_body: Some("question and answer data".into()),
+            action: None,
+            attachments: vec![Hash32([3; 32])],
+            causal_root: Id128([4; 16]),
+            hop: 1,
+            expires_at_ms: Some(10),
+        }
+        .encode()
+        .unwrap(),
+    });
 
     let hello = frames
         .iter()
@@ -288,16 +311,22 @@ pub fn check_case_counts(cases: &[VectorCase]) -> CorpusResult<()> {
         .iter()
         .filter(|case| case.accepted && case.codec == Codec::Record)
         .count();
+    let values = cases
+        .iter()
+        .filter(|case| case.accepted && case.codec == Codec::Value)
+        .count();
     let unique_names: BTreeSet<_> = cases.iter().map(|case| case.name).collect();
     if cases.len() != VECTOR_COUNT
         || accepted != ACCEPTED_COUNT
         || rejected != REJECTED_COUNT
         || frames != 20
         || records != 3
+        || values != 1
         || unique_names.len() != cases.len()
     {
         return Err(
-            "expected 33 unique vectors: 20 frames + 3 records accepted, 10 rejected".into(),
+            "expected 34 unique vectors: 20 frames + 1 value + 3 records accepted, 10 rejected"
+                .into(),
         );
     }
     Ok(())

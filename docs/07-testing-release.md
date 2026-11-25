@@ -28,7 +28,7 @@
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
 | ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub 网络与 Core act 路由已接入；其余待实现 | act/群/IPC/MCP 定向测试和编译通过；`asl-net` 真实双节点 gossipsub 通过。尚无 act 历史、模型自动回复、远程密文邮箱和跨机多跳/规模验收 |
 | 两人 MLS 私聊（G00） | 待实现验收 | 必须与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、gossipsub 与容量分级 | 待实现 | 只存密文；direct fan-out、gossip 和万人级分层由本机实测容量选择，不设固定 64 人业务上限 |
+| 加密邮箱、gossipsub 与容量分级 | v35 本地密文仓储、libp2p gossipsub 和 Core act 路径部分实现 | 邮箱远程托管/补收和分层拓扑待实现；direct/gossip 由本机容量选择，不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
