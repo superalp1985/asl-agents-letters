@@ -40,7 +40,6 @@ impl Command {
             )),
             ["revoke", agent] => Ok(Self::Revoke(parse_agent(agent)?)),
             ["forget", agent] => Ok(Self::Forget(parse_agent(agent)?)),
-            ["publish", "on"] => Ok(Self::Publish(true)),
             ["publish", "off"] => Ok(Self::Publish(false)),
             _ => Err(AslError::InvalidMessage),
         }
@@ -181,6 +180,7 @@ mod tests {
         for args in [
             &["lookup", "42"][..],
             &["lookup", "10000000000000000"],
+            &["publish", "on"],
             &["publish", "true"],
             &["revoke", "not-an-agent"],
             &["dismiss", &agent, &peer, "0000000000000042", "extra"],

@@ -775,6 +775,33 @@ fn compact(value: &str) -> String {
     }
 }
 
+fn binding_lookup_code(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .ok()
+            .filter(|code| *code < 10_000_000_000_000_000);
+    }
+    let bytes = bs58::decode(value).into_vec().ok()?;
+    let agent = asl_types::ids::AgentId(bytes.try_into().ok()?);
+    Some(asl_types::record::short_code(agent))
+}
+
+fn copy_button(ui: &mut Ui, language: Language, value: &str) {
+    if ui
+        .small_button(ui_text(language, "复制", "Copy"))
+        .on_hover_text(ui_text(
+            language,
+            "复制完整 ID，不复制截断显示。",
+            "Copy the full ID, not the shortened display.",
+        ))
+        .clicked()
+    {
+        ui.ctx().copy_text(value.to_owned());
+    }
+}
+
 fn remaining(expires_at_ms: i64, now_ms: i64, language: Language) -> String {
     let seconds = expires_at_ms.saturating_sub(now_ms).max(0) / 1000;
     let (value, zh, en) = if seconds < 60 {
@@ -796,61 +823,116 @@ fn contacts(
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!(
-            "{}: {}",
-            ui_text(language, "本机短码", "Local short code"),
-            data.identity
-                .binding_code
-                .as_deref()
-                .map(format_code)
-                .unwrap_or_else(|| ui_text(language, "不可用", "Unavailable").into())
-        ));
-        let mut publish = data.binding_code_public;
-        if ui
-            .add_enabled(
-                actions_enabled && action.is_none(),
-                egui::Checkbox::new(
-                    &mut publish,
-                    ui_text(language, "公开短码", "Publish short code"),
-                ),
-            )
-            .changed()
-        {
-            *action = Some(super::LocalAction::new(
-                "bindings",
-                [
-                    OsString::from("publish"),
-                    OsString::from(if publish { "on" } else { "off" }),
-                ],
+    ui.label(
+        RichText::new(ui_text(language, "添加联系人", "Add contact"))
+            .strong()
+            .size(16.0),
+    );
+    if let Some(agent) = data.identity.agent_id.as_deref() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(ui_text(
+                language,
+                "我的唯一长号（完整 AgentId）",
+                "My unique long ID (full AgentId)",
             ));
-        }
-    });
+            ui.add(egui::Label::new(agent).truncate())
+                .on_hover_text(agent);
+            copy_button(ui, language, agent);
+        });
+    }
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "添加联系人时，优先粘贴对方的完整 AgentId。查找只返回已认证设备，找到后仍需你确认绑定。",
+            "Add a contact by pasting the other side's full AgentId. Lookup only returns authenticated devices; you still confirm the binding.",
+        ))
+        .color(MUTED),
+    );
     ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(code_input)
-                .hint_text(ui_text(language, "输入 16 位短码", "Enter 16-digit code"))
-                .desired_width(190.0),
+                .hint_text(ui_text(
+                    language,
+                    "粘贴完整 AgentId",
+                    "Paste a full AgentId",
+                ))
+                .desired_width(360.0),
         );
-        if ui
-            .add_enabled(
-                actions_enabled
-                    && action.is_none()
-                    && code_input.len() == 16
-                    && code_input.bytes().all(|byte| byte.is_ascii_digit()),
-                egui::Button::new(ui_text(language, "查找", "Find")),
-            )
-            .clicked()
+        let lookup_code = binding_lookup_code(code_input);
+        if let Some(lookup_code) = lookup_code
+            && ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(ui_text(language, "查找联系人", "Find contact")),
+                )
+                .on_hover_text(ui_text(
+                    language,
+                    "精确查找不会把完整 AgentId 当作自由文本或文件名。",
+                    "Exact lookup does not treat the full AgentId as free text or a filename.",
+                ))
+                .clicked()
         {
             *action = Some(super::LocalAction::new(
                 "bindings",
                 [
                     OsString::from("lookup"),
-                    OsString::from(code_input.as_str()),
+                    OsString::from(format!("{lookup_code:016}")),
                 ],
             ));
         }
     });
+    ui.collapsing(
+        ui_text(
+            language,
+            "旧版兼容：16 位查找码",
+            "Legacy compatibility: 16-digit lookup code",
+        ),
+        |ui| {
+            ui.label(
+                RichText::new(ui_text(
+                    language,
+                    "此码用于兼容旧版联系人，不是新的身份地址，也不是临时邀请。新联系人请使用上面的完整 AgentId。",
+                    "This code is only for legacy contacts. It is not a new identity address or a temporary invitation. Use the full AgentId above for new contacts.",
+                ))
+                .color(MUTED),
+            );
+            if let Some(code) = data.identity.binding_code.as_deref() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "旧版查找码", "Legacy lookup code"),
+                        format_code(code)
+                    ));
+                    copy_button(ui, language, code);
+                });
+            }
+            if data.binding_code_public {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(ui_text(
+                        language,
+                        "旧版查找码当前处于公开状态。",
+                        "The legacy lookup code is currently public.",
+                    ));
+                    if ui
+                        .add_enabled(
+                            actions_enabled && action.is_none(),
+                            egui::Button::new(ui_text(
+                                language,
+                                "关闭旧版公开",
+                                "Disable legacy publication",
+                            )),
+                        )
+                        .clicked()
+                    {
+                        *action = Some(super::LocalAction::new(
+                            "bindings",
+                            [OsString::from("publish"), OsString::from("off")],
+                        ));
+                    }
+                });
+            }
+        },
+    );
     ui.add_space(12.0);
     ui.label(RichText::new(ui_text(language, "待确认候选", "Pending candidates")).strong());
     let pending = data
@@ -882,7 +964,7 @@ fn contacts(
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
-                    egui::Button::new(ui_text(language, "绑定", "Bind")),
+                    egui::Button::new(ui_text(language, "添加为联系人", "Add contact")),
                 )
                 .clicked()
             {
@@ -2253,5 +2335,19 @@ mod tests {
         assert!(selected_active_group(&form, &data).is_none());
         data.groups.remove(0);
         assert!(selected_active_group(&form, &data).is_none());
+    }
+
+    #[test]
+    fn contact_lookup_accepts_full_agent_ids_and_legacy_codes_only() {
+        let agent = asl_types::ids::AgentId([7; 32]);
+        let full = bs58::encode(agent.as_bytes()).into_string();
+        assert_eq!(
+            binding_lookup_code(&full),
+            Some(asl_types::record::short_code(agent))
+        );
+        assert_eq!(binding_lookup_code("0000000000000042"), Some(42));
+        for invalid in ["42", "10000000000000000", "not-an-agent-id"] {
+            assert_eq!(binding_lookup_code(invalid), None);
+        }
     }
 }

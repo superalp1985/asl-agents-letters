@@ -669,11 +669,24 @@ fn identifier(
     en_label: &'static str,
     value: &str,
 ) {
-    ui.add(
-        egui::Label::new(format!("{}: {value}", label(language, zh_label, en_label)))
-            .wrap()
-            .selectable(true),
-    );
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::Label::new(format!("{}: {value}", label(language, zh_label, en_label)))
+                .wrap()
+                .selectable(true),
+        );
+        if ui
+            .small_button(label(language, "复制", "Copy"))
+            .on_hover_text(label(
+                language,
+                "复制完整 ID，不复制截断显示。",
+                "Copy the full ID, not the shortened display.",
+            ))
+            .clicked()
+        {
+            ui.ctx().copy_text(value.to_owned());
+        }
+    });
 }
 
 fn room_label(room: &AdminRoom) -> String {
