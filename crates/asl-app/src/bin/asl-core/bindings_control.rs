@@ -6,6 +6,7 @@ use asl_store::{contact_bindings::ContactBindingActionKind, open_store, open_sto
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
+    record::short_code,
 };
 use serde_json::json;
 
@@ -13,6 +14,7 @@ const SHORT_CODE_LIMIT: u64 = 10_000_000_000_000_000;
 
 enum Command {
     Lookup(u64),
+    LookupAgent(AgentId),
     Approve(AgentId, PeerId, u64),
     Dismiss(AgentId, PeerId, u64),
     Revoke(AgentId),
@@ -28,6 +30,7 @@ impl Command {
             .collect::<Result<Vec<_>, _>>()?;
         match args.as_slice() {
             ["lookup", code] => Ok(Self::Lookup(parse_code(code)?)),
+            ["lookup-agent", agent] => Ok(Self::LookupAgent(parse_agent(agent)?)),
             ["approve", agent, peer, code] => Ok(Self::Approve(
                 parse_agent(agent)?,
                 parse_peer(peer)?,
@@ -48,6 +51,12 @@ impl Command {
     fn enqueue(self, store: &mut asl_store::Store, now_ms: u64) -> Result<(), AslError> {
         let (kind, code, agent_id, peer_id) = match self {
             Self::Lookup(code) => (ContactBindingActionKind::Lookup, Some(code), None, None),
+            Self::LookupAgent(agent) => (
+                ContactBindingActionKind::Lookup,
+                Some(short_code(agent)),
+                Some(agent),
+                None,
+            ),
             Self::Approve(agent, peer, code) => (
                 ContactBindingActionKind::Approve,
                 Some(code),
@@ -170,6 +179,10 @@ mod tests {
             Ok(Command::Lookup(42))
         ));
         assert!(matches!(
+            parse(&["lookup-agent", &agent]),
+            Ok(Command::LookupAgent(_))
+        ));
+        assert!(matches!(
             parse(&["approve", &agent, &peer, "0000000000000042"]),
             Ok(Command::Approve(_, _, 42))
         ));
@@ -180,6 +193,7 @@ mod tests {
         for args in [
             &["lookup", "42"][..],
             &["lookup", "10000000000000000"],
+            &["lookup-agent", "not-an-agent"],
             &["publish", "on"],
             &["publish", "true"],
             &["revoke", "not-an-agent"],

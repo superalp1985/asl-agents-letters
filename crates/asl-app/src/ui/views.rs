@@ -778,17 +778,24 @@ fn compact(value: &str) -> String {
     }
 }
 
-fn binding_lookup_code(value: &str) -> Option<u64> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BindingLookup {
+    Legacy(u64),
+    Exact(asl_types::ids::AgentId),
+}
+
+fn binding_lookup(value: &str) -> Option<BindingLookup> {
     let value = value.trim();
     if value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_digit()) {
         return value
             .parse::<u64>()
             .ok()
-            .filter(|code| *code < 10_000_000_000_000_000);
+            .filter(|code| *code < 10_000_000_000_000_000)
+            .map(BindingLookup::Legacy);
     }
     let bytes = bs58::decode(value).into_vec().ok()?;
     let agent = asl_types::ids::AgentId(bytes.try_into().ok()?);
-    Some(asl_types::record::short_code(agent))
+    Some(BindingLookup::Exact(agent))
 }
 
 fn copy_button(ui: &mut Ui, language: Language, value: &str) {
@@ -865,8 +872,8 @@ fn contacts(
                 ))
                 .desired_width(360.0),
         );
-        let lookup_code = binding_lookup_code(code_input);
-        if let Some(lookup_code) = lookup_code
+        let lookup = binding_lookup(code_input);
+        if let Some(lookup) = lookup
             && ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
@@ -879,13 +886,22 @@ fn contacts(
                 ))
                 .clicked()
         {
-            *action = Some(super::LocalAction::new(
-                "bindings",
-                [
-                    OsString::from("lookup"),
-                    OsString::from(format!("{lookup_code:016}")),
-                ],
-            ));
+            *action = Some(match lookup {
+                BindingLookup::Legacy(code) => super::LocalAction::new(
+                    "bindings",
+                    [
+                        OsString::from("lookup"),
+                        OsString::from(format!("{code:016}")),
+                    ],
+                ),
+                BindingLookup::Exact(agent) => super::LocalAction::new(
+                    "bindings",
+                    [
+                        OsString::from("lookup-agent"),
+                        OsString::from(bs58::encode(agent.as_bytes()).into_string()),
+                    ],
+                ),
+            });
         }
     });
     ui.collapsing(
@@ -2354,13 +2370,13 @@ mod tests {
     fn contact_lookup_accepts_full_agent_ids_and_legacy_codes_only() {
         let agent = asl_types::ids::AgentId([7; 32]);
         let full = bs58::encode(agent.as_bytes()).into_string();
+        assert_eq!(binding_lookup(&full), Some(BindingLookup::Exact(agent)));
         assert_eq!(
-            binding_lookup_code(&full),
-            Some(asl_types::record::short_code(agent))
+            binding_lookup("0000000000000042"),
+            Some(BindingLookup::Legacy(42))
         );
-        assert_eq!(binding_lookup_code("0000000000000042"), Some(42));
         for invalid in ["42", "10000000000000000", "not-an-agent-id"] {
-            assert_eq!(binding_lookup_code(invalid), None);
+            assert_eq!(binding_lookup(invalid), None);
         }
     }
 }

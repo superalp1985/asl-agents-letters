@@ -13,6 +13,7 @@ use crate::{
 
 const TOKEN_HASH_DOMAIN: &[u8] = b"ASL-CONTACT-INVITE-TOKEN-v1\0";
 const SHORT_CODE_LIMIT: u64 = 10_000_000_000_000_000;
+const SHORT_CODE_SCHEME: &str = "ASL-CONTACT-INVITE-CODE:1:";
 
 pub fn issue(
     identity: &AgentIdentity,
@@ -82,6 +83,29 @@ pub fn short_code(invite: &ContactInviteV1) -> String {
         .map(u64::from_be_bytes)
         .unwrap_or_default();
     format!("{code:016}")
+}
+
+pub fn short_code_envelope(inviter: AgentId, invite: &ContactInviteV1) -> String {
+    format!(
+        "{SHORT_CODE_SCHEME}{}:{}",
+        bs58::encode(inviter.as_bytes()).into_string(),
+        short_code(invite)
+    )
+}
+
+pub fn parse_short_code_envelope(value: &str) -> Result<(AgentId, Id128), AslError> {
+    let payload = value
+        .strip_prefix(SHORT_CODE_SCHEME)
+        .ok_or(AslError::InvalidMessage)?;
+    let (agent, code) = payload.split_once(':').ok_or(AslError::InvalidMessage)?;
+    let bytes = bs58::decode(agent)
+        .into_vec()
+        .map_err(|_| AslError::InvalidMessage)?;
+    if bs58::encode(&bytes).into_string() != agent {
+        return Err(AslError::InvalidMessage);
+    }
+    let agent = AgentId(bytes.try_into().map_err(|_| AslError::InvalidMessage)?);
+    Ok((agent, token_from_short_code(code)?))
 }
 
 pub fn token_from_short_code(value: &str) -> Result<Id128, AslError> {
@@ -160,6 +184,11 @@ mod tests {
         assert_eq!(
             token_from_short_code(&short_code(&invite)).unwrap(),
             invite.token
+        );
+        let code_envelope = short_code_envelope(inviter.agent_id(), &invite);
+        assert_eq!(
+            parse_short_code_envelope(&code_envelope).unwrap(),
+            (inviter.agent_id(), invite.token)
         );
         let short_target = target_invite_for_token(
             &receiver,

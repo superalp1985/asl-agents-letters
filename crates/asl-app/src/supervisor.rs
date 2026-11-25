@@ -286,11 +286,9 @@ impl Supervisor {
         now_ms: u64,
     ) -> Result<PairingExchange, AslError> {
         let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
-        let mut store = open_store(&self.state_database)?;
-        let exchange = pairing::answer_signed_invite(
+        let (remote_agent, exchange) = pairing::prepare_answer(
             &self.agent_identity,
             admission,
-            &mut store,
             &self.device_peer_id,
             connection_id,
             &invite,
@@ -302,6 +300,10 @@ impl Supervisor {
             response_id,
             exchange: exchange.clone(),
         })?;
+        let mut store = open_store(&self.state_database)?;
+        if !pairing::commit_answer(&mut store, remote_agent, &invite, &exchange, now_ms)? {
+            return Err(AslError::InvalidMessage);
+        }
         Ok(exchange)
     }
 

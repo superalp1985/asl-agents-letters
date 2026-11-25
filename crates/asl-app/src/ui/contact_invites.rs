@@ -77,10 +77,15 @@ impl Form {
         });
 
         for invite in &data.contact_invites {
-            let envelope = match invite_envelope(invite, now_ms) {
+            let model = match invite_model(invite) {
+                Ok(model) => model,
+                Err(_) => continue,
+            };
+            let envelope = match model.to_envelope(u64::try_from(now_ms).unwrap_or_default()) {
                 Ok(envelope) => envelope,
                 Err(_) => continue,
             };
+            let short_code = asl_app::contact_invite::short_code_envelope(model.inviter, &model);
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(label(language, "待使用邀请", "Active invite")).strong());
@@ -105,14 +110,18 @@ impl Form {
                     ));
                 }
             });
-            let short_code = short_code(invite);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
                         "{}: {short_code}",
-                        label(language, "临时短码", "Temporary code")
+                        label(
+                            language,
+                            "临时短码（已绑定本机 AgentId）",
+                            "Temporary code (bound to this AgentId)"
+                        )
                     ))
-                    .monospace(),
+                    .monospace()
+                    .small(),
                 );
                 if ui
                     .small_button(label(language, "复制短码", "Copy code"))
@@ -138,8 +147,8 @@ impl Form {
                 egui::TextEdit::singleline(&mut self.import)
                     .hint_text(label(
                         language,
-                        "粘贴完整邀请或 16 位临时短码",
-                        "Paste an invite or a 16-digit temporary code",
+                        "粘贴完整邀请或已绑定 AgentId 的临时短码",
+                        "Paste an invite or a temporary code bound to its AgentId",
                     ))
                     .desired_width(420.0),
             );
@@ -221,11 +230,10 @@ impl Form {
     }
 }
 
-fn invite_envelope(
+fn invite_model(
     invite: &asl_store::contact_invites::ContactInvite,
-    now_ms: i64,
-) -> Result<String, asl_types::error::AslError> {
-    let invite = asl_types::contact_invite::ContactInviteV1 {
+) -> Result<asl_types::contact_invite::ContactInviteV1, asl_types::error::AslError> {
+    Ok(asl_types::contact_invite::ContactInviteV1 {
         version: asl_types::contact_invite::CONTACT_INVITE_VERSION,
         invite_id: invite.invite_id,
         token: invite.token,
@@ -234,14 +242,7 @@ fn invite_envelope(
         expires_at_ms: invite.expires_at_ms,
         note: invite.note.clone().unwrap_or_default(),
         signature: asl_types::ids::Signature65(invite.signature),
-    };
-    invite
-        .to_envelope(u64::try_from(now_ms).map_err(|_| asl_types::error::AslError::InvalidMessage)?)
-}
-
-fn short_code(invite: &asl_store::contact_invites::ContactInvite) -> String {
-    let code = u64::from_be_bytes(invite.token.0[8..].try_into().unwrap_or([0; 8]));
-    format!("{code:016}")
+    })
 }
 
 fn expiry_label(minutes: u64, language: Language) -> String {

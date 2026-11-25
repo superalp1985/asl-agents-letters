@@ -32,8 +32,8 @@ pub(super) struct ContactInviteRuntime {
     published: HashMap<Id128, Id128>,
     publishing: HashMap<[u8; 16], (Id128, bool)>,
     lookups: HashMap<[u8; 16], ImportLookup>,
-    dialing: HashMap<PeerId, ImportSource>,
-    outgoing: HashMap<[u8; 16], PairingInvite>,
+    dialing: HashMap<PeerId, DialAttempt>,
+    outgoing: HashMap<[u8; 16], OutgoingAttempt>,
     prompts: HashMap<Id128, PendingPrompt>,
 }
 
@@ -46,9 +46,25 @@ struct ImportLookup {
 #[derive(Clone)]
 enum ImportSource {
     Discovery(ContactInviteV1),
-    ShortCode { token: Id128 },
+    ShortCode {
+        token: Id128,
+        expected_inviter: asl_types::ids::AgentId,
+    },
 }
 
+struct DialAttempt {
+    source: ImportSource,
+    operation_id: [u8; 16],
+    expires_at_ms: u64,
+}
+
+struct OutgoingAttempt {
+    invite: PairingInvite,
+    connection_id: [u8; 16],
+    expires_at_ms: u64,
+}
+
+#[derive(Clone)]
 struct PendingPrompt {
     connection_id: [u8; 16],
     response_id: [u8; 16],
@@ -81,6 +97,9 @@ impl Supervisor {
         let mut store = open_store(&self.state_database)?;
         if !self.contact_invites.initialized {
             store.cleanup_expired_contact_invites(now_ms)?;
+            for prompt in store.list_contact_invite_prompts(now_ms)? {
+                let _ = store.decide_contact_invite_prompt(prompt.prompt_id, now_ms, false);
+            }
             self.contact_invites.initialized = true;
         }
         let expired_lookups = self
@@ -96,6 +115,12 @@ impl Supervisor {
                 store.finish_contact_invite_action(lookup.action_id, Err("expired"))?;
             }
         }
+        self.contact_invites
+            .dialing
+            .retain(|_, attempt| attempt.expires_at_ms > now_ms);
+        self.contact_invites
+            .outgoing
+            .retain(|_, attempt| attempt.expires_at_ms > now_ms);
         self.sync_contact_invite_publications(&store, now_ms)?;
         self.process_contact_invite_actions(&mut store, now_ms)?;
         self.process_contact_invite_decisions(&mut store, now_ms)?;
@@ -137,14 +162,20 @@ impl Supervisor {
                 break;
             }
             let peer_id = provider.peer_id.clone();
-            let Some(command) = invite_provider_dial(provider, fresh_id()?) else {
+            let operation_id = fresh_id()?;
+            let Some(command) = invite_provider_dial(provider, operation_id) else {
                 continue;
             };
             if self.send_network_command(command).is_ok() {
                 dialed += 1;
-                self.contact_invites
-                    .dialing
-                    .insert(peer_id, lookup.source.clone());
+                self.contact_invites.dialing.insert(
+                    peer_id,
+                    DialAttempt {
+                        source: lookup.source.clone(),
+                        operation_id,
+                        expires_at_ms: lookup.expires_at_ms,
+                    },
+                );
             }
         }
         store.finish_contact_invite_action(
@@ -169,6 +200,9 @@ impl Supervisor {
                 {
                     self.contact_invites.published.remove(&invite_id);
                 }
+                self.contact_invites
+                    .dialing
+                    .retain(|_, attempt| attempt.operation_id != *operation_id);
             }
             _ => {}
         }
@@ -185,9 +219,10 @@ impl Supervisor {
                 peer_id,
                 agent_id,
             } => {
-                let Some(source) = self.contact_invites.dialing.remove(peer_id) else {
+                let Some(attempt) = self.contact_invites.dialing.remove(peer_id) else {
                     return Ok(None);
                 };
+                let source = attempt.source;
                 let controller = self
                     .admission
                     .as_mut()
@@ -209,18 +244,33 @@ impl Supervisor {
                             now_ms,
                         )?
                     }
-                    ImportSource::ShortCode { token } => contact_invite::target_invite_for_token(
-                        &self.agent_identity,
-                        *agent_id,
-                        "Contact request.",
+                    ImportSource::ShortCode {
                         token,
-                        now_ms,
-                    )?,
+                        expected_inviter,
+                    } => {
+                        if *agent_id != expected_inviter {
+                            return Ok(Some(NetworkCommand::CloseConnection {
+                                connection_id: *connection_id,
+                            }));
+                        }
+                        contact_invite::target_invite_for_token(
+                            &self.agent_identity,
+                            *agent_id,
+                            "Contact request.",
+                            token,
+                            now_ms,
+                        )?
+                    }
                 };
                 let request_id = fresh_id()?;
-                self.contact_invites
-                    .outgoing
-                    .insert(request_id, invite.clone());
+                self.contact_invites.outgoing.insert(
+                    request_id,
+                    OutgoingAttempt {
+                        invite: invite.clone(),
+                        connection_id: *connection_id,
+                        expires_at_ms: invite.expires_at_ms,
+                    },
+                );
                 Ok(Some(NetworkCommand::RequestPairing {
                     connection_id: *connection_id,
                     request_id,
@@ -284,6 +334,7 @@ impl Supervisor {
                     *response_id,
                     invite.clone(),
                 ) {
+                    let _ = store.decide_contact_invite_prompt(prompt_id, now_ms, false);
                     return Ok(Some(NetworkCommand::CloseConnection {
                         connection_id: *connection_id,
                     }));
@@ -307,11 +358,12 @@ impl Supervisor {
                 invite,
                 exchange,
             } => {
-                let Some(sent_invite) = self.contact_invites.outgoing.remove(request_id) else {
+                let Some(attempt) = self.contact_invites.outgoing.remove(request_id) else {
                     return Ok(Some(NetworkCommand::CloseConnection {
                         connection_id: *connection_id,
                     }));
                 };
+                let sent_invite = attempt.invite;
                 if sent_invite != *invite || exchange.agent_id != *agent_id {
                     return Ok(Some(NetworkCommand::CloseConnection {
                         connection_id: *connection_id,
@@ -328,6 +380,9 @@ impl Supervisor {
                 if let Some(peer_id) = peer_id {
                     self.contact_invites.dialing.remove(peer_id);
                 }
+                self.contact_invites
+                    .outgoing
+                    .retain(|_, attempt| attempt.connection_id != *connection_id);
                 let prompt_ids = self
                     .contact_invites
                     .prompts
@@ -460,15 +515,25 @@ impl Supervisor {
             if invite.inviter == self.agent_identity.agent_id() {
                 return Err("self_invite");
             }
+            let controller = self
+                .admission
+                .as_mut()
+                .ok_or("identity_unavailable")?
+                .verified_controller(invite.inviter, now_ms)
+                .map_err(|_| "identity_unavailable")?;
+            contact_invite::verify(&invite, now_ms, controller).map_err(|_| "invalid_signature")?;
             ImportSource::Discovery(invite)
         } else {
-            let token =
-                contact_invite::token_from_short_code(envelope).map_err(|_| "invalid_envelope")?;
-            ImportSource::ShortCode { token }
+            let (expected_inviter, token) = contact_invite::parse_short_code_envelope(envelope)
+                .map_err(|_| "invalid_envelope")?;
+            ImportSource::ShortCode {
+                token,
+                expected_inviter,
+            }
         };
         let token = match &source {
             ImportSource::Discovery(invite) => invite.token,
-            ImportSource::ShortCode { token } => *token,
+            ImportSource::ShortCode { token, .. } => *token,
         };
         let lookup_id = fresh_id().map_err(|_| "unavailable")?;
         let key: [u8; 32] = contact_invite_key(token)
@@ -517,12 +582,9 @@ impl Supervisor {
                     continue;
                 }
             };
-            let Some(pending) = self.contact_invites.prompts.remove(&prompt_id) else {
+            let Some(pending) = self.contact_invites.prompts.get(&prompt_id).cloned() else {
                 continue;
             };
-            if !store.consume_contact_invite(pending.discovery_invite_id, now_ms, accepted)? {
-                continue;
-            }
             self.send_admitted_network_command(
                 NetworkCommand::AnswerPairingInvite {
                     connection_id: pending.connection_id,
@@ -532,6 +594,8 @@ impl Supervisor {
                 },
                 now_ms,
             )?;
+            self.contact_invites.prompts.remove(&prompt_id);
+            store.consume_contact_invite(pending.discovery_invite_id, now_ms, accepted)?;
         }
         Ok(())
     }

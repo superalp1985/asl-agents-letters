@@ -605,7 +605,7 @@ fn valid_action(
     has_peer: bool,
 ) -> bool {
     match kind {
-        ContactBindingActionKind::Lookup => code.is_some() && agent_id.is_none() && !has_peer,
+        ContactBindingActionKind::Lookup => code.is_some() && !has_peer,
         ContactBindingActionKind::Approve | ContactBindingActionKind::Dismiss => {
             code.is_some() && agent_id.is_some() && has_peer
         }
@@ -798,6 +798,26 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn exact_agent_lookup_preserves_the_full_target_id() {
+        let (_directory, mut store) = store();
+        let agent = AgentId([71; 32]);
+        store
+            .enqueue_contact_binding_action(
+                ContactBindingActionKind::Lookup,
+                Some(short_code(agent)),
+                Some(agent),
+                None,
+                25,
+            )
+            .unwrap();
+        let actions = store.claim_contact_binding_actions().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ContactBindingActionKind::Lookup);
+        assert_eq!(actions[0].code, Some(short_code(agent)));
+        assert_eq!(actions[0].agent_id, Some(agent));
     }
 
     #[test]

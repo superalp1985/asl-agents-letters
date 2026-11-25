@@ -12,7 +12,11 @@ use asl_store::{
     contact_bindings::{ContactBindingAction, ContactBindingActionKind},
     open_store,
 };
-use asl_types::{error::AslError, ids::PeerId, record::short_code};
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, PeerId},
+    record::short_code,
+};
 use rand::{TryRng, rngs::SysRng};
 
 use crate::{
@@ -42,11 +46,13 @@ pub(super) struct ContactBindingRuntime {
 struct PendingLookup {
     action_id: i64,
     code: u64,
+    expected_agent: Option<AgentId>,
     expires_at_ms: u64,
 }
 
 struct PendingPeer {
     code: u64,
+    expected_agent: Option<AgentId>,
     expires_at_ms: u64,
 }
 
@@ -138,6 +144,12 @@ impl Supervisor {
                 .iter()
                 .find(|(_, _, peer_id)| *peer_id == provider.peer_id)
             {
+                if lookup
+                    .expected_agent
+                    .is_some_and(|expected| expected != *agent_id)
+                {
+                    continue;
+                }
                 found |= store.record_contact_binding_candidate(
                     *agent_id,
                     &provider.peer_id,
@@ -147,7 +159,12 @@ impl Supervisor {
                 continue;
             }
 
-            if !self.track_binding_peer(&provider.peer_id, lookup.code, lookup.expires_at_ms) {
+            if !self.track_binding_peer(
+                &provider.peer_id,
+                lookup.code,
+                lookup.expected_agent,
+                lookup.expires_at_ms,
+            ) {
                 continue;
             }
             if connecting.contains(&provider.peer_id) {
@@ -199,7 +216,11 @@ impl Supervisor {
                 let now_ms = unix_time_ms()?;
                 let store = open_store(&self.state_database)?;
                 for request in pending {
-                    if now_ms < request.expires_at_ms {
+                    if now_ms < request.expires_at_ms
+                        && request
+                            .expected_agent
+                            .is_none_or(|expected| expected == *agent_id)
+                    {
                         store.record_contact_binding_candidate(
                             *agent_id,
                             peer_id,
@@ -239,6 +260,12 @@ impl Supervisor {
         let result = match action.kind {
             ContactBindingActionKind::Lookup => {
                 let code = action.code.ok_or(AslError::InvalidMessage)?;
+                if action
+                    .agent_id
+                    .is_some_and(|agent| short_code(agent) != code)
+                {
+                    return Err(AslError::InvalidMessage);
+                }
                 if !self.net.is_running()
                     || self.network_admission_status != NetworkAdmissionStatus::Active
                     || self.contact_bindings.pending_lookups.len() >= MAX_BINDING_LOOKUPS
@@ -260,6 +287,7 @@ impl Supervisor {
                                 PendingLookup {
                                     action_id: action.id,
                                     code,
+                                    expected_agent: action.agent_id,
                                     expires_at_ms: now_ms
                                         .saturating_add(BINDING_LOOKUP_LIFETIME_MS),
                                 },
@@ -411,7 +439,13 @@ impl Supervisor {
         Ok(())
     }
 
-    fn track_binding_peer(&mut self, peer_id: &PeerId, code: u64, expires_at_ms: u64) -> bool {
+    fn track_binding_peer(
+        &mut self,
+        peer_id: &PeerId,
+        code: u64,
+        expected_agent: Option<AgentId>,
+        expires_at_ms: u64,
+    ) -> bool {
         if !self.contact_bindings.pending_peers.contains_key(peer_id)
             && self.contact_bindings.pending_peers.len() >= MAX_PENDING_BINDING_PEERS
         {
@@ -422,7 +456,10 @@ impl Supervisor {
             .pending_peers
             .entry(peer_id.clone())
             .or_default();
-        if requests.iter().any(|request| request.code == code) {
+        if requests
+            .iter()
+            .any(|request| request.code == code && request.expected_agent == expected_agent)
+        {
             return true;
         }
         if requests.len() >= MAX_CODES_PER_BINDING_PEER {
@@ -430,6 +467,7 @@ impl Supervisor {
         }
         requests.push(PendingPeer {
             code,
+            expected_agent,
             expires_at_ms,
         });
         true

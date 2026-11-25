@@ -167,6 +167,31 @@ pub fn answer_signed_invite(
     authorization: PairingAuthorization,
     now_ms: u64,
 ) -> Result<PairingExchange, AslError> {
+    let (remote_agent, exchange) = prepare_answer(
+        identity,
+        admission,
+        local_peer,
+        connection_id,
+        invite,
+        authorization,
+        now_ms,
+    )?;
+    if !commit_answer(store, remote_agent, invite, &exchange, now_ms)? {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(exchange)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_answer(
+    identity: &AgentIdentity,
+    admission: &mut CoreAdmission,
+    local_peer: &PeerId,
+    connection_id: [u8; 16],
+    invite: &PairingInvite,
+    authorization: PairingAuthorization,
+    now_ms: u64,
+) -> Result<(AgentId, PairingExchange), AslError> {
     let (remote_agent, remote_peer) = admission.admitted_peer_identity(connection_id, now_ms)?;
     let remote_controller = admission.verified_controller(remote_agent, now_ms)?;
     validate_invite(
@@ -183,16 +208,23 @@ pub fn answer_signed_invite(
         &remote_peer,
         authorization == PairingAuthorization::Approve,
     )?;
-    if !store.consume_pairing_invite(
+    Ok((remote_agent, exchange))
+}
+
+pub(crate) fn commit_answer(
+    store: &mut Store,
+    remote_agent: AgentId,
+    invite: &PairingInvite,
+    exchange: &PairingExchange,
+    now_ms: u64,
+) -> Result<bool, AslError> {
+    store.consume_pairing_invite(
         remote_agent,
         invite.invite_id,
         invite.expires_at_ms,
         now_ms,
         exchange.accepted,
-    )? {
-        return Err(AslError::InvalidMessage);
-    }
-    Ok(exchange)
+    )
 }
 
 fn signed_exchange(

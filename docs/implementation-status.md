@@ -26,7 +26,7 @@
 | 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer | 远程 DHT 邮箱、公网跨机、真实两设备大文件验收；Offer 本身不是下载许可 |
 | 预算 | 消息数授予、续期、发送侧原子扣减 | 字节、模型调用、CPU、邮箱复合额度与 GUI 策略 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不交付 act | 模型自动回复流水线、audience 自动裁剪、GUI 会话操作 |
-| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口；有期限签名邀请、二维码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
+| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId 的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
 
 ## 尚未实现
 
