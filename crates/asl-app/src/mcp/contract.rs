@@ -47,6 +47,8 @@ pub(super) enum Request {
     SendFile(SendFileArgs),
     GroupList,
     GroupCreate,
+    GroupMembers(GroupRoomArgs),
+    GroupSetAccess(GroupSetAccessArgs),
     GroupInvite(GroupInviteArgs),
     DirectOpen(AgentTargetArgs),
     RenewActBudget(RenewActBudgetArgs),
@@ -385,6 +387,69 @@ pub(super) struct GroupInviteArgs {
     pub room: String,
     #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
     pub target: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupRoomArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+}
+
+impl GroupRoomArgs {
+    pub(super) fn validate(self) -> Result<Hash32, ErrorCode> {
+        parse_hash32(&self.room)
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupSetAccessArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    pub allow_member_text: bool,
+    pub allow_member_files: bool,
+    pub allow_member_invite: bool,
+    #[schemars(length(max = 512))]
+    pub admins: Vec<String>,
+    #[schemars(length(max = 512))]
+    pub muted: Vec<String>,
+}
+
+impl GroupSetAccessArgs {
+    pub(super) fn validate(
+        self,
+    ) -> Result<(Hash32, crate::agent_mail::GroupAccessUpdate), ErrorCode> {
+        let room = parse_hash32(&self.room)?;
+        if self.admins.len() > 512 || self.muted.len() > 512 {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let admins = self
+            .admins
+            .iter()
+            .map(|peer| parse_peer(peer))
+            .collect::<Result<Vec<_>, _>>()?;
+        let muted = self
+            .muted
+            .iter()
+            .map(|peer| parse_peer(peer))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            room,
+            crate::agent_mail::GroupAccessUpdate {
+                allow_member_text: self.allow_member_text,
+                allow_member_files: self.allow_member_files,
+                allow_member_invite: self.allow_member_invite,
+                admins,
+                muted,
+            },
+        ))
+    }
+}
+
+fn parse_peer(value: &str) -> Result<asl_types::ids::PeerId, ErrorCode> {
+    let peer: libp2p_identity::PeerId = value.parse().map_err(|_| ErrorCode::InvalidMessage)?;
+    asl_types::ids::PeerId::from_bytes(peer.to_bytes()).map_err(|_| ErrorCode::InvalidMessage)
 }
 
 impl GroupInviteArgs {

@@ -12,6 +12,7 @@ use asl_groups::GroupApplication;
 use asl_policy::PolicyEngine;
 use asl_store::{
     Store,
+    group_access::{GroupAccessKind, GroupMemberAccess},
     group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
     mailbox::{
         ConversationBudgetGrant, MAX_BUDGET_MESSAGES, MAX_BUDGET_RENEWALS, MAX_BUDGET_WINDOW_MS,
@@ -22,12 +23,16 @@ use asl_store::{
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
-    protocol::{GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame},
+    protocol::{
+        GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT, GroupControl,
+        GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame, encode_frame,
+    },
     task::GroupId,
 };
 use serde_json::{Value, json};
 
 use crate::{
+    agent_mail::GroupAccessUpdate,
     network::{NetworkCommand, NetworkEvent},
     profile::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, fresh_id},
     transfer::TransferService,
@@ -123,12 +128,23 @@ impl LoopbackGroups {
     pub(super) fn dispatch_letter(
         &mut self,
         admission: &mut crate::profile::CoreAdmission,
+        local_peer: &PeerId,
         room: Hash32,
         letter: asl_types::protocol::ExpressionLetter,
         now: u64,
         enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<(), AslError> {
         if self.cleanup_failed || !GroupInboundPolicy::load(&self.store)?.answer_enabled {
+            return Err(AslError::PolicyDenied);
+        }
+        let snapshot = self
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        if !self
+            .store
+            .group_can_send(&snapshot.local_id, local_peer, GroupAccessKind::Text)?
+        {
             return Err(AslError::PolicyDenied);
         }
         let sent = admission.send_loopback_mls_application(
@@ -170,6 +186,116 @@ impl Supervisor {
         {
             admission.enable_loopback_mls_directories();
         }
+    }
+
+    pub(super) fn group_members(&self, room: Hash32) -> Result<Value, AslError> {
+        let groups = self.groups.as_ref().ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        let policy = groups.store.group_access_policy(&snapshot.local_id)?;
+        let mut members = groups.store.group_members(&snapshot.local_id)?;
+        members.sort_by(|left, right| {
+            left.role
+                .as_str()
+                .cmp(right.role.as_str())
+                .then_with(|| left.peer.as_bytes().cmp(right.peer.as_bytes()))
+        });
+        Ok(json!({
+            "room": hex::encode(room.0),
+            "conversation_id": hex::encode(snapshot.local_id.0.0),
+            "policy_revision": policy.revision,
+            "allow_member_text": policy.permissions & GROUP_ALLOW_MEMBER_TEXT != 0,
+            "allow_member_files": policy.permissions & GROUP_ALLOW_MEMBER_FILES != 0,
+            "allow_member_invite": policy.permissions & GROUP_ALLOW_MEMBER_INVITE != 0,
+            "members": members.iter().map(member_view).collect::<Vec<_>>(),
+        }))
+    }
+
+    pub(super) fn set_group_access(
+        &mut self,
+        room: Hash32,
+        update: GroupAccessUpdate,
+    ) -> Result<Value, AslError> {
+        let now = unix_time_ms()?;
+        if !self.net.is_running()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+            || self.network_report.store().network_pause_requested()?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        let owner = groups
+            .store
+            .group_access_owner(room)?
+            .ok_or(AslError::NotFound)?;
+        if owner != self.device_peer_id {
+            return Err(AslError::PolicyDenied);
+        }
+        let current = groups.store.group_access_policy(&snapshot.local_id)?;
+        let mut permissions = 0;
+        if update.allow_member_text {
+            permissions |= GROUP_ALLOW_MEMBER_TEXT;
+        }
+        if update.allow_member_files {
+            permissions |= GROUP_ALLOW_MEMBER_FILES;
+        }
+        if update.allow_member_invite {
+            permissions |= GROUP_ALLOW_MEMBER_INVITE;
+        }
+        let control = GroupControl {
+            message_id: Id128(fresh_id()?),
+            policy_revision: current
+                .revision
+                .checked_add(1)
+                .ok_or(AslError::QuotaExceeded)?,
+            permissions,
+            admins: update.admins,
+            muted: update.muted,
+        };
+        groups.store.apply_group_control(
+            &snapshot.local_id,
+            &self.device_peer_id,
+            &control,
+            now,
+        )?;
+        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let sent = admission.send_loopback_mls_application_with_gossip(
+            &mut groups.store,
+            room,
+            GroupApplication::Policy(control.clone()),
+            now,
+            |command| {
+                if self.net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        )?;
+        let payload = encode_frame(&WireFrame::GroupEnvelope(sent.packet.into_envelope()?))?;
+        let _ = self.net.try_send(
+            &NetworkCommand::GossipPublish {
+                operation_id: fresh_id()?,
+                key: room.0,
+                payload,
+            }
+            .into_ipc()?,
+        );
+        Ok(json!({
+            "room": hex::encode(room.0),
+            "policy_revision": control.policy_revision,
+            "permissions": control.permissions,
+            "admins": control.admins.iter().map(peer_text).collect::<Vec<_>>(),
+            "muted": control.muted.iter().map(peer_text).collect::<Vec<_>>(),
+            "queued": sent.queued,
+            "available": sent.available,
+        }))
     }
 
     pub(super) fn route_group_event(&mut self, event: NetworkEvent, now_ms: u64) {
@@ -222,6 +348,10 @@ impl Supervisor {
             application,
         })) = &result
         {
+            if let GroupApplication::Policy(control) = application.as_ref() {
+                let _ = apply_group_policy(&mut groups.store, *wire_id, sender, control, now_ms);
+                return;
+            }
             if GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled) {
                 groups
                     .recent_applications
@@ -253,7 +383,24 @@ impl Supervisor {
                         membership_epoch: snapshot.version.membership_epoch,
                     })
                 });
-            if self.mailbox.interested()
+            let member_allowed =
+                requester
+                    .as_ref()
+                    .is_none_or(|member| match application.as_ref() {
+                        GroupApplication::Act(_)
+                        | GroupApplication::Query(_)
+                        | GroupApplication::Expression(_) => groups
+                            .store
+                            .group_can_send(&member.group_id, sender, GroupAccessKind::Text)
+                            .unwrap_or(false),
+                        GroupApplication::Offer(_) => groups
+                            .store
+                            .group_can_send(&member.group_id, sender, GroupAccessKind::Files)
+                            .unwrap_or(false),
+                        _ => true,
+                    });
+            if member_allowed
+                && self.mailbox.interested()
                 && let Some(member) = requester.as_ref()
                 && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
             {
@@ -318,6 +465,7 @@ impl Supervisor {
             }
             match groups.prepare_application_reply(
                 *wire_id,
+                &self.device_peer_id,
                 sender,
                 application,
                 requester.as_ref(),
@@ -398,10 +546,31 @@ impl Supervisor {
             .store
             .mls_room_snapshot(key)?
             .ok_or(AslError::NotFound)?;
+        let local_group_id = snapshot.local_id.clone();
         let binding = asl_store::transfers::GroupTransferBinding {
-            group_id: snapshot.local_id,
+            group_id: local_group_id.clone(),
             membership_epoch: snapshot.version.membership_epoch,
         };
+        if let GroupApplication::Policy(control) = &application {
+            let _ = apply_group_policy(&mut groups.store, key, &peer, control, now_ms);
+            return Ok(());
+        }
+        let member_allowed = match &application {
+            GroupApplication::Act(_)
+            | GroupApplication::Query(_)
+            | GroupApplication::Expression(_) => groups
+                .store
+                .group_can_send(&local_group_id, &peer, GroupAccessKind::Text)
+                .unwrap_or(false),
+            GroupApplication::Offer(_) => groups
+                .store
+                .group_can_send(&local_group_id, &peer, GroupAccessKind::Files)
+                .unwrap_or(false),
+            _ => true,
+        };
+        if !member_allowed {
+            return Ok(());
+        }
         if let GroupApplication::Act(act) = &application
             && mailbox.interested()
             && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
@@ -538,7 +707,8 @@ impl Supervisor {
                 | GroupApplication::Answer(_)
                 | GroupApplication::Offer(_)
                 | GroupApplication::Expression(_)
-                | GroupApplication::Act(_) => {}
+                | GroupApplication::Act(_)
+                | GroupApplication::Policy(_) => {}
             }
         }
     }
@@ -997,6 +1167,7 @@ impl LoopbackGroups {
     fn prepare_application_reply(
         &mut self,
         wire_id: Hash32,
+        local_peer: &PeerId,
         sender: &PeerId,
         application: &GroupApplication,
         requester: Option<&GroupRequester>,
@@ -1072,6 +1243,15 @@ impl LoopbackGroups {
         let Some(frame) = inbound.take_reply(reply, &policy, now_ms) else {
             return Ok(None);
         };
+        if matches!(&frame, WireFrame::Offer(_))
+            && !self.store.group_can_send(
+                &requester.group_id,
+                local_peer,
+                GroupAccessKind::Files,
+            )?
+        {
+            return Ok(None);
+        }
         self.store.with_current_group_authority(
             requester,
             revision,
@@ -1163,6 +1343,37 @@ fn select_invite(
 fn peer_text(peer: &PeerId) -> String {
     libp2p_identity::PeerId::from_bytes(peer.as_bytes())
         .map_or_else(|_| hex::encode(peer.as_bytes()), |peer| peer.to_base58())
+}
+
+fn apply_group_policy(
+    store: &mut Store,
+    wire_id: Hash32,
+    sender: &PeerId,
+    control: &asl_types::protocol::GroupControl,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    let owner = store
+        .group_access_owner(wire_id)?
+        .ok_or(AslError::NotFound)?;
+    if &owner != sender {
+        return Err(AslError::PolicyDenied);
+    }
+    let snapshot = store
+        .mls_room_snapshot(wire_id)?
+        .ok_or(AslError::NotFound)?;
+    store.apply_group_control(&snapshot.local_id, sender, control, now_ms)?;
+    Ok(())
+}
+
+fn member_view(member: &GroupMemberAccess) -> Value {
+    json!({
+        "peer": peer_text(&member.peer),
+        "role": member.role.as_str(),
+        "muted": member.muted,
+        "can_send_text": member.can_send_text,
+        "can_send_files": member.can_send_files,
+        "can_invite": member.can_invite,
+    })
 }
 
 fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslError> {

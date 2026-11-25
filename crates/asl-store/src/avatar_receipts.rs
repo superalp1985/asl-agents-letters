@@ -297,7 +297,9 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TABLE local_capacity_measurements;
          DROP TABLE semantic_context_resources;
          DROP TABLE semantic_context_candidates;
-         DELETE FROM schema_migrations WHERE version IN (33,34,35);",
+         DROP TABLE group_access_members;
+         DROP TABLE group_access_policies;
+         DELETE FROM schema_migrations WHERE version IN (33,34,35,36);",
         )
         .unwrap();
 }

@@ -123,7 +123,7 @@ Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派�
 
 **表达式与主动通知。** 用户可在 Core 启动环境中分别设置 `ASL_MCP_EXPRESSIONS=send` 和 `ASL_MCP_AGENT_PUSH=1`。前者允许宿主用 `asl_send_expression` 向已准入的在线 Agent 或当前群组投递；直连或群的回答开关也必须允许发送。返回 `message_id` 表示已入本机发送队列，不等于远端确认。目标格式、符号语法与示例见 [表达式信件](expression-language.md)，宿主也可读取 `asl://protocol/expression-v1`。
 
-ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、两人会话创建、预算续期和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露；`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。
+ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。
 
 已验证身份与语义包可用时，还可调用 `asl_send_context_expression` 给单个 Agent 发送绑定精确上下文摘要的表达式。Core 在发送前重新验证包签名、依赖和一致性向量；接收端事件携带完整 ASL CBOR（`control_cbor_hex`）及本机求值状态。缺包或无法验证时状态为 `unresolved`，不会回退成自由文本。该入口目前不向群发送，也不代表 ContextRequest/Offer 文件同步已完成。
 
@@ -167,7 +167,7 @@ ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 C
 
 ### 7.1 ASL/1.3 对话主线（部分实现）
 
-当前已真实接入 act 编解码、MLS application 收发、入站事件通知、`untrusted_remote_data` 隔离标记、MCP 发 act、显式管理授权下的房间创建/邀请/两人会话工具、持久预算仓储，以及 libp2p gossipsub 到 Core act 的处理路径。还提供 `asl_send_file`，把本机已授权快照的结构化 Offer 发往现有 MLS 会话。act 历史持久化、自动模型回复、远程密文邮箱托管/补收和跨机多跳验收仍未完成；这些能力不得在 UI 中标为已完成。`nl-body` 始终作为不可信远端数据交付，结构化 `action` 单独经 PolicyService。私聊是两人 MLS 组，与群聊共用同一 act 事件路径；不得为私聊增加明文 IPC。
+当前已真实接入 act 编解码、MLS application 收发、入站事件通知、`untrusted_remote_data` 隔离标记、MCP 发 act、显式管理授权下的房间创建/邀请/两人会话工具、群主策略控制、持久预算仓储，以及 libp2p gossipsub 到 Core act 的处理路径。还提供 `asl_send_file`，把本机已授权快照的结构化 Offer 发往现有 MLS 会话。群主策略可限制成员文字、文件和邀请权限，并可指定管理员和禁言设备；入站 act/Offer 也会在成员端重新检查策略。act 历史持久化、自动模型回复、远程密文邮箱托管/补收和跨机多跳验收仍未完成；这些能力不得在 UI 中标为已完成。`nl-body` 始终作为不可信远端数据交付，结构化 `action` 单独经 PolicyService。私聊是两人 MLS 组，与群聊共用同一 act 事件路径；不得为私聊增加明文 IPC。
 
 附件只以 `blob-ref` 出现在 act 中。宿主按现有 `file_offer`、`asl_send_file`、`asl_receive_offer`、`asl_fetch` 和收件授权路径处理；`asl_send_file` 只能引用已导入快照，不接受路径或文件字节。下载完成事件只表示文件已到达或缓存，不把文件字节放进 act、事件正文或模型提示。远程邮箱补收、跨机 gossip 多跳和 64 人以上验收完成前，MCP/UI 必须继续标注这些边界。
 

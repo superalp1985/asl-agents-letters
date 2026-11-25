@@ -61,6 +61,11 @@ pub struct AdminMember {
     pub agent: String,
     pub device: String,
     pub creator: bool,
+    pub role: String,
+    pub muted: bool,
+    pub can_send_text: bool,
+    pub can_send_files: bool,
+    pub can_invite: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,9 +207,14 @@ impl Store {
                ORDER BY g.created_at_ms DESC,g.group_id LIMIT ?2
              )
              SELECT lower(hex(o.wire_group_id)),o.local_name,o.mls_epoch,o.membership_epoch,
-                    p.agent_id,m.peer_id,m.role='creator'
+                    p.agent_id,m.peer_id,m.role='creator',
+                    coalesce(r.role,'member'),coalesce(r.muted,0),
+                    coalesce(gp.permissions,3)
              FROM owned o JOIN group_members m ON m.group_id=o.group_id AND m.state='active'
              JOIN peers p ON p.peer_id=m.peer_id
+             LEFT JOIN group_access_members r
+               ON r.group_id=o.group_id AND r.peer_id=m.peer_id
+             LEFT JOIN group_access_policies gp ON gp.group_id=o.group_id
              ORDER BY o.created_at_ms DESC,o.group_id,m.role,m.peer_id"
         ).map_err(database_error)?;
         let mut rows = statement
@@ -229,10 +239,32 @@ impl Store {
             if members.len() >= asl_types::protocol::MAX_GROUP_MEMBERS {
                 return Err(AslError::InvalidDatabase);
             }
+            let creator: bool = row.get(6).map_err(database_error)?;
+            let role: String = if creator {
+                "owner".into()
+            } else {
+                row.get(7).map_err(database_error)?
+            };
+            let muted: bool = row.get::<_, i64>(8).map_err(database_error)? != 0;
+            let permissions: u8 = u8::try_from(row.get::<_, i64>(9).map_err(database_error)?)
+                .map_err(|_| AslError::InvalidDatabase)?;
+            let admin = role == "admin";
+            let can_send = !muted && (admin || role == "owner");
             members.push(AdminMember {
                 agent: row.get(4).map_err(database_error)?,
                 device: row.get(5).map_err(database_error)?,
-                creator: row.get(6).map_err(database_error)?,
+                creator,
+                role,
+                muted,
+                can_send_text: !muted
+                    && (can_send
+                        || permissions & asl_types::protocol::GROUP_ALLOW_MEMBER_TEXT != 0),
+                can_send_files: !muted
+                    && (can_send
+                        || permissions & asl_types::protocol::GROUP_ALLOW_MEMBER_FILES != 0),
+                can_invite: !muted
+                    && (can_send
+                        || permissions & asl_types::protocol::GROUP_ALLOW_MEMBER_INVITE != 0),
             });
         }
         Ok(rooms)

@@ -98,6 +98,8 @@ impl Client {
             }
             Request::GroupList
             | Request::GroupCreate
+            | Request::GroupMembers(_)
+            | Request::GroupSetAccess(_)
             | Request::GroupInvite(_)
             | Request::DirectOpen(_)
             | Request::RenewActBudget(_)

@@ -28,6 +28,8 @@ ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame
 
 当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。远程持久加密邮箱补收、自动模型回答、跨设备历史和大规模跨机验收仍未完成；本文不能据此宣称这些能力完整可用。
 
+ASL/1.3 群内还定义了 `group-policy` 控制值：它只在 MLS 解密后由群创建者（群主）发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId 和禁言 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是该群创建者，再原子替换本机策略。成员端对入站 act 和文件 Offer 都重新检查该策略；策略消息本身不进入自然语言数据区，也记录为无文本控制事件。
+
 - 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件和预算均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
 - 规范结构外的字节串只允许出现在用途固定的密码学值、hash、签名、PeerId、文件/MLS 密文载荷中。验证器按具体用途检查长度、格式和状态转移，不把未知 blob 交给模型。
 - 文件载荷与控制消息分流，是由本地 grant 明确授权的不透明对象；接收文件不自动解析成对话、指令、可执行内容或模型上下文。人类选择授权模型处理时，仍按不可信数据进入隔离模型闸门。
@@ -91,7 +93,7 @@ PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode �
 
 ### 群子流
 
-`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，其中 ASL/1.3 可包含 `act`，其他应用帧仍不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
+`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，其中 ASL/1.3 可包含 `act` 或群主 `group-policy`，其他应用帧仍不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
 
 | 请求 | 允许的回复 | 回复 epoch |
 | --- | --- | --- |

@@ -2,7 +2,10 @@ use std::{collections::BTreeSet, error::Error, fs, path::Path};
 
 use asl_types::{
     ids::{Hash32, Id128, Signature65},
-    protocol::{Act, ActType, WireFrame, decode_frame, encode_frame},
+    protocol::{
+        Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_TEXT, GroupControl, WireFrame,
+        decode_frame, encode_frame,
+    },
     record::{
         DeviceDirectory, RecordPayload, ShortCodeClaim, SignedRecord, UnsignedRecord,
         decode_record, encode_record, short_code,
@@ -16,8 +19,8 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 34;
-pub const ACCEPTED_COUNT: usize = 24;
+pub const VECTOR_COUNT: usize = 35;
+pub const ACCEPTED_COUNT: usize = 25;
 pub const REJECTED_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -26,6 +29,8 @@ pub enum Codec {
     Frame,
     Record,
     Value,
+    #[serde(rename = "group-policy")]
+    GroupPolicy,
 }
 
 #[derive(Debug)]
@@ -43,6 +48,7 @@ impl VectorCase {
             Codec::Frame => decode_frame(bytes).and_then(|value| encode_frame(&value)),
             Codec::Record => decode_record(bytes).and_then(|value| encode_record(&value)),
             Codec::Value => Act::decode(bytes).and_then(|value| value.encode()),
+            Codec::GroupPolicy => GroupControl::decode(bytes).and_then(|value| value.encode()),
         };
         match (self.accepted, reencoded) {
             (true, Ok(encoded)) if encoded == bytes => Ok(()),
@@ -140,6 +146,22 @@ pub fn vector_cases() -> Vec<VectorCase> {
             causal_root: Id128([4; 16]),
             hop: 1,
             expires_at_ms: Some(10),
+        }
+        .encode()
+        .unwrap(),
+    });
+
+    cases.push(VectorCase {
+        name: "group-policy-v1",
+        root: "group-policy",
+        codec: Codec::GroupPolicy,
+        accepted: true,
+        bytes: GroupControl {
+            message_id: Id128([8; 16]),
+            policy_revision: 1,
+            permissions: GROUP_ALLOW_MEMBER_TEXT | GROUP_ALLOW_MEMBER_FILES,
+            admins: Vec::new(),
+            muted: Vec::new(),
         }
         .encode()
         .unwrap(),

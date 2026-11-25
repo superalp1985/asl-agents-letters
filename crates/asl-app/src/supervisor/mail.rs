@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use asl_agent::{QueryScope, runner::InboundMode};
 use asl_groups::GroupApplication;
-use asl_store::{Store, group_state::GroupInboundPolicy, mailbox::ConversationBudgetRenewal};
+use asl_store::{
+    Store, group_access::GroupAccessKind, group_state::GroupInboundPolicy,
+    mailbox::ConversationBudgetRenewal,
+};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -195,6 +198,16 @@ impl Supervisor {
             } if !reply.is_closed() => {
                 let _ = reply.send(self.send_group_file(room, content_id, media_kind, concepts));
             }
+            MailCommand::GroupMembers { room, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.group_members(room));
+            }
+            MailCommand::GroupSetAccess {
+                room,
+                update,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.set_group_access(room, update));
+            }
             MailCommand::GroupList { reply } if !reply.is_closed() => {
                 let _ = reply
                     .send(unix_time_ms().and_then(|now| {
@@ -347,7 +360,7 @@ impl Supervisor {
             }
             Target::Group(room) => {
                 let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
-                groups.dispatch_letter(admission, room, letter, now, |cmd| {
+                groups.dispatch_letter(admission, local, room, letter, now, |cmd| {
                     check_target()?;
                     if store.network_pause_requested()? {
                         return Err(AslError::PolicyDenied);
@@ -718,6 +731,13 @@ impl Supervisor {
         if state != "active" {
             return Err(AslError::PolicyDenied);
         }
+        if !groups.store.group_can_send(
+            &snapshot.local_id,
+            &self.device_peer_id,
+            GroupAccessKind::Text,
+        )? {
+            return Err(AslError::PolicyDenied);
+        }
         if act.message_id.0 == [0; 16] {
             act.message_id = Id128(fresh_id()?);
         }
@@ -792,6 +812,18 @@ impl Supervisor {
         if room_state.is_none_or(|(state, _)| state != "active") {
             return Err(AslError::PolicyDenied);
         }
+        let local_group_id = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?
+            .local_id;
+        if !groups.store.group_can_send(
+            &local_group_id,
+            &self.device_peer_id,
+            GroupAccessKind::Files,
+        )? {
+            return Err(AslError::PolicyDenied);
+        }
         let expires_at_ms = now.saturating_add(10 * 60 * 1_000);
         let offer = asl_types::protocol::Offer {
             message_id: Id128(fresh_id()?),
@@ -839,6 +871,18 @@ impl Supervisor {
 
     fn invite_group_agent(&mut self, room: Hash32, agent: AgentId) -> Result<Value, AslError> {
         let now = unix_time_ms()?;
+        let groups = self.groups.as_ref().ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        if !groups.store.group_can_send(
+            &snapshot.local_id,
+            &self.device_peer_id,
+            GroupAccessKind::Invite,
+        )? {
+            return Err(AslError::PolicyDenied);
+        }
         let connections = self
             .admission
             .as_ref()

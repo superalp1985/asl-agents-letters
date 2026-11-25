@@ -26,9 +26,9 @@ use super::{
     client::Client,
     contract::{
         ActArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs, ContextRequestArgs,
-        EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, QueryArgs, ReceiveOfferArgs,
-        RecoveryDownloadArgs, RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs,
-        RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
+        EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, GroupRoomArgs, GroupSetAccessArgs,
+        QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs, RecoveryDownloadDecisionArgs,
+        RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -43,6 +43,8 @@ const SEND_ACT: &str = "asl_send_act";
 const SEND_FILE: &str = "asl_send_file";
 const GROUP_LIST: &str = "asl_group_list";
 const GROUP_CREATE: &str = "asl_group_create";
+const GROUP_MEMBERS: &str = "asl_group_members";
+const GROUP_SET_ACCESS: &str = "asl_group_set_access";
 const GROUP_INVITE: &str = "asl_group_invite";
 const DIRECT_OPEN: &str = "asl_direct_open";
 const RENEW_ACT_BUDGET: &str = "asl_renew_act_budget";
@@ -269,6 +271,17 @@ impl ServerHandler for ToolServer {
                     schema_for_input::<EmptyArgs>().map_err(|_| invalid_arguments())?,
                 ));
                 tools.push(Tool::new(
+                    GROUP_MEMBERS,
+                    "Read the current MLS member roles, mute flags, and owner policy for one room.",
+                    schema_for_input::<GroupRoomArgs>().map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
+                    GROUP_SET_ACCESS,
+                    "Owner-only: publish a new group policy inside MLS. Set member text/file/invite permissions, admins, and muted member devices. The policy revision advances and is enforced by receiving ASL cores.",
+                    schema_for_input::<GroupSetAccessArgs>()
+                        .map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
                     GROUP_INVITE,
                     "Invite one admitted Agent to an existing MLS conversation. This queues a targeted invite; it does not prove acceptance.",
                     schema_for_input::<GroupInviteArgs>().map_err(|_| invalid_arguments())?,
@@ -454,6 +467,16 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
         }
         GROUP_LIST if arguments.is_empty() => Ok(Request::GroupList),
         GROUP_CREATE if arguments.is_empty() => Ok(Request::GroupCreate),
+        GROUP_MEMBERS => {
+            let args: GroupRoomArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::GroupMembers(args))
+        }
+        GROUP_SET_ACCESS => {
+            let args: GroupSetAccessArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::GroupSetAccess(args))
+        }
         GROUP_LIST | GROUP_CREATE => Err(invalid_arguments()),
         GROUP_INVITE => Ok(Request::GroupInvite(parse_arguments(arguments)?)),
         DIRECT_OPEN => Ok(Request::DirectOpen(parse_arguments(arguments)?)),
@@ -647,6 +670,38 @@ mod tests {
             let request = CallToolRequestParams::new(SEND_FILE).with_arguments(object(invalid));
             assert!(parse_request(request).is_err());
         }
+    }
+
+    #[test]
+    fn group_access_tools_accept_only_full_room_and_peer_ids() {
+        let room = "44".repeat(32);
+        let members = CallToolRequestParams::new(GROUP_MEMBERS)
+            .with_arguments(object(json!({ "room": room.clone() })));
+        assert!(matches!(
+            parse_request(members),
+            Ok(Request::GroupMembers(_))
+        ));
+
+        let peer = libp2p_identity::Keypair::ed25519_from_bytes([7; 32])
+            .unwrap()
+            .public()
+            .to_peer_id()
+            .to_base58();
+        let access = CallToolRequestParams::new(GROUP_SET_ACCESS).with_arguments(object(json!({
+            "room": room,
+            "allow_member_text": true,
+            "allow_member_files": false,
+            "allow_member_invite": false,
+            "admins": [peer],
+            "muted": []
+        })));
+        assert!(matches!(
+            parse_request(access),
+            Ok(Request::GroupSetAccess(_))
+        ));
+        let bad_room = CallToolRequestParams::new(GROUP_MEMBERS)
+            .with_arguments(object(json!({ "room": "00" })));
+        assert!(parse_request(bad_room).is_err());
     }
 
     #[test]

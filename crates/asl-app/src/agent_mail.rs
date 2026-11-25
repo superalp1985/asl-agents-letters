@@ -80,6 +80,15 @@ pub(crate) enum MailCommand {
         concepts: Vec<asl_types::protocol::ConceptRef>,
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
+    GroupMembers {
+        room: Hash32,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    GroupSetAccess {
+        room: Hash32,
+        update: GroupAccessUpdate,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     GroupList {
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
@@ -125,6 +134,15 @@ pub(crate) enum MailCommand {
     RequestTaskInbox {
         reply: oneshot::Sender<Result<InboxDecision, AslError>>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GroupAccessUpdate {
+    pub allow_member_text: bool,
+    pub allow_member_files: bool,
+    pub allow_member_invite: bool,
+    pub admins: Vec<asl_types::ids::PeerId>,
+    pub muted: Vec<asl_types::ids::PeerId>,
 }
 
 #[derive(Clone)]
@@ -222,6 +240,26 @@ impl MailPort {
             content_id,
             media_kind,
             concepts,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_members(&self, room: Hash32) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupMembers { room, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_set_access(
+        &self,
+        room: Hash32,
+        update: GroupAccessUpdate,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupSetAccess {
+            room,
+            update,
             reply,
         })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?

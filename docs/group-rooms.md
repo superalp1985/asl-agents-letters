@@ -9,7 +9,7 @@
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
 - 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
-- 远程密文邮箱托管/补收尚未接通；v35 只有本地 opaque 邮箱和预算仓储。
+- 远程密文邮箱托管/补收尚未接通；v35 只有本地 opaque 邮箱和预算仓储，v36 只有群主策略和管理员/禁言投影。
 
 ## 已实现：群消息编解码
 
@@ -182,3 +182,13 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 若捕获的 `Allow inbound AppContainer loopback` 规则属于旧测试 SID，可在上述命令后加 `-ReleaseOrphanSid '<旧测试 SID>'`。脚本核对 profile、进程所有者、系统程序路径、调试参数和父进程状态，再显示会话信息。确认是已结束的 ASL 测试后输入 `Y`，脚本会移除该 SID 的出站调试豁免并关闭遗留程序。
 
 测试会打印三个节点的 PeerId、Core 进程号、TCP 监听端口和每次拨号的目标。真实容器的状态轮询超时时，测试会在清理临时程序前查询 Windows Filtering Platform，按本次 `asl-net.exe`、TCP 和 IPv4 回环地址筛选。成功导出的 `netevents.xml` 和 `filters.xml` 位于开发根的 `work/tmp/asl-group-wfp-*` 下，控制台会给出路径。用拨号端口匹配丢弃事件，再用事件的 `filterId` 查过滤规则。若事件为空，阻断原因仍待确认。[Windows 网络隔离排查](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)
+
+## 已实现：群主、管理员与成员权限
+
+群创建者是群主，身份由 MLS room creator 和当前 epoch 的 sender leaf 共同确定；成员不能自报群主。群主可通过 `asl_group_members` 读取角色、禁言和权限状态，通过 `asl_group_set_access` 发布新的 `group-policy`：
+
+- 成员默认允许/禁止发送 `act`、发起查询或表达式、发送文件 Offer、邀请新成员。
+- 群主可指定管理员 PeerId，也可指定禁言设备；管理员仍只能发送消息/文件/邀请，不能替代群主修改策略或改变 MLS 创建者。
+- 策略 revision 单调递增；非群主 sender、回退 revision、非活动成员、禁言群主和重复/乱序 PeerId 都被拒绝。
+
+策略只通过 MLS application plaintext 传播，不写入 DHT、文件名、路径或自然语言字段。接收端在通知 Agent、收取 act/Offer 或开始文件传输前重新检查当前群策略；本机目录授权、收件目录授权、设备证书和传输审批仍然是独立硬边界。当前验证覆盖控制值 round-trip、存储策略/角色/禁言、MCP 参数和发送/接收代码路径；尚未完成两台真实设备的管理员策略同步、群主转移和管理员管理动作验收。

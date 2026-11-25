@@ -438,6 +438,7 @@ pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>,
         GroupApplication::Error(_) => (None, u64::MAX),
         GroupApplication::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
         GroupApplication::Act(act) => (None, act.expires_at_ms.unwrap_or(u64::MAX)),
+        GroupApplication::Policy(_) => (None, u64::MAX),
     }
 }
 

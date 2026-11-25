@@ -36,7 +36,7 @@ Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重
 
 ## 2. 数据表
 
-当前版本为 SQLite v35。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；远程邮箱传输尚未接通。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
+当前版本为 SQLite v36。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影。远程邮箱传输尚未接通。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
 
 v22 增加 `observed_remote_profiles`，保存 Core 已验签的远端公开主题投影。每个 Agent 一条、总量最多 200 条，不保存头像或原始报文。只读面板按有效期、链观察与本机撤销状态过滤；该表不用于身份、权限或信任判定。
 
@@ -57,9 +57,9 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 | 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、contact_bindings、contact_binding_candidates、contact_binding_actions、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、本机身份 pin、待核验发现候选及受限动作队列 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
-| 群组 | asl_groups、group_members、group_events、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、定向入群邀请与有期限密文事件 |
+| 群组 | asl_groups、group_members、group_events、group_access_policies、group_access_members、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、群主策略、管理员/禁言投影、定向入群邀请与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources、semantic_context_candidates、semantic_context_resources | 物理内容、授权引用、本机检索索引、溯源和已验证语义上下文候选/精确资源关联 |
-| 任务 | tasks、messages、offers、outbox、processed_requests | v35+ 前的有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
+| 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
 | 本机观察 | direct_inbound_observations | 有界、短期的结构化直连请求浏览记录，不含请求正文或回复 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |
 | 证据 | trust_events、contribution_events、model_calls、security_events | 本地评价、调用状态和脱敏审计 |
@@ -112,6 +112,15 @@ T29 将本机观察按 integrity/availability/evidence/promise 分开保存；�
 秘密不进 settings、messages 或 security_events。日志中的 peer 可截断显示，完整身份只存业务表；lease、API Key、私钥和模型端点认证头不进入诊断。
 
 FTS5 的结果不能直接返回 peer。检索前先确定请求者可读的 resource_key 集合，再以集合约束执行 MATCH。不能先把私有片段交给模型，再指望输出过滤。
+
+## 2.2 v36 群权限存储（已实现）
+
+v36 不改写 v1–v35，只增加：
+
+- `group_access_policies`：每个群一条群主策略，保存单调递增的 revision、成员默认权限位和更新时间。
+- `group_access_members`：只保存管理员和禁言投影；群主始终由 `asl_groups.creator_peer_id` 推导，普通成员不需要额外行。
+
+策略只能由群创建者通过 MLS 应用明文中的 `group-policy` 下发。Core 先核对当前 epoch 的 MLS sender 等于创建者，再在同一事务中替换策略、管理员和禁言集合。策略 revision 不能回退；成员从 MLS 群移除后仍保留的旧行不会授予发送权限。群组成员列表和操作入口会把角色、禁言、文字发送、文件发送和邀请权限分开显示。
 
 ## 3. 应用类型与职责
 

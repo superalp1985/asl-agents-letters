@@ -2,6 +2,7 @@ mod act;
 pub(crate) mod cbor;
 mod expression;
 mod group;
+mod group_control;
 mod semantic_context;
 
 use serde::Serialize;
@@ -23,6 +24,10 @@ pub use expression::{Expression, ExpressionLetter};
 pub use group::{
     GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS, MAX_GROUP_MLS_OBJECT_BYTES,
     MAX_GROUP_PAYLOAD_BYTES,
+};
+pub use group_control::{
+    GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
+    GROUP_ALLOWED_PERMISSION_BITS, GroupControl, MAX_GROUP_CONTROL_BYTES, MAX_GROUP_CONTROL_PEERS,
 };
 pub use semantic_context::{
     ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,

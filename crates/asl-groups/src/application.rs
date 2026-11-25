@@ -3,7 +3,8 @@ use asl_types::{
     ids::{Hash32, Id128},
     protocol::{
         Act, Answer, ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody,
-        GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
+        GroupControl, GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control,
+        encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -23,6 +24,7 @@ pub enum GroupApplication {
     Error(ProtocolError),
     Expression(ExpressionLetter),
     Act(Act),
+    Policy(GroupControl),
 }
 
 impl GroupApplication {
@@ -37,6 +39,7 @@ impl GroupApplication {
             Self::Error(_) => "error",
             Self::Expression(_) => "expression",
             Self::Act(_) => "act",
+            Self::Policy(_) => "policy",
         }
     }
 
@@ -51,6 +54,7 @@ impl GroupApplication {
             Self::Error(error) => error.message_id,
             Self::Expression(letter) => letter.message_id,
             Self::Act(act) => act.message_id,
+            Self::Policy(control) => control.message_id,
         }
     }
 
@@ -68,12 +72,16 @@ impl GroupApplication {
                 _ => Err(AslError::InvalidMessage),
             };
         }
-        Act::decode(plaintext).map(Self::Act)
+        if let Ok(act) = Act::decode(plaintext) {
+            return Ok(Self::Act(act));
+        }
+        GroupControl::decode(plaintext).map(Self::Policy)
     }
 
     pub fn encode(self) -> Result<Vec<u8>, AslError> {
         match self {
             Self::Act(act) => act.encode(),
+            Self::Policy(control) => control.encode(),
             frame => encode_control(&match frame {
                 Self::Query(query) => WireFrame::Query(query),
                 Self::Answer(answer) => WireFrame::Answer(answer),
@@ -83,7 +91,7 @@ impl GroupApplication {
                 Self::FetchPending(pending) => WireFrame::FetchPending(pending),
                 Self::Error(error) => WireFrame::Error(error),
                 Self::Expression(letter) => WireFrame::Expression(letter),
-                Self::Act(_) => unreachable!(),
+                Self::Act(_) | Self::Policy(_) => unreachable!(),
             }),
         }
     }
@@ -234,6 +242,20 @@ mod tests {
             causal_root: Id128([4; 16]),
             hop: 0,
             expires_at_ms: None,
+        });
+        let bytes = application.clone().encode().unwrap();
+        assert_eq!(GroupApplication::decode(&bytes).unwrap(), application);
+    }
+
+    #[test]
+    fn owner_policy_application_round_trips_without_text() {
+        let application = GroupApplication::Policy(asl_types::protocol::GroupControl {
+            message_id: Id128([9; 16]),
+            policy_revision: 3,
+            permissions: asl_types::protocol::GROUP_ALLOW_MEMBER_TEXT
+                | asl_types::protocol::GROUP_ALLOW_MEMBER_FILES,
+            admins: Vec::new(),
+            muted: Vec::new(),
         });
         let bytes = application.clone().encode().unwrap();
         assert_eq!(GroupApplication::decode(&bytes).unwrap(), application);

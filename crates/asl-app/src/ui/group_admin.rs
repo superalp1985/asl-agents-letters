@@ -413,11 +413,15 @@ impl Form {
                 let reviewing = self.removal_member(room) == Some(member);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(if member.creator {
-                        label(view.language, "创建者", "Creator")
-                    } else {
-                        label(view.language, "成员", "Member")
-                    });
+                    let role = match member.role.as_str() {
+                        "owner" => label(view.language, "群主", "Owner"),
+                        "admin" => label(view.language, "管理员", "Admin"),
+                        _ => label(view.language, "成员", "Member"),
+                    };
+                    ui.label(role);
+                    if member.muted {
+                        ui.weak(label(view.language, "已禁言", "Muted"));
+                    }
                     if !member.creator
                         && !reviewing
                         && ui
@@ -436,6 +440,27 @@ impl Form {
                 });
                 identifier(ui, view.language, "Agent ID", "Agent ID", &member.agent);
                 identifier(ui, view.language, "设备 ID", "Device ID", &member.device);
+                ui.weak(format!(
+                    "{}: {}  {}: {}  {}: {}",
+                    label(view.language, "文字", "Text"),
+                    if member.can_send_text {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    },
+                    label(view.language, "文件", "Files"),
+                    if member.can_send_files {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    },
+                    label(view.language, "邀请", "Invite"),
+                    if member.can_invite {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    }
+                ));
                 if reviewing {
                     ui.label(format!(
                         "{} \"{}\"?",
@@ -584,11 +609,21 @@ mod tests {
                         agent: "owner-agent".into(),
                         device: "owner-device".into(),
                         creator: true,
+                        role: "owner".into(),
+                        muted: false,
+                        can_send_text: true,
+                        can_send_files: true,
+                        can_invite: true,
                     },
                     AdminMember {
                         agent: "member-agent".into(),
                         device: "offline-device".into(),
                         creator: false,
+                        role: "member".into(),
+                        muted: true,
+                        can_send_text: false,
+                        can_send_files: false,
+                        can_invite: false,
                     },
                 ],
             }],

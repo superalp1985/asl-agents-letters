@@ -300,6 +300,8 @@ async fn serve(
                     | Request::SendFile(_)
                     | Request::GroupList
                     | Request::GroupCreate
+                    | Request::GroupMembers(_)
+                    | Request::GroupSetAccess(_)
                     | Request::GroupInvite(_)
                     | Request::DirectOpen(_)
                     | Request::RenewActBudget(_)
@@ -316,6 +318,8 @@ async fn serve(
                     Request::SendFile(args) => send_file(mail, grant, args).await,
                     Request::GroupList => group_list(mail, grant).await,
                     Request::GroupCreate => group_create(mail, grant).await,
+                    Request::GroupMembers(args) => group_members(mail, grant, args).await,
+                    Request::GroupSetAccess(args) => group_set_access(mail, grant, args).await,
                     Request::GroupInvite(args) => group_invite(mail, grant, args).await,
                     Request::DirectOpen(args) => direct_open(mail, grant, args).await,
                     Request::RenewActBudget(args) => {
@@ -504,6 +508,32 @@ async fn group_create(mail: Option<&MailPort>, grant: &HostGrant) -> Result<Valu
         .filter(|_| grant.groups_admin)
         .ok_or(ErrorCode::PolicyDenied)?;
     mail.group_create().await.map_err(error_code)
+}
+
+async fn group_members(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupRoomArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let room = args.validate()?;
+    mail.group_members(room).await.map_err(error_code)
+}
+
+async fn group_set_access(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupSetAccessArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, update) = args.validate()?;
+    mail.group_set_access(room, update)
+        .await
+        .map_err(error_code)
 }
 
 async fn group_invite(

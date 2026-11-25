@@ -908,9 +908,9 @@ mod tests {
     }
 
     #[test]
-    fn v35_migration_creates_all_new_tables() {
+    fn v35_and_v36_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
-        assert_eq!(store.schema_version(), 35);
+        assert_eq!(store.schema_version(), 36);
         for table in [
             "mailbox_slots",
             "mailbox_shards",
@@ -919,6 +919,8 @@ mod tests {
             "conversation_attachment_refs",
             "gossip_topic_state",
             "local_capacity_measurements",
+            "group_access_policies",
+            "group_access_members",
         ] {
             let exists: bool = store
                 .connection
@@ -949,20 +951,22 @@ mod tests {
                  DROP TABLE mailbox_slots;
                  DROP TABLE gossip_topic_state;
                  DROP TABLE local_capacity_measurements;
-                 DELETE FROM schema_migrations WHERE version=35;",
+                 DROP TABLE group_access_members;
+                 DROP TABLE group_access_policies;
+                 DELETE FROM schema_migrations WHERE version IN (35,36);",
             )
             .unwrap();
         drop(connection);
 
         let store = open_store(&path).unwrap();
-        assert_eq!(store.schema_version(), 35);
+        assert_eq!(store.schema_version(), 36);
         let migration_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 35);
+        assert_eq!(migration_count, 36);
         let budget_table_exists: bool = store
             .connection
             .query_row(
