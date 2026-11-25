@@ -39,6 +39,10 @@ impl Form {
         if self.minutes == 0 {
             self.minutes = 15;
         }
+        let local_device = data.identity.peer_id.as_deref().and_then(|value| {
+            let bytes = bs58::decode(value).into_vec().ok()?;
+            asl_types::ids::PeerId::from_bytes(bytes).ok()
+        });
         ui.horizontal_wrapped(|ui| {
             ui.label(label(language, "附言（可选）", "Note (optional)"));
             ui.add(
@@ -85,7 +89,12 @@ impl Form {
                 Ok(envelope) => envelope,
                 Err(_) => continue,
             };
-            let short_code = asl_app::contact_invite::short_code_envelope(model.inviter, &model);
+            let short_code = local_device
+                .as_ref()
+                .map(|device| {
+                    asl_app::contact_invite::short_code_envelope(model.inviter, device, &model)
+                })
+                .unwrap_or_else(|| asl_app::contact_invite::short_code(&model));
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(label(language, "待使用邀请", "Active invite")).strong());

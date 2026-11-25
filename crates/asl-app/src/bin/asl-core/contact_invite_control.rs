@@ -1,6 +1,10 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
-use asl_app::{contact_invite, identity::AgentIdentity, paths::AppPaths};
+use asl_app::{
+    contact_invite,
+    identity::{AgentIdentity, DeviceIdentity},
+    paths::AppPaths,
+};
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::{
     contact_invites::{ContactInviteActionKind, ContactInviteActionPayload},
@@ -23,6 +27,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
         [command, minutes, note] if command == "create" => {
             let minutes = parse_minutes(text(minutes)?)?;
             let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+            let device = DeviceIdentity::load_protected(&paths.device_key())?;
             let invite = contact_invite::issue(
                 &identity,
                 text(note)?,
@@ -43,7 +48,11 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 json!({
                     "invite_id": hex_id(invite.invite_id),
                     "short_code": contact_invite::short_code(&invite),
-                    "short_code_envelope": contact_invite::short_code_envelope(invite.inviter, &invite),
+                    "short_code_envelope": contact_invite::short_code_envelope(
+                        invite.inviter,
+                        &device.peer_id(),
+                        &invite
+                    ),
                     "expires_at_ms": invite.expires_at_ms,
                     "envelope": invite.to_envelope(now_ms)?,
                 })
@@ -51,6 +60,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
         }
         [command] if command == "list" => {
             let now_ms = unix_time_ms()?;
+            let device = DeviceIdentity::load_protected(&paths.device_key())?;
             let rows = open_store(&database)?
                 .active_contact_invites(now_ms)?
                 .into_iter()
@@ -68,7 +78,11 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                     Ok(json!({
                         "invite_id": hex_id(row.invite_id),
                         "short_code": contact_invite::short_code(&invite),
-                        "short_code_envelope": contact_invite::short_code_envelope(invite.inviter, &invite),
+                        "short_code_envelope": contact_invite::short_code_envelope(
+                            invite.inviter,
+                            &device.peer_id(),
+                            &invite
+                        ),
                         "expires_at_ms": row.expires_at_ms,
                         "envelope": invite.to_envelope(now_ms)?,
                     }))

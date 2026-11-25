@@ -1000,7 +1000,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 ### 2026-11-26 有期限联系人邀请与二维码
 
 - 新增 SQLite v37：`contact_invites` 保存完整签名、token、创建/到期时间、状态和绑定 AgentId；`contact_invite_receipts` 持久化单次消费；`contact_invite_prompts` 投影待确认 Pairing 请求；`contact_invite_actions` 承载 CLI/Core 的 import/decide 动作。v1–v36 迁移保持不改写。
-- 新增独立 `ASL-CONTACT-INVITE:1:<base58>` canonical CBOR envelope，签名绑定 inviter、invite/token、时间、单句附言和 24 小时上限；二维码与完整 envelope 使用同一载荷。16 位临时短码采用 `ASL-CONTACT-INVITE-CODE:1:<inviter-AgentId>:<code>`，必须同时绑定邀请人完整 AgentId，不代替长期身份；二维码使用 vendored `qrcodegen 1.8.0`。
+- 新增独立 `ASL-CONTACT-INVITE:1:<base58>` canonical CBOR envelope，签名绑定 inviter、invite/token、时间、单句附言和 24 小时上限；二维码与完整 envelope 使用同一载荷。16 位临时短码采用 `ASL-CONTACT-INVITE-CODE:1:<inviter-AgentId>:<device-PeerId>:<code>`，必须同时绑定邀请人完整 AgentId 和签发设备，不代替长期身份；二维码使用 vendored `qrcodegen 1.8.0`。
 - Contacts 页展示完整 AgentId、绑定 AgentId 的临时短码、完整邀请和二维码；完整邀请在拨号前先查询本地链控制者并验签，短码路径在拨号后必须命中绑定的 AgentId 才发送 Pairing。导入必须经本机 Pairing 确认。DHT provider 只提供 token 发现，实际建联仍由双方签名 Pairing、设备证书和链身份核验完成。邀请消费不创建 `authorized_contacts`、文件授权或群成员资格。
 - 定向验证：`asl-types` 6 项 contact invite、`asl-store` 9 项 contact invite、`asl-app` 1 项邀请类型、CLI 1 项、桌面 UI/二维码 28 项通过；真实临时资料执行 `--initialize-profile`、`--contact-invites create 5 "..."`、`list`、短码 `import` 成功。`cargo +1.100.0 clippy -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings`、格式、schema exporter 和 `git diff --check` 通过。
 - 安全复核后追加：完整 AgentId 查询使用 `lookup-agent` 在同一动作中保存目标 `AgentId`，Core 只记录精确相等且通过链/设备准入的候选，不再把长号降级成短码后接受其他 Agent；临时短码编码为绑定邀请人 AgentId 的 `ASL-CONTACT-INVITE-CODE:1:...`。完整 signed envelope 在 DHT 拨号前先查本地链控制者并验签；短码连接在发送 Pairing 前也必须命中绑定的 AgentId。重启时无内存连接上下文的 pending prompt 自动关闭，Pairing 回复先进入 Net 再提交本地 receipt，拨号和 outgoing 请求按操作/连接/到期回收。

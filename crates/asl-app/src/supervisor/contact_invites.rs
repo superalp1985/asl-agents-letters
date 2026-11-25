@@ -49,6 +49,7 @@ enum ImportSource {
     ShortCode {
         token: Id128,
         expected_inviter: asl_types::ids::AgentId,
+        expected_peer: PeerId,
     },
 }
 
@@ -161,6 +162,12 @@ impl Supervisor {
             if self.contact_invites.dialing.len() >= MAX_TRACKED_CONNECTIONS {
                 break;
             }
+            if match &lookup.source {
+                ImportSource::ShortCode { expected_peer, .. } => *expected_peer != provider.peer_id,
+                ImportSource::Discovery(_) => false,
+            } {
+                continue;
+            }
             let peer_id = provider.peer_id.clone();
             let operation_id = fresh_id()?;
             let Some(command) = invite_provider_dial(provider, operation_id) else {
@@ -247,8 +254,9 @@ impl Supervisor {
                     ImportSource::ShortCode {
                         token,
                         expected_inviter,
+                        expected_peer,
                     } => {
-                        if *agent_id != expected_inviter {
+                        if *agent_id != expected_inviter || *peer_id != expected_peer {
                             return Ok(Some(NetworkCommand::CloseConnection {
                                 connection_id: *connection_id,
                             }));
@@ -524,11 +532,13 @@ impl Supervisor {
             contact_invite::verify(&invite, now_ms, controller).map_err(|_| "invalid_signature")?;
             ImportSource::Discovery(invite)
         } else {
-            let (expected_inviter, token) = contact_invite::parse_short_code_envelope(envelope)
-                .map_err(|_| "invalid_envelope")?;
+            let (expected_inviter, expected_peer, token) =
+                contact_invite::parse_short_code_envelope(envelope)
+                    .map_err(|_| "invalid_envelope")?;
             ImportSource::ShortCode {
                 token,
                 expected_inviter,
+                expected_peer,
             }
         };
         let token = match &source {

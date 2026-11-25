@@ -1,7 +1,7 @@
 use asl_types::{
     contact_invite::{ContactInviteV1, MAX_CONTACT_INVITE_LIFETIME_MS},
     error::AslError,
-    ids::{AgentId, Hash32, Id128, Signature65},
+    ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::PairingInvite,
 };
 use rand::{TryRng, rngs::SysRng};
@@ -85,19 +85,26 @@ pub fn short_code(invite: &ContactInviteV1) -> String {
     format!("{code:016}")
 }
 
-pub fn short_code_envelope(inviter: AgentId, invite: &ContactInviteV1) -> String {
+pub fn short_code_envelope(inviter: AgentId, device: &PeerId, invite: &ContactInviteV1) -> String {
     format!(
-        "{SHORT_CODE_SCHEME}{}:{}",
+        "{SHORT_CODE_SCHEME}{}:{}:{}",
         bs58::encode(inviter.as_bytes()).into_string(),
+        bs58::encode(device.as_bytes()).into_string(),
         short_code(invite)
     )
 }
 
-pub fn parse_short_code_envelope(value: &str) -> Result<(AgentId, Id128), AslError> {
+pub fn parse_short_code_envelope(value: &str) -> Result<(AgentId, PeerId, Id128), AslError> {
     let payload = value
         .strip_prefix(SHORT_CODE_SCHEME)
         .ok_or(AslError::InvalidMessage)?;
-    let (agent, code) = payload.split_once(':').ok_or(AslError::InvalidMessage)?;
+    let mut fields = payload.split(':');
+    let agent = fields.next().ok_or(AslError::InvalidMessage)?;
+    let device = fields.next().ok_or(AslError::InvalidMessage)?;
+    let code = fields.next().ok_or(AslError::InvalidMessage)?;
+    if fields.next().is_some() {
+        return Err(AslError::InvalidMessage);
+    }
     let bytes = bs58::decode(agent)
         .into_vec()
         .map_err(|_| AslError::InvalidMessage)?;
@@ -105,7 +112,9 @@ pub fn parse_short_code_envelope(value: &str) -> Result<(AgentId, Id128), AslErr
         return Err(AslError::InvalidMessage);
     }
     let agent = AgentId(bytes.try_into().map_err(|_| AslError::InvalidMessage)?);
-    Ok((agent, token_from_short_code(code)?))
+    let device: libp2p_identity::PeerId = device.parse().map_err(|_| AslError::InvalidMessage)?;
+    let device = PeerId::from_bytes(device.to_bytes()).map_err(|_| AslError::InvalidMessage)?;
+    Ok((agent, device, token_from_short_code(code)?))
 }
 
 pub fn token_from_short_code(value: &str) -> Result<Id128, AslError> {
@@ -185,10 +194,13 @@ mod tests {
             token_from_short_code(&short_code(&invite)).unwrap(),
             invite.token
         );
-        let code_envelope = short_code_envelope(inviter.agent_id(), &invite);
+        let device = crate::identity::DeviceIdentity::generate()
+            .unwrap()
+            .peer_id();
+        let code_envelope = short_code_envelope(inviter.agent_id(), &device, &invite);
         assert_eq!(
             parse_short_code_envelope(&code_envelope).unwrap(),
-            (inviter.agent_id(), invite.token)
+            (inviter.agent_id(), device, invite.token)
         );
         let short_target = target_invite_for_token(
             &receiver,
