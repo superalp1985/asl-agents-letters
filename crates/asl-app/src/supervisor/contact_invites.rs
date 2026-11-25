@@ -408,6 +408,14 @@ impl Supervisor {
                 }
                 Ok(None)
             }
+            AdmittedNetworkEvent::RequestFailed {
+                request_id,
+                protocol: crate::ipc::NetworkProtocol::Pairing,
+                ..
+            } => {
+                self.contact_invites.outgoing.remove(request_id);
+                Ok(None)
+            }
             _ => Ok(None),
         }
     }
