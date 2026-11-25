@@ -1,0 +1,35 @@
+{
+  "vectors": [
+    {
+      "accepted": true,
+      "codec": "file",
+      "name": "context-file-v1",
+      "root": "semantic-context-file"
+    },
+    {
+      "accepted": false,
+      "codec": "file",
+      "name": "context-file-unknown-version",
+      "root": "semantic-context-file"
+    },
+    {
+      "accepted": false,
+      "codec": "file",
+      "name": "context-bundle-unknown-version",
+      "root": "semantic-context-file"
+    },
+    {
+      "accepted": false,
+      "codec": "file",
+      "name": "context-file-bad-signature-length",
+      "root": "semantic-context-file"
+    },
+    {
+      "accepted": false,
+      "codec": "file",
+      "name": "context-file-missing-signature",
+      "root": "semantic-context-file"
+    }
+  ],
+  "version": 1
+}
