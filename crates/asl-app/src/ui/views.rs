@@ -853,6 +853,29 @@ fn contacts(
                 .on_hover_text(agent);
             copy_button(ui, language, agent);
         });
+        let mut public = data.binding_code_public;
+        if ui
+            .add_enabled(
+                actions_enabled && action.is_none(),
+                egui::Checkbox::new(
+                    &mut public,
+                    ui_text(
+                        language,
+                        "允许其他 Agent 用完整 AgentId 精确找到我",
+                        "Let other Agents find me by exact AgentId",
+                    ),
+                ),
+            )
+            .changed()
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [
+                    OsString::from("publish"),
+                    OsString::from(if public { "on" } else { "off" }),
+                ],
+            ));
+        }
     }
     ui.label(
         RichText::new(ui_text(
@@ -927,31 +950,6 @@ fn contacts(
                         format_code(code)
                     ));
                     copy_button(ui, language, code);
-                });
-            }
-            if data.binding_code_public {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(ui_text(
-                        language,
-                        "旧版查找码当前处于公开状态。",
-                        "The legacy lookup code is currently public.",
-                    ));
-                    if ui
-                        .add_enabled(
-                            actions_enabled && action.is_none(),
-                            egui::Button::new(ui_text(
-                                language,
-                                "关闭旧版公开",
-                                "Disable legacy publication",
-                            )),
-                        )
-                        .clicked()
-                    {
-                        *action = Some(super::LocalAction::new(
-                            "bindings",
-                            [OsString::from("publish"), OsString::from("off")],
-                        ));
-                    }
                 });
             }
         },

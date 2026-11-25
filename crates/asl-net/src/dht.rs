@@ -66,6 +66,10 @@ pub fn contact_invite_key(token: Id128) -> Result<RecordKey, AslError> {
     Ok(domain_key(b"ASL-CONTACT-INVITE-v1\0", token.as_bytes()))
 }
 
+pub fn agent_lookup_key(agent: AgentId) -> RecordKey {
+    domain_key(b"ASL-AGENT-LOOKUP-v1\0", agent.as_bytes())
+}
+
 pub fn identity_record_key(agent: AgentId, kind: RecordKind) -> Result<RecordKey, AslError> {
     let domain = match kind {
         RecordKind::Profile => b"ASL-PROFILE-v1\0".as_slice(),
@@ -317,6 +321,9 @@ mod tests {
         assert!(handle_key(10_000_000_000_000_000).is_err());
         assert!(contact_invite_key(Id128([1; 16])).is_ok());
         assert!(contact_invite_key(Id128([0; 16])).is_err());
+        let agent = AgentId([7; 32]);
+        assert_eq!(agent_lookup_key(agent), agent_lookup_key(agent));
+        assert_ne!(agent_lookup_key(agent), agent_lookup_key(AgentId([8; 32])));
     }
 
     #[test]

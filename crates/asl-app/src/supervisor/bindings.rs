@@ -4,7 +4,7 @@ use std::{
 };
 
 use asl_net::{
-    dht::handle_key,
+    dht::{agent_lookup_key, handle_key},
     transport::{DhtLookupStatus, DhtProviderCandidate},
 };
 use asl_store::{
@@ -273,7 +273,10 @@ impl Supervisor {
                     Err("unavailable")
                 } else {
                     let lookup_id = fresh_id()?;
-                    let key = handle_key(code)?;
+                    let key = match action.agent_id {
+                        Some(agent) => agent_lookup_key(agent),
+                        None => handle_key(code)?,
+                    };
                     let key: [u8; 32] = key
                         .as_ref()
                         .try_into()
@@ -397,8 +400,7 @@ impl Supervisor {
         }
 
         let operation_id = fresh_id()?;
-        let code = short_code(self.agent_identity.agent_id());
-        let key = handle_key(code)?;
+        let key = agent_lookup_key(self.agent_identity.agent_id());
         let key: [u8; 32] = key
             .as_ref()
             .try_into()
