@@ -15,6 +15,9 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
     manifest::{CHUNK_SIZE, Manifest, decode_manifest},
+    protocol::{
+        MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES, SemanticContextRef, SignedSemanticContextBundle,
+    },
     task::{GroupId, TaskId, TransferId},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -721,6 +724,54 @@ impl DownloadBroker {
                 ),
             )?,
         })
+    }
+
+    pub fn cache_downloaded_semantic_context(
+        &mut self,
+        transfer_id: &TransferId,
+        expected: SemanticContextRef,
+        stored_at_ms: i64,
+    ) -> Result<bool, AslError> {
+        if stored_at_ms < 0 {
+            return Err(AslError::InvalidMessage);
+        }
+        let row = self.load_row(transfer_id)?;
+        if row.state != "complete" || row.grant_kind != "inbox" || row.grant_status != "active" {
+            return Err(AslError::PolicyDenied);
+        }
+        let manifest = self.read_manifest(&row)?;
+        if !(1..=MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES as u64).contains(&manifest.file_size) {
+            return Ok(false);
+        }
+        let grant = self.write_grant(&row)?;
+        let relative = destination_relative(&row)?;
+        let file = grant.open_existing(&relative, &part_identity(&row)?)?;
+        if file.len()? != manifest.file_size {
+            return Ok(false);
+        }
+        let mut bytes = Vec::with_capacity(manifest.file_size as usize);
+        file.take((MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != manifest.file_size
+            || *blake3::hash(&bytes).as_bytes() != manifest.file_hash
+        {
+            return Ok(false);
+        }
+        let signed = match SignedSemanticContextBundle::decode(&bytes) {
+            Ok(signed) => signed,
+            Err(_) => return Ok(false),
+        };
+        if signed.bundle.context_ref()? != expected || signed.encode()? != bytes {
+            return Ok(false);
+        }
+        match self
+            .store
+            .put_semantic_context_candidate(&bytes, stored_at_ms)
+        {
+            Ok(_) => Ok(true),
+            Err(AslError::QuotaExceeded | AslError::InvalidIdentity) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Loads scheduling state before assigning any new blocks, after recovery has

@@ -1,10 +1,12 @@
 mod art;
 mod avatar;
 mod binding_feedback;
+mod bubble;
 mod checkpoint;
 mod group_admin;
 mod locale;
 mod model_endpoints;
+mod nav_icon;
 mod network_privacy;
 mod notification_settings;
 mod profile_signing;
@@ -103,12 +105,13 @@ impl Viewer {
     fn new(ctx: &egui::Context, home: Option<PathBuf>) -> Self {
         theme(ctx);
         let notification_settings = notification_settings::Editor::load(home.as_deref());
-        let first_launch = notification_settings.first_launch;
         let language = notification_settings.settings.language;
         #[cfg(windows)]
         asl_policy::set_tray_language(matches!(language, locale::Language::En));
         #[cfg(windows)]
-        let tray = asl_policy::start_tray(art::tray_icon());
+        let tray = home
+            .as_ref()
+            .and_then(|_| asl_policy::start_tray(art::tray_icon()));
         let mut viewer = Self {
             home: home.clone(),
             page: Page::Overview,
@@ -117,7 +120,7 @@ impl Viewer {
             action: None,
             action_success_notice: None,
             notification_settings,
-            show_notification_settings: first_launch,
+            show_notification_settings: false,
             close_requested: false,
             language,
             access_form: AccessForm::default(),
@@ -125,7 +128,7 @@ impl Viewer {
             checkpoint_form: checkpoint::CheckpointForm::default(),
             group_admin: group_admin::Form::default(),
             profile_form: profile_signing::ProfileForm::default(),
-            show_startup_settings: !first_launch,
+            show_startup_settings: true,
             code_input: String::new(),
             notice: None,
             error: None,
@@ -146,8 +149,8 @@ impl Viewer {
         let Some(home) = self.home.clone() else {
             self.error = Some(label(
                 self.language,
-                "未配置数据目录",
-                "Data directory is not configured",
+                "未配置数据目录。请用 Start-ASL.ps1 -DataDirectory 启动，或用 asl-ui.exe --home 指定已有资料目录。",
+                "No data directory configured. Use Start-ASL.ps1 -DataDirectory or open an existing profile with asl-ui.exe --home.",
             ));
             return;
         };
@@ -299,7 +302,14 @@ impl Viewer {
 
     fn nav(&mut self, ui: &mut egui::Ui, compact: bool) {
         for page in Page::ALL {
-            let button = egui::Button::selectable(self.page == page, self.language.page(page))
+            let selected = self.page == page;
+            let icon = nav_icon::texture(ui.ctx(), page);
+            let icon = egui::Image::new((icon.id(), Vec2::splat(16.0))).tint(if selected {
+                ACCENT
+            } else {
+                MUTED
+            });
+            let button = egui::Button::selectable(selected, (icon, self.language.page(page)))
                 .min_size(Vec2::new(if compact { 48.0 } else { 120.0 }, 29.0));
             if ui.add(button).clicked() {
                 self.page = page;
@@ -322,9 +332,9 @@ impl Viewer {
         }
         if let Some(snapshot) = &self.snapshot {
             let data = &snapshot.dashboard;
-            if !data.download_approvals.is_empty()
-                || !data.upload_approvals.is_empty()
-                || !data.group_invitations.is_empty()
+            if data.download_approvals.iter().any(|item| !item.approved)
+                || data.upload_approvals.iter().any(|item| !item.approved)
+                || data.group_invitations.iter().any(|item| !item.approved)
                 || data.host_inbox_request.is_some()
             {
                 return Mood::Waiting;
@@ -423,6 +433,9 @@ impl eframe::App for Viewer {
                         .as_ref()
                         .filter(|_| group_admin::enabled(&snapshot.network_config, dashboard)),
                 );
+                if self.snapshot.is_none() && self.notification_settings.first_launch {
+                    self.show_notification_settings = true;
+                }
                 self.snapshot = Some(snapshot);
                 true
             }
@@ -490,7 +503,8 @@ impl eframe::App for Viewer {
         }
         if matches!(
             self.page,
-            Page::Activity
+            Page::Overview
+                | Page::Activity
                 | Page::Transfers
                 | Page::Groups
                 | Page::Contacts
@@ -547,6 +561,8 @@ impl eframe::App for Viewer {
                             label(self.language, "读取中", "Loading")
                         } else if self.error.is_some() && self.snapshot.is_some() {
                             label(self.language, "上次快照", "Last snapshot")
+                        } else if self.snapshot.is_none() {
+                            label(self.language, "未就绪", "Not ready")
                         } else {
                             label(self.language, "就绪", "Ready")
                         };
@@ -573,7 +589,10 @@ impl eframe::App for Viewer {
                             self.show_startup_settings = true;
                         }
                         if ui
-                            .button(self.language.settings())
+                            .add_enabled(
+                                self.snapshot.is_some(),
+                                egui::Button::new(self.language.settings()),
+                            )
                             .on_hover_text(match self.language {
                                 locale::Language::Zh => "提醒音、窗口和语言",
                                 locale::Language::En => "Sound, window and language",
@@ -582,7 +601,25 @@ impl eframe::App for Viewer {
                         {
                             self.show_notification_settings = true;
                         }
-                        if ui
+                        #[cfg(windows)]
+                        let tray_available = self.tray.is_some();
+                        #[cfg(not(windows))]
+                        let tray_available = false;
+                        if tray_available {
+                            // Hiding keeps the agents running; only the tray menu exits.
+                            if ui
+                                .button(label(self.language, "隐藏到托盘", "Hide to tray"))
+                                .on_hover_text(label(
+                                    self.language,
+                                    "只隐藏窗口，不停止后台。可在托盘菜单中退出界面。",
+                                    "Hide the window without stopping the background service. Use the tray menu to quit the interface.",
+                                ))
+                                .clicked()
+                            {
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            }
+                        } else if ui
                             .button(self.language.quit())
                             .on_hover_text(match self.language {
                                 locale::Language::Zh => "停止 ASL 界面进程",
@@ -620,6 +657,8 @@ impl eframe::App for Viewer {
                 ui.add_space(10.0);
                 if let Some(snapshot) = &self.snapshot {
                     let mut action = None;
+                    let mut navigate = None;
+                    let animations_enabled = self.notification_settings.animations_enabled();
                     {
                         let mut interaction = Interaction {
                             avatar: &mut self.avatar,
@@ -638,10 +677,15 @@ impl eframe::App for Viewer {
                                 && !self.show_notification_settings
                                 && self.action.is_none()
                                 && self.loading.is_none(),
+                            animations_enabled,
                             action: &mut action,
+                            navigate: &mut navigate,
                         };
                         self.page
                             .show(ui, &snapshot.dashboard, &self.mascot, &mut interaction);
+                    }
+                    if let Some(page) = navigate {
+                        self.page = page;
                     }
                     if let Some(action) = action {
                         self.submit_local_action(ui.ctx(), action);
@@ -651,6 +695,7 @@ impl eframe::App for Viewer {
                 }
             });
         if self.show_startup_settings
+            && !self.show_notification_settings
             && let Some(snapshot) = &self.snapshot
             && let Some(decision) = startup_settings::show(ui.ctx(), snapshot, self.language)
         {

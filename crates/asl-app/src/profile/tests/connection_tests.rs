@@ -728,7 +728,7 @@ fn local_profile_signing_checks_chain_and_binds_revocation_to_exact_approval() {
 #[cfg(windows)]
 #[test]
 fn core_admission_only_emits_application_events_after_proof_verification() {
-    use asl_types::protocol::{Ack, IdentityProofRequest};
+    use asl_types::protocol::{Ack, ContextExpression, IdentityProofRequest};
 
     let local_root = AgentIdentity::generate().unwrap();
     let local_device = DeviceIdentity::generate().unwrap();
@@ -1035,6 +1035,32 @@ fn core_admission_only_emits_application_events_after_proof_verification() {
                     request: old_peer_letter
                 },
                 NOW
+            )
+            .events
+            .is_empty()
+    );
+    let context_letter = WireFrame::ContextExpression(ContextExpression {
+        message_id: Id128([91; 16]),
+        root_task_id: Id128([92; 16]),
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 1_000,
+        required_contexts: Vec::new(),
+        expression: asl_types::protocol::Expression::from_json(&serde_json::json!(["int", "42"]))
+            .unwrap(),
+    });
+    assert!(matches!(
+        admission.authorize_control_command(connection_id, [91; 16], context_letter.clone(), NOW),
+        Err(AslError::IncompatibleVersion)
+    ));
+    assert!(
+        admission
+            .handle_event(
+                NetworkEvent::UnverifiedControlRequest {
+                    connection_id,
+                    response_id: [92; 16],
+                    request: context_letter,
+                },
+                NOW,
             )
             .events
             .is_empty()

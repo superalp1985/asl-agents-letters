@@ -7,7 +7,10 @@ use asl_store::transfers::GroupTransferBinding;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128},
-    protocol::{Expression, Offer, WireFrame},
+    protocol::{
+        Act, ContextAgreementStatus, ContextExpression, Expression, Offer, SemanticContextRef,
+        WireFrame,
+    },
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -21,6 +24,7 @@ use crate::{
 const EVENT_LIMIT: usize = 32;
 const HANDLE_LIMIT: usize = 32;
 const REPLAY_LIMIT: usize = 256;
+const CONTEXT_REQUEST_LIMIT: usize = 32;
 const MAIL_TTL_MS: u64 = 60_000;
 pub(crate) type InboxDecision = oneshot::Receiver<Result<Id128, AslError>>;
 
@@ -55,6 +59,57 @@ pub(crate) enum MailCommand {
         root: Option<Id128>,
         expression: Expression,
         reply: oneshot::Sender<Result<Id128, AslError>>,
+    },
+    SendContextExpression {
+        target: Target,
+        scope: QueryScope,
+        root: Option<Id128>,
+        expression: Expression,
+        required_contexts: Vec<SemanticContextRef>,
+        reply: oneshot::Sender<Result<Id128, AslError>>,
+    },
+    SendAct {
+        room: Hash32,
+        act: Act,
+        reply: oneshot::Sender<Result<Id128, AslError>>,
+    },
+    SendFile {
+        room: Hash32,
+        content_id: Hash32,
+        media_kind: asl_types::protocol::MediaKind,
+        concepts: Vec<asl_types::protocol::ConceptRef>,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    GroupList {
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    GroupCreate {
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    GroupInvite {
+        room: Hash32,
+        agent: AgentId,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    DirectOpen {
+        agent: AgentId,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    RenewActBudget {
+        conversation_id: String,
+        additional_messages: u32,
+        window_ms: u64,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
+    RequestContext {
+        target: AgentId,
+        scope: QueryScope,
+        reference: SemanticContextRef,
+        reply: oneshot::Sender<Result<Id128, AslError>>,
+    },
+    ConfirmContext {
+        request_id: Id128,
+        reply: oneshot::Sender<Result<(Id128, ContextAgreementStatus), AslError>>,
     },
     Claim {
         handle: Id128,
@@ -128,6 +183,122 @@ impl MailPort {
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 
+    pub(crate) async fn send_context_expression(
+        &self,
+        scope: QueryScope,
+        target: String,
+        root: Option<Id128>,
+        expression: Expression,
+        required_contexts: Vec<SemanticContextRef>,
+    ) -> Result<Id128, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::SendContextExpression {
+            target: Target::parse(&target)?,
+            scope,
+            root,
+            expression,
+            required_contexts,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn send_act(&self, room: Hash32, act: Act) -> Result<Id128, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::SendAct { room, act, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn send_file(
+        &self,
+        room: Hash32,
+        content_id: Hash32,
+        media_kind: asl_types::protocol::MediaKind,
+        concepts: Vec<asl_types::protocol::ConceptRef>,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::SendFile {
+            room,
+            content_id,
+            media_kind,
+            concepts,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_list(&self) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupList { reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_create(&self) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupCreate { reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_invite(
+        &self,
+        room: Hash32,
+        agent: AgentId,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupInvite { room, agent, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn direct_open(&self, agent: AgentId) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::DirectOpen { agent, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn renew_act_budget(
+        &self,
+        conversation_id: String,
+        additional_messages: u32,
+        window_ms: u64,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::RenewActBudget {
+            conversation_id,
+            additional_messages,
+            window_ms,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn request_context(
+        &self,
+        scope: QueryScope,
+        target: String,
+        reference: SemanticContextRef,
+    ) -> Result<Id128, AslError> {
+        let Target::Agent(target) = Target::parse(&target)? else {
+            return Err(AslError::InvalidMessage);
+        };
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::RequestContext {
+            target,
+            scope,
+            reference,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn confirm_context(
+        &self,
+        request_id: Id128,
+    ) -> Result<(Id128, ContextAgreementStatus), AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::ConfirmContext { request_id, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
     pub(crate) async fn claim_offer(
         &self,
         handle: Id128,
@@ -151,16 +322,23 @@ pub(crate) struct HeldOffer {
     pub(crate) room: Option<(Hash32, u64, GroupTransferBinding)>,
     content: Hash32,
     expires: u64,
+    context_ref: Option<SemanticContextRef>,
 }
 
 impl HeldOffer {
     pub(crate) fn selection(self, inbox_grant: Id128) -> DownloadSelection {
+        let extension = if self.context_ref.is_some() {
+            "aslc"
+        } else {
+            "bin"
+        };
         DownloadSelection {
             content_id: self.content,
             inbox_grant,
-            filename: format!("asl-{}.bin", hex::encode(self.content.0)),
+            filename: format!("asl-{}.{}", hex::encode(self.content.0), extension),
             sources: vec![self.source],
             group: self.room.map(|(_, _, binding)| binding),
+            context_ref: self.context_ref,
         }
     }
 }
@@ -169,9 +347,19 @@ pub(crate) struct Mailbox {
     pub(crate) port: MailPort,
     pub(crate) commands: mpsc::Receiver<MailCommand>,
     offers: HashMap<Id128, HeldOffer>,
+    context_requests: HashMap<([u8; 16], [u8; 16]), PendingContextRequest>,
     seen: VecDeque<(AgentId, Id128, u64)>,
     recent: VecDeque<u64>,
     permission: Option<InboxWaiter>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingContextRequest {
+    pub(crate) source: DownloadSource,
+    pub(crate) scope: QueryScope,
+    pub(crate) reference: SemanticContextRef,
+    expires: u64,
+    offer: Option<Id128>,
 }
 
 struct InboxWaiter {
@@ -190,6 +378,7 @@ impl Default for Mailbox {
             },
             commands: receiver,
             offers: HashMap::new(),
+            context_requests: HashMap::new(),
             seen: VecDeque::new(),
             recent: VecDeque::new(),
             permission: None,
@@ -198,6 +387,187 @@ impl Default for Mailbox {
 }
 
 impl Mailbox {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn remember_context_request(
+        &mut self,
+        source: DownloadSource,
+        scope: QueryScope,
+        connection: [u8; 16],
+        request: Id128,
+        reference: SemanticContextRef,
+        expires: u64,
+        now: u64,
+    ) -> Result<(), AslError> {
+        self.context_requests
+            .retain(|_, pending| pending.expires > now);
+        let key = (connection, request.0);
+        if request.0 == [0; 16]
+            || expires <= now
+            || self.context_requests.len() >= CONTEXT_REQUEST_LIMIT
+            || self.context_requests.contains_key(&key)
+        {
+            return Err(AslError::QuotaExceeded);
+        }
+        self.context_requests.insert(
+            key,
+            PendingContextRequest {
+                source,
+                scope,
+                reference,
+                expires,
+                offer: None,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn cancel_context_request(&mut self, connection: [u8; 16], request: Id128) {
+        self.context_requests.remove(&(connection, request.0));
+    }
+
+    pub(crate) fn context_request_for_confirmation(
+        &self,
+        request_id: Id128,
+        now: u64,
+    ) -> Result<([u8; 16], PendingContextRequest), AslError> {
+        self.context_requests
+            .iter()
+            .find(|((_, id), pending)| {
+                *id == request_id.0 && pending.expires > now && pending.offer.is_some()
+            })
+            .map(|((connection, _), pending)| (*connection, pending.clone()))
+            .ok_or(AslError::NotFound)
+    }
+
+    pub(crate) fn complete_context_request(&mut self, connection: [u8; 16], request: Id128) {
+        self.context_requests.remove(&(connection, request.0));
+    }
+
+    pub(crate) fn prune_context_requests(&mut self, now: u64) {
+        self.context_requests
+            .retain(|_, pending| pending.expires > now);
+    }
+
+    pub(crate) fn observe_context_offer(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        request_id: [u8; 16],
+        frame: &WireFrame,
+        now: u64,
+    ) -> bool {
+        let WireFrame::ContextOffer(offer) = frame else {
+            return false;
+        };
+        let key = (connection, request_id);
+        let Some(pending) = self.context_requests.get(&key) else {
+            return false;
+        };
+        if pending.expires <= now
+            || pending.offer.is_some()
+            || pending.source != source
+            || offer.request_id.0 != request_id
+            || offer.reference != pending.reference
+            || offer.expires_at_ms > pending.expires
+            || offer.expires_at_ms <= now
+            || !self.admit(source.agent_id, offer.message_id, offer.expires_at_ms, now)
+        {
+            return false;
+        }
+        self.offers.retain(|_, existing| existing.expires > now);
+        if self.offers.len() >= HANDLE_LIMIT {
+            return false;
+        }
+        let Ok(handle) = fresh_id().map(Id128) else {
+            return false;
+        };
+        let details = json!({
+            "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+            "message_id": hex::encode(offer.message_id.0),
+            "request_id": hex::encode(offer.request_id.0),
+            "offer_id": hex::encode(handle.0),
+            "context_ref": {
+                "authority": hex::encode(offer.reference.authority.0),
+                "namespace": offer.reference.namespace,
+                "revision": offer.reference.revision,
+                "digest": hex::encode(offer.reference.digest.0),
+            },
+            "content_id": hex::encode(offer.content_id.0),
+            "file_size": offer.file_size,
+            "expires_at_ms": offer.expires_at_ms,
+        });
+        self.offers.insert(
+            handle,
+            HeldOffer {
+                source,
+                connection,
+                room: None,
+                content: offer.content_id,
+                expires: offer.expires_at_ms.min(now.saturating_add(MAIL_TTL_MS)),
+                context_ref: Some(offer.reference),
+            },
+        );
+        if let Some(pending) = self.context_requests.get_mut(&key) {
+            pending.offer = Some(handle);
+        }
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "context_file_offer",
+                details,
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn observe_context_agreement(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        request_id: [u8; 16],
+        frame: &WireFrame,
+        now: u64,
+    ) -> bool {
+        let WireFrame::ContextAgreement(agreement) = frame else {
+            return false;
+        };
+        let key = (connection, request_id);
+        let Some(pending) = self.context_requests.get(&key) else {
+            return false;
+        };
+        if pending.expires <= now
+            || pending.source != source
+            || agreement.request_id.0 != request_id
+            || agreement.reference != pending.reference
+            || !self.admit(source.agent_id, agreement.message_id, pending.expires, now)
+        {
+            return false;
+        }
+        let status = match agreement.status {
+            ContextAgreementStatus::Conformant => 0,
+            ContextAgreementStatus::Unresolved => 1,
+            ContextAgreementStatus::Rejected => 2,
+        };
+        self.context_requests.remove(&key);
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "context_agreement",
+                details: json!({
+                    "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+                    "message_id": hex::encode(agreement.message_id.0),
+                    "request_id": hex::encode(agreement.request_id.0),
+                    "context_ref": {
+                        "authority": hex::encode(agreement.reference.authority.0),
+                        "namespace": agreement.reference.namespace,
+                        "revision": agreement.reference.revision,
+                        "digest": hex::encode(agreement.reference.digest.0),
+                    },
+                    "status": status,
+                }),
+            })
+            .is_ok()
+    }
+
     pub(crate) fn request_inbox_binding(
         &mut self,
         store: &asl_store::Store,
@@ -276,6 +646,18 @@ impl Mailbox {
         frame: &WireFrame,
         now: u64,
     ) -> bool {
+        self.observe_with_evaluation(source, connection, room, frame, now, None)
+    }
+
+    pub(crate) fn observe_with_evaluation(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        room: Option<(Hash32, u64, GroupTransferBinding)>,
+        frame: &WireFrame,
+        now: u64,
+        evaluation: Option<&crate::semantic_context::SemanticEvaluation>,
+    ) -> bool {
         let (kind, id, root, created, expiry) = match frame {
             WireFrame::Expression(e) => (
                 "expression",
@@ -305,6 +687,20 @@ impl Mailbox {
                 a.created_at_ms,
                 a.expires_at_ms,
             ),
+            WireFrame::ContextRequest(request) => (
+                "context_request",
+                request.message_id,
+                request.message_id,
+                0,
+                request.expires_at_ms,
+            ),
+            WireFrame::ContextExpression(e) => (
+                "context_expression",
+                e.message_id,
+                e.root_task_id,
+                e.created_at_ms,
+                e.expires_at_ms,
+            ),
             _ => return false,
         };
         if created > now || !self.admit(source.agent_id, id, expiry, now) {
@@ -317,6 +713,24 @@ impl Mailbox {
         });
         match frame {
             WireFrame::Expression(e) => details["expression"] = e.expression.to_json(),
+            WireFrame::ContextExpression(ContextExpression { .. }) => {
+                let Ok(bytes) = asl_types::protocol::encode_control(frame) else {
+                    return false;
+                };
+                if bytes.len() > asl_types::protocol::MAX_CONTROL_FRAME_BYTES {
+                    return false;
+                }
+                details["control_cbor_hex"] = json!(hex::encode(bytes));
+                if let Some(evaluation) = evaluation {
+                    details["semantic_evaluation"] = evaluation.to_host_value();
+                }
+            }
+            WireFrame::ContextRequest(_) => {
+                let Ok(bytes) = asl_types::protocol::encode_control(frame) else {
+                    return false;
+                };
+                details["control_cbor_hex"] = json!(hex::encode(bytes));
+            }
             WireFrame::Offer(Offer {
                 content_id,
                 file_size,
@@ -340,6 +754,7 @@ impl Mailbox {
                         room,
                         content: *content_id,
                         expires: expiry.min(now.saturating_add(MAIL_TTL_MS)),
+                        context_ref: None,
                     },
                 );
             }
@@ -358,6 +773,67 @@ impl Mailbox {
         self.port.events.send(MailEvent { kind, details }).is_ok()
     }
 
+    pub(crate) fn observe_act(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        room: (Hash32, u64, GroupTransferBinding),
+        act: &Act,
+        now: u64,
+    ) -> bool {
+        let expires = act.expires_at_ms.unwrap_or(u64::MAX);
+        if !self.admit(source.agent_id, act.message_id, expires, now) {
+            return false;
+        }
+        let Ok(bytes) = act.encode() else {
+            return false;
+        };
+        let mut details = json!({
+            "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+            "room": format!("group:{}", hex::encode(room.0.0)),
+            "connection_id": hex::encode(connection),
+            "mls_epoch": room.1,
+            "conversation_id": hex::encode(act.conversation_id.0),
+            "message_id": hex::encode(act.message_id.0),
+            "causal_root": hex::encode(act.causal_root.0),
+            "reply_to": act.reply_to.map(|id| hex::encode(id.0)),
+            "act_type": act.act_type.as_str(),
+            "hop": act.hop,
+            "expires_at_ms": act.expires_at_ms,
+            "attachments": act
+                .attachments
+                .iter()
+                .map(|attachment| hex::encode(attachment.0))
+                .collect::<Vec<_>>(),
+            "act_cbor_hex": hex::encode(bytes),
+        });
+        if let Some(body) = &act.nl_body {
+            details["untrusted_remote_data"] = json!({
+                "kind": "act_nl_body",
+                "text": body,
+                "source_agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+                "conversation_id": hex::encode(act.conversation_id.0),
+                "message_id": hex::encode(act.message_id.0),
+            });
+        }
+        if let Some(action) = &act.action {
+            details["action"] = json!({
+                "id": [
+                    action.action_id.vocabulary_id,
+                    action.action_id.concept_id
+                ],
+                "arg_count": action.args.len(),
+            });
+        }
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "act",
+                details,
+            })
+            .is_ok()
+    }
+
     pub(crate) fn take_offer(&mut self, id: Id128, now: u64) -> Result<HeldOffer, AslError> {
         self.offers
             .remove(&id)
@@ -369,5 +845,88 @@ impl Mailbox {
             .get(&id)
             .filter(|offer| now < offer.expires)
             .ok_or(AslError::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod context_offer_tests {
+    use super::*;
+    use crate::identity::DeviceIdentity;
+    use asl_types::protocol::{ContextAgreement, ContextAgreementStatus, ContextOffer};
+
+    #[test]
+    fn only_a_correlated_context_offer_becomes_a_downloadable_inbox_event() {
+        let mut mailbox = Mailbox::default();
+        let mut events = mailbox.port.subscribe();
+        let source = DownloadSource {
+            agent_id: AgentId([3; 32]),
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+        };
+        let reference = SemanticContextRef {
+            authority: AgentId([7; 32]),
+            namespace: 12,
+            revision: 2,
+            digest: Hash32([9; 32]),
+        };
+        let request_id = Id128([1; 16]);
+        mailbox
+            .remember_context_request(
+                source.clone(),
+                QueryScope::Public,
+                [4; 16],
+                request_id,
+                reference,
+                100,
+                3,
+            )
+            .unwrap();
+
+        let mismatched = WireFrame::ContextOffer(ContextOffer {
+            message_id: Id128([2; 16]),
+            request_id,
+            reference: SemanticContextRef {
+                digest: Hash32([10; 32]),
+                ..reference
+            },
+            content_id: Hash32([11; 32]),
+            file_size: 321,
+            expires_at_ms: 90,
+        });
+        assert!(!mailbox.observe_context_offer(
+            source.clone(),
+            [4; 16],
+            request_id.0,
+            &mismatched,
+            3,
+        ));
+        assert!(mailbox.observe_context_offer(
+            source.clone(),
+            [4; 16],
+            request_id.0,
+            &WireFrame::ContextOffer(ContextOffer {
+                message_id: Id128([3; 16]),
+                request_id,
+                reference,
+                content_id: Hash32([11; 32]),
+                file_size: 321,
+                expires_at_ms: 90,
+            }),
+            3,
+        ));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.kind, "context_file_offer");
+        let offer_id =
+            hex::decode_to_array::<_, 16>(event.details["offer_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            mailbox.live_offer(Id128(offer_id), 3).unwrap().context_ref,
+            Some(reference)
+        );
+        let unavailable = WireFrame::ContextAgreement(ContextAgreement {
+            message_id: Id128([4; 16]),
+            request_id,
+            reference,
+            status: ContextAgreementStatus::Unresolved,
+        });
+        assert!(mailbox.observe_context_agreement(source, [4; 16], request_id.0, &unavailable, 4,));
     }
 }

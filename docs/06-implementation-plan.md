@@ -4,7 +4,7 @@
 
 **Goal:** 完整实现 R01–R33，发布可无人值守运行的 A信 1.0。
 
-**Architecture:** Rust workspace 分层实现；确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。确定性 CBOR/CDDL 语义协议、身份根/公共链校验、策略服务、SQLite、MLS 群状态和纯传输调度器分别测试；GUI 只观察与授权。
+**Architecture:** Rust workspace 分层实现；确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。确定性 CBOR/CDDL 控制面、身份根/公共链校验、策略服务、SQLite、OpenMLS 两人/群会话、加密邮箱和纯传输调度器分别测试；ASL/1.3 `nl-body` 只在 MLS 解密后作为不可信数据进入模型数据区。GUI 只观察与授权。
 
 **Tech Stack:** Rust 1.100.0、libp2p 0.57.1、OpenMLS 0.9.2、Tokio、SQLite/FTS5、egui/eframe 0.35.0、rmcp、Windows AppContainer/Job Object。
 
@@ -14,7 +14,7 @@
 
 - 完整 1.0 包含 R01–R33，不删成 MVP。
 - 单文件最多 68,719,476,736 字节，固定块 1,048,576 字节。
-- 控制 CBOR 最多 65,536 字节，manifest 最多 2,097,210 字节；控制协议不定义自由文本字段。
+- 控制 CBOR 最多 65,536 字节，manifest 最多 2,097,210 字节；外层控制面、DHT、身份记录和 MCP 控制消息不定义任意文本。ASL/1.3 唯一文本例外是 MLS 解密后的 `act[5] nl-body`，它永远不能成为指令、策略、路径或动作。
 - 模型最多一次修复，非法输出整次拒绝。
 - 应用层不转发 query；incoming 不产生远端检索。
 - 信任/贡献/自动偏好不参与授权。
@@ -23,7 +23,7 @@
 - 项目自身 MIT，第三方许可独立保留。
 - browsing 与 answering 分别授权；默认不自动回答。
 - upload/download 每次询问是可选授权策略；确认绑定内容、目标和群 membership epoch，不逐块确认。
-- 群消息使用 MLS 端到端加密；只向明确成员点对点投递，不引入群广播 mesh。
+- 私聊和群聊都使用 MLS 端到端加密；小群使用已认证成员 direct fan-out，中大群使用 gossipsub 传播密文，万人级使用分层拓扑。人数由本机实测容量和编译期资源上限决定，不使用固定 64 人业务上限。
 - `unsafe` 仅允许在 `asl-policy/src/platform/windows/`，新增位置需专项复核。
 
 ## 文件地图
@@ -64,7 +64,7 @@ contracts/{src/IdentityRegistry.sol,test/IdentityRegistry.t.sol,foundry.toml}
 ## 里程碑与依赖
 
 - A：T01–T10（含 T06a/T06b），类型/持久化/身份链/权限与隔离基础。
-- B：T11–T19，资源、网络、发现与对话。
+- B：T11–T19，资源、网络、发现与通用会话；G00 是 T19 前必须完成的两人/群 MLS 会话基底。
 - C：T20–T24，完整文件传输。
 - D：T25–T30，普通模型自主流程、经验与接入。
 - E：T31–T34，群协议/Agent 集成及完整 GUI。
@@ -298,6 +298,19 @@ cargo test -p asl-types --test signed_records
 
 T13 实现记录（2026-11-18）：记录核心、严格嵌套 CBOR、固定签名原文、目录承诺与短码派生已实现；app 接入现有根签名和当前链身份 resolver，记录/设备序号与撤销观察单调、有界并原子更新。资料默认不发布，明确配置后每 5 分钟生成候选；撤下停止续发，头像引用每次经过公开资源授权。具体 Rust 入口使用已验证的 RecordPayload 推导 kind，并显式传入本机签发身份/时间及验证 resolver。此前未定义的记录封装/目录/短码 CDDL 已在协议文档中显式补全，没有更改既有控制帧或合约接口。24 项 codec、37 项 app 记录测试和工作区共 226 项测试函数通过，Clippy、格式和 CDDL 语法/ACK 检查通过。历史/发布游标仍为内存状态，DHT 入站过滤、总额度、持久化、实际投递与发送取消在后续任务集成；不声称 T17 或完整节点发现完成。详见 `docs/signed-records.md`。
 
+### 2026-11-25 T14–T19 增量验收口径
+
+以下增量依据 `docs/11-semantic-v2-scalable-groups-plan.md`，不删除或回退各任务已经通过的安全切片。ASL/1.1 表达式和 ASL/1.2 语义上下文保持不变；`act-nl` 使用 ASL/1.3。
+
+| 任务 | 新增验收 |
+| --- | --- |
+| T14 | act、MLS 群流、邮箱和 gossip 事件只能在链身份、设备目录、设备证书和认证 PeerId 全部准入后交付；监听、bootstrap、relay 和邮箱宿主都来自配置/发现，换地址不崩溃 |
+| T15 | relay 只转发密文和受限元数据；邮箱宿主、gossip 邻居和 relay 各有本机配额；缺失主机不写死默认地址 |
+| T16 | LAN 可直连；未验证连接不能进入 act；观察到的 IP 只用于本机资源分桶和用户查看，不进入公开身份 |
+| T17 | DHT 只存封闭结构记录、邮箱槽和轮换 pseudonymous topic；拒绝任意文本、`nl-body`、文件名、目录路径和长期可追踪主题；信任值不改变记录授权 |
+| T18 | 旧 query/answer 继续服务确定性检索；act 对话不得伪装成 query；两者共享发送前身份、预算和 audience 重验 |
+| T19 | 使用通用私聊/群聊会话；移除固定三回合/六消息；实现可续期预算、causal-root、hop、去重、加密邮箱补收和明确的未发送/未收取通知 |
+
 ### T14 — libp2p Driver 与链身份握手
 
 依赖 T02、T10、T13。创建 net behaviour/transport/driver。
@@ -454,17 +467,35 @@ T18a 配对核心切片（2026-11-20）：新增有界短码 provider 候选集�
 
 T18a 配对 request-response 接线与提示限流（2026-11-20）：邀请和接受/拒绝响应已接入 `/asl/pair/1.0.0`、Net/Core IPC、Supervisor admission 流程。邀请可附一条签名覆盖的可选单句说明，最多 120 个 Unicode 字符；提示记录升级到 SQLite schema v7，按 AgentId 每 24 小时最多展示 1 次，全机每小时最多展示 20 次，最多 5 个并行待处理提示。超限邀请签名拒绝且不 pin；回答命令必须精确匹配当前待处理邀请、连接和响应句柄。完整配对 GUI 仍未实现，本轮不声明端到端 UI 已完成。
 
-### T19 — 会话、消息与有限 outbox
+### G00 — 通用 MLS 会话基底
 
-依赖 T18、T05。创建 store messages/outbox、agent conversation。
+依赖 T06、T14；可与 T15–T18 并行，必须在 T19 前完成。复用 OpenMLS 0.9.2，不自创群密钥、应用加密或成员树。
 
-验收最多 3 回合/6 语义消息，answer/ack/error 不创建任务；重启不重新回答旧消息；离线最多 3 次本机重试且总 10 分钟。fetch_grant 和 lease 不进聊天/outbox。
+工作：以同一房间接口建立私聊两人组和群组，统一 Welcome、Commit、epoch、成员、KeyPackage、密文日志、重放和恢复；act 只从 MLS application plaintext 进入 Core；私聊不保留“认证连接直接发明文”的旁路；预算、outbox、邮箱、附件和历史均引用同一 `conversation-id = MLS group_id`。
+
+验收：
+
+- 两台独立设备建立两人 MLS，双向发送/解密 act，重启后从持久化状态恢复。
+- 两人组和 3 人群使用同一编解码、预算、历史和附件引用路径。
+- 非成员、错误 epoch、重复 act、被移除设备和旧设备证书不能发送或解密。
+- 私聊和群聊都能把未在线消息交给同一加密邮箱入口，不出现按会话类型分叉的明文实现。
+
+```text
+cargo test -p asl-groups --test mls_application
+cargo test -p asl-app --test conversation_lifecycle
+```
+
+### T19 — 通用会话、可续期预算与 outbox
+
+依赖 G00、T18、T05。创建 store conversation/act events/outbox、agent conversation。
+
+验收不再写死三回合/六消息。私聊和群聊均按用户可续期预算扣减消息、字节和模型调用额度；续期产生新预算版本，重连、重启、换设备不能重置旧消耗。`act-id`、`conversation-id`、`reply-to`、`causal-root`、hop、MLS epoch 和持久去重共同阻止无界循环。预算耗尽进入等待授权状态；在线消息进入有界 outbox，离线消息进入加密邮箱，队列或磁盘不足时明确显示未发送/未收取，不静默丢弃。answer/ack/error 不创建新任务；重启不重新回答旧消息。fetch_grant 和 lease 不进 act、聊天历史或 outbox。
 
 ```text
 cargo test -p asl-agent --test conversation_lifecycle
 ```
 
-T19 已完成本地状态机与 SQLite 存储切片（2026-11-19）：`asl-agent::Conversation` 实现任务关联、Peer 绑定、3 回合/6 条语义消息预算、重复消息去重、10 分钟 outbox 窗口和最多 3 次离线重试；`asl-store::conversation` 将任务、CBOR `messages.body_cbor`、`outbox` 和 `processed_requests` 写入同一 SQLite 事务。回答、确认和错误只能挂到已有任务，未知回答不会创建任务；fetch request、fetch grant 和 lease 不进入聊天记录或 outbox。已有 schema v1 的表直接复用，本轮没有新增迁移。
+T19 旧本地状态机与 SQLite 存储切片（2026-11-19，兼容状态）：该切片实现任务关联、Peer 绑定、旧三回合/六条语义消息额度、重复消息去重、10 分钟 outbox 窗口和最多 3 次离线重试；`asl-store::conversation` 将任务、CBOR `messages.body_cbor`、`outbox` 和 `processed_requests` 写入同一 SQLite 事务。这个固定额度只保留为旧代码状态，ASL/1.3 必须改由预算表替换。回答、确认和错误只能挂到已有任务，未知回答不会创建任务；fetch request、fetch grant 和 lease 不进入聊天记录或 outbox。已有 schema v1 的表直接复用，本轮没有新增迁移；act/邮箱/续期预算需要 v35+，不能把本记录解释为已完成。
 
 T19 集中验证（2026-11-19，Windows x64，Rust 1.100.0，E 盘 Cargo 缓存，离线）：`cargo test -p asl-agent -p asl-store --all-targets --locked --offline` 通过 93 项、0 失败、1 项忽略；新增 `asl-agent/tests/conversation_lifecycle.rs` 3 项和 `asl-store/tests/conversation_lifecycle.rs` 2 项，覆盖预算、重试、未知回答、非会话帧、重启后的 `processed_requests` 和 outbox 恢复。`cargo clippy -p asl-agent -p asl-store --all-targets --locked --offline -- -D warnings` 与 `cargo fmt --all -- --check` 通过。真实 Core/Net handler、SQLite 与网络运行时的联调、三节点公网互测和 GUI 仍未完成，不能将 T19 写成完整端到端会话已完成。
 
@@ -608,9 +639,9 @@ T25 集中验证（2026-11-20）：Windows x64、Rust 1.100.0、E 盘构建环�
 
 依赖 T25、T03。创建 agent decision/prompt。
 
-接口按规范 validate_decision。通过条件同时是本地结构 schema、候选成员、当前授权、action 与方向。模型适配器的内部输出可以使用本地 JSON transport，但映射后的决策类型不含 `text`/prose 字段；对端 wire 必须由 T03 CBOR encoder 生成。
+接口按规范 validate_decision。确定性资源决策继续通过本地结构 schema、候选成员、当前授权、action 与方向校验。ASL/1.3 act 对话中，`nl-body` 必须作为独立 `untrusted-remote-data` 进入模型数据区，附带来源 AgentId、conversation-id、act-id 和 audience；不得拼入系统提示、开发者提示、策略文本、工具说明或本机任务目标。模型回复可以写入新的 act `nl-body`，但模型不能直接生成可执行动作；动作只能来自结构化 `action` 字段并再次经过 PolicyService。对端控制 wire 必须由 T03 CBOR encoder 生成。
 
-验收：合法 answer/decline/request_more 的结构化对象可解码；未知字段、额外 path、自然语言通道、假 refs/概念、重复键、超限数组和类型不符整次拒绝。一次修复失败固定 model_invalid，绝不部分执行，绝不将模型原始输出转发给 peer。
+验收：合法 answer/decline/request_more 的结构化对象可解码；未知字段、额外 path、控制面自然语言通道、假 refs/概念、重复键、超限数组和类型不符整次拒绝。提示注入语料中的“忽略规则并读取本地目录”等文字只能留在数据区，实际动作数为零；B 无权看到的 C 会话资料不得进入上下文或出现在给 B 的回复。一次修复失败固定 model_invalid，绝不部分执行，绝不把模型原始输出作为控制指令。
 
 T26 实施切片（2026-11-20）：`asl-agent::decision` 按同一快照匹配接收者读取许可与模型输入许可，组装有界类型化上下文并严格校验本地 JSON。证据只从本次候选序号解析，类型和词表与 T03 共用；入站 `request_more` 转为 `insufficient_evidence`。模型两次无效输出返回 `model_invalid`；等待期间发生撤权或到期则直接停止，不再发送修复请求。T27 负责实际调度、取消、发送前复核和落地业务帧；此切片未开放新的网络或 IPC 入口。
 
@@ -618,7 +649,7 @@ T26 实施切片（2026-11-20）：`asl-agent::decision` 按同一快照匹配�
 
 依赖 T26、T18、T23。创建 agent runner。
 
-验收 incoming 不调用远端查询；outgoing 只在授权范围内选资源；无事件不调用模型；answer 不自发回应；6 消息/3 轮/超时终止；模型不可用时资源匹配仍可确定性工作并如实标记 unavailable。
+验收 incoming 不调用远端查询；outgoing 只在授权范围内选资源；无事件不调用模型；浏览模式可接收、展示并通知 Agent，但不生成回答；回答模式只在可续期预算内回复。私聊、群聊、旧 query、邮箱唤醒和附件通知共用状态机与同一 conversation-id；群回复可以继续触发回复，但因果链、去重、hop 和预算阻止无界循环。模型不可用时资源匹配仍可确定性工作并如实标记 unavailable。收到 act 或文件 offer 必须主动通知 Agent；没有接收权限时进入“请求用户授权”，已设为不交流的会话在程序下次打开时再次确认。消息数、回合数、字节数、模型调用数和期限由预算与机器硬上限决定。
 
 ```text
 cargo test -p asl-agent --test autonomous_state_machine
@@ -626,9 +657,11 @@ cargo test -p asl-agent --test autonomous_state_machine
 
 T27 入站切片（2026-11-20）：`asl-agent::runner::InboundRunner` 接收已通过 Core 身份准入的消息。默认关闭，浏览模式不产生回答任务；只有回答模式的有效 query 才创建本地工作。复用查询去重和会话预算，一个 AgentId 的多个设备共用一个待处理名额。模型不可用时，从当前接收者获准的本地元数据生成主题匹配结果或资源 offer，并在本机标记 `model_unavailable`；不读取文件内容、不触发传输、不发起外部查询。关停回答、断开连接或超时可令待处理工作失效；提取消息前需重验附带的资源许可。
 
-T27 直连集成（2026-11-20）：`Supervisor::run()` 已将认证连接上的 query 接入 SQLite 授权检索和原请求应答通道。`asl-core --direct-inbound off|browse|answer` 写入当前 `ASL_HOME` 的本机设置；未设置时关闭，仅 `answer` 会运行检索和回复。直接检索仅考虑本机已导入且授权给该接收者的资源，每次检查最近最多 4096 条已索引候选，最多返回一个结构化匹配；`NoMatch` 始终标记为未验证，不代表完整库无结果。全局最多每 250 毫秒启动一次处理，同一 AgentId 的设备共用一秒冷却。SQLite 持久化 AgentId/root_task_id 的三轮/六条语义消息预算，以及 AgentId/message_id 的十分钟请求去重；重复、重启或换设备不能重答或重置预算。交给 Net 前重验持久链状态的目录 commitment、序号和控制器，另复核资源、当前本机开关及连接。最终授权与有限队列交接一起执行，不在 SQLite 事务内写管道；Net 检查交接期限和原连接的单次回复句柄。Offer 不含正文、路径或可直接使用的传输权限。
+T27 直连集成旧切片（2026-11-20，兼容状态）：`Supervisor::run()` 已将认证连接上的 query 接入 SQLite 授权检索和原请求应答通道。`asl-core --direct-inbound off|browse|answer` 写入当前 `ASL_HOME` 的本机设置；未设置时关闭，仅 `answer` 会运行检索和回复。直接检索仅考虑本机已导入且授权给该接收者的资源，每次检查最近最多 4096 条已索引候选，最多返回一个结构化匹配；`NoMatch` 始终标记为未验证，不代表完整库无结果。全局最多每 250 毫秒启动一次处理，同一 AgentId 的设备共用一秒冷却。SQLite 当前仍持久化旧 AgentId/root_task_id 三轮/六条语义消息额度，以及 AgentId/message_id 的十分钟请求去重；重复、重启或换设备不能重答或重置该旧额度。ASL/1.3 不得继续使用这两个数字，改由 `conversation_budget_grants` 的可续期预算取代。交给 Net 前重验持久链状态的目录 commitment、序号和控制器，另复核资源、当前本机开关及连接。最终授权与有限队列交接一起执行，不在 SQLite 事务内写管道；Net 检查交接期限和原连接的单次回复句柄。Offer 不含正文、路径或可直接使用的传输权限。
 
 T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPort`，只接受本地类型化 `OutgoingTask` 且限 `ContactsOnly`；队列最多 16 项、同时运行最多 8 项。Core 从本机 `authorized_contacts` 与当前已准入会话的交集中，按本地授权顺序挑选现有在线联系人；没有通过身份准入的 PeerId 不进入查询路由。发送前仍由 `CoreAdmission` 对该连接重验链身份，再通过原 Net request-response 通道发送固定 CBOR `Query`。Answer、Offer、Error 只按 request ID/AgentId/连接关联，Answer/Offer 还须匹配 root task 与有效期限；Offer 只接受资源型任务。结果经有界结构事件端口回交调用方，不自动追问、不自动拉取文件，也不调用模型。QueryRouter 终结任务后释放状态槽。
+
+T27 计划 11 增量（部分实现）：act 编解码、MLS application 收发、入站主动通知、`untrusted_remote_data` 隔离、MCP 发 act、发送侧持久预算、gossipsub 网络与 Core act 路由已接入；`ASL_MCP_GROUPS=admin` 下可建群、邀请和创建两人 MLS 会话。仍未接入 act 历史、自动模型回复、audience 自动裁剪、预算续期 UI、远程加密邮箱唤醒和跨机规模验收；在这些功能完成前，不宣称“无限制交流”或“任意内容可理解”已完整验收。
 
 出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；contacts-only 只向已在线且本地列入 `authorized_contacts` 的联系人直询，Public scope 已接入 DHT provider 查询和准入后直询。bootstrap 配置/节点入口、资源 provider 发布、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
 
@@ -684,13 +717,15 @@ cargo test -p asl-app --test mcp_contract
 cargo test -p asl-app --lib mcp_offer_and_approved_tcp_chunks_publish_to_authorized_inbox
 ```
 
-### T31 — OpenMLS 群房间与加密投递
+### T31 — OpenMLS 群房间、邮箱与可伸缩加密投递
 
-依赖 T06、T14、T19。创建 `asl-groups` 房间服务、持久化适配器、基于现有认证连接的逐成员 fan-out 与定向邀请协议。优先复用 OpenMLS 0.9.2 的 RFC 9420 实现；不得自创群密钥、消息加密或成员树。
+依赖 G00、T06、T14、T19。创建 `asl-groups` 房间服务、持久化适配器、私聊/群聊通用会话、direct fan-out、gossipsub、加密邮箱与定向邀请协议。优先复用 OpenMLS 0.9.2 的 RFC 9420 实现；不得自创群密钥、消息加密或成员树。
 
-固定应用约束：最多 64 名成员、群消息最多 64 KiB、群事件本地保留 7 天、状态 catch-up 最多 256 个 epoch。MLS credential 必须绑定稳定 AgentId 与当前已验证链状态/设备证书；迁移设备通过新叶子入组，不复制旧 ratchet 状态。MLS 解密后的 application plaintext 必须为 CDDL 定义的 ASL 结构对象；禁止自由自然语言字段。仅当前成员收到群帧，OpenMLS 仅在核验 authenticated sender、链状态、设备证书、群成员和 epoch 后处理消息。群标识、群名、成员清单和群资源不发布到 DHT。
+应用约束：删除固定 64 人业务上限；单帧仍受编译期资源上限和本机消息预算约束，群事件本地默认保留 7 天，状态 catch-up 仍最多 256 个 epoch。MLS credential 必须绑定稳定 AgentId 与当前已验证链状态/设备证书；迁移设备通过新叶子入组，不复制旧 ratchet 状态。MLS 解密后的 application plaintext 必须是 CDDL 定义的 ASL 结构对象；ASL/1.1 表达式和 ASL/1.2 语义上下文不新增文本，ASL/1.3 只允许一个可选 `act[5] nl-body`。仅当前成员收到群帧，OpenMLS 仅在核验 authenticated sender、链状态、设备证书、群成员和 epoch 后处理消息。群标识、群名、成员清单和群资源不发布到 DHT；邮箱和 gossip 只传播密文及受限路由元数据。
 
-验收：邀请仅定向到指定 PeerId；加入前不接收群帧；非成员、伪造 credential、过期或重复消息、未授权成员变更和超预算 catch-up 均拒绝。并发/陈旧 commit 可恢复或明确进入 `needs_sync`，不静默分叉。离线成员消息尽力投递、不承诺必达；状态可从获准成员同步有限 commit，超预算后需重新邀请。验证成员退出/移除后的新消息不可解密，并说明旧消息无法远程删除。
+验收：邀请仅定向到指定 PeerId，建群/邀请/加入/移除都经用户授权；加入前不接收群帧；非成员、伪造 credential、过期或重复消息、未授权成员变更和超预算 catch-up 均拒绝。并发/陈旧 commit 可恢复或明确进入 `needs_sync`，不静默分叉。离线消息进入加密邮箱，支持固定大小桶、分片、TTL、签收和轮换 pseudonymous topic；邮箱落盘不含明文。小群使用 direct fan-out，中大群使用 gossipsub，万人级使用分层拓扑；`direct_max`、mesh、队列和并发由本机实测决定，迁移不改变 MLS group_id、epoch 或去重语义。验证成员退出/移除后的新消息不可解密，并说明旧消息无法远程删除。
+
+规模验收矩阵：2、32、128、512 个设备验证 direct/gossip 切换、成员移除、预算公平性和失败恢复；2,000 个逻辑成员验证 gossip 收敛、主题轮换和邮箱积压；10,000 级分层拓扑验证子群桥接、Welcome/Commit 成本和单机资源保护。每档记录 CPU、内存、磁盘、带宽、p95 收敛、重复率和失败恢复；本机低于门槛时拒绝继续扩容。此矩阵在新实现完成后执行，不从现有 3 节点群测试推导。
 
 T31 初始编解码切片（2026-11-20）：新增独立群子流 codec，复用冻结的 `GroupEnvelope`；MLS 应用明文只接受规范 Query、Answer、Offer。OpenMLS 0.9.2 集成夹具验证真实入组、应用消息及移除后新消息无法解密。此阶段未开放群子流，不包含生产链身份绑定、持久化、邀请、fan-out 或同步。线上/本机群 ID 的映射与 SQLite provider 兼容性已专项核对，待实施项见 [群组接线记录](group-rooms.md)。
 
@@ -740,11 +775,11 @@ T31 三节点容器回环验收（2026-11-22）：管理员定向用例已验证
 
 ### T32 — 群策略、浏览/回答与传输确认
 
-依赖 T07、T20、T27、T31。创建确定性策略与 Agent 群事件适配。添加 `browse_enabled`、`answer_enabled`；回答关闭时保留群消息浏览但模型调用/回答数为零。群回复不能触发新回复；按 group/message ID 去重并沿用单轮预算。
+依赖 T07、T20、T27、T31。创建确定性策略与 Agent 群事件适配。添加 `browse_enabled`、`answer_enabled`；回答关闭时保留群消息浏览但模型调用/回答数为零。按 conversation/act/message ID 去重，并使用可续期预算、因果链和 hop 限制循环；不再保留“群回复绝不触发回复”的业务禁令。
 
 新增 `group` 资源 audience；仅显式授权给群的资源可由当前成员获取。群 membership epoch 进入 permit/lease；成员变化后重判，移除成员失去新读取权限，既有副本不可召回。上传和下载分别支持 `authorized` / `ask`。ask 确认绑定 transfer、content ID、接收方或本地目标、grant epoch、可选 group epoch 与过期时间；超时拒绝，任何绑定变化要求重新确认，块级请求不得弹窗。
 
-验收：浏览-only 收到并显示消息但不运行模型；回答关闭时无 query/answer 输出；偏好/贡献不能扩群权限；群成员不能读取未授权目录；撤销或成员移除使未发 lease 失效；未确认传输不读取/写入文件，过期确认拒绝，已确认内容/目标/epoch 改变后拒绝继续。
+验收：浏览-only 收到并显示消息但不运行模型；回答关闭时无 query/answer/act 回复输出；回答模式受可续期预算约束。群回复可以继续触发回复，但 `causal-root`、hop、act-id 去重和预算必须阻止无界循环。偏好/贡献不能扩群权限；群成员不能读取未授权目录；撤销或成员移除使未发 lease 失效；未确认传输不读取/写入文件，过期确认拒绝，已确认内容/目标/epoch 改变后拒绝继续。私聊和群聊文件共用同一 `offer -> fetch -> chunk -> hash` 路径，act 的附件只携带 blob-ref；收到文件 offer 主动通知 Agent，无权限时请求用户授权。
 
 实现进展（2026-11-21）：已接入 SQLite v16 群下载绑定、群范围资源检索和下载许可、结构化群 FetchRequest/FetchGrant 与现有 Bulk 通道；群 lease 由本机映射到群和认证设备，不接受消息自报群 ID。成员变化会使旧同意、lease 和未完成下载失效。活动成员侧周期性只向已连接的创建者核对 MLS head，已活动房间也能发现后续成员变更；本机创建者仅在提交后核验自身 head/roster/设备证据时重新激活。群入站浏览/回答开关保存于本机，默认可浏览但不回答；显式启用回答后由结构化查询与本机授权检索生成结果，不调用模型。群查询由独立 runner 处理，并以 wire group ID 隔离持久化重放预算；三 Core 流程覆盖启用回答、关闭节点不显示新消息/不回复及成员移除后的投递范围。授权 ask 的绑定、过期、拒绝、撤销和群 epoch 变化矩阵已由集中测试覆盖；`asl-core --downloads` / `--uploads` 提供本机列表、模式切换及批准/拒绝。对应 GUI 授权界面属于 T34；公网和真实 AppContainer 网络仍未验收。
 
@@ -916,7 +951,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | R29 | T13、T17、T18a、T33 |
 | R30 | T14–T18a、T33–T34、T37–T38 |
 | R31 | T05、T06、T06a、T06b、T13–T15、T37–T40 |
-| R32 | T03、T13、T17–T19、T26–T28、T31–T32、T37、T39 |
+| R32 | G00、T03、T13、T17–T19、T26–T28、T31–T32、T37、T39；控制面严格结构化，唯一自然语言在 MLS 解密后的 `act[5] nl-body`，并作为不可信数据隔离 |
 | R33 | T09–T10、T14–T18、T20–T29、T37–T38 |
 
 ## 工作量判断

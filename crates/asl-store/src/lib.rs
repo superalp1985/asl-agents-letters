@@ -19,6 +19,7 @@ mod group_observations;
 pub mod group_state;
 mod host_inbox;
 pub mod inbound_observations;
+pub mod mailbox;
 pub mod mcp_recovery;
 pub mod migration;
 pub mod network_privacy;
@@ -30,10 +31,11 @@ mod remote_profiles;
 pub mod resources;
 mod retention;
 pub mod search;
+pub mod semantic_context;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 35;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -66,6 +68,9 @@ const SCHEMA_V29: &str = include_str!("../../../specs/schema-v29.sql");
 const SCHEMA_V30: &str = include_str!("../../../specs/schema-v30.sql");
 const SCHEMA_V31: &str = include_str!("../../../specs/schema-v31.sql");
 const SCHEMA_V32: &str = include_str!("../../../specs/schema-v32.sql");
+const SCHEMA_V33: &str = include_str!("../../../specs/schema-v33.sql");
+const SCHEMA_V34: &str = include_str!("../../../specs/schema-v34.sql");
+const SCHEMA_V35: &str = include_str!("../../../specs/schema-v35.sql");
 
 pub struct Store {
     connection: Connection,
@@ -284,6 +289,15 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 32 {
             apply_migration_in_transaction(&transaction, SCHEMA_V32, 32, now)?;
+        }
+        if version < 33 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V33, 33, now)?;
+        }
+        if version < 34 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V34, 34, now)?;
+        }
+        if version < 35 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V35, 35, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

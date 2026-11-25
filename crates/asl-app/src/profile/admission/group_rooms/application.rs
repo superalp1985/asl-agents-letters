@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use asl_groups::{
     GroupApplication, encrypt_application,
     local_state::{RoomBinding, seal_with_history},
-    open_application,
+    open_application, open_application_with_sender,
 };
 use asl_net::transport::REQUEST_TIMEOUT;
 use asl_store::{
     Store,
     group_state::{
-        MlsApplicationAuthority, MlsJournalEntry, MlsJournalKind, MlsRoomUpdate, RoomVersion,
+        MlsApplicationAuthority, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
+        RoomVersion,
     },
 };
 use asl_types::{
@@ -20,7 +21,7 @@ use asl_types::{
 use openmls::prelude::CredentialWithKey;
 
 use super::{CoreAdmission, LocalRoomCandidate, sync::SyncClock};
-use crate::profile::admission::fresh_id;
+use crate::profile::{admission::fresh_id, group_credential};
 
 pub struct MlsApplicationReceive<'a> {
     pub connection_id: [u8; 16],
@@ -34,6 +35,31 @@ struct ApplicationSource<'a> {
     connection_id: [u8; 16],
     key: &'a CredentialWithKey,
     device: &'a PeerId,
+}
+
+enum ApplicationOrigin<'a> {
+    Direct(ApplicationSource<'a>),
+    Roster {
+        kind: &'static str,
+        key: &'a CredentialWithKey,
+        member: &'a MlsMemberEvidence,
+    },
+}
+
+impl<'a> ApplicationOrigin<'a> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Direct(source) => source.kind,
+            Self::Roster { kind, .. } => kind,
+        }
+    }
+
+    fn device(&self) -> &PeerId {
+        match self {
+            Self::Direct(source) => source.device,
+            Self::Roster { member, .. } => &member.certificate.peer_id,
+        }
+    }
 }
 
 impl CoreAdmission {
@@ -149,6 +175,11 @@ impl CoreAdmission {
         {
             return Err(AslError::IncompatibleVersion);
         }
+        if matches!(application, GroupApplication::Act(_))
+            && !self.peer_supports_act(receive.connection_id)
+        {
+            return Err(AslError::IncompatibleVersion);
+        }
         let (created, expires) = application_times(&application);
         check_application_creation(created, clock.now_ms()?)?;
         let (_, browse_enabled) = self.persist_mls_application(
@@ -156,12 +187,12 @@ impl CoreAdmission {
             &candidate,
             packet,
             application.message_id(),
-            Some(ApplicationSource {
+            Some(ApplicationOrigin::Direct(ApplicationSource {
                 kind: application.kind(),
                 connection_id: receive.connection_id,
                 key: &sender_key,
                 device: &peer,
-            }),
+            })),
             || {
                 let now = clock.now_ms()?;
                 if now >= expires {
@@ -170,10 +201,96 @@ impl CoreAdmission {
                 Ok(now)
             },
         )?;
-        Ok(
-            (!matches!(application, GroupApplication::Expression(_)) || browse_enabled)
-                .then_some(application),
-        )
+        Ok((!matches!(
+            application,
+            GroupApplication::Expression(_) | GroupApplication::Act(_)
+        ) || browse_enabled)
+            .then_some(application))
+    }
+
+    pub fn apply_mls_gossip(
+        &mut self,
+        store: &mut Store,
+        packet: &GroupPacket,
+        directories: &HashMap<AgentId, Vec<u8>>,
+        now: u64,
+    ) -> Result<Option<(GroupApplication, AgentId, PeerId)>, AslError> {
+        packet.validate_request()?;
+        if !matches!(packet.body, GroupBody::Application(_)) {
+            return Err(AslError::InvalidMessage);
+        }
+        let snapshot = store
+            .mls_room_snapshot(packet.group_id)?
+            .ok_or(AslError::PolicyDenied)?;
+        let (state, _) = store
+            .mls_room_progress(packet.group_id)?
+            .ok_or(AslError::PolicyDenied)?;
+        if state != "active" || packet.epoch != snapshot.version.mls_epoch {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        let mut candidate = self.load_mls_application_base(
+            store,
+            packet.group_id,
+            snapshot.version,
+            directories,
+            now,
+        )?;
+        let (application, sender_index) = open_application_with_sender(
+            &mut candidate.base.group,
+            &candidate.base.provider,
+            packet,
+        )?;
+        if sender_index == candidate.group.own_leaf_index() {
+            return Err(AslError::PolicyDenied);
+        }
+        let sender_leaf = candidate
+            .leaves
+            .iter()
+            .find(|leaf| leaf.member.index == sender_index)
+            .ok_or(AslError::PolicyDenied)?;
+        let member = candidate
+            .roster
+            .members
+            .iter()
+            .find(|member| {
+                member.certificate.peer_id == sender_leaf.certificate.peer_id
+                    && member.certificate.agent_id == sender_leaf.certificate.agent_id
+            })
+            .ok_or(AslError::PolicyDenied)?;
+        let sender_key = CredentialWithKey::from(&sender_leaf.member);
+        group_credential::verify_binding(
+            packet.group_id,
+            &sender_key,
+            &member.certificate,
+            member.controller,
+        )?;
+        let (created, expires) = application_times(&application);
+        check_application_creation(created, now)?;
+        if now >= expires {
+            return Err(AslError::ExpiredMessage);
+        }
+        let (_, browse_enabled) = self.persist_mls_application(
+            store,
+            &candidate,
+            packet,
+            application.message_id(),
+            Some(ApplicationOrigin::Roster {
+                kind: application.kind(),
+                key: &sender_key,
+                member,
+            }),
+            || Ok(now),
+        )?;
+        let visible = browse_enabled
+            || !matches!(
+                application,
+                GroupApplication::Expression(_) | GroupApplication::Act(_)
+            );
+        Ok(visible.then_some((
+            application,
+            member.certificate.agent_id,
+            member.certificate.peer_id.clone(),
+        )))
     }
 
     pub(super) fn load_mls_application_base(
@@ -203,7 +320,7 @@ impl CoreAdmission {
         candidate: &LocalRoomCandidate,
         packet: &GroupPacket,
         message_id: Id128,
-        incoming: Option<ApplicationSource<'_>>,
+        incoming: Option<ApplicationOrigin<'_>>,
         current_time: impl Fn() -> Result<u64, AslError>,
     ) -> Result<(RoomVersion, bool), AslError> {
         let GroupBody::Application(ciphertext) = &packet.body else {
@@ -243,11 +360,11 @@ impl CoreAdmission {
                 sealed_snapshot: &snapshot,
                 members: &members,
                 event: Some(MlsJournalEntry {
-                    sender: incoming.as_ref().map_or(&local, |source| source.device),
+                    sender: incoming.as_ref().map_or(&local, ApplicationOrigin::device),
                     kind: incoming
                         .as_ref()
                         .map_or(MlsJournalKind::Application(message_id), |source| {
-                            MlsJournalKind::ReceivedApplication(message_id, source.kind)
+                            MlsJournalKind::ReceivedApplication(message_id, source.kind())
                         }),
                     ciphertext,
                 }),
@@ -264,23 +381,35 @@ impl CoreAdmission {
                 // exact deadline compared against the post-check sample.
                 for _ in 0..2 {
                     let now = current_time()?;
-                    let session_expiry = if let Some(source) = &incoming {
-                        self.verify_admitted_group_leaf(
-                            source.connection_id,
-                            packet.group_id,
-                            source.key,
-                            now,
-                        )?;
-                        self.peers
-                            .get(&source.connection_id)
-                            .and_then(|peer| peer.session.admission_facts())
-                            .ok_or(AslError::InvalidIdentity)?
-                            .1
-                    } else {
-                        if !self.local_is_current(now) {
-                            return Err(AslError::InvalidIdentity);
+                    let session_expiry = match &incoming {
+                        Some(ApplicationOrigin::Direct(source)) => {
+                            self.verify_admitted_group_leaf(
+                                source.connection_id,
+                                packet.group_id,
+                                source.key,
+                                now,
+                            )?;
+                            self.peers
+                                .get(&source.connection_id)
+                                .and_then(|peer| peer.session.admission_facts())
+                                .ok_or(AslError::InvalidIdentity)?
+                                .1
                         }
-                        u64::MAX
+                        Some(ApplicationOrigin::Roster { key, member, .. }) => {
+                            group_credential::verify_binding(
+                                packet.group_id,
+                                key,
+                                &member.certificate,
+                                member.controller,
+                            )?;
+                            member.certificate.expires_at_ms
+                        }
+                        None => {
+                            if !self.local_is_current(now) {
+                                return Err(AslError::InvalidIdentity);
+                            }
+                            u64::MAX
+                        }
                     };
                     let directory_expiry =
                         roster.require_current_directories(&mut self.resolver, now)?;
@@ -308,6 +437,7 @@ pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>,
         GroupApplication::FetchPending(pending) => (None, pending.expires_at_ms),
         GroupApplication::Error(_) => (None, u64::MAX),
         GroupApplication::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
+        GroupApplication::Act(act) => (None, act.expires_at_ms.unwrap_or(u64::MAX)),
     }
 }
 

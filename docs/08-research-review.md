@@ -1,6 +1,6 @@
 # 一手资料、Fable 5.2 咨询与最终裁决
 
-日期：2026-11-20。资料优先官方仓库、规范、注册表和系统文档。公开项目描述不是安全审计或实际性能证据。
+日期：2026-11-20。资料优先官方仓库、规范、注册表和系统文档。公开项目描述不是安全审计或实际性能证据。2026-11-25 加注：D4/D5 已把对话通道更新为 MLS 解密后的 ASL/1.3 `act-nl`；本文件的“无自由文本”历史结论继续只适用于控制面和结构化查询。
 
 ## 1. 实际咨询
 
@@ -26,7 +26,7 @@
 | iroh 与 libp2p 二选一 | 选 libp2p，统一发现/DHT/中继/文件协议，不维护两套网络栈 |
 | 全文搜索 | 本地 FTS5 + 有界候选直询，DHT 只作精确 tag/content provider |
 | 应用层转发 | 不做 query 转发，避免转发者把自己的 contacts 权限借给别人 |
-| Agent 间自由文本 | ASL/1 语义帧、DHT 资料记录和 MLS 应用明文不含自然语言字段；使用 CBOR/CDDL、类型化 concept ID 与结构化 claim |
+| Agent 间自由文本（2026-11-25 修订） | 控制面、DHT、身份记录、预算和结构化群应用不含任意自然语言；ASL/1.3 act 的 `nl-body` 只在 MLS application plaintext 内，作为不可信数据交付，不能创建动作或授权 |
 | 仅凭 hash 下载 | 不允许；使用 peer 绑定 lease，私有内容不发 provider |
 | 全局 revision | 触发重判/审计，实际失效依据 grant epoch 和当前成员权限 |
 | 位图恢复 | 不盲信位图，重验 durable 块与最终整文件 |
@@ -91,7 +91,7 @@ Rust 复用边界：Alloy 可评估用于 EVM 类型、交易和 typed-data 编�
 - offer 的 title/summary/tags 改为 content ID、媒体/资源类别枚举、concept IDs、大小和期限；文件名只在本机接收后生成。
 - profile 名称、说明、地区和自由标签不经网络发布；公开 profile 只含授权概念和头像引用。
 - 文件是单独授权的不透明载荷，不是控制协议字段；不得自动解析为对话/指令或交给模型。授权模型处理仍需本机 grant。
-- MLS ciphertext 不透明，但解密后的应用明文必须是 ASL/1 结构对象。不能映射到词表的语义不发送，不能回退成 JSON 字符串。
+- MLS ciphertext 不透明，解密后的应用明文必须是既有结构化群应用或 ASL/1.3 act。结构化查询/表达式仍不能映射到词表就不得回退为字符串；开放式语义只允许写入 act `nl-body`，并保持不可信数据隔离。
 
 ## 3.4 个人电脑优先的 Sybil 防护
 
@@ -99,7 +99,7 @@ Rust 复用边界：Alloy 可评估用于 EVM 类型、交易和 typed-data 编�
 
 ## 4. 可复用项目
 
-- OpenMLS：复用 RFC 9420 群密钥/成员状态与端到端消息保护；不复制源码，也不自行实现群密码学。群消息用现有认证连接逐成员投递，不用 pubsub，减少组件和群元数据暴露。
+- OpenMLS：复用 RFC 9420 群密钥/成员状态与端到端消息保护；不复制源码，也不自行实现群密码学。历史建议曾排除 pubsub；2026-11-25 D2 已改为小群 direct、大群使用只传播密文的 libp2p gossipsub，成员资格仍只由 MLS Commit 决定。
 - egui/eframe 版本从 0.37.0 调整为 0.35.0：T02 编译发现与 libp2p 0.57.1 的 wasm 依赖固定冲突，不能通过双版本解决；保持网络栈不变，选择仍兼容 Rust 1.95 的 GUI 版本。
 - rust-libp2p：主网络栈和官方 examples。`https://github.com/libp2p/rust-libp2p`
 - 官方 Kademlia 规范：精确键、provider 与记录验证。`https://github.com/libp2p/specs/tree/master/kad-dht`

@@ -5,10 +5,11 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
+        ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
         DeviceCertificate, Expression, ExpressionLetter, Feature, FetchGrant, FetchPending,
         FetchRequest, GroupEnvelope, GroupOperation, Hello, IdentityProof, IdentityProofRequest,
         Intent, MediaKind, Offer, PairingExchange, PairingInvite, Profile, ProtocolError, Query,
-        ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame,
+        ResultShape, ResultStatus, SemanticContextRef, StorageProof, TypedValue, WireFrame,
     },
 };
 
@@ -224,5 +225,60 @@ pub fn sample_frames() -> Vec<WireFrame> {
             ]))
             .unwrap(),
         }),
+        WireFrame::ContextRequest(ContextRequest {
+            message_id: Id128([21; 16]),
+            reference: SemanticContextRef {
+                authority: agent,
+                namespace: 4,
+                revision: 1,
+                digest: Hash32([22; 32]),
+            },
+            expires_at_ms: 200,
+        }),
+        WireFrame::ContextOffer(ContextOffer {
+            message_id: Id128([23; 16]),
+            request_id: Id128([21; 16]),
+            reference: SemanticContextRef {
+                authority: agent,
+                namespace: 4,
+                revision: 1,
+                digest: Hash32([22; 32]),
+            },
+            content_id: Hash32([24; 32]),
+            file_size: 4_096,
+            expires_at_ms: 200,
+        }),
+        WireFrame::ContextAgreement(ContextAgreement {
+            message_id: Id128([25; 16]),
+            request_id: Id128([21; 16]),
+            reference: SemanticContextRef {
+                authority: agent,
+                namespace: 4,
+                revision: 1,
+                digest: Hash32([22; 32]),
+            },
+            status: ContextAgreementStatus::Conformant,
+        }),
+        WireFrame::ContextExpression(ContextExpression {
+            message_id: Id128([26; 16]),
+            root_task_id: Id128([4; 16]),
+            created_at_ms: 100,
+            expires_at_ms: 200,
+            required_contexts: vec![SemanticContextRef {
+                authority: agent,
+                namespace: 4,
+                revision: 1,
+                digest: Hash32([22; 32]),
+            }],
+            expression: Expression::from_json(&serde_json::json!([
+                "meaning",
+                ["concept", hex_agent(agent), 4, 1, 7]
+            ]))
+            .unwrap(),
+        }),
     ]
+}
+
+fn hex_agent(agent: AgentId) -> String {
+    agent.0.iter().map(|byte| format!("{byte:02x}")).collect()
 }

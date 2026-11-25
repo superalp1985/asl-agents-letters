@@ -4,7 +4,7 @@ use super::*;
 use crate::address_policy::{AddressPolicy, validate_multiaddr};
 use crate::dht::BoundedRecordStore;
 use libp2p::{
-    kad, mdns, relay,
+    gossipsub, kad, mdns, relay,
     request_response::ProtocolSupport,
     swarm::{THandlerInEvent, behaviour::toggle::Toggle, dummy},
 };
@@ -25,6 +25,7 @@ pub(super) struct AslBehaviour {
     pub(super) pairing: request_response::Behaviour<PairingCodec>,
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
     pub(super) group: Toggle<request_response::Behaviour<GroupStreamCodec>>,
+    pub(super) gossip: super::gossip::GossipBehaviour,
 }
 
 #[derive(Debug)]
@@ -39,6 +40,7 @@ pub(super) enum BehaviourEvent {
     Pairing(request_response::Event<PairingInvite, PairingExchange>),
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
     Group(request_response::Event<TimedGroupEnvelope, GroupEnvelope>),
+    Gossip(gossipsub::Event),
 }
 
 #[derive(Debug)]
@@ -100,6 +102,12 @@ impl From<request_response::Event<TimedGroupEnvelope, GroupEnvelope>> for Behavi
     }
 }
 
+impl From<gossipsub::Event> for BehaviourEvent {
+    fn from(value: gossipsub::Event) -> Self {
+        Self::Gossip(value)
+    }
+}
+
 impl AslBehaviour {
     pub(super) fn new(
         local_peer_id: libp2p::PeerId,
@@ -155,6 +163,8 @@ impl AslBehaviour {
             group: loopback_groups
                 .then(|| request_response(GroupStreamCodec::new(REQUEST_TIMEOUT), GROUP_PROTOCOL))
                 .into(),
+            gossip: super::gossip::new_behaviour()
+                .expect("static bounded gossipsub configuration must be valid"),
         }
     }
 

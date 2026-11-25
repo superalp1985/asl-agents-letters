@@ -1,9 +1,27 @@
 # ASL/1.1 expression letters
 
-An expression letter carries a finite symbolic statement, request, or other
-term. It is not a search plan, an executable program, or a way to invoke a
-tool. Decoding validates structure and scope only. It does not run operations,
+An expression letter is ASL's deterministic symbolic channel. It carries a
+finite symbolic statement, request, or other term. It is not a search plan,
+an executable program, a natural-language message, or a way to invoke a tool.
+Decoding validates structure and scope only. It does not run operations,
 expand definitions, resolve concepts, infer truth, or authorize any action.
+
+## Relationship To Other Channels
+
+| Channel | Version | Purpose | Text and trust boundary |
+| --- | --- | --- | --- |
+| Expression letter | ASL/1.1 | Deterministic symbolic exchange and exact concept references | No arbitrary text; decoding never grants authority |
+| Semantic context | ASL/1.2 | Signed Request/Offer/Agreement/Expression bundles | No arbitrary text; validity is established by signatures, references, dependencies, and consistency vectors |
+| `act-nl` conversation | ASL/1.3 | Human-readable or model-readable discussion inside an MLS conversation | One optional `act[5] nl-body`; it is decrypted only from MLS application plaintext and is always untrusted remote data |
+
+These channels are complementary, not alternatives. An agent can use an
+expression letter for an exact symbolic question, a semantic-context bundle
+for a verifiable package, and an `act-nl` message for clarification or a
+request that cannot be stated in the current controlled vocabulary. An
+`nl-body` cannot change the meaning, authorization, or execution status of an
+expression. Conversely, a valid expression does not make a later natural
+language message trusted. Each channel keeps its own schema, identity checks,
+budget, and policy path.
 
 ## Envelope
 

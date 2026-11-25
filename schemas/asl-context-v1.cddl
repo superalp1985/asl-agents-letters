@@ -1,0 +1,66 @@
+; Semantic context package file format. Package bytes are data-only and never
+; executable. Rust adds semantic checks for ordering, root-definition binding,
+; dependency scope and expression limits.
+
+semantic-context-file = {
+  0: 1,
+  1: semantic-context-bundle,
+  2: bstr .size 65
+}
+
+semantic-context-bundle = {
+  0: 1,
+  1: agent-id,
+  2: uint .le 4294967295,
+  3: uint .le 65535,
+  4: uint .le 65535,
+  5: [0*64 semantic-context-ref],
+  6: [1*4096 semantic-concept-definition],
+  7: [1*4096 semantic-conformance-vector]
+}
+
+semantic-context-ref = [
+  agent-id,
+  uint .le 4294967295,
+  uint .le 65535,
+  hash32
+]
+
+semantic-concept-definition = [
+  uint .le 4294967295,
+  uint .le 16,
+  expression-term
+]
+
+semantic-conformance-vector = [
+  uint .le 4294967295,
+  uint .le 4294967295,
+  [0*16 expression-term],
+  expression-term
+]
+
+; Reuse the expression grammar without importing its letter envelope.
+expression-term = [0, expression-i64] / [1, expression-i64, 1..18] / [2, bool] /
+                  [3, expression-unary-op, expression-term] /
+                  [3, expression-binary-op, expression-term, expression-term] /
+                  [4, expression-index] / [5, expression-term, expression-term] /
+                  [6, expression-arity, expression-term, expression-term] /
+                  [7, expression-index, expression-items] /
+                  [8, expression-term, expression-term, expression-term] /
+                  [9, expression-term] / [10, expression-term] / [11, expression-items] /
+                  expression-concept / [13, expression-concept] /
+                  [14, expression-concept, expression-arity, expression-term] /
+                  [15, expression-concept, expression-items]
+expression-i64 = -9223372036854775808..9223372036854775807
+expression-index = 0..255
+expression-arity = 0..16
+expression-items = [0*16 expression-term]
+expression-concept = [
+  12,
+  agent-id,
+  uint .le 4294967295,
+  uint .le 65535,
+  uint .le 4294967295
+]
+expression-unary-op = 4 / 13
+expression-binary-op = 0..3 / 5..12

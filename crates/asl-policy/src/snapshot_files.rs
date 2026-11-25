@@ -20,6 +20,51 @@ pub struct PinnedHome {
     _unavailable: std::convert::Infallible,
 }
 
+pub struct LegacyRootSeed {
+    #[cfg(windows)]
+    inner: crate::platform::windows::handles::LegacyRootSeed,
+    #[cfg(not(windows))]
+    _unavailable: std::convert::Infallible,
+}
+
+impl LegacyRootSeed {
+    pub fn read_seed(&mut self) -> Result<[u8; 32], AslError> {
+        #[cfg(windows)]
+        {
+            self.inner.read()
+        }
+        #[cfg(not(windows))]
+        {
+            match self._unavailable {}
+        }
+    }
+
+    pub fn retire(self) -> Result<(), AslError> {
+        #[cfg(windows)]
+        {
+            self.inner.retire()
+        }
+        #[cfg(not(windows))]
+        {
+            match self._unavailable {}
+        }
+    }
+}
+
+pub fn open_legacy_root_seed(home: &Path) -> Result<LegacyRootSeed, AslError> {
+    #[cfg(windows)]
+    {
+        Ok(LegacyRootSeed {
+            inner: crate::platform::windows::handles::open_legacy_root_seed(home)?,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = home;
+        Err(AslError::PlatformUnavailable)
+    }
+}
+
 impl PinnedHome {
     pub fn open(home: &Path) -> Result<Self, AslError> {
         #[cfg(windows)]
@@ -245,6 +290,21 @@ impl StagedSnapshot {
         progress: impl FnMut() -> Result<(), AslError>,
         observe: impl FnOnce(&[u8]),
     ) -> Result<Self, AslError> {
+        let mut observe = Some(observe);
+        Self::copy_from_observing_chunks(home, source, progress, move |chunk| {
+            if let Some(observe) = observe.take() {
+                observe(chunk);
+            }
+        })
+    }
+
+    /// Observe each source chunk from the same pinned handle used for copying.
+    pub fn copy_from_observing_chunks(
+        home: &Path,
+        source: &mut AuthorizedFile,
+        progress: impl FnMut() -> Result<(), AslError>,
+        mut observe: impl FnMut(&[u8]),
+    ) -> Result<Self, AslError> {
         #[cfg(windows)]
         {
             use asl_types::manifest::{CHUNK_SIZE, content_id, encode_manifest};
@@ -258,7 +318,6 @@ impl StagedSnapshot {
             let mut whole = blake3::Hasher::new();
             let mut chunk_hashes = Vec::new();
             let mut buffer = vec![0; remaining.min(u64::from(CHUNK_SIZE)) as usize];
-            let mut first_chunk = Some(observe);
             while remaining != 0 {
                 let len = remaining.min(u64::from(CHUNK_SIZE)) as usize;
                 let chunk = &mut buffer[..len];
@@ -266,9 +325,7 @@ impl StagedSnapshot {
                 blob.write_all(chunk)?;
                 whole.update(chunk);
                 chunk_hashes.push(*blake3::hash(chunk).as_bytes());
-                if let Some(observe) = first_chunk.take() {
-                    observe(chunk);
-                }
+                observe(chunk);
                 remaining -= len as u64;
                 progress()?;
             }

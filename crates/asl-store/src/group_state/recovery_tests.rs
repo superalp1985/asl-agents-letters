@@ -9,7 +9,7 @@ use rusqlite::params;
 use super::{
     MlsEpochBindings, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
     MlsSyncAddAuthority, MlsSyncReadAuthority, PendingMlsRoom,
-    tests::{register_agent_peer, register_peer, test_peer},
+    tests::{register_agent_peer, register_peer, test_peer, test_peer_u64},
     transition::peer_text,
 };
 use crate::{Store, chain::agent_text, open_store};
@@ -146,7 +146,7 @@ fn reconciliation_reads_a_bounded_active_projection_of_the_paused_room() {
     set_role(&member, "member");
 
     for index in 0..(MAX_GROUP_MEMBERS - 1) {
-        let peer = test_peer(u8::try_from(index + 10).unwrap());
+        let peer = test_peer_u64(u64::try_from(index + 10).unwrap());
         register_peer(&store, &peer, i64::try_from(index + 10).unwrap());
         store
             .connection

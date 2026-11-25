@@ -26,6 +26,7 @@ pub(super) struct ActiveJob {
     group: Option<asl_store::transfers::GroupTransferBinding>,
     state: State,
     events: SyncSender<DownloadEvent>,
+    context_ref: Option<asl_types::protocol::SemanticContextRef>,
     host_resume: Option<(TransferId, [u8; 32])>,
 }
 
@@ -139,6 +140,10 @@ impl ActiveJob {
                     Ok(Source::new(source, registered))
                 })
                 .collect::<Result<_, AslError>>()?;
+            let context_ref = match &job {
+                DownloadJob::Fetch(selection) => selection.context_ref,
+                DownloadJob::Resume { .. } | DownloadJob::ResumeForHost { .. } => None,
+            };
             let (content, state) = match job {
                 DownloadJob::Fetch(selection) => (
                     selection.content_id,
@@ -178,6 +183,7 @@ impl ActiveJob {
                 group,
                 state,
                 events: queued.events.clone(),
+                context_ref,
                 host_resume,
             }))
         })();
@@ -460,10 +466,35 @@ impl ActiveJob {
         }
     }
 
-    pub(super) fn report_terminal(&self, result: Result<Option<DownloadInfo>, AslError>) -> bool {
+    pub(super) fn report_terminal(
+        &self,
+        local: &mut LocalDownloads,
+        result: Result<Option<DownloadInfo>, AslError>,
+        now_ms: u64,
+    ) -> bool {
         let event = match result {
             Ok(None) => return false,
-            Ok(Some(info)) => DownloadEvent::Completed(info),
+            Ok(Some(info)) => {
+                if let Some(reference) = self.context_ref {
+                    let stored = i64::try_from(now_ms)
+                        .ok()
+                        .and_then(|now| {
+                            local
+                                .broker
+                                .cache_downloaded_semantic_context(
+                                    &info.transfer_id,
+                                    reference,
+                                    now,
+                                )
+                                .ok()
+                        })
+                        .unwrap_or(false);
+                    let _ = self
+                        .events
+                        .try_send(DownloadEvent::ContextCandidate { reference, stored });
+                }
+                DownloadEvent::Completed(info)
+            }
             Err(error) => DownloadEvent::Failed(error),
         };
         let _ = self.events.try_send(event);

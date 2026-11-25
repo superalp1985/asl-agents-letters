@@ -1,16 +1,18 @@
 ; ASL/1 peer-to-peer protocol.
-; All map keys and enum values are unsigned integers. No wire text strings.
+; All map keys and enum values are unsigned integers. Wire text is allowed only
+; in pairing-invite[8] and MLS-decrypted act[5] nl-body.
 ; Decoders MUST reject unknown keys, duplicate keys, indefinite lengths,
 ; non-preferred integers, trailing bytes, and non-deterministic encodings.
 
 control-frame = hello / query / answer / offer / fetch-request /
-                fetch-grant / error / ack / profile / fetch-pending / expression-letter
+                fetch-grant / error / ack / profile / fetch-pending / expression-letter /
+                context-request / context-offer / context-agreement / context-expression
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
 ; Authenticated plaintext inside an MLS application message, not an outer frame.
 group-application = query / answer / offer / fetch-request /
-                    fetch-grant / fetch-pending / error / expression-letter
+                    fetch-grant / fetch-pending / error / expression-letter / act
 
 id128 = bstr .size 16
 hash32 = bstr .size 32
@@ -18,6 +20,7 @@ agent-id = bstr .size 32
 peer-id = bstr .size (1..128)
 signature65 = bstr .size 65
 time-ms = uint .le 9223372036854775807
+positive-time-ms = 1..9223372036854775807
 
 ; Concept refs identify entries in a versioned, localizable ASL vocabulary.
 concept-ref = [uint .le 65535, uint .le 4294967295]
@@ -35,7 +38,7 @@ constraint = {
   2: typed-value
 }
 intent-id = 1..6
-feature-id = 1 / 2 / 3 / 4
+feature-id = 1 / 2 / 3 / 4 / 5
 constraint-operator = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7
 result-shape = 0 / 1 / 2
 answer-status = 0 / 1 / 2 / 3
@@ -149,6 +152,74 @@ expression-letter = {
   4: time-ms,
   5: time-ms,
   6: expression-term
+}
+
+; ASL/1.2 semantic-context exchange. Package bytes use authorized file transfer.
+semantic-context-ref = [agent-id, uint .le 4294967295, 1..65535, hash32]
+context-agreement-status = 0 / 1 / 2
+context-request = {
+  0: 1,
+  1: 16,
+  2: id128,
+  3: agent-id,
+  4: uint .le 4294967295,
+  5: 1..65535,
+  6: hash32,
+  7: positive-time-ms
+}
+context-offer = {
+  0: 1,
+  1: 17,
+  2: id128,
+  3: id128,
+  4: agent-id,
+  5: uint .le 4294967295,
+  6: 1..65535,
+  7: hash32,
+  8: hash32,
+  9: 1..8388608,
+  10: positive-time-ms
+}
+context-agreement = {
+  0: 1,
+  1: 18,
+  2: id128,
+  3: id128,
+  4: agent-id,
+  5: uint .le 4294967295,
+  6: 1..65535,
+  7: hash32,
+  8: context-agreement-status
+}
+context-expression = {
+  0: 1,
+  1: 19,
+  2: id128,
+  3: id128,
+  4: time-ms,
+  5: time-ms,
+  6: [0*64 semantic-context-ref],
+  7: expression-term
+}
+
+; ASL/1.3 act-nl. This value is valid only as decrypted MLS application plaintext.
+; Total canonical act bytes are 1..61440. nl-body is the only text field.
+act-type = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9
+act-action = {
+  0: concept-ref,
+  1: { * uint .le 4294967295 => typed-value }
+}
+act = {
+  1: id128,
+  2: id128,
+  3: act-type,
+  ? 4: id128,
+  ? 5: tstr .size (1..32768),
+  ? 6: act-action,
+  ? 7: [0*16 hash32],
+  8: id128,
+  9: uint .le 1024,
+  ? 10: positive-time-ms
 }
 
 expression-term = [0, expression-i64] / [1, expression-i64, 1..18] / [2, bool] /

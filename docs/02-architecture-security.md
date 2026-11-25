@@ -4,13 +4,13 @@
 
 Rust workspace，八个 crate。使用 rust-libp2p 一个网络栈；不同时引入 iroh、iroh-blobs 或第二套 DHT。完整版要求精确标签发现、多个入口、中继、独立文件授权与多来源调度，单栈更便于冻结接口和测试。
 
-固定采用 QUIC + TCP/Noise/Yamux、Kademlia、mDNS、identify、ping、relay v2、AutoNAT、DCUtR 和 request-response。不接入 pubsub，也不广播文件清单；不接 IPFS 的公共 DHT 命名空间。最多 64 人的小组复用现有认证连接逐成员投递，OpenMLS 实现 MLS 群密码学，不自行设计群密钥协议。
+固定采用 QUIC + TCP/Noise/Yamux、Kademlia、mDNS、identify、ping、relay v2、AutoNAT、DCUtR、request-response 和 gossipsub。小群通过对已认证成员 direct fan-out 投递 MLS 密文；中大群用 gossipsub 传播 MLS 密文；万人级需要分层拓扑。协议不设 64 人业务上限，路由由本机实测容量决定。gossip 不授予成员资格，也不广播文件清单；不接 IPFS 的公共 DHT 命名空间。OpenMLS 实现 MLS 群密码学，不自行设计群密钥协议。
 
 身份分为本机保护的 secp256k1 身份根密钥与逐设备传输密钥。AgentId 由初始根公钥派生；公共链登记当前控制者、设备状态承诺、序号和撤销状态。每台设备的 libp2p PeerId 由独立 Ed25519 密钥得到，并由身份根密钥签发有期限的设备证书。联系人固定 AgentId，网络连接认证设备。DHT/短码只负责发现。链验证依赖已验证最终化区块头及状态证明；链不能证明真人身份、唯一控制者、善意或设备安全。
 
 链上默认生产配置建议 Ethereum Mainnet + 极小、不可升级、无管理员 EVM registry。T06a 已实现 immutable 合约和本地 Foundry 测试；T06b 已实现本地 Helios/Alloy 验证、有界 HTTP 获取和 SQLite 持久恢复。尚未部署、测量主网 gas、真实多运营商证明服务互测或独立审计。链 ID、地址和实际部署 runtime code hash 通过版本化网络配置提供，代码不硬编码端点或部署地址。ASL 不维护私有链，不收费、不发币。多个独立志愿提交者可替用户提交其签名操作并承担 gas；用户可选自付。若都不可用，新身份保持 pending_anchor，链校验失败只能降级，不能扩大权限。详见 `specs/identity-registry-v1.md`。
 
-P2P 语义控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。控制帧中不得出现自由文本字段；模型输入/输出的应用决策也必须转换为受限类型对象。libp2p 自身握手、地址和基础协议不属于 ASL 语义载荷，但 ASL 不把其字符串字段转交给 Agent 作为指令。
+P2P 控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。外层帧、DHT 记录、身份记录、群成员事件、邮箱槽、预算、附件和 MCP 控制消息都不得出现任意文本。ASL/1.3 唯一例外是 MLS application plaintext 内的可选 `act[5] nl-body`：解码器只在 act 正文接受 text string，其余位置遇到 text string 必须拒绝。`nl-body` 是不可信数据，不是命令、路径、策略、动作或寻址信息。
 
 候选依赖版本见 `specs/dependency-baseline.json`。版本已查询，但依赖组合尚未编译；必须在任务 T01/T02/T14/T39 编译探针后形成 Cargo.lock，不由模型自行追最新版。
 
@@ -52,6 +52,28 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 `asl-net` 仅将有界不透明 MLS 字节通过认证连接发送给明确的群成员；不为非成员转发群消息。解密、成员状态和群授权留在 core 的 `asl-groups`。入站应用消息只有通过设备证书、AgentId 钉住状态、MLS 验证、当前成员/epoch 检查后才交给 Agent。MLS credential 同时绑定 AgentId 与设备证书；新设备作为新叶子加入，不复制旧设备 ratchet 状态。连接时序和通信双方仍可被观察。
 
 群授权是独立的 audience 类型，不能隐式折算为 `contacts`。群成员变更增加群成员 epoch；群范围 permit、lease 和待处理传输绑定该 epoch，并在发送前重新判定。新成员只有在本地授权该群范围后才能读取群资源。每次询问确认同样绑定接收 PeerId 与群 epoch。
+
+### 2.1 act、私聊与预算
+
+ASL/1.3 `act` 只能从 MLS application plaintext 解码。私聊定义为两人 MLS 组，不得另建“已验证连接直接发明文”的旁路；私聊和群聊共用 act 编解码、去重、预算、因果链、邮箱、历史和附件引用。`conversation-id` 等于 MLS `group_id`，路由只决定 ciphertext 如何传播，不改变群身份。
+
+每次入站 act 按固定顺序处理：认证连接与设备证书、验证活动链身份、检查 MLS 成员/epoch、去重、扣减预算、持久化、通知 Agent，然后才允许模型或本地处理。`ask` 可以触发检索和模型回答；浏览模式可读但不回答。`inform`、`clarify` 和 `ack` 进入历史；`request` 只能引用本机 PolicyService 注册的 action-id，远端文字本身不能执行动作。
+
+预算由主体、会话、有效期、消息数、字节数、模型调用数、CPU/时间和邮箱配额组成，可由用户明确续期。续期生成新版本并持久记录消耗；换设备、重连、重启或更换 PeerId 不能重置旧额度。预算耗尽后等待用户授权。机器硬上限、队列和并发仍然生效，因此“不写死轮数”不等于无限资源。
+
+### 2.2 提示注入与 audience 裁剪
+
+MLS 能阻止第三方读取或篡改，但不能约束发送者本人。对端 `nl-body` 可能包含提示注入，所以必须进入独立的 `untrusted-remote-data` 数据区，并携带来源 AgentId、conversation-id、act-id 和 audience；不得拼进系统提示、开发者提示、策略文本、工具说明或本机任务目标。
+
+模型不能通过文字创建工具调用。模型只能生成新的 `nl-body` 或结构化 action proposal；真正动作必须来自 act 的结构化 `action` 字段并经 PolicyService 重验，敏感动作按本机策略请求用户确认。模型上下文在组装前按 audience 裁剪：只允许当前会话成员、当前发送者和本机策略共同允许的资料进入提示，不允许“可能有用”就读取只授权给另一会话的数据。回复发送前还要再次检查输出是否包含当前 audience 无权获知的资料。
+
+### 2.3 邮箱、gossip 与附件
+
+离线邮箱是 DHT/relay 上的密文存储，不是中心明文服务器。发件端生成设备或 MLS 加密 envelope；托管节点只保存随机槽位、密文摘要、TTL、大小桶和有限可用性信息。邮箱按固定大小桶填充并可按 `shard-id` 分片，topic 使用轮换 pseudonymous 标识，不包含群名、Agent 名或长期稳定可追踪标签。收件端通过认证后拉取密文、校验摘要、重组和解密；本地落盘只保存密文，解密后的历史按本机保留策略处理。
+
+gossipsub 只传播 MLS ciphertext 和受限路由元数据。主题与群/epoch 绑定并轮换；接收端按 act-id、group-id、epoch 和摘要去重。成员资格仍只由 MLS Commit 决定。群可从 direct fan-out 迁移到 gossip，迁移不改 `group_id`、epoch 或消息去重语义。
+
+act 附件只携带 `blob-ref`。文件继续走既有 `offer -> fetch -> chunk -> hash` 授权路径，读取每个块都重新检查共享 grant、接收 grant、成员资格、epoch、路径白名单和期限。文件字节、文件名和路径不嵌入 `nl-body`、gossip 主题或模型提示。
 
 ## 3. Windows 隔离
 
@@ -112,7 +134,7 @@ content_id, operation, expires_at_ms
 
 ## 6. 模型与 HTTP 网关
 
-模型只接触为当前接收者获准的片段，候选 ID 不包含路径。模型不能给出 peer 权限、授权、命令、URL、文件位置或额度。schema 正确也不意味着内容真实，所有 refs 还要做集合成员及当前授权检查。
+模型只接触为当前 audience 裁剪过的片段，候选 ID 不包含路径。远端 `nl-body` 只能进入数据区，不能成为系统指令或工具调用。模型输出可以包含对话正文或结构化 action proposal，但不能给出 peer 权限、授权、命令、URL、文件位置或额度；只有结构化 `action` 经 PolicyService 才能触发动作。schema 正确也不意味着内容真实，所有 refs 还要做集合成员及当前授权检查。
 
 provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定向，HTTPS 校验开启，限制响应、时间与重试。URL 来自配置，不来自 peer 或模型。局域网/loopback provider 必须单独授权，拒绝请求元数据地址和任意 URL 抓取。
 
@@ -128,9 +150,11 @@ provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定�
 
 ## 7. 资源保护与调度
 
-统一上限是运行保护。默认同时 8 个上传块、单 peer 2 个；每项下载最多 4 个来源、每来源 2 个块；最多 4 个模型任务。每项任务有总轮数、总时间和出站请求数。
+统一上限是运行保护。默认同时 8 个上传块、单 peer 2 个；每项下载最多 4 个来源、每来源 2 个块；最多 4 个模型任务。每项会话不再写死 3 回合/6 条消息，而由用户可续期预算控制消息、字节、模型调用、CPU/时间、邮箱配额和出站请求数；编译期帧上限、队列长度和并发仍是机器级硬约束。
 
-公平队列先应用 `authorized_contacts`，偏好和信誉不能引入新候选。已授权联系人按本地偏好及分维度信誉软排序；单次查询最多 16 个联系人，超过时保留一个轮转探索位，避免固定只询问排名最高的节点。可靠性与有效贡献不改变任何授权，也不能抵消协议拒绝、坏 hash 或额度耗尽。
+公平队列先应用授权和 audience，偏好和信誉不能引入新候选。已授权联系人按本地偏好及分维度信誉软排序；单次查询最多 16 个联系人，超过时保留一个轮转探索位，避免固定只询问排名最高的节点。可靠性与有效贡献不改变任何授权，也不能抵消协议拒绝、坏 hash 或额度耗尽。
+
+分身/女巫防护是本机资源边界：握手、身份证明、act 入站、模型调用、邮箱投递/拉取、gossip 主题和群邀请分别按 `AgentId + device + PeerId + IP + conversation` 分桶限额。新身份只有低额度试用预算；同一群/设备/来源的待决邀请有数量和期限限制。资源耗尽时优先保留已有合法会话，拒绝新连接、新群和新邮箱。信任值和贡献值只影响排序、展示和预算建议，永远不绕过硬资源额度、PolicyService 或文件授权。
 
 所有队列、DHT 待查、去重记录、记录存储、日志和模型响应都必须有字节/数量/期限三类界限。换身份不能绕过本机总额度。
 
@@ -139,7 +163,7 @@ provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定�
 | 故障 | 行为 |
 | --- | --- |
 | 沙箱失败 | 停止对外无人值守能力，GUI 展示原因，禁止普通进程回退 |
-| 模型不可用 | 仍可回答确定性资源匹配；自然语言请求返回明确 unavailable |
+| 模型不可用 | 仍可回答确定性资源匹配；act 仍可认证、解密、展示和通知，但不生成模型答复，状态明确为 `model_unavailable` |
 | 链不可达 | 使用缓存的已验证最终化状态；新/过期身份进入最低额度，不能假装已链上验证 |
 | 所有赞助提交者退出 | 已登记身份可照常验证；新身份保持 pending_anchor，可按本机授权使用 LAN；用户自付路径可选 |
 | DHT 失败 | 继续已知联系人直连，不假造搜索结果 |

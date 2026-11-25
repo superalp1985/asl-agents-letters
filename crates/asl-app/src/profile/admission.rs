@@ -9,7 +9,10 @@ use asl_store::search::direct::DirectRequester;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    protocol::{Hello, IdentityProof, PairingExchange, PairingInvite, WireFrame},
+    protocol::{
+        ASL_PROTOCOL_MAJOR, ASL_PROTOCOL_MINOR, Feature, Hello, IdentityProof, PairingExchange,
+        PairingInvite, WireFrame,
+    },
     record::{MAX_RECORD_LIFETIME_MS, RecordKind, RecordPayload, decode_record},
 };
 use rand::{TryRng, rngs::SysRng};
@@ -111,6 +114,27 @@ impl DirectoryLease {
 struct QueuedProof {
     proof: IdentityProof,
     received_at: Instant,
+}
+
+fn is_context_frame(frame: &WireFrame) -> bool {
+    matches!(
+        frame,
+        WireFrame::ContextRequest(_)
+            | WireFrame::ContextOffer(_)
+            | WireFrame::ContextAgreement(_)
+            | WireFrame::ContextExpression(_)
+    )
+}
+
+fn is_context_request(frame: &WireFrame) -> bool {
+    matches!(
+        frame,
+        WireFrame::ContextRequest(_) | WireFrame::ContextExpression(_)
+    )
+}
+
+fn is_context_response(frame: &WireFrame) -> bool {
+    matches!(frame, WireFrame::ContextOffer(_))
 }
 
 struct ProofVerificationBudget {
@@ -277,9 +301,9 @@ impl CoreAdmission {
             agent_id: identity.agent_id(),
             peer_id: local_peer_id.clone(),
             device_certificate,
-            major: 1,
-            minor: 1,
-            features: Vec::new(),
+            major: ASL_PROTOCOL_MAJOR,
+            minor: ASL_PROTOCOL_MINOR,
+            features: vec![Feature::ActNl],
         };
         let mut admission = Self::new(
             local_peer_id,
@@ -708,7 +732,9 @@ impl CoreAdmission {
                     .events
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
-            NetworkEvent::DiscoveryCandidate { .. } | NetworkEvent::DhtProviders { .. } => {}
+            NetworkEvent::DiscoveryCandidate { .. }
+            | NetworkEvent::DhtProviders { .. }
+            | NetworkEvent::GossipReceived { .. } => {}
             NetworkEvent::DhtRecordCandidate {
                 candidate_id,
                 key,
@@ -789,6 +815,12 @@ impl CoreAdmission {
                 }
                 request => {
                     if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                        if (is_context_frame(&request)
+                            && !self.peer_supports_contexts(connection_id))
+                            || is_context_response(&request)
+                        {
+                            return batch;
+                        }
                         if matches!(request, WireFrame::Expression(_))
                             && !self.peer_supports_expression(connection_id)
                         {
@@ -835,6 +867,11 @@ impl CoreAdmission {
                         self.close(connection_id, &mut batch);
                     }
                 } else if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    if (is_context_frame(&response) && !self.peer_supports_contexts(connection_id))
+                        || is_context_request(&response)
+                    {
+                        return batch;
+                    }
                     if matches!(response, WireFrame::Expression(_)) {
                         // Expression letters use fresh requests. A correlated legacy
                         // query response must never create an unsolicited letter.
@@ -1008,6 +1045,12 @@ impl CoreAdmission {
         request: WireFrame,
         now_ms: u64,
     ) -> Result<NetworkCommand, AslError> {
+        if is_context_frame(&request) && !self.peer_supports_contexts(connection_id) {
+            return Err(AslError::IncompatibleVersion);
+        }
+        if is_context_response(&request) {
+            return Err(AslError::InvalidMessage);
+        }
         if matches!(&request, WireFrame::Expression(_))
             && !self.peer_supports_expression(connection_id)
         {
@@ -1035,6 +1078,12 @@ impl CoreAdmission {
         response: WireFrame,
         now_ms: u64,
     ) -> Result<NetworkCommand, AslError> {
+        if is_context_frame(&response) && !self.peer_supports_contexts(connection_id) {
+            return Err(AslError::IncompatibleVersion);
+        }
+        if is_context_request(&response) {
+            return Err(AslError::InvalidMessage);
+        }
         if matches!(
             &response,
             WireFrame::Hello(_)
@@ -1500,6 +1549,27 @@ impl CoreAdmission {
                 .get(&connection_id)
                 .and_then(|peer| peer.remote_hello.as_ref())
                 .is_some_and(|hello| hello.major == 1 && hello.minor >= 1)
+    }
+
+    pub(crate) fn peer_supports_contexts(&self, connection_id: [u8; 16]) -> bool {
+        self.local_hello.minor >= 2
+            && self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.remote_hello.as_ref())
+                .is_some_and(|hello| hello.major == 1 && hello.minor >= 2)
+    }
+
+    pub(crate) fn peer_supports_act(&self, connection_id: [u8; 16]) -> bool {
+        self.local_hello.minor >= 3
+            && self.local_hello.features.contains(&Feature::ActNl)
+            && self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.remote_hello.as_ref())
+                .is_some_and(|hello| {
+                    hello.major == 1 && hello.minor >= 3 && hello.features.contains(&Feature::ActNl)
+                })
     }
 
     pub(crate) fn direct_requester(

@@ -102,6 +102,8 @@ pub struct Supervisor {
     profile_signing: profile_signing::ProfileSigningRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
+    #[cfg(windows)]
+    mcp_readiness: tokio::sync::watch::Sender<NetworkAdmissionStatus>,
     chain_refresh: Option<ChainRefreshWorker>,
     home: PathBuf,
     state_database: PathBuf,
@@ -146,9 +148,9 @@ impl Supervisor {
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
         let model_gateway =
             configured_model_gateway(&paths).map_err(|_| AslError::InvalidPolicyState)?;
-        let agent_identity = AgentIdentity::load_or_create_protected(&paths.agent_root_key())?;
+        let (agent_identity, device_identity) =
+            crate::profile_setup::ensure_local_identity(&paths)?;
         let device_key_path = paths.device_key();
-        let device_identity = DeviceIdentity::load_or_create_protected(&device_key_path)?;
         let device_peer_id = device_identity.peer_id();
         let libraries = LocalLibraries::open(&paths)?;
         let network_admission =
@@ -193,6 +195,8 @@ impl Supervisor {
             transport_connections: HashMap::new(),
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
+            #[cfg(windows)]
+            mcp_readiness: tokio::sync::watch::Sender::new(network_admission.status),
             chain_refresh: network_admission.refresh_worker,
             home: paths.dos_root().to_owned(),
             state_database,
@@ -314,6 +318,8 @@ impl Supervisor {
             return;
         }
         self.network_admission_status = status;
+        #[cfg(windows)]
+        self.mcp_readiness.send_replace(status);
         self.persist_local_identity_projection();
     }
 
@@ -386,13 +392,14 @@ impl Supervisor {
         #[cfg(windows)]
         if let Some(grant) = grant {
             let (download_port, downloads) = download_channel();
-            let _mcp = crate::mcp::McpWorker::spawn_with_mail(
+            let _mcp = crate::mcp::McpWorker::spawn_with_mail_and_readiness(
                 self.home.clone(),
                 grant,
                 port,
                 download_port,
                 self.mailbox.port.clone(),
                 recovery,
+                self.mcp_readiness.subscribe(),
             )?;
             return self.run_with_local_downloads(runtime, downloads);
         }
@@ -468,6 +475,11 @@ impl Supervisor {
                     request: WireFrame::FetchRequest(_),
                     ..
                 } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
+                #[cfg(windows)]
+                event @ AdmittedNetworkEvent::ControlRequest {
+                    request: WireFrame::ContextRequest(_),
+                    ..
+                } => supervisor.handle_context_request(&mut transfer.borrow_mut(), event),
                 event @ AdmittedNetworkEvent::BulkRequest { .. } => {
                     supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
                 }
@@ -489,6 +501,16 @@ impl Supervisor {
                     else {
                         return Ok(());
                     };
+                    #[cfg(windows)]
+                    if matches!(
+                        &event,
+                        AdmittedNetworkEvent::ControlResponse {
+                            response: WireFrame::ContextOffer(_) | WireFrame::ContextAgreement(_),
+                            ..
+                        }
+                    ) {
+                        supervisor.observe_context_response(&event)?;
+                    }
                     if supervisor.net.is_running() {
                         outbound.borrow_mut().handle_event(&event, now_ms)?;
                     }
@@ -1308,6 +1330,7 @@ impl Supervisor {
             event,
             NetworkEvent::UnverifiedGroupRequest { .. }
                 | NetworkEvent::UnverifiedGroupResponse { .. }
+                | NetworkEvent::GossipReceived { .. }
         ) {
             self.route_group_event(event, now_ms);
             return Ok(AdmissionBatch::default());
@@ -2053,6 +2076,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::DhtRecordCandidate { .. }
         | NetworkEvent::DhtProviders { .. }
+        | NetworkEvent::GossipReceived { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
     }

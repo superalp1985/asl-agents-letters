@@ -71,6 +71,7 @@ impl Session<'_> {
             .await
             .map_err(error_code)?;
         let content_id = selection.content_id;
+        let context_ref = selection.context_ref;
         let ticket = self
             .downloads
             .submit(DownloadJob::Fetch(selection))
@@ -81,6 +82,8 @@ impl Session<'_> {
             ticket: Some(ticket),
             state: DownloadState::Queued,
             notices: VecDeque::new(),
+            context_ref,
+            context_candidate_stored: None,
         };
         let result = download.value();
         self.received.push_back(download);

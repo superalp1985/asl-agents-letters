@@ -79,7 +79,36 @@ impl Client {
         };
         let reply = match &request {
             Request::LocalCapabilities => Ok(connection.capabilities.clone()),
+            Request::AgentBootstrap if connection.capabilities["bootstrap_v1"] != true => {
+                Err(ErrorCode::IncompatibleVersion)
+            }
             Request::SendExpression(_) if connection.capabilities["send_expression"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::SendContextExpression(_)
+                if connection.capabilities["send_context_expression"] != true =>
+            {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::SendAct(_) if connection.capabilities["send_act"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::SendFile(_) if connection.capabilities["send_file"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::GroupList
+            | Request::GroupCreate
+            | Request::GroupInvite(_)
+            | Request::DirectOpen(_)
+            | Request::RenewActBudget(_)
+                if connection.capabilities["groups_admin"] != true =>
+            {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::RequestContext(_) if connection.capabilities["request_context"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::ConfirmContext(_) if connection.capabilities["confirm_context"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
             Request::ReceiveOffer(_) if connection.capabilities["receive_offer"] != true => {

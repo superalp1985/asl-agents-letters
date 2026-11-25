@@ -57,6 +57,7 @@ impl Task {
                 filename: format!("asl-{}.bin", hex::encode(content_id.0)),
                 sources,
                 group: None,
+                context_ref: None,
             }))
             .map_err(error_code)?;
         Ok(self.downloads.push_mut(Download {
@@ -65,6 +66,8 @@ impl Task {
             offer_ids: ids,
             ticket: Some(ticket),
             state: DownloadState::Queued,
+            context_ref: None,
+            context_candidate_stored: None,
         }))
     }
 }

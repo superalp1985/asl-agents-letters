@@ -222,15 +222,59 @@ GLYPHS = {
 }
 
 
-def face(hair, accent, feature):
+MUSTARD = (232, 184, 72, 255)
+LEMON = (246, 222, 116, 255)
+MINT = (150, 214, 190, 255)
+ROSE = (232, 132, 150, 255)
+FOREST = (52, 104, 74, 255)
+TOMATO = (222, 92, 70, 255)
+NAVY = (48, 70, 110, 255)
+LEAF = (120, 176, 84, 255)
+DENIM = (78, 118, 168, 255)
+
+
+def outfit(canvas, main, second, pattern):
+    """Shirt across rows 12-15: main body, a second colour and a pattern."""
+    canvas.rect(4, 12, 8, 2, main)
+    canvas.rect(5, 14, 6, 2, shift(main, -0.12))
+    if pattern == "stripe":
+        canvas.hline(4, 13, 8, second)
+        canvas.hline(5, 15, 6, second)
+    elif pattern == "collar":
+        canvas.rect(6, 12, 1, 2, second)
+        canvas.rect(9, 12, 1, 2, second)
+        canvas.rect(7, 12, 2, 1, WHITE)
+    elif pattern == "dots":
+        for x, y in ((5, 13), (8, 12), (10, 14), (6, 15)):
+            canvas.dot(x, y, second)
+    elif pattern == "split":
+        canvas.rect(8, 12, 4, 2, second)
+        canvas.rect(8, 14, 3, 2, shift(second, -0.12))
+    elif pattern == "tie":
+        canvas.rect(7, 12, 2, 1, WHITE)
+        canvas.rect(7, 13, 2, 3, second)
+    elif pattern == "overall":
+        canvas.rect(5, 13, 6, 3, second)
+        canvas.dot(5, 12, second)
+        canvas.dot(10, 12, second)
+        canvas.dot(6, 14, LEMON)
+        canvas.dot(9, 14, LEMON)
+    elif pattern == "pocket":
+        canvas.rect(9, 13, 2, 2, second)
+        canvas.dot(9, 13, WHITE)
+    elif pattern == "scarf":
+        canvas.rect(4, 12, 8, 1, second)
+        canvas.rect(10, 13, 1, 2, second)
+
+
+def face(hair, accent, feature, dress=(TEAL, TEAL_DEEP, "plain")):
     canvas = Canvas(16)
     canvas.rect(4, 1, 8, 2, hair)
     canvas.rect(3, 3, 10, 9, SKIN)
     canvas.rect(3, 3, 10, 2, hair)
     canvas.rect(3, 5, 1, 4, hair)
     canvas.rect(12, 5, 1, 4, hair)
-    canvas.rect(4, 12, 8, 2, TEAL)
-    canvas.rect(5, 14, 6, 2, TEAL_DEEP)
+    outfit(canvas, *dress)
     canvas.rect(5, 6, 2, 2, INK)
     canvas.rect(9, 6, 2, 2, INK)
     canvas.rect(6, 7, 1, 1, WHITE)
@@ -244,19 +288,337 @@ def face(hair, accent, feature):
 
 
 AVATARS = [
-    ("01-teal-bob", (25, 118, 108, 255), CORAL, []),
-    ("02-ink-cap", INK, CREAM, [(4, 1, 8, 1, INK), (3, 2, 10, 1, INK)]),
-    ("03-sky-glasses", SKY, TEAL, [(4, 6, 8, 1, INK)]),
-    ("04-coral-band", CORAL_DEEP, SKY, [(4, 3, 8, 1, CORAL)]),
-    ("05-headphones", (70, 104, 122, 255), CORAL, [(2, 6, 1, 3, INK), (13, 6, 1, 3, INK), (3, 5, 1, 2, INK), (12, 5, 1, 2, INK)]),
-    ("06-cream-bun", CREAM, TEAL, [(6, 0, 4, 2, CREAM), (5, 1, 6, 1, INK)]),
-    ("07-antenna", TEAL_DEEP, CORAL, [(7, 0, 2, 2, TEAL), (6, 0, 4, 1, CORAL)]),
-    ("08-visor", (47, 72, 92, 255), SKY, [(4, 6, 8, 2, (150, 214, 206, 255))]),
-    ("09-freckles", (122, 86, 64, 255), CREAM, [(4, 8, 1, 1, CORAL_DEEP), (11, 8, 1, 1, CORAL_DEEP)]),
-    ("10-side-part", (236, 232, 214, 255), TEAL_DEEP, [(7, 3, 1, 3, SKIN)]),
-    ("11-earpiece", SKY, CORAL_DEEP, [(13, 7, 2, 2, CORAL), (14, 6, 1, 1, INK)]),
-    ("12-round-badge", (18, 99, 90, 255), CORAL, [(12, 11, 2, 2, CREAM), (12, 12, 2, 1, TEAL)]),
+    ("01-teal-bob", (25, 118, 108, 255), CORAL, [], (CORAL, CREAM, "collar")),
+    ("02-ink-cap", INK, CREAM, [(4, 1, 8, 1, INK), (3, 2, 10, 1, INK)], (MUSTARD, INK, "stripe")),
+    ("03-sky-glasses", SKY, TEAL, [(4, 6, 8, 1, INK)], (MINT, FOREST, "pocket")),
+    ("04-coral-band", CORAL_DEEP, SKY, [(4, 3, 8, 1, CORAL)], (DENIM, CORAL, "overall")),
+    ("05-headphones", (70, 104, 122, 255), CORAL, [(2, 6, 1, 3, INK), (13, 6, 1, 3, INK), (3, 5, 1, 2, INK), (12, 5, 1, 2, INK)], (TOMATO, CREAM, "dots")),
+    ("06-cream-bun", CREAM, TEAL, [(6, 0, 4, 2, CREAM), (5, 1, 6, 1, INK)], (ROSE, WHITE, "stripe")),
+    ("07-antenna", TEAL_DEEP, CORAL, [(7, 0, 2, 2, TEAL), (6, 0, 4, 1, CORAL)], (LEMON, TEAL, "split")),
+    ("08-visor", (47, 72, 92, 255), SKY, [(4, 6, 8, 2, (150, 214, 206, 255))], (NAVY, CORAL, "tie")),
+    ("09-freckles", (122, 86, 64, 255), CREAM, [(4, 8, 1, 1, CORAL_DEEP), (11, 8, 1, 1, CORAL_DEEP)], (LEAF, MUSTARD, "scarf")),
+    ("10-side-part", (236, 232, 214, 255), TEAL_DEEP, [(7, 3, 1, 3, SKIN)], (FOREST, LEMON, "collar")),
+    ("11-earpiece", SKY, CORAL_DEEP, [(13, 7, 2, 2, CORAL), (14, 6, 1, 1, INK)], (CREAM, ROSE, "dots")),
+    ("12-round-badge", (18, 99, 90, 255), CORAL, [(12, 11, 2, 2, CREAM), (12, 12, 2, 1, TEAL)], (SKY, TOMATO, "split")),
 ]
+
+
+FONT = {
+    "Z": ("111", "001", "010", "100", "111"),
+    "?": ("111", "001", "011", "000", "010"),
+    "!": ("1", "1", "1", "0", "1"),
+    "{": ("011", "010", "110", "010", "011"),
+    "}": ("110", "010", "011", "010", "110"),
+}
+FLOOR = (214, 224, 220, 255)
+OWL = (140, 104, 80, 255)
+FUR = (196, 200, 204, 255)
+
+
+def text(canvas, x, y, chars, color):
+    for char in chars:
+        rows = FONT[char]
+        for dy, row in enumerate(rows):
+            for dx, bit in enumerate(row):
+                if bit == "1":
+                    canvas.dot(x + dx, y + dy, color)
+        x += len(rows[0]) + 1
+
+
+def eyes(canvas, x, y, gap, look=0, blink=False):
+    if blink:
+        canvas.hline(x, y + 1, 2, INK)
+        canvas.hline(x + gap, y + 1, 2, INK)
+        return
+    canvas.rect(x, y, 2, 2, INK)
+    canvas.rect(x + gap, y, 2, 2, INK)
+    spot = 1 if look >= 0 else 0
+    canvas.dot(x + spot, y, WHITE)
+    canvas.dot(x + gap + spot, y, WHITE)
+
+
+def stage():
+    canvas = Canvas(32)
+    canvas.hline(1, 29, 30, FLOOR)
+    return canvas
+
+
+def scene_idle(f):
+    """Xiao Fang, a boxy robot napping while the node stays online."""
+    c = stage()
+    bob = 1 if f in (1, 2) else 0
+    c.vline(16, 5 + bob, 3, INK)
+    c.rect(15, 3 + bob, 3, 2, CORAL if f % 2 == 0 else LEMON)
+    c.rect(9, 8 + bob, 14, 10, SKY)
+    c.outline_rect(9, 8 + bob, 14, 10, NAVY)
+    c.rect(11, 10 + bob, 10, 6, INK)
+    c.hline(13, 13 + bob, 2, MINT)
+    c.hline(17, 13 + bob, 2, MINT)
+    c.rect(11, 18 + bob, 10, 8 - bob, DENIM)
+    c.rect(14, 20 + bob, 4, 2, LEMON if f % 2 == 0 else MINT)
+    c.rect(8, 19 + bob, 3, 5, SKY)
+    c.rect(21, 19 + bob, 3, 5, SKY)
+    c.rect(12, 26, 3, 3, NAVY)
+    c.rect(17, 26, 3, 3, NAVY)
+    for i in range(f % 3 + 1):
+        text(c, 24 + i * 2, 8 - i * 3, "Z", shift(SKY, -0.1 * i))
+    return c
+
+
+def scene_message(f):
+    """Pip, a round postman bird catching a structured envelope."""
+    c = stage()
+    c.rect(9, 16, 14, 12, LEMON)
+    c.rect(8, 18, 16, 8, LEMON)
+    c.rect(11, 24, 10, 3, CREAM)
+    c.rect(9, 13, 14, 3, NAVY)
+    c.hline(8, 15, 16, NAVY)
+    c.rect(15, 13, 2, 2, MUSTARD)
+    eyes(c, 11, 18, 8, blink=f == 0)
+    c.rect(15, 21, 2, 2, CORAL_DEEP)
+    c.rect(12, 28, 2, 1, CORAL_DEEP)
+    c.rect(18, 28, 2, 1, CORAL_DEEP)
+    if f >= 2:
+        c.rect(5, 9, 3, 8, MUSTARD)
+        c.rect(24, 9, 3, 8, MUSTARD)
+    else:
+        c.rect(6, 19, 2, 6, MUSTARD)
+        c.rect(24, 19, 2, 6, MUSTARD)
+    y = (0, 4, 7, 7)[f]
+    c.rect(11, y, 10, 6, CREAM)
+    c.outline_rect(11, y, 10, 6, TEAL)
+    if f < 3:
+        for i in range(4):
+            c.dot(12 + i, y + 1 + i // 2, TEAL)
+            c.dot(19 - i, y + 1 + i // 2, TEAL)
+    else:
+        c.hline(12, y, 8, CREAM)
+        text(c, 9, 0, "{", TEAL_DEEP)
+        text(c, 20, 0, "}", TEAL_DEEP)
+        c.hline(13, 2, 6, CORAL_DEEP)
+    return c
+
+
+def scene_transfer(f):
+    """Dabao, a little bear mover walking a parcel from one node to the other."""
+    c = stage()
+    c.rect(1, 20, 4, 9, TEAL)
+    c.rect(27, 20, 4, 9, TEAL)
+    c.rect(2, 22, 2, 2, CREAM)
+    c.rect(28, 22, 2, 2, CREAM)
+    x = 3 + f * 4
+    step = f % 2
+    c.rect(x + 1, 9, 2, 2, OWL)
+    c.rect(x + 8, 9, 2, 2, OWL)
+    c.rect(x + 1, 10, 9, 8, OWL)
+    c.rect(x + 3, 14, 5, 3, CREAM)
+    eyes(c, x + 2, 12, 5)
+    c.dot(x + 5, 15, INK)
+    c.rect(x + 1, 18, 9, 7, CORAL)
+    c.hline(x + 1, 20, 9, CORAL_DEEP)
+    c.rect(x + 2 + step, 25, 2, 4, OWL)
+    c.rect(x + 7 - step, 25, 2, 4, OWL)
+    c.rect(x + 7, 4 + step, 9, 7, MUSTARD)
+    c.outline_rect(x + 7, 4 + step, 9, 7, CORAL_DEEP)
+    c.vline(x + 11, 4 + step, 7, CORAL_DEEP)
+    c.rect(x + 9, 11, 2, 7, OWL)
+    for i in range(f + 1):
+        c.dot(x - 2 - i * 2, 27, FLOOR)
+    return c
+
+
+def scene_waiting(f):
+    """Mimi, a cat holding up a sign and tapping a foot until you decide."""
+    c = stage()
+    tap = f % 2
+    c.rect(9, 9, 2, 3, FUR)
+    c.rect(19, 9, 2, 3, FUR)
+    c.dot(10, 10, ROSE)
+    c.dot(20, 10, ROSE)
+    c.rect(9, 11, 12, 9, FUR)
+    eyes(c, 11, 14, 6, look=-1 if f == 2 else 1, blink=f == 3)
+    c.dot(15, 17, ROSE)
+    c.hline(14, 18, 3, INK)
+    c.rect(10, 20, 10, 7, ROSE)
+    c.rect(11, 27, 3, 2, FUR)
+    c.rect(16, 27 - tap, 3, 2 + tap, FUR)
+    c.vline(21, 18, 3, FUR)
+    c.vline(22, 16 - (f % 2), 6, FUR)
+    c.vline(6, 4, 22, OWL)
+    c.rect(1, 2, 11, 9, CREAM)
+    c.outline_rect(1, 2, 11, 9, CORAL_DEEP)
+    text(c, 5, 4, "?", CORAL_DEEP)
+    c.rect(6, 20, 4, 2, FUR)
+    if f >= 2:
+        for i in range(f - 1):
+            c.rect(25 + i * 3, 24, 2, 2, CORAL)
+    return c
+
+
+def scene_done(f):
+    """Tuantuan, a green frog that hops and throws confetti when work is done."""
+    c = stage()
+    hop = (0, 4, 6, 0)[f]
+    y = 13 - hop
+    c.rect(9, y - 3, 4, 4, LEAF)
+    c.rect(19, y - 3, 4, 4, LEAF)
+    eyes(c, 10, y - 2, 10, blink=f == 3)
+    c.rect(7, y, 18, 10, LEAF)
+    c.rect(10, y + 5, 12, 5, (200, 232, 160, 255))
+    c.hline(12, y + 3, 8, FOREST)
+    c.dot(11, y + 2, FOREST)
+    c.dot(20, y + 2, FOREST)
+    c.rect(8, y + 1, 2, 1, BLUSH)
+    c.rect(22, y + 1, 2, 1, BLUSH)
+    if f in (1, 2):
+        c.rect(4, y - 4, 3, 5, LEAF)
+        c.rect(25, y - 4, 3, 5, LEAF)
+    legs = 2 if hop else 4
+    c.rect(7, y + 10, 5, legs, FOREST)
+    c.rect(20, y + 10, 5, legs, FOREST)
+    colors = (CORAL, LEMON, SKY, ROSE, MINT)
+    for i in range(6 if f else 0):
+        c.dot((5 + i * 4 + f * 3) % 30 + 1, (2 + i * 3 + f * 2) % 9, colors[i % 5])
+    if f == 3:
+        c.rect(22, 21, 2, 2, TEAL_DEEP)
+        c.rect(24, 19, 2, 2, TEAL_DEEP)
+        c.rect(26, 17, 2, 2, TEAL_DEEP)
+        c.rect(20, 19, 2, 2, TEAL_DEEP)
+    return c
+
+
+def scene_warning(f):
+    """Ding, a lighthouse keeper with a red lamp that flashes when something fails."""
+    c = stage()
+    c.rect(4, 12, 8, 17, CREAM)
+    c.rect(4, 16, 8, 3, TOMATO)
+    c.rect(4, 23, 8, 3, TOMATO)
+    c.rect(3, 6, 10, 6, INK)
+    c.rect(5, 7, 6, 4, LEMON if f % 2 == 0 else DANGER)
+    c.rect(3, 4, 10, 2, TOMATO)
+    if f % 2 == 0:
+        c.hline(0, 8, 3, LEMON)
+        c.hline(13, 8, 4, LEMON)
+    c.rect(17, 7, 10, 4, NAVY)
+    c.rect(16, 10, 12, 1, NAVY)
+    c.rect(18, 11, 8, 7, SKIN)
+    eyes(c, 19, 13, 4)
+    shake = 1 if f in (1, 3) else 0
+    c.rect(21, 16, 2, 2 if shake else 1, INK)
+    c.rect(17, 18, 10, 8, MUSTARD)
+    c.vline(22, 18, 8, CORAL_DEEP)
+    c.rect(27, 14 - shake * 3, 2, 6, MUSTARD)
+    c.rect(18, 26, 3, 3, NAVY)
+    c.rect(23, 26, 3, 3, NAVY)
+    text(c, 29, 1 + shake, "!", DANGER)
+    return c
+
+
+def scene_browse(f):
+    """Hoo, a reading owl: looks through messages and never writes back."""
+    c = stage()
+    c.rect(8, 4, 2, 3, OWL)
+    c.rect(22, 4, 2, 3, OWL)
+    c.rect(8, 6, 16, 18, OWL)
+    c.rect(10, 8, 5, 5, CREAM)
+    c.rect(17, 8, 5, 5, CREAM)
+    look = (-1, 0, 1, 0)[f]
+    c.rect(12 + look, 10, 2, 2, INK)
+    c.rect(19 + look, 10, 2, 2, INK)
+    c.rect(15, 12, 2, 2, MUSTARD)
+    c.rect(11, 15, 10, 8, (176, 140, 110, 255))
+    c.rect(10, 24, 3, 3, MUSTARD)
+    c.rect(19, 24, 3, 3, MUSTARD)
+    c.rect(5, 17, 22, 9, SKY)
+    c.vline(16, 17, 9, NAVY)
+    c.rect(6, 18, 9, 7, WHITE)
+    c.rect(17, 18, 9, 7, WHITE)
+    for row in range(3):
+        c.hline(7, 19 + row * 2, 7 - (row + f) % 3, SKY)
+        c.hline(18, 19 + row * 2, 7 - (row + f + 1) % 3, SKY)
+    c.hline(5 + f * 5, 26, 2, TEAL)
+    return c
+
+
+def scene_silent(f):
+    """Momo, a panda receiving everything but keeping a hand over its mouth."""
+    c = stage()
+    c.rect(8, 4, 4, 4, INK)
+    c.rect(20, 4, 4, 4, INK)
+    c.rect(9, 6, 14, 12, WHITE)
+    c.outline_rect(9, 6, 14, 12, FUR)
+    c.rect(11, 9, 3, 3, INK)
+    c.rect(18, 9, 3, 3, INK)
+    c.dot(12 + (f % 2), 10, WHITE)
+    c.dot(19 + (f % 2), 10, WHITE)
+    c.rect(13, 13, 6, 4, INK)
+    c.rect(14, 14, 4, 2, FUR)
+    c.rect(9, 18, 14, 9, WHITE)
+    c.rect(9, 18, 3, 6, INK)
+    c.rect(20, 18, 3, 6, INK)
+    c.rect(11, 27, 4, 2, INK)
+    c.rect(17, 27, 4, 2, INK)
+    c.rect(1, 2 + f * 2, 6, 4, CREAM)
+    c.outline_rect(1, 2 + f * 2, 6, 4, TEAL)
+    if f >= 1:
+        # A paw comes up over the mouth: received, but staying quiet.
+        c.rect(12, 14 - (f == 1), 8, 3, INK)
+        c.hline(13, 14 - (f == 1), 6, FUR)
+    if f >= 2:
+        c.rect(26, 4, 5, 5, CREAM)
+        c.outline_rect(26, 4, 5, 5, CORAL_DEEP)
+        c.dot(27, 5, CORAL_DEEP)
+        c.dot(29, 7, CORAL_DEEP)
+        c.dot(29, 5, CORAL_DEEP)
+        c.dot(27, 7, CORAL_DEEP)
+        c.dot(28, 6, CORAL_DEEP)
+    return c
+
+
+def scene_answer(f):
+    """Lulu, a fox librarian: reads the request, then sends a structured reply."""
+    c = stage()
+    fox = (226, 126, 72, 255)
+    c.rect(4, 6, 3, 4, fox)
+    c.rect(13, 6, 3, 4, fox)
+    c.rect(4, 9, 12, 9, fox)
+    c.rect(6, 14, 8, 4, CREAM)
+    eyes(c, 6, 11, 6, look=1 if f >= 2 else -1)
+    c.rect(9, 15, 2, 1, INK)
+    c.rect(5, 18, 10, 8, TEAL)
+    c.rect(5, 26, 3, 3, fox)
+    c.rect(12, 26, 3, 3, fox)
+    c.rect(15, 20, 5, 3, fox)
+    c.rect(1, 21, 3, 6, CREAM)
+    if f == 0:
+        c.rect(19, 3, 11, 7, CREAM)
+        c.outline_rect(19, 3, 11, 7, SKY)
+        text(c, 23, 4, "?", SKY)
+    elif f == 1:
+        c.rect(1, 6, 3, 2, CREAM)
+        c.rect(14, 1, 6, 4, WHITE)
+        c.outline_rect(14, 1, 6, 4, SKY)
+    else:
+        x = 16 + (f - 2) * 6
+        c.rect(x, 10, 10, 6, MINT)
+        c.outline_rect(x, 10, 10, 6, TEAL_DEEP)
+        text(c, x + 1, 10, "{", TEAL_DEEP)
+        text(c, x + 6, 10, "}", TEAL_DEEP)
+    return c
+
+
+SCENES = {
+    "idle": scene_idle,
+    "message": scene_message,
+    "transfer": scene_transfer,
+    "waiting": scene_waiting,
+    "done": scene_done,
+    "warning": scene_warning,
+    "browse": scene_browse,
+    "silent": scene_silent,
+    "answer": scene_answer,
+}
+SCENE_FRAMES = 4
 
 
 def shift(color, amount):
@@ -351,9 +713,17 @@ def main():
     shutil.copyfile(ASSET / "mascot" / "mascot-idle.svg", DOCS / "asl-pixel-mascot.svg")
     contact_sheet(mascot_items, 96, 6).save(DOCS / "asl-mascot-states-preview.png")
 
+    scene_items = []
+    for name, draw in SCENES.items():
+        for frame in range(SCENE_FRAMES):
+            canvas = draw(frame)
+            canvas.image(4).save(ASSET / "mascot" / f"anim-{name}-{frame}-128.png")
+            scene_items.append((f"{name}-{frame}", canvas.image(4)))
+    contact_sheet(scene_items, 96, SCENE_FRAMES).save(DOCS / "asl-explainer-scenes-preview.png")
+
     avatar_items = []
-    for name, hair, accent, feature in AVATARS:
-        canvas = face(hair, accent, feature)
+    for name, hair, accent, feature, dress in AVATARS:
+        canvas = face(hair, accent, feature, dress)
         write_svg(canvas, ASSET / "avatars" / f"avatar-{name}.svg")
         save_scaled(canvas, ASSET / "avatars" / f"avatar-{name}.png", [4, 8])
         avatar_items.append((name, canvas.image(8)))
@@ -386,17 +756,20 @@ def main():
 | 资产 | 文件（`crates/asl-app/assets/`） | 运行时用途 |
 |---|---|---|
 | 产品图标 | `icons/asl-icon-{16,32,48,64,128,256}.png`、`asl-icon.ico`、`asl-icon.svg` | 256 px PNG 用作窗口图标；ICO 留给打包 |
-| 吉祥物 | `mascot/mascot-{idle,message,transfer,waiting,done,warning}-{64,128,256}.png` 及 SVG | 只编译 idle：无数据时的空状态和本机头像缺省图 |
-| 头像 | `avatars/avatar-01…12-*-{64,128}.png` 及 SVG | 暂未编译进程序，作为本机预设头像候选 |
+| 吉祥物 | `mascot/mascot-{idle,message,transfer,waiting,done,warning}-{64,128,256}.png` 及 SVG | idle 256 px 用作空状态和本机头像缺省图；其余 5 种 128 px 随本机状态显示在顶栏 |
+| 讲解小剧场 | `mascot/anim-{idle,message,transfer,waiting,done,warning,browse,silent,answer}-{0..3}-128.png` | 概览页「看懂 ASL」：9 个场景各有独立角色（机器人、邮差鸟、小熊搬运工、举牌猫、青蛙、灯塔守、猫头鹰、熊猫、狐狸），每场 4 帧 |
+| 头像 | `avatars/avatar-01…12-*-{64,128}.png` 及 SVG | 128 px 编译进程序，作为本机预设头像；每个头像衣服配色和图案不同 |
 | 空节点 / 空联系人 / 空群组 | `states/empty-{node,contacts,group}-64.png` | 对应页面的空状态 |
 | 传输完成 | `states/transfer-complete-64.png` | 传输页无待处理项 |
 | 等待批准 | `states/awaiting-approval-64.png` | 审批状态行的内联图标 |
 | 匿名 / 公开身份 | `states/identity-{anonymous,public}-64.png` | 身份资料披露说明 |
 | 只浏览 | `states/mode-browse-only-64.png` | 直连「只浏览（不回答）」按钮 |
 | 不回答 | `states/mode-no-answer-64.png` | 群组「只浏览，不回答」提示 |
-| 网络离线 | `states/network-offline-64.png` | 暂未接入，没有合适的入口级网络状态 |
+| 网络离线 | `states/network-offline-64.png` | 网络隐私设置中的离线 / 未启用提示 |
 
-`docs/assets/` 中的 `asl-pixel-icon.svg`、`asl-pixel-icon-256.png`、`asl-pixel-mascot.svg` 和 `asl-*-preview.png` 由本脚本输出，属于设计预览，不是产品截图。`asl-product-icon.svg` 与 `asl-agent-mascot.svg` 不由本脚本生成或修改。
+`docs/assets/` 中的 `asl-pixel-icon.svg`、`asl-pixel-icon-256.png`、`asl-pixel-mascot.svg` 和 `asl-*-preview.png` 由本脚本输出，属于设计预览，不是产品截图。`asl-product-icon.svg` 与 `asl-agent-mascot.svg` 不由本脚本生成或修改。`asl-explainer-scenes-preview.png` 是 9 个讲解场景的拼图预览。
+
+侧栏导航图标不是资产文件：由 `crates/asl-app/src/ui/nav_icon.rs` 在运行时用 8×8 像素图案绘制。
 
 许可：这些资产随 ASL 仓库使用 MIT 许可。若仓库根目录的许可证文件有更具体的资产条款，以根目录许可证为准。
 
@@ -411,17 +784,20 @@ Tool: Python 3.14.3 + Pillow 12.1.1, generated offline on 2026-11-23. Everything
 | Asset | Files (`crates/asl-app/assets/`) | Runtime use |
 |---|---|---|
 | Product icon | `icons/asl-icon-{16,32,48,64,128,256}.png`, `asl-icon.ico`, `asl-icon.svg` | The 256 px PNG is the window icon; the ICO is for packaging |
-| Mascot | `mascot/mascot-{idle,message,transfer,waiting,done,warning}-{64,128,256}.png` and SVGs | Only idle is compiled in: the empty state when there is no data, and the fallback avatar |
-| Avatars | `avatars/avatar-01…12-*-{64,128}.png` and SVGs | Not compiled in yet; reserved as local preset avatar candidates |
+| Mascot | `mascot/mascot-{idle,message,transfer,waiting,done,warning}-{64,128,256}.png` and SVGs | Idle at 256 px is the empty state and fallback avatar; the other five at 128 px follow local state in the top bar |
+| Explainer scenes | `mascot/anim-{idle,message,transfer,waiting,done,warning,browse,silent,answer}-{0..3}-128.png` | "Understand ASL" on the overview: each of the 9 scenes has its own character (robot, postman bird, bear mover, sign-holding cat, frog, lighthouse keeper, owl, panda, fox), 4 frames each |
+| Avatars | `avatars/avatar-01…12-*-{64,128}.png` and SVGs | The 128 px set is compiled in as local presets; every avatar has its own outfit colours and pattern |
 | Empty node / contacts / group | `states/empty-{node,contacts,group}-64.png` | Empty state of the matching page |
 | Transfer complete | `states/transfer-complete-64.png` | Transfers page with nothing pending |
 | Awaiting approval | `states/awaiting-approval-64.png` | Inline icon on an approval status row |
 | Anonymous / public identity | `states/identity-{anonymous,public}-64.png` | Disclosure note on the identity profile |
 | Browse only | `states/mode-browse-only-64.png` | Button for the direct "browse only, no answers" mode |
 | No answer | `states/mode-no-answer-64.png` | Hint for the group "browse only, no answers" state |
-| Network offline | `states/network-offline-64.png` | Not wired in; there is no entry-level network state for it |
+| Network offline | `states/network-offline-64.png` | Offline / disabled hint in the network privacy settings |
 
-The `asl-pixel-icon.svg`, `asl-pixel-icon-256.png`, `asl-pixel-mascot.svg` and `asl-*-preview.png` files under `docs/assets/` come from this script and are design previews, not product screenshots. `asl-product-icon.svg` and `asl-agent-mascot.svg` are neither generated nor modified by this script.
+The `asl-pixel-icon.svg`, `asl-pixel-icon-256.png`, `asl-pixel-mascot.svg` and `asl-*-preview.png` files under `docs/assets/` come from this script and are design previews, not product screenshots. `asl-product-icon.svg` and `asl-agent-mascot.svg` are neither generated nor modified by this script. `asl-explainer-scenes-preview.png` is a contact sheet of the 9 explainer scenes.
+
+The sidebar navigation icons are not asset files: `crates/asl-app/src/ui/nav_icon.rs` draws them at runtime from 8×8 pixel patterns.
 
 License: these assets follow the MIT license of the ASL repository. If the repository root states a more specific asset term, that root license controls.
 """,

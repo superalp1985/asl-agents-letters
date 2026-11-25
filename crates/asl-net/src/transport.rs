@@ -20,9 +20,11 @@ use crate::relay::{
     relay_route_address,
 };
 mod behaviour;
+mod gossip;
 mod profile_publication;
 mod requests;
 use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
+pub use gossip::{GossipMessage, GossipTopic, MAX_GOSSIP_PAYLOAD_BYTES, MAX_GOSSIP_SUBSCRIPTIONS};
 use requests::Requests;
 
 use asl_types::ids::PeerId;
@@ -299,6 +301,7 @@ pub enum TransportEvent {
         request: RequestToken,
         response: GroupPacket,
     },
+    GossipMessage(GossipMessage),
     RequestFailed {
         connection_id: LocalConnectionId,
         request: RequestToken,
@@ -329,6 +332,7 @@ pub struct LocalTransport {
     pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
     pending_dht_provider_lookups: HashMap<kad::QueryId, PendingDhtProviderLookup>,
     profile_publication: Option<profile_publication::Publication>,
+    gossip_subscriptions: HashSet<GossipTopic>,
 }
 
 struct PendingDhtProviderLookup {
@@ -363,7 +367,7 @@ impl LocalTransport {
             .map_err(|_| io::Error::other("cannot configure authenticated TCP"))?
             .with_quic_config(|mut config| {
                 config.handshake_timeout = HANDSHAKE_TIMEOUT;
-                config.max_concurrent_stream_limit = 1;
+                config.max_concurrent_stream_limit = 8;
                 config.max_stream_data = 16 * 1024;
                 config.max_connection_data = 16 * 1024;
                 config
@@ -374,7 +378,7 @@ impl LocalTransport {
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
-                    .with_max_negotiating_inbound_streams(1)
+                    .with_max_negotiating_inbound_streams(4)
                     .with_idle_connection_timeout(IDLE_TIMEOUT)
             })
             .with_connection_timeout(HANDSHAKE_TIMEOUT)
@@ -397,6 +401,7 @@ impl LocalTransport {
             pending_dht_records: HashMap::new(),
             pending_dht_provider_lookups: HashMap::new(),
             profile_publication: None,
+            gossip_subscriptions: HashSet::new(),
         })
     }
 
@@ -822,6 +827,11 @@ impl LocalTransport {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Group(event)) => {
                     if let Some(event) = self.handle_group(event) {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossip(event)) => {
+                    if let Some(event) = self.handle_gossip(event) {
                         return Ok(event);
                     }
                 }

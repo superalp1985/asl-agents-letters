@@ -15,12 +15,13 @@ use super::{
 };
 use crate::{network::NetworkCommand, profile::admission::fresh_id};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MlsApplicationDispatch {
     pub message_id: Id128,
     /// Recipients whose command entered Core's local Net queue, not receipts.
     pub queued: usize,
     pub available: usize,
+    pub packet: GroupPacket,
 }
 
 pub struct MlsApplicationSendToConnection {
@@ -65,6 +66,30 @@ impl CoreAdmission {
                 application,
                 now_ms,
             },
+            false,
+            enqueue,
+        )
+    }
+
+    pub fn send_loopback_mls_application_with_gossip(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        application: GroupApplication,
+        now_ms: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        self.send_loopback_mls_application_inner(
+            store,
+            MlsApplicationDelivery {
+                wire_id,
+                target_connection: None,
+                automatic_reply: false,
+                envelope_id: Id128(fresh_id()?),
+                application,
+                now_ms,
+            },
+            false,
             enqueue,
         )
     }
@@ -85,6 +110,7 @@ impl CoreAdmission {
                 application: send.application,
                 now_ms: send.now_ms,
             },
+            false,
             enqueue,
         )
     }
@@ -107,6 +133,7 @@ impl CoreAdmission {
                 application,
                 now_ms,
             },
+            true,
             enqueue,
         )
     }
@@ -115,6 +142,7 @@ impl CoreAdmission {
         &mut self,
         store: &mut Store,
         delivery: MlsApplicationDelivery,
+        allow_gossip: bool,
         mut enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<MlsApplicationDispatch, AslError> {
         let MlsApplicationDelivery {
@@ -172,7 +200,7 @@ impl CoreAdmission {
                 }
             }
         }
-        if routes.is_empty() {
+        if routes.is_empty() && !allow_gossip {
             return Err(if incompatible {
                 AslError::IncompatibleVersion
             } else {
@@ -186,6 +214,7 @@ impl CoreAdmission {
             message_id,
             queued: 0,
             available: routes.len(),
+            packet: packet.clone(),
         };
         let chain_id = self.resolver.deployment().chain_id;
         store.with_mls_application_dispatch(

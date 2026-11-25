@@ -146,6 +146,7 @@ fn handle(
                     group_id: snapshot.local_id,
                     membership_epoch: snapshot.version.membership_epoch,
                 }),
+                context_ref: None,
             }))?);
         }
         FileAction::Status | FileAction::WaitingForUpload => unreachable!(),

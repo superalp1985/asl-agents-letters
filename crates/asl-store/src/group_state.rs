@@ -138,6 +138,33 @@ impl Store {
         Ok(read_mls_room_snapshot(&self.connection, wire_id, false)?.map(|(snapshot, _)| snapshot))
     }
 
+    pub fn list_mls_room_ids(&self) -> Result<Vec<(Hash32, GroupId)>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT wire_group_id,local_group_id
+                 FROM mls_room_states
+                 ORDER BY wire_group_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        rows.into_iter()
+            .map(|(wire, local)| {
+                let wire = wire.try_into().map_err(|_| AslError::InvalidDatabase)?;
+                let mut decoded = [0; 16];
+                hex::decode_to_slice(local.as_bytes(), &mut decoded)
+                    .map_err(|_| AslError::InvalidDatabase)?;
+                Ok((Hash32(wire), GroupId(Id128(decoded))))
+            })
+            .collect()
+    }
+
     pub fn mls_room_progress(&self, wire_id: Hash32) -> Result<Option<(String, u64)>, AslError> {
         self.connection
             .query_row(
@@ -270,7 +297,13 @@ mod tests {
     use asl_types::ids::AgentId;
 
     pub(super) fn test_peer(seed: u8) -> PeerId {
-        let key = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
+        test_peer_u64(seed.into())
+    }
+
+    pub(super) fn test_peer_u64(seed: u64) -> PeerId {
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&seed.to_be_bytes());
+        let key = libp2p_identity::Keypair::ed25519_from_bytes(bytes).unwrap();
         PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap()
     }
 

@@ -5,7 +5,8 @@ Pixel product icon and agent mascot
 -----------------------------------
 - Source: scripts/generate-art.py; see docs/assets/ART-SOURCE.md
 - Creator: ASL project contributors; original programmatically drawn pixel designs
-- Method: offline Pillow render for the product icon, mascot states, preset avatars, and state glyphs
+- Method: offline Pillow render for the product icon, mascot states, 9 explainer scenes (4 frames each), preset avatars, state glyphs, and the design preview sheets under docs/assets
+- Navigation icons: drawn at runtime from 8x8 patterns in crates/asl-app/src/ui/nav_icon.rs; no image file
 - External image URLs and third-party or copied art: none
 - License: MIT, under the repository LICENSE
 

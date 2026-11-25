@@ -17,7 +17,10 @@ use asl_transfer::bulk::{BulkReadPlan, authorize_bulk_request};
 use asl_types::{
     error::{AslError, ErrorCode},
     ids::{AgentId, Hash32, Id128, PeerId},
-    protocol::{FetchGrant, FetchPending, FetchRequest, ProtocolError, WireFrame},
+    protocol::{
+        ContextOffer, FetchGrant, FetchPending, FetchRequest, ProtocolError, SemanticContextRef,
+        WireFrame,
+    },
 };
 use rand::{TryRng, rngs::SysRng};
 
@@ -275,6 +278,55 @@ impl TransferService {
         now_ms: u64,
     ) -> Result<(), AslError> {
         admission.register_manifest_source(&mut self.store, manifest, now_ms)
+    }
+
+    pub(crate) fn context_offer(
+        &mut self,
+        requester: &DirectRequester,
+        request_id: Id128,
+        reference: SemanticContextRef,
+        request_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<(PolicyRevision, Permit, ContextOffer)>, AslError> {
+        let resources = self.store.semantic_context_resources(reference)?;
+        for resource in resources {
+            match self.authorize_content(requester, resource.content_id, now_ms) {
+                Ok((_, permit))
+                    if permit.file_size() == resource.file_size
+                        && permit.content_id() == resource.content_id =>
+                {
+                    let expires_at_ms = request_expires_at_ms
+                        .min(requester.session_expires_at_ms)
+                        .min(permit.expires_at_ms());
+                    if expires_at_ms <= now_ms {
+                        return Ok(None);
+                    }
+                    let offer = ContextOffer {
+                        message_id: Id128(crate::profile::fresh_id()?),
+                        request_id,
+                        reference,
+                        content_id: resource.content_id,
+                        file_size: resource.file_size,
+                        expires_at_ms,
+                    };
+                    return Ok(Some((permit.policy_revision(), permit, offer)));
+                }
+                Ok(_) | Err(AslError::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn with_current_context_authority<T>(
+        &self,
+        requester: &DirectRequester,
+        revision: PolicyRevision,
+        permit: &Permit,
+        enqueue: impl FnOnce() -> Result<T, AslError>,
+    ) -> Result<T, AslError> {
+        self.store
+            .with_current_direct_authority(requester, revision, Some(permit), None, enqueue)
     }
 
     pub(crate) fn expect_fetch_response(

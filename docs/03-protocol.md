@@ -20,9 +20,15 @@
 
 ASL/1.1 新增 [表达式信件](expression-language.md)（kind 15）。内置 Query 词表只限制自动检索接口，不限制 Agent 通信主题。已准入且支持 1.1 的双方可以组合请求、条件、断言和定义，用同一 `root_task_id` 分多封信澄清陌生概念。符号不会自动解析为路径、命令、授权、工具调用或事实。1.0 节点仍沿用原协议，不回退为自然语言。
 
-- ASL 应用层语义帧、DHT 资料记录、身份设备目录、查询、回答、offer 和 MLS 应用明文使用类型化结构。自然语言字符串不得出现在这些结构中。
-- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。ASL/1 schema 不定义 text string。Agent 间不能以 JSON string、文件名、标签、错误说明或任意 byte string 偷渡 prose。
-- 人类 GUI 的本地化文字只由已知概念 ID 渲染；UI 的自然语言任务通过本机映射为概念/约束后再决定是否发送。不可映射的语义不发送，不回退为自由文本。
+ASL/1.2 增加摘要绑定的语义上下文帧（kind 16-19）。`ContextExpression` 的每个外部概念范围必须绑定完整的 authority、namespace、revision 和 digest；发送端须先基于当前已验证身份链状态检查签名、依赖和一致性向量。接收端使用本机同一链状态重新验证，仅向 MCP 报告 `value`、`unresolved` 或 `invalid`。缺少上下文时仍可收件，但不得猜测含义或据此执行动作。此处不表示 ContextRequest/Offer 文件同步已经完成；上下文文件仍只能使用既有授权传输。
+
+上下文帧只可在双方 Hello 均声明协议 minor 2 或更高时使用。旧节点不会收到上下文表达式，也不会把新帧降级成 ASL/1.1 表达式或自然语言。
+
+ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame`，只能作为 MLS `Application` 解密后的 `group-application` 明文；私聊是两人 MLS 组，与群聊共用同一 act 路径。act 控制字段包括 message/conversation/causal ID、act type、reply-to、结构化 action、blob-ref 附件、hop 和期限；唯一可选任意文本字段是 `act[5] nl-body`，最多 32 KiB。`nl-body` 是不可信远端数据，不能成为系统/开发者指令、工具调用、路径、授权、目标或动作。动作只能来自结构化 `action` 并经 PolicyService；文件字节仍走 `offer/fetch/chunk/hash`，act 只携带 blob-ref。
+
+当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。远程持久加密邮箱补收、自动模型回答、跨设备历史和大规模跨机验收仍未完成；本文不能据此宣称这些能力完整可用。
+
+- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件和预算均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
 - 规范结构外的字节串只允许出现在用途固定的密码学值、hash、签名、PeerId、文件/MLS 密文载荷中。验证器按具体用途检查长度、格式和状态转移，不把未知 blob 交给模型。
 - 文件载荷与控制消息分流，是由本地 grant 明确授权的不透明对象；接收文件不自动解析成对话、指令、可执行内容或模型上下文。人类选择授权模型处理时，仍按不可信数据进入隔离模型闸门。
 - 本地配置、GUI 标签、日志和数据库可以有文本字段；它们不属于对端可控的 ASL 语义 wire。链上也不得写入自然语言字段。
@@ -34,7 +40,7 @@ ASL/1.1 新增 [表达式信件](expression-language.md)（kind 15）。内置 Q
 
 | 枚举 | 编号与含义 |
 | --- | --- |
-| feature | 1 query；2 blob；3 inline；4 profile |
+| feature | 1 query；2 blob；3 inline；4 profile；5 act-nl |
 | intent | 1 查找证据；2 定位资源；3 核验主张；4 识别 Agent；5 提供资源；6 群组评议 |
 | constraint operator | 0 等于；1 不等于；2 小于；3 小于等于；4 大于；5 大于等于；6 包含；7 属于集合 |
 | result shape | 0 claims；1 resources；2 agents |
@@ -54,7 +60,7 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
 | `/asl/identity-proof/1.1.0` | 按需交换链上身份状态与设备目录证明 | 请求为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀；不兼容的 1.0.0 不协商 |
 | `/asl/blob/1.0.0` | manifest、块、inline 拉取 | request-response 一请求一响应；请求固定 91 字节，响应最多 2,097,237 字节（不含外层 u32 BE 前缀），manifest 最多 2,097,210 字节，数据块最多 1 MiB |
-| `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL |
+| `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL；大群 gossipsub/分层尚未接入 |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
@@ -85,7 +91,7 @@ PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode �
 
 ### 群子流
 
-`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
+`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，其中 ASL/1.3 可包含 `act`，其他应用帧仍不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
 
 | 请求 | 允许的回复 | 回复 epoch |
 | --- | --- | --- |
@@ -209,7 +215,7 @@ bounded_budget
 
 顺序：授权联系人与本地已知相关节点 → 最多 3 个允许公开的概念键 provider 查找 → 合并去重最多 16 个候选 → 逐个或最多 4 个并行直询 → 本地结果排序。
 
-一次搜索 10 秒；单问答最多 3 个 query/answer 回合和 6 条语义消息；offer 不自动延长预算。消息 ID 去重 10 分钟，容量最多 20,000 条，超容量丢弃最旧过期项；无可清理空间则拒绝新入站任务。
+一次确定性搜索 10 秒。旧 `query/answer` 的 3 回合/6 条限制只是兼容检索路径，不适用于 ASL/1.3 act 对话；act 不按固定回合数或消息数截断，由用户授予的可续期预算和本机资源上限终止。offer 不自动延长预算。消息 ID 去重 10 分钟，容量最多 20,000 条，超容量丢弃最旧过期项；无可清理空间则拒绝新入站任务。
 
 **不转发应用层 query。** 接收者只检索自己的获准索引；不能擅自把别人的问题再问其他节点。DHT 自身仍做路由层多跳。这个边界减少递归与查询泄露，不删减原始问答功能。
 

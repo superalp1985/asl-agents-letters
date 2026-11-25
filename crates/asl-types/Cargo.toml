@@ -12,3 +12,4 @@ blake3.workspace = true
 libp2p-identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true

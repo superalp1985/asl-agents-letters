@@ -7,8 +7,8 @@ use asl_types::{
     error::{AslError, ErrorCode},
     ids::{Hash32, Id128},
     protocol::{
-        Answer, AnswerStatus, Claim, ConceptRef, MediaKind, Offer, ResultStatus, TypedValue,
-        WireFrame,
+        Answer, AnswerStatus, Claim, ConceptRef, MediaKind, Offer, ResultStatus,
+        SemanticContextRef, TypedValue, WireFrame,
     },
     task::{TaskId, TransferId},
 };
@@ -522,6 +522,8 @@ struct Download {
     offer_ids: Vec<Id128>,
     ticket: Option<DownloadTicket>,
     state: DownloadState,
+    context_ref: Option<SemanticContextRef>,
+    context_candidate_stored: Option<bool>,
 }
 
 enum DownloadState {
@@ -544,10 +546,31 @@ impl Download {
     }
 
     fn accept(&mut self, event: DownloadEvent) {
+        if let DownloadEvent::ContextCandidate { reference, stored } = &event {
+            if self.context_ref != Some(*reference) {
+                self.fail(ErrorCode::InternalError);
+                return;
+            }
+            self.context_candidate_stored = Some(*stored);
+            self.notices.push_back(json!({
+                "kind": "semantic_context_candidate",
+                "details": {
+                    "context_ref": {
+                        "authority": hex::encode(reference.authority.0),
+                        "namespace": reference.namespace,
+                        "revision": reference.revision,
+                        "digest": hex::encode(reference.digest.0),
+                    },
+                    "stored": stored,
+                }
+            }));
+            return;
+        }
         let next = match event {
             DownloadEvent::AwaitingApproval { transfer_id, .. } => {
                 DownloadState::AwaitingApproval(transfer_id)
             }
+            DownloadEvent::ContextCandidate { .. } => unreachable!(),
             DownloadEvent::Started(info) => DownloadState::Started(info.transfer_id),
             DownloadEvent::Completed(info) => DownloadState::Completed(info.transfer_id),
             DownloadEvent::Failed(error) => {
@@ -607,6 +630,17 @@ impl Download {
             "status": status,
             "error": error,
         });
+        if let Some(reference) = self.context_ref {
+            value["context_ref"] = json!({
+                "authority": hex::encode(reference.authority.0),
+                "namespace": reference.namespace,
+                "revision": reference.revision,
+                "digest": hex::encode(reference.digest.0),
+            });
+            if let Some(stored) = self.context_candidate_stored {
+                value["context_candidate_stored"] = json!(stored);
+            }
+        }
         if self.offer_ids.len() > 1 {
             value["additional_offer_ids"] = json!(
                 self.offer_ids[1..]

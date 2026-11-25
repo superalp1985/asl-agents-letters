@@ -287,7 +287,17 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TRIGGER avatar_receipts_local_insert;
          DROP TRIGGER avatar_receipts_local_update;
          DROP TRIGGER avatar_receipts_local_delete;
-         DROP TABLE avatar_receipts;",
+         DROP TABLE avatar_receipts;
+         DROP TABLE conversation_attachment_refs;
+         DROP TABLE conversation_act_events;
+         DROP TABLE conversation_budget_grants;
+         DROP TABLE mailbox_shards;
+         DROP TABLE mailbox_slots;
+         DROP TABLE gossip_topic_state;
+         DROP TABLE local_capacity_measurements;
+         DROP TABLE semantic_context_resources;
+         DROP TABLE semantic_context_candidates;
+         DELETE FROM schema_migrations WHERE version IN (33,34,35);",
         )
         .unwrap();
 }

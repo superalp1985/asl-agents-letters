@@ -49,6 +49,7 @@ pub struct DownloadSelection {
     pub filename: String,
     pub sources: Vec<DownloadSource>,
     pub group: Option<GroupTransferBinding>,
+    pub context_ref: Option<asl_types::protocol::SemanticContextRef>,
 }
 
 #[derive(Debug)]
@@ -69,6 +70,10 @@ pub enum DownloadEvent {
     AwaitingApproval {
         approval_id: Id128,
         transfer_id: TransferId,
+    },
+    ContextCandidate {
+        reference: asl_types::protocol::SemanticContextRef,
+        stored: bool,
     },
     Started(DownloadInfo),
     Completed(DownloadInfo),
@@ -125,7 +130,7 @@ impl DownloadPort {
             return Err(AslError::InvalidMessage);
         }
         // A job reports at most one consent, one start and one terminal outcome.
-        let (events, receiver) = sync_channel(3);
+        let (events, receiver) = sync_channel(4);
         send(&self.jobs, QueuedJob { job, events })?;
         Ok(DownloadTicket(receiver))
     }
@@ -355,7 +360,7 @@ fn run(
                         .map_or(Ok(()), |event| local.handle_chunk_event(event))
                 })
                 .and_then(|()| job.step(&mut local, event.as_ref(), now, &send));
-            if job.report_terminal(result) {
+            if job.report_terminal(&mut local, result, now) {
                 local.pause_chunks()?;
                 active = None;
             }

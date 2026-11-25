@@ -98,6 +98,36 @@
       "accepted": true
     },
     {
+      "name": "context-request-v1",
+      "root": "context-request",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "context-offer-v1",
+      "root": "context-offer",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "context-agreement-v1",
+      "root": "context-agreement",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "context-expression-v1",
+      "root": "context-expression",
+      "codec": "frame",
+      "accepted": true
+    },
+    {
+      "name": "act-v1",
+      "root": "act",
+      "codec": "value",
+      "accepted": true
+    },
+    {
       "name": "signed-profile-record-v1",
       "root": "signed-profile-record",
       "codec": "record",
@@ -142,6 +172,36 @@
     {
       "name": "expression-wrong-operator-arity-v1",
       "root": "expression-letter",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "context-request-zero-expiry-v1",
+      "root": "context-request",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "context-request-zero-revision-v1",
+      "root": "context-request",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "context-offer-oversized-v1",
+      "root": "context-offer",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "context-offer-zero-expiry-v1",
+      "root": "context-offer",
+      "codec": "frame",
+      "accepted": false
+    },
+    {
+      "name": "context-agreement-unknown-status-v1",
+      "root": "context-agreement",
       "codec": "frame",
       "accepted": false
     }

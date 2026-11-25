@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::Path,
     sync::mpsc::{Receiver, SyncSender, TryRecvError},
@@ -13,12 +13,16 @@ use asl_policy::PolicyEngine;
 use asl_store::{
     Store,
     group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
+    mailbox::{
+        ConversationBudgetGrant, MAX_BUDGET_MESSAGES, MAX_BUDGET_RENEWALS, MAX_BUDGET_WINDOW_MS,
+        MailboxPut,
+    },
     search::group::GroupRequester,
 };
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
-    protocol::{Intent, MediaKind, ResultShape, WireFrame},
+    protocol::{GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame},
     task::GroupId,
 };
 use serde_json::{Value, json};
@@ -85,7 +89,7 @@ pub struct LocalGroupCommand {
 }
 
 pub(super) struct LoopbackGroups {
-    store: Store,
+    pub(super) store: Store,
     next_prune: Instant,
     next_review: Instant,
     operator_view: Option<asl_store::group_state::operator::AdminSnapshot>,
@@ -95,6 +99,7 @@ pub(super) struct LoopbackGroups {
     next_sync_probe: Instant,
     sync_cursor: Option<(Hash32, PeerId)>,
     pending_transfers: VecDeque<PendingGroupTransfer>,
+    gossip_subscriptions: HashSet<Hash32>,
 }
 
 struct ReceivedApplication {
@@ -153,6 +158,7 @@ impl LoopbackGroups {
             next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
             sync_cursor: None,
             pending_transfers: VecDeque::new(),
+            gossip_subscriptions: HashSet::new(),
         })
     }
 }
@@ -167,6 +173,21 @@ impl Supervisor {
     }
 
     pub(super) fn route_group_event(&mut self, event: NetworkEvent, now_ms: u64) {
+        if let NetworkEvent::GossipReceived { key, payload, .. } = &event {
+            let mailbox = &mut self.mailbox;
+            if let (Some(groups), Some(admission)) = (self.groups.as_mut(), self.admission.as_mut())
+            {
+                let _ = Self::handle_group_gossip(
+                    mailbox,
+                    groups,
+                    admission,
+                    Hash32(*key),
+                    payload,
+                    now_ms,
+                );
+            }
+            return;
+        }
         let (Some(groups), Some(admission)) = (&mut self.groups, &mut self.admission) else {
             return;
         };
@@ -236,6 +257,22 @@ impl Supervisor {
                 && let Some(member) = requester.as_ref()
                 && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
             {
+                if let GroupApplication::Act(act) = application.as_ref() {
+                    let group = asl_store::transfers::GroupTransferBinding {
+                        group_id: member.group_id.clone(),
+                        membership_epoch: member.membership_epoch,
+                    };
+                    self.mailbox.observe_act(
+                        crate::downloads::DownloadSource {
+                            agent_id: member.direct.agent,
+                            peer_id: sender.clone(),
+                        },
+                        *connection_id,
+                        (*wire_id, *epoch, group),
+                        act,
+                        now_ms,
+                    );
+                }
                 let frame = match application.as_ref() {
                     GroupApplication::Query(q) => Some(WireFrame::Query(q.clone())),
                     GroupApplication::Answer(a) => Some(WireFrame::Answer(a.clone())),
@@ -333,6 +370,54 @@ impl Supervisor {
                 _ => {}
             }
         }
+    }
+
+    fn handle_group_gossip(
+        mailbox: &mut crate::agent_mail::Mailbox,
+        groups: &mut LoopbackGroups,
+        admission: &mut crate::profile::CoreAdmission,
+        key: Hash32,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let envelope = match decode_frame(payload)? {
+            WireFrame::GroupEnvelope(envelope) => envelope,
+            _ => return Err(AslError::InvalidMessage),
+        };
+        let packet = GroupPacket::from_envelope(envelope)?;
+        if packet.group_id != key {
+            return Err(AslError::InvalidMessage);
+        }
+        let directories = HashMap::new();
+        let Some((application, agent, peer)) =
+            admission.apply_mls_gossip(&mut groups.store, &packet, &directories, now_ms)?
+        else {
+            return Ok(());
+        };
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(key)?
+            .ok_or(AslError::NotFound)?;
+        let binding = asl_store::transfers::GroupTransferBinding {
+            group_id: snapshot.local_id,
+            membership_epoch: snapshot.version.membership_epoch,
+        };
+        if let GroupApplication::Act(act) = &application
+            && mailbox.interested()
+            && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
+        {
+            mailbox.observe_act(
+                crate::downloads::DownloadSource {
+                    agent_id: agent,
+                    peer_id: peer,
+                },
+                [0; 16],
+                (key, packet.epoch, binding),
+                act,
+                now_ms,
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn poll_group_transfers(
@@ -452,7 +537,8 @@ impl Supervisor {
                 GroupApplication::Query(_)
                 | GroupApplication::Answer(_)
                 | GroupApplication::Offer(_)
-                | GroupApplication::Expression(_) => {}
+                | GroupApplication::Expression(_)
+                | GroupApplication::Act(_) => {}
             }
         }
     }
@@ -567,6 +653,22 @@ impl Supervisor {
             if self.net.is_running()
                 && self.network_admission_status == NetworkAdmissionStatus::Active
                 && !groups.cleanup_failed
+            {
+                for (wire_id, _) in groups.store.list_mls_room_ids()? {
+                    if groups.gossip_subscriptions.insert(wire_id) {
+                        let command = NetworkCommand::GossipSubscribe {
+                            operation_id: fresh_id()?,
+                            key: wire_id.0,
+                        };
+                        if enqueue(&self.net, command).is_err() {
+                            groups.gossip_subscriptions.remove(&wire_id);
+                        }
+                    }
+                }
+            }
+            if self.net.is_running()
+                && self.network_admission_status == NetworkAdmissionStatus::Active
+                && !groups.cleanup_failed
                 && let Some(admission) = &mut self.admission
             {
                 groups.poll_sync(admission, &self.net, now, unix_time_ms()?);
@@ -625,7 +727,7 @@ impl Supervisor {
         }
     }
 
-    fn apply_local_group_action(
+    pub(super) fn apply_local_group_action(
         &mut self,
         action: LocalGroupAction,
         now_ms: u64,
@@ -660,7 +762,23 @@ impl Supervisor {
                     .iter()
                     .map(|invite| invite_view(store, invite))
                     .collect::<Result<Vec<_>, _>>()?;
+                let rooms = store
+                    .list_mls_room_ids()?
+                    .into_iter()
+                    .map(|(wire_id, local_id)| {
+                        let (state, epoch) = store
+                            .mls_room_progress(wire_id)?
+                            .ok_or(AslError::NotFound)?;
+                        Ok(json!({
+                            "room": hex::encode(wire_id.0),
+                            "conversation_id": hex::encode(local_id.0.0),
+                            "state": state,
+                            "mls_epoch": epoch,
+                        }))
+                    })
+                    .collect::<Result<Vec<_>, AslError>>()?;
                 return Ok(json!({
+                    "rooms": rooms,
                     "pending": pending,
                     "approved": approved
                 }));
@@ -751,6 +869,7 @@ impl Supervisor {
                     "Group",
                     now_ms,
                 )?;
+                grant_act_budget(store, id.0, now_ms)?;
                 Ok(json!({"room": hex::encode(wire_id.0), "state": "active"}))
             }
             LocalGroupAction::Approve(id) | LocalGroupAction::Retry(id) => {
@@ -796,6 +915,7 @@ impl Supervisor {
                 );
                 match send {
                     Ok(_) => {
+                        grant_act_budget(store, local_id.0, now_ms)?;
                         groups
                             .join_diagnostics
                             .retain(|(previous, _)| *previous != id);
@@ -1055,6 +1175,32 @@ fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslEr
         "base_epoch": invite.base_epoch,
         "expires_at_ms": invite.expires_at_ms
     }))
+}
+
+fn grant_act_budget(
+    store: &mut Store,
+    conversation_id: Id128,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    let now_ms = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
+    let first = fresh_id()?;
+    let second = fresh_id()?;
+    let mut grant_id = [0; 32];
+    grant_id[..16].copy_from_slice(&first);
+    grant_id[16..].copy_from_slice(&second);
+    let inserted = store.grant_conversation_budget(ConversationBudgetGrant {
+        conversation_id: &hex::encode(conversation_id.0),
+        grant_id,
+        messages_granted: MAX_BUDGET_MESSAGES,
+        max_renewals: MAX_BUDGET_RENEWALS,
+        now_ms,
+        expires_at_ms: now_ms.saturating_add(MAX_BUDGET_WINDOW_MS),
+    })?;
+    if matches!(inserted, MailboxPut::Inserted | MailboxPut::Duplicate) {
+        Ok(())
+    } else {
+        Err(AslError::InvalidPolicyState)
+    }
 }
 
 fn describe_join_failure(error: AslError) -> &'static str {

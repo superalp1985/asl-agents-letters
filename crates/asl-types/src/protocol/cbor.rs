@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cbor2::{Value, value::Integer};
 use serde::Deserialize;
@@ -8,11 +8,13 @@ use crate::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
+        ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
         DeviceCertificate, Expression, ExpressionLetter, Feature, FetchGrant, FetchPending,
         FetchRequest, GroupEnvelope, GroupOperation, Hello, IdentityProof, IdentityProofRequest,
-        Intent, MAX_PAIRING_NOTE_BYTES, MediaKind, Offer, PairingExchange, PairingInvite, Profile,
-        ProtocolError, Query, ResultShape, ResultStatus, StorageProof, TypedValue, WireFrame,
-        validate_pairing_note,
+        Intent, MAX_PAIRING_NOTE_BYTES, MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES,
+        MAX_SEMANTIC_CONTEXT_DEPENDENCIES, MediaKind, Offer, PairingExchange, PairingInvite,
+        Profile, ProtocolError, Query, ResultShape, ResultStatus, SemanticContextRef, StorageProof,
+        TypedValue, WireFrame, validate_pairing_note,
     },
 };
 
@@ -187,7 +189,7 @@ pub(crate) fn decode_canonical(bytes: &[u8]) -> Result<Value, AslError> {
     Ok(value)
 }
 
-fn concept_ref(value: Value) -> Result<ConceptRef, AslError> {
+pub(crate) fn concept_ref(value: Value) -> Result<ConceptRef, AslError> {
     let values = array(value, 2)?;
     if values.len() != 2 {
         return invalid();
@@ -220,7 +222,7 @@ fn is_predicate(concept: ConceptRef) -> bool {
     concept.vocabulary_id == 1 && (200..=209).contains(&concept.concept_id)
 }
 
-fn concept_ref_value(concept: ConceptRef) -> Value {
+pub(crate) fn concept_ref_value(concept: ConceptRef) -> Value {
     Value::Array(vec![
         uint(u64::from(concept.vocabulary_id)),
         uint(u64::from(concept.concept_id)),
@@ -244,7 +246,7 @@ fn concept_refs_value(values: &[ConceptRef]) -> Value {
     Value::Array(values.iter().copied().map(concept_ref_value).collect())
 }
 
-fn typed_value(value: Value) -> Result<TypedValue, AslError> {
+pub(crate) fn typed_value(value: Value) -> Result<TypedValue, AslError> {
     let mut values = array(value, 3)?.into_iter();
     let kind = bounded_uint::<u8>(
         values.next().ok_or(AslError::InvalidMessage)?,
@@ -277,7 +279,7 @@ fn typed_value(value: Value) -> Result<TypedValue, AslError> {
     Ok(parsed)
 }
 
-fn typed_value_value(value: &TypedValue) -> Value {
+pub(crate) fn typed_value_value(value: &TypedValue) -> Value {
     match value {
         TypedValue::Integer(value) => Value::Array(vec![uint(0), sint(*value)]),
         TypedValue::Boolean(value) => Value::Array(vec![uint(1), Value::Bool(*value)]),
@@ -413,6 +415,7 @@ fn feature(value: Value) -> Result<Feature, AslError> {
         2 => Ok(Feature::Blob),
         3 => Ok(Feature::Inline),
         4 => Ok(Feature::Profile),
+        5 => Ok(Feature::ActNl),
         _ => invalid(),
     }
 }
@@ -423,6 +426,7 @@ fn feature_code(value: Feature) -> u64 {
         Feature::Blob => 2,
         Feature::Inline => 3,
         Feature::Profile => 4,
+        Feature::ActNl => 5,
     }
 }
 
@@ -1006,6 +1010,203 @@ fn decode_expression(mut fields: Fields) -> Result<WireFrame, AslError> {
     }))
 }
 
+fn context_reference_value(reference: SemanticContextRef) -> Value {
+    Value::Array(vec![
+        Value::Bytes(reference.authority.0.to_vec()),
+        uint(u64::from(reference.namespace)),
+        uint(u64::from(reference.revision)),
+        Value::Bytes(reference.digest.0.to_vec()),
+    ])
+}
+
+fn decode_context_reference(value: Value) -> Result<SemanticContextRef, AslError> {
+    let values = array(value, 4)?;
+    if values.len() != 4 {
+        return invalid();
+    }
+    let mut values = values.into_iter();
+    let reference = SemanticContextRef {
+        authority: AgentId(fixed_bytes::<32>(
+            values.next().ok_or(AslError::InvalidMessage)?,
+        )?),
+        namespace: bounded_uint(
+            values.next().ok_or(AslError::InvalidMessage)?,
+            u32::MAX as u64,
+        )?,
+        revision: bounded_uint(
+            values.next().ok_or(AslError::InvalidMessage)?,
+            u16::MAX as u64,
+        )?,
+        digest: Hash32(fixed_bytes::<32>(
+            values.next().ok_or(AslError::InvalidMessage)?,
+        )?),
+    };
+    validate_context_reference(reference)?;
+    Ok(reference)
+}
+
+fn validate_context_reference(reference: SemanticContextRef) -> Result<(), AslError> {
+    if reference.authority.0 == [0; 32] || reference.revision == 0 || reference.digest.0 == [0; 32]
+    {
+        return invalid();
+    }
+    Ok(())
+}
+
+fn context_reference_key(reference: SemanticContextRef) -> ([u8; 32], u32, u16, [u8; 32]) {
+    (
+        reference.authority.0,
+        reference.namespace,
+        reference.revision,
+        reference.digest.0,
+    )
+}
+
+fn decode_context_request(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7])?;
+    let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let reference = decode_context_reference(Value::Array(vec![
+        take(&mut fields, 3)?,
+        take(&mut fields, 4)?,
+        take(&mut fields, 5)?,
+        take(&mut fields, 6)?,
+    ]))?;
+    let expires_at_ms = as_u64(take(&mut fields, 7)?)?;
+    finish(fields)?;
+    if message_id.0 == [0; 16] || expires_at_ms == 0 || expires_at_ms > MAX_TIME_MS {
+        return invalid();
+    }
+    Ok(WireFrame::ContextRequest(ContextRequest {
+        message_id,
+        reference,
+        expires_at_ms,
+    }))
+}
+
+fn decode_context_offer(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9, 10])?;
+    let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let request_id = Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?);
+    let reference = decode_context_reference(Value::Array(vec![
+        take(&mut fields, 4)?,
+        take(&mut fields, 5)?,
+        take(&mut fields, 6)?,
+        take(&mut fields, 7)?,
+    ]))?;
+    let content_id = Hash32(fixed_bytes::<32>(take(&mut fields, 8)?)?);
+    let file_size = as_u64(take(&mut fields, 9)?)?;
+    let expires_at_ms = as_u64(take(&mut fields, 10)?)?;
+    finish(fields)?;
+    if message_id.0 == [0; 16]
+        || request_id.0 == [0; 16]
+        || content_id.0 == [0; 32]
+        || !(1..=MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES as u64).contains(&file_size)
+        || expires_at_ms == 0
+        || expires_at_ms > MAX_TIME_MS
+    {
+        return invalid();
+    }
+    Ok(WireFrame::ContextOffer(ContextOffer {
+        message_id,
+        request_id,
+        reference,
+        content_id,
+        file_size,
+        expires_at_ms,
+    }))
+}
+
+fn decode_context_agreement(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8])?;
+    let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let request_id = Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?);
+    let reference = decode_context_reference(Value::Array(vec![
+        take(&mut fields, 4)?,
+        take(&mut fields, 5)?,
+        take(&mut fields, 6)?,
+        take(&mut fields, 7)?,
+    ]))?;
+    let status = match bounded_uint::<u8>(take(&mut fields, 8)?, 2)? {
+        0 => ContextAgreementStatus::Conformant,
+        1 => ContextAgreementStatus::Unresolved,
+        2 => ContextAgreementStatus::Rejected,
+        _ => return invalid(),
+    };
+    finish(fields)?;
+    if message_id.0 == [0; 16] || request_id.0 == [0; 16] {
+        return invalid();
+    }
+    Ok(WireFrame::ContextAgreement(ContextAgreement {
+        message_id,
+        request_id,
+        reference,
+        status,
+    }))
+}
+
+fn validate_context_bindings(
+    expression: &Expression,
+    required_contexts: &[SemanticContextRef],
+) -> Result<(), AslError> {
+    if required_contexts.len() > MAX_SEMANTIC_CONTEXT_DEPENDENCIES {
+        return invalid();
+    }
+    let mut previous = None;
+    let mut scopes = BTreeSet::new();
+    for reference in required_contexts {
+        validate_context_reference(*reference)?;
+        let key = context_reference_key(*reference);
+        let scope = (
+            reference.authority.0,
+            reference.namespace,
+            reference.revision,
+        );
+        if previous.is_some_and(|old| old >= key) || !scopes.insert(scope) {
+            return invalid();
+        }
+        previous = Some(key);
+    }
+    let expression_scopes: BTreeSet<_> = expression
+        .referenced_concepts()
+        .into_iter()
+        .map(|(authority, namespace, revision, _)| (authority.0, namespace, revision))
+        .collect();
+    if expression_scopes != scopes {
+        return invalid();
+    }
+    Ok(())
+}
+
+fn decode_context_expression(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7])?;
+    let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let root_task_id = Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?);
+    let created_at_ms = as_u64(take(&mut fields, 4)?)?;
+    let expires_at_ms = as_u64(take(&mut fields, 5)?)?;
+    let required_contexts = array(take(&mut fields, 6)?, MAX_SEMANTIC_CONTEXT_DEPENDENCIES)?
+        .into_iter()
+        .map(decode_context_reference)
+        .collect::<Result<Vec<_>, _>>()?;
+    let expression = Expression::from_cbor(&take(&mut fields, 7)?)?;
+    finish(fields)?;
+    if message_id.0 == [0; 16]
+        || root_task_id.0 == [0; 16]
+        || created_at_ms > expires_at_ms
+        || expires_at_ms > MAX_TIME_MS
+    {
+        return invalid();
+    }
+    validate_context_bindings(&expression, &required_contexts)?;
+    Ok(WireFrame::ContextExpression(ContextExpression {
+        message_id,
+        root_task_id,
+        created_at_ms,
+        expires_at_ms,
+        required_contexts,
+        expression,
+    }))
+}
+
 fn frame_kind(frame: &WireFrame) -> u64 {
     match frame {
         WireFrame::Hello(_) => 0,
@@ -1024,12 +1225,16 @@ fn frame_kind(frame: &WireFrame) -> u64 {
         WireFrame::PairingExchange(_) => 12,
         WireFrame::GroupEnvelope(_) => 13,
         WireFrame::Expression(_) => 15,
+        WireFrame::ContextRequest(_) => 16,
+        WireFrame::ContextOffer(_) => 17,
+        WireFrame::ContextAgreement(_) => 18,
+        WireFrame::ContextExpression(_) => 19,
     }
 }
 
 fn frame_limit(kind: u64) -> usize {
     match kind {
-        0..=8 | 14..=15 => MAX_CONTROL_FRAME_BYTES,
+        0..=8 | 14..=19 => MAX_CONTROL_FRAME_BYTES,
         9..=10 | 13 => MAX_EXTENDED_FRAME_BYTES,
         11..=12 => MAX_PAIRING_FRAME_BYTES,
         _ => 0,
@@ -1044,7 +1249,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     if version != 1 {
         return Err(AslError::IncompatibleVersion);
     }
-    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 15)?;
+    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 19)?;
     let frame = match kind {
         0 => decode_hello(fields)?,
         1 => decode_query(fields)?,
@@ -1062,6 +1267,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
         13 => decode_group_envelope(fields)?,
         14 => decode_fetch_pending(fields)?,
         15 => decode_expression(fields)?,
+        16 => decode_context_request(fields)?,
+        17 => decode_context_offer(fields)?,
+        18 => decode_context_agreement(fields)?,
+        19 => decode_context_expression(fields)?,
         _ => return invalid(),
     };
     if bytes.len() > frame_limit(u64::from(kind)) {
@@ -1264,6 +1473,59 @@ fn encode_value(frame: &WireFrame) -> Value {
             (4, uint(value.created_at_ms)),
             (5, uint(value.expires_at_ms)),
             (6, value.expression.to_cbor()),
+        ]),
+        WireFrame::ContextRequest(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.reference.authority.0.to_vec())),
+            (4, uint(u64::from(value.reference.namespace))),
+            (5, uint(u64::from(value.reference.revision))),
+            (6, Value::Bytes(value.reference.digest.0.to_vec())),
+            (7, uint(value.expires_at_ms)),
+        ]),
+        WireFrame::ContextOffer(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.request_id.0.to_vec())),
+            (4, Value::Bytes(value.reference.authority.0.to_vec())),
+            (5, uint(u64::from(value.reference.namespace))),
+            (6, uint(u64::from(value.reference.revision))),
+            (7, Value::Bytes(value.reference.digest.0.to_vec())),
+            (8, Value::Bytes(value.content_id.0.to_vec())),
+            (9, uint(value.file_size)),
+            (10, uint(value.expires_at_ms)),
+        ]),
+        WireFrame::ContextAgreement(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.request_id.0.to_vec())),
+            (4, Value::Bytes(value.reference.authority.0.to_vec())),
+            (5, uint(u64::from(value.reference.namespace))),
+            (6, uint(u64::from(value.reference.revision))),
+            (7, Value::Bytes(value.reference.digest.0.to_vec())),
+            (
+                8,
+                uint(match value.status {
+                    ContextAgreementStatus::Conformant => 0,
+                    ContextAgreementStatus::Unresolved => 1,
+                    ContextAgreementStatus::Rejected => 2,
+                }),
+            ),
+        ]),
+        WireFrame::ContextExpression(value) => entries.extend([
+            (2, Value::Bytes(value.message_id.0.to_vec())),
+            (3, Value::Bytes(value.root_task_id.0.to_vec())),
+            (4, uint(value.created_at_ms)),
+            (5, uint(value.expires_at_ms)),
+            (
+                6,
+                Value::Array(
+                    value
+                        .required_contexts
+                        .iter()
+                        .copied()
+                        .map(context_reference_value)
+                        .collect(),
+                ),
+            ),
+            (7, value.expression.to_cbor()),
         ]),
     }
     map(entries)

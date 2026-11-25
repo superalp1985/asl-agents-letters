@@ -6,7 +6,7 @@ use super::contract::ServerFrame;
 
 pub(super) const MAX_EVENTS: usize = 32;
 // Leave room for JSON-RPC and escaping the resource's JSON text as a string.
-const MAX_BYTES: usize = 27 * 1024;
+const MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 pub(super) struct Inbox {
@@ -61,5 +61,21 @@ impl Inbox {
             .map(|(sequence, _, event)| json!({ "sequence": sequence, "event": event }))
             .collect::<Vec<_>>();
         json!({ "events": events, "dropped": self.dropped, "sequence": self.sequence })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_a_maximum_control_frame_notification_for_the_agent() {
+        let mut inbox = Inbox::default();
+        inbox.push(json!({
+            "kind": "context_expression",
+            "details": {"control_cbor_hex": "ab".repeat(65_536)}
+        }));
+        assert_eq!(inbox.snapshot()["events"].as_array().unwrap().len(), 1);
+        assert_eq!(inbox.snapshot()["dropped"], 0);
     }
 }

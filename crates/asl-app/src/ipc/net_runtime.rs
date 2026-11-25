@@ -8,8 +8,8 @@ use std::{
 use asl_net::{
     codec::{BulkRequest, BulkResponse},
     transport::{
-        AuthenticatedPeer, DialFailure, LocalConnectionId, LocalTransport, REQUEST_TIMEOUT,
-        RequestToken, ResponseToken, TransportEvent,
+        AuthenticatedPeer, DialFailure, GossipTopic, LocalConnectionId, LocalTransport,
+        REQUEST_TIMEOUT, RequestToken, ResponseToken, TransportEvent,
     },
 };
 use asl_transfer::scheduler::MAX_ACTIVE_PER_SOURCE;
@@ -230,6 +230,33 @@ impl NetworkBridge {
                 let result = self
                     .transport
                     .stop_providing(asl_net::dht::RecordKey::new(&key));
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::GossipSubscribe { operation_id, key } => {
+                let result = self
+                    .transport
+                    .subscribe_gossip(GossipTopic::new(key))
+                    .map(|_| ());
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::GossipUnsubscribe { operation_id, key } => {
+                let result = (!self.transport.unsubscribe_gossip(GossipTopic::new(key)))
+                    .then_some(())
+                    .ok_or_else(|| io::ErrorKind::NotFound.into());
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::GossipPublish {
+                operation_id,
+                key,
+                payload,
+            } => {
+                let result = self
+                    .transport
+                    .publish_gossip(GossipTopic::new(key), payload)
+                    .map(|_| ());
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
@@ -959,6 +986,18 @@ impl NetworkBridge {
                     candidate_id,
                     key,
                     value,
+                })?;
+            }
+            TransportEvent::GossipMessage(message) => {
+                let message_id = message
+                    .message_id
+                    .try_into()
+                    .map_err(|_| AslError::InvalidMessage)?;
+                writer.send(&IpcMessage::GossipReceived {
+                    key: message.topic.key(),
+                    propagation_source: message.propagation_source,
+                    message_id,
+                    payload: message.data,
                 })?;
             }
             TransportEvent::ProfilePublicationProgress {

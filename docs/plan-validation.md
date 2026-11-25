@@ -948,3 +948,43 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - Windows x64、Rust 1.100.0、锁定依赖离线；`cargo test --workspace --all-targets --features asl-app/desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：859 通过、1 失败、11 忽略。收件审批跨 Core 重启的 MCP 回归通过。
 - 失败为 `asl-agent` 的 `model_gateway::authorized_prompt_uses_only_registered_endpoint_and_returns_model_text`，本机模拟服务返回路径出现 `ProviderUnavailable`。前一次遇错停止的运行在同一测试目标中有两条不同用例报相同错误。没有定位根因，不能标记工作区测试全绿。
 - 同配置的工作区全目标严格 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。未执行真实外部模型、公网双节点、72 小时长跑或提权 AppContainer 验收。
+
+### 2026-11-24 桌面启动与美术改动复检
+
+- `asl-ui.exe --home <目录>` 可显式打开已有资料，优先于继承的 `ASL_HOME`；无参数仍兼容原启动器。参数缺失或不完整时不回退到其他资料目录。未读取到资料时不会先弹出无法保存的语言设置。
+- Windows x64、Rust 1.100.0；沿用上一轮全工作区串行命令：**865 通过、0 失败、11 忽略**。工作区严格 Clippy、格式和差异检查通过。此前日志中的传输 `PermissionDenied` 和模拟网关 `ProviderUnavailable` 本轮未复现，尚未确认根因。
+- 调试便携 ZIP 核对 17 项散列。在含空格的解包路径、不预设 `ASL_HOME` 的环境下通过 `Start-ASL.ps1 -DataDirectory` 启动，确认 SQLite 建在指定临时资料目录；不重启 Core 时可用显式 `--home` 重新打开窗口。渲染器直接截图确认无数据目录时显示指引、没有语言弹窗。新头像与动画帧通过编译内嵌资源的解码检查。
+- 未操作用户已有资料，未逐项人工检查新界面与托盘，也未重跑需手动启用的 AppContainer 或公网验收。
+
+### 2026-11-24 Windows 优化版测试候选
+
+- `Start-ASL.ps1 -ViewerOnly` 只打开当前激活版本的界面。Cargo 路径由本机脚本或环境变量指定；独立 checkout 不需要 `E:` 盘。构建发布动作只对 Windows 文件共享冲突限时重试，不覆盖已有输出，不更改签名更新器。
+- 本地模型 HTTP 夹具显式将已接受的连接设为阻塞，依旧受既有读超时限制。分段发送请求头／请求体的回归在修改前失败，修改后通过。正式模型网关、网络授权没有变更；真实模型服务未验收。
+- `cargo test --workspace --all-targets --features asl-app/desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：各 Cargo 目标共 **865 通过、0 失败、13 忽略**；另有一个成功的子进程夹具摘要。单独运行并通过 5 项显式测试：便携窗口入口、打包共享冲突、两次签名更新预检与激活、跨 Core 头像隔离解码、30 秒生产补扫计时。
+- 全目标严格 Clippy、格式与 Git 差异检查通过。CDDL 语法通过，24 个向量中 19 个接受、5 个拒绝，符合预期。
+- Windows x64 优化版测试 ZIP：`ASL-Windows-x64-Test-2026-11-24.zip`。SHA-256：`0cb2e88910947e6850198d686fbcc5db9f714de6386eb7ff7a08be5ef6118881`。解包验证 18 个文件和 17 项散列；用新资料启动后，`-ViewerOnly` 重开界面时 Core 进程号不变。未使用用户旧资料。
+- 这是供[单机人工验收](windows-test-checklist.md)的未签名包，不是正式 1.0。真实用户托盘与 DPI、提权容器多来源、真实链注册及撤销、跨机互通和长时间运行仍待验。
+
+### 2026-11-25 计划 11 文档审计
+
+- 本轮按 `docs/11-semantic-v2-scalable-groups-plan.md` 只做文档对齐，未修改代码，未运行 Rust、Cargo、CDDL、Foundry、GUI 或网络测试。此记录不是实现完成，也不是全量验收。
+- 当前 SQLite 最新迁移明确为 v34：v33 保存有界语义上下文候选，v34 保存 `.aslc` 与精确 authority/namespace/revision/digest 的资源关联。act、可续期预算、两人 MLS 私聊、加密邮箱、gossip topic 和容量测量只作为 v35+ 设计，不得按已存在表或已实现事务处理。
+- ASL/1.1 表达式和 ASL/1.2 语义上下文保持原用途；ASL/1.3 `act-nl` 已接入编解码、MLS 收发、MCP、群/两人会话工具、发送预算和 gossipsub act 路由。冻结边界是外层控制面、DHT、身份记录和 MCP 控制消息无任意文本，唯一自然语言为 MLS 解密后的 `act[5] nl-body`，且始终作为不可信远端数据。
+- 已有查询/答复、OpenMLS 小群、邀请/审批、结构化群消息和群文件局部测试证据保留，但它们不等同于两人 MLS 私聊、act 通知/确认、加密邮箱、gossipsub、可伸缩大群或无限制交流。
+- 最新工作树包含未提交文档与代码改动；此前 2026-11-24 的 `865 通过、0 失败、13 忽略` 只对应当时快照，不覆盖本轮工作树、v35+ 设计或新增语义上下文/ConfirmContext 接线。不得用历史全绿记录宣称最新工作树全量通过。
+
+### 2026-11-25 ASL/1.3 act 与群工具接线
+
+- 完成 ASL/1.3 `Act` 确定性 CBOR 编解码：外层 map 键 1-10，唯一文本字段为 `act[5] nl-body`（1..32 KiB），总 act 上限 60 KiB；`request` 必须带结构化 action，其他 act 类型不得伪装 action。`GroupApplication` 只能把 act 作为 MLS application plaintext 编解码，不新增外层 `WireFrame`。
+- `asl-app` 已接入 act 入站事件：可信控制字段与 `act_cbor_hex` 分开推送，自然语言只放在 `untrusted_remote_data`。已接入 `asl_send_act`、`asl_group_list/create/invite`、`asl_direct_open`；群管理工具只有 `ASL_MCP_GROUPS=admin` 时出现，收件方仍需本机批准邀请。
+- 单 MLS 群编译硬上限从 64 调整为 512；这是资源上限，不是跨机大群验收。libp2p gossipsub 网络层、Net IPC 命令/事件、Core 订阅/发布以及 gossip act 的 MLS/房间成员重验路径已接线；尚无跨机多跳群聊收敛验收。
+- 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项、三 Core 群消息进程测试 1 项和双 Core 群文件双端审批测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 与工作区全目标编译通过；`scripts/validate-cddl.ps1` 语法通过（24 接受、10 拒绝，含独立 act 向量）。
+- 群消息进程测试首次运行发现 active room 列表把 TEXT `local_group_id` 当 BLOB 读取；修复为严格 32-hex 解码后重跑通过。`group_file_crosses_core_processes_with_two_approvals` 也通过，验证双 Core 群文件双端审批、分块下载和最终内容。两测试验证 direct 路径，不是 gossipsub 多跳或跨机。
+- v35 迁移和 opaque 邮箱/预算仓储已实现并测试，但尚未接入远程 DHT 托管、邮箱收发、Core/Agent 预算 UI 或离线补收。
+- 未运行最新工作区全量测试、严格 Clippy、真实两设备建群/邀请/act 互通、群文件回归、提示注入红队、离线邮箱投递、512 人大群或公网/链 RPC。上述功能不得仅凭本轮编译和局部测试标为完整验收。
+
+### 2026-11-26 Agent 文件 Offer MCP 入口与工作区基线
+
+- 新增 `asl_send_file`，仅在本机宿主获得 `ASL_MCP_GROUPS=admin` 且 Core/MLS 会话可用时暴露。参数绑定现有 MLS room、已导入本机快照 content ID、媒体类型和有界 ASL topic；Core 先验证快照与 active room，再发送结构化 `Offer`，不会接受任意路径、文件名、目录或自然语言。接收方仍走现有的成员/epoch、收件目录、传输审批和分块校验。
+- `cargo +1.100.0 check -p asl-app --all-targets --locked --offline` 通过；`cargo +1.100.0 clippy -p asl-app --all-targets --locked --offline -- -D warnings` 通过。新增 MCP 参数单测 1 项通过：合法 `document` Offer 可解析，未知媒体类型、非 topic concept 和错误 content ID 被拒绝。
+- 本轮变更后完整工作区测试已重跑：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **899 通过、0 失败、13 忽略**。`asl-app` 库 295 项通过、`asl-store` 203 项通过、`asl-net` 62 项通过、`asl-policy` 119 项通过、`asl-types` 76 项通过、`asl-agent` 42 项通过；忽略项均来自显式环境门槛或子进程入口。`scripts/validate-cddl.ps1` 本轮未执行成功，本机当前 PATH 没有 `cddl` 命令；schema exporter 通过并核对 34 个向量（24 接受、10 拒绝）。`asl_send_file` 的 Core→MLS→接收方端到端尚未单独验收，不能把它等同于公网文件传输完成。

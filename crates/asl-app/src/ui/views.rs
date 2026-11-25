@@ -74,7 +74,10 @@ pub(super) struct Interaction<'a> {
         asl_types::error::AslError,
     >,
     pub(super) language: Language,
+    pub(super) animations_enabled: bool,
     pub(super) action: &'a mut Option<super::LocalAction>,
+    /// Set by a page to ask the shell to switch pages after this frame.
+    pub(super) navigate: &'a mut Option<Page>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -132,8 +135,10 @@ impl Page {
             remote_avatars,
             checkpoints,
             language,
+            animations_enabled,
             actions_enabled,
             action,
+            navigate,
         } = interaction;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -144,6 +149,10 @@ impl Page {
             .id_salt(self)
             .show(ui, |ui| match self {
                 Self::Overview => {
+                    pending_decisions(ui, data, *language, navigate);
+                    ui.add_space(16.0);
+                    explainer(ui, *language, *animations_enabled);
+                    ui.add_space(16.0);
                     overview(
                         ui,
                         data,
@@ -1630,6 +1639,7 @@ fn overview(
                     .strong()
                     .size(16.0),
             );
+            read_only_tag(ui, language);
             let identity = &data.identity;
             let rows = [
                 [
@@ -1673,14 +1683,15 @@ fn overview(
                         .unwrap_or(ui_text(language, "未记录", "Not recorded")),
                 ],
             ];
+            let separator = ui_text(language, "：", ": ");
             for [label, value] in rows {
-                let label = format!("{label}：{value}");
+                let label = format!("{label}{separator}{value}");
                 ui.add(egui::Label::new(label.clone()).truncate())
                     .on_hover_text(label);
             }
             if let Some(height) = identity.finalized_height {
                 ui.label(format!(
-                    "{}: {height}",
+                    "{}{separator}{height}",
                     ui_text(language, "本机已记录的最终区块", "Local finalized block")
                 ));
             }
@@ -1753,6 +1764,239 @@ fn overview(
                     .color(ACCENT),
             );
         }
+    });
+}
+
+/// Shows what is waiting for a human decision and jumps to the page that
+/// handles it. Nothing here approves anything by itself.
+fn pending_decisions(
+    ui: &mut Ui,
+    data: &Dashboard,
+    language: Language,
+    navigate: &mut Option<Page>,
+) {
+    let transfers = data
+        .download_approvals
+        .iter()
+        .filter(|item| !item.approved)
+        .count()
+        + data
+            .upload_approvals
+            .iter()
+            .filter(|item| !item.approved)
+            .count()
+        + usize::from(data.host_inbox_request.is_some());
+    let invites = data
+        .group_invitations
+        .iter()
+        .filter(|item| !item.approved)
+        .count();
+    let rows = [
+        (
+            ui_text(language, "文件授权", "File access"),
+            transfers,
+            Page::Transfers,
+        ),
+        (
+            ui_text(language, "群邀请", "Group invites"),
+            invites,
+            Page::Groups,
+        ),
+    ];
+    let waiting = transfers + invites > 0;
+    let fill = if waiting {
+        super::tokens::WARNING_SOFT
+    } else {
+        super::tokens::SURFACE
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(super::tokens::border())
+        .corner_radius(super::tokens::radius_small())
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(ui_text(language, "需要你处理", "Needs you"))
+                        .strong()
+                        .size(16.0),
+                );
+                if waiting {
+                    ui.label(
+                        RichText::new(ui_text(language, "你来决定", "Your call"))
+                            .strong()
+                            .color(super::tokens::WARNING),
+                    );
+                }
+            });
+            if !waiting {
+                super::bubble::caption(
+                    ui,
+                    language,
+                    "现在没有等你批准的事。Agent 们正按协议各忙各的。",
+                    "Nothing is waiting for your approval. Agents are working over the protocol.",
+                );
+                return;
+            }
+            for (label, count, page) in rows {
+                if count == 0 {
+                    continue;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{label} {count}")).strong());
+                    if ui
+                        .button(ui_text(language, "去处理", "Review"))
+                        .on_hover_text(ui_text(
+                            language,
+                            "打开对应页面，由你确认或拒绝",
+                            "Open the page where you approve or decline",
+                        ))
+                        .clicked()
+                    {
+                        *navigate = Some(page);
+                    }
+                });
+            }
+        });
+}
+
+/// Marks data that agents exchange over the protocol and humans only read.
+fn read_only_tag(ui: &mut Ui, language: Language) {
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "Agent 间协议 · 只读",
+            "Agent protocol · read-only",
+        ))
+        .small()
+        .color(MUTED),
+    );
+}
+
+/// Per-scene copy: (button, character, bubble) in Chinese and English.
+fn scene_text(scene: super::art::Scene) -> [(&'static str, &'static str); 3] {
+    use super::art::Scene;
+    match scene {
+        Scene::Idle => [
+            ("待机", "Idle"),
+            ("小方 · 方块机器人", "Cube · block robot"),
+            (
+                "没有任务时我就打个盹。网络一直连着，来消息会叫醒我。",
+                "No tasks, so I nap. I stay connected and wake up when a message arrives.",
+            ),
+        ],
+        Scene::Message => [
+            ("收消息", "Message"),
+            ("Pip · 邮差鸟", "Pip · mail bird"),
+            (
+                "我收到一封结构化信封。里面装的是字段，不是聊天句子。",
+                "I got a structured envelope. It carries fields, not chat sentences.",
+            ),
+        ],
+        Scene::Transfer => [
+            ("传文件", "File transfer"),
+            ("大宝 · 小熊搬运工", "Bao · bear mover"),
+            (
+                "我在搬文件。想知道搬到哪了，去“传输”页看。",
+                "I'm moving a file. Open Transfers to see how far it got.",
+            ),
+        ],
+        Scene::Waiting => [
+            ("等你批准", "Needs approval"),
+            ("咪咪 · 举牌猫", "Mimi · sign cat"),
+            (
+                "这一步要你点头。配对、群邀请、文件授权都会停下来等你。",
+                "This step needs your OK. Pairing, group invites and file access all wait for you.",
+            ),
+        ],
+        Scene::Done => [
+            ("完成", "Done"),
+            ("团团 · 彩纸青蛙", "Tuan · confetti frog"),
+            (
+                "搞定！任务按协议完成了，可以去“活动”页看看。",
+                "Done! The task finished over the protocol. Check Activity for details.",
+            ),
+        ],
+        Scene::Warning => [
+            ("出错", "Error"),
+            ("阿丁 · 灯塔守护者", "Ding · lighthouse keeper"),
+            (
+                "出错了，我亮红灯。看顶部的提示，照着处理就行。",
+                "Something went wrong, so my light is red. Read the notice at the top and follow it.",
+            ),
+        ],
+        Scene::Browse => [
+            ("只浏览", "Browse only"),
+            ("Hoo · 读书猫头鹰", "Hoo · reading owl"),
+            (
+                "只浏览：别的 Agent 发来的请求我会看，但不回一个字。",
+                "Browse only: I read requests from other agents but never reply.",
+            ),
+        ],
+        Scene::Silent => [
+            ("不接收", "Not receiving"),
+            ("Momo · 捂嘴熊猫", "Momo · hush panda"),
+            (
+                "不接收：直连请求我不收也不看。想让我看，改成“只浏览”；想让我回，改成“浏览并回答”。",
+                "Not receiving: I neither take nor read direct requests. Pick Browse only to let me read, or Browse and answer to let me reply.",
+            ),
+        ],
+        Scene::Answer => [
+            ("浏览并回答", "Browse and answer"),
+            ("Lulu · 狐狸图书管理员", "Lulu · fox librarian"),
+            (
+                "浏览并回答：我读完请求，用结构化格式回一份答复。",
+                "Browse and answer: I read the request and send back a structured reply.",
+            ),
+        ],
+    }
+}
+
+/// Small explainer theatre: one character per ASL state, slow frames.
+fn explainer(ui: &mut Ui, language: Language, animations_enabled: bool) {
+    use super::art::Scene;
+    const FRAME_MS: u64 = 700;
+    let id = egui::Id::new("asl-explainer-scene");
+    let mut selected = ui.data(|d| d.get_temp::<usize>(id)).unwrap_or(0) % Scene::ALL.len();
+    ui.label(
+        RichText::new(ui_text(language, "看懂 ASL", "Understand ASL"))
+            .strong()
+            .size(16.0),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (index, scene) in Scene::ALL.into_iter().enumerate() {
+            let [(zh, en), _, _] = scene_text(scene);
+            if ui
+                .add(egui::Button::selectable(
+                    selected == index,
+                    ui_text(language, zh, en),
+                ))
+                .clicked()
+            {
+                selected = index;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, selected));
+    let scene = Scene::ALL[selected];
+    let frame = if animations_enabled {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(FRAME_MS));
+        let time = ui.input(|i| i.time);
+        (time * 1000.0 / FRAME_MS as f64) as usize
+    } else {
+        0
+    };
+    let [_, (name_zh, name_en), (say_zh, say_en)] = scene_text(scene);
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let texture = super::art::scene_frame(ui.ctx(), scene, frame);
+        ui.image((texture.id(), egui::Vec2::splat(96.0)));
+        ui.vertical(|ui| {
+            ui.label(RichText::new(ui_text(language, name_zh, name_en)).strong());
+            super::bubble::bubble(ui, language, say_zh, say_en);
+        });
     });
 }
 
