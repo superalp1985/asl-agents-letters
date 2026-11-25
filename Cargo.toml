@@ -24,6 +24,7 @@ libp2p = { version = "=0.57.1", default-features = false, features = [
     "autonat",
     "dcutr",
     "ed25519",
+    "gossipsub",
     "identify",
     "kad",
     "macros",

@@ -62,6 +62,7 @@ impl Harness {
                 filename: "received.bin".into(),
                 sources,
                 group,
+                context_ref: None,
             }))
             .unwrap()
     }
@@ -389,6 +390,7 @@ fn download_port_is_bounded_and_rejects_non_filename_destinations() {
                     .peer_id(),
             }],
             group: None,
+            context_ref: None,
         })
     };
     assert!(port.submit(make("outside/item.bin")).is_err());

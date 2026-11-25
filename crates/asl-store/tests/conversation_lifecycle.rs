@@ -283,4 +283,18 @@ fn sqlite_does_not_create_tasks_for_answers_or_store_fetch_grants_in_outbox() {
             .unwrap_err(),
         AslError::InvalidMessage
     ));
+
+    let context_expression = WireFrame::ContextExpression(asl_types::protocol::ContextExpression {
+        message_id: [5; 16].into(),
+        root_task_id: [6; 16].into(),
+        created_at_ms: 1_000,
+        expires_at_ms: 60_000,
+        required_contexts: Vec::new(),
+        expression: asl_types::protocol::Expression::from_json(&serde_json::json!(["int", "1"]))
+            .unwrap(),
+    });
+    assert!(matches!(
+        store.enqueue_outgoing_message(&unknown, &remote, &context_expression, 1_000, 60_000,),
+        Err(AslError::InvalidMessage)
+    ));
 }

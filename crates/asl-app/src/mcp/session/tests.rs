@@ -34,6 +34,7 @@ fn received_answer_survives_reopen_but_not_disabling_retention() {
         inbox: None,
         agent_push: false,
         expressions: false,
+        groups_admin: false,
     };
     let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
     let (queries, _query_runtime) = outgoing_query_channel();

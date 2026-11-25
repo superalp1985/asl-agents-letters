@@ -174,3 +174,18 @@ the existing local authorization checks.
 7. ASL/1.1 behavior remains covered by existing protocol vectors and
    two-host loopback tests. Public-network interoperability remains a
    separate release gate.
+
+## Implementation status (2026-11-25)
+
+The direct MCP path for `ContextExpression` is connected. The sender requires a
+direct admitted Agent at ASL/1 minor 2 or newer and rechecks each candidate
+package against its current verified controller, exact digest, dependency
+graph, and conformance vectors. The receiver performs the same local checks
+before deterministic evaluation. Missing or unverified packages report
+`unresolved`; a result is only a local evaluation and is not proof of model
+understanding or authorization. The complete encoded frame is exposed to the
+local Agent as `control_cbor_hex`.
+
+The remaining negotiated ContextRequest/Offer/Agreement exchange is not yet
+runtime-wired. In particular, no context package bytes are automatically
+published, requested, downloaded, imported, or granted by this slice.

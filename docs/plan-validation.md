@@ -964,3 +964,21 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 全目标严格 Clippy、格式与 Git 差异检查通过。CDDL 语法通过，24 个向量中 19 个接受、5 个拒绝，符合预期。
 - Windows x64 优化版测试 ZIP：`ASL-Windows-x64-Test-2026-11-24.zip`。SHA-256：`0cb2e88910947e6850198d686fbcc5db9f714de6386eb7ff7a08be5ef6118881`。解包验证 18 个文件和 17 项散列；用新资料启动后，`-ViewerOnly` 重开界面时 Core 进程号不变。未使用用户旧资料。
 - 这是供[单机人工验收](windows-test-checklist.md)的未签名包，不是正式 1.0。真实用户托盘与 DPI、提权容器多来源、真实链注册及撤销、跨机互通和长时间运行仍待验。
+
+### 2026-11-25 计划 11 文档审计
+
+- 本轮按 `docs/11-semantic-v2-scalable-groups-plan.md` 只做文档对齐，未修改代码，未运行 Rust、Cargo、CDDL、Foundry、GUI 或网络测试。此记录不是实现完成，也不是全量验收。
+- 当前 SQLite 最新迁移明确为 v34：v33 保存有界语义上下文候选，v34 保存 `.aslc` 与精确 authority/namespace/revision/digest 的资源关联。act、可续期预算、两人 MLS 私聊、加密邮箱、gossip topic 和容量测量只作为 v35+ 设计，不得按已存在表或已实现事务处理。
+- ASL/1.1 表达式和 ASL/1.2 语义上下文保持原用途；ASL/1.3 `act-nl` 已接入编解码、MLS 收发、MCP、群/两人会话工具、发送预算和 gossipsub act 路由。冻结边界是外层控制面、DHT、身份记录和 MCP 控制消息无任意文本，唯一自然语言为 MLS 解密后的 `act[5] nl-body`，且始终作为不可信远端数据。
+- 已有查询/答复、OpenMLS 小群、邀请/审批、结构化群消息和群文件局部测试证据保留，但它们不等同于两人 MLS 私聊、act 通知/确认、加密邮箱、gossipsub、可伸缩大群或无限制交流。
+- 最新工作树包含未提交文档与代码改动；此前 2026-11-24 的 `865 通过、0 失败、13 忽略` 只对应当时快照，不覆盖本轮工作树、v35+ 设计或新增语义上下文/ConfirmContext 接线。不得用历史全绿记录宣称最新工作树全量通过。
+
+### 2026-11-25 ASL/1.3 act 与群工具接线
+
+- 完成 ASL/1.3 `Act` 确定性 CBOR 编解码：外层 map 键 1-10，唯一文本字段为 `act[5] nl-body`（1..32 KiB），总 act 上限 60 KiB；`request` 必须带结构化 action，其他 act 类型不得伪装 action。`GroupApplication` 只能把 act 作为 MLS application plaintext 编解码，不新增外层 `WireFrame`。
+- `asl-app` 已接入 act 入站事件：可信控制字段与 `act_cbor_hex` 分开推送，自然语言只放在 `untrusted_remote_data`。已接入 `asl_send_act`、`asl_group_list/create/invite`、`asl_direct_open`；群管理工具只有 `ASL_MCP_GROUPS=admin` 时出现，收件方仍需本机批准邀请。
+- 单 MLS 群编译硬上限从 64 调整为 512；这是资源上限，不是跨机大群验收。libp2p gossipsub 网络层、Net IPC 命令/事件、Core 订阅/发布以及 gossip act 的 MLS/房间成员重验路径已接线；尚无跨机多跳群聊收敛验收。
+- 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项，以及原三 Core 群消息进程测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 通过；`scripts/validate-cddl.ps1` 语法通过（23 接受、10 拒绝）。该 CDDL 语料尚未包含独立 act 向量。
+- 群消息进程测试首次运行发现 active room 列表把 TEXT `local_group_id` 当 BLOB 读取；修复为严格 32-hex 解码后重跑通过。`group_file_crosses_core_processes_with_two_approvals` 也通过，验证双 Core 群文件双端审批、分块下载和最终内容。两测试验证 direct 路径，不是 gossipsub 多跳或跨机。
+- v35 迁移和 opaque 邮箱/预算仓储已实现并测试，但尚未接入远程 DHT 托管、邮箱收发、Core/Agent 预算 UI 或离线补收。
+- 未运行最新工作区全量测试、严格 Clippy、真实两设备建群/邀请/act 互通、群文件回归、提示注入红队、离线邮箱投递、512 人大群或公网/链 RPC。上述功能不得仅凭本轮编译和局部测试标为完整验收。

@@ -38,6 +38,7 @@ impl Host {
                 inbox: Some(inbox),
                 expressions: false,
                 agent_push: true,
+                groups_admin: false,
             },
             queries,
             downloads,
@@ -105,6 +106,15 @@ impl Host {
             .await;
         assert!(reply.get("error").is_none(), "{reply}");
         reply["result"]["structuredContent"].clone()
+    }
+
+    pub(crate) async fn bootstrap(&mut self) -> Value {
+        let reply = self
+            .request("resources/read", json!({"uri":"asl://agent/bootstrap-v1"}))
+            .await;
+        let resource = &reply["result"]["contents"][0];
+        assert_eq!(resource["mimeType"], "application/json", "{reply}");
+        serde_json::from_str(resource["text"].as_str().unwrap()).unwrap()
     }
 
     pub(crate) async fn notified(&mut self, kind: &str, field: &str, id: &Value) -> Value {
@@ -285,6 +295,7 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
         inbox: None,
         expressions: true,
         agent_push: true,
+        groups_admin: false,
     };
     let worker = McpWorker::spawn_with_mail(
         home.clone(),
@@ -306,11 +317,58 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
             .any(|t| t["name"] == "asl_send_expression")
     );
     assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "asl_send_context_expression")
+    );
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "asl_request_context")
+    );
+    assert!(
         host.request("resources/subscribe", json!({"uri":uri}))
             .await
             .get("result")
             .is_some()
     );
+    let target = AgentId([0x44; 32]);
+    let authority = AgentId([0x55; 32]);
+    let digest = Hash32([0x66; 32]);
+    let request = host.call(
+        "asl_request_context",
+        json!({
+            "target": format!("agent:{}", alloy_primitives::hex::encode(target.0)),
+            "authority": alloy_primitives::hex::encode(authority.0),
+            "namespace": 7,
+            "revision": 3,
+            "digest": alloy_primitives::hex::encode(digest.0),
+        }),
+    );
+    let core = async {
+        let Some(MailCommand::RequestContext {
+            target: received_target,
+            scope,
+            reference,
+            reply,
+        }) = mailbox.commands.recv().await
+        else {
+            panic!("context requests must be routed through Core");
+        };
+        assert_eq!(received_target, target);
+        assert_eq!(scope, QueryScope::ContactsOnly);
+        assert_eq!(reference.authority, authority);
+        assert_eq!(reference.namespace, 7);
+        assert_eq!(reference.revision, 3);
+        assert_eq!(reference.digest, digest);
+        reply.send(Ok(Id128([0x77; 16]))).unwrap();
+    };
+    let (result, ()) = tokio::join!(request, core);
+    assert_eq!(result, json!({"request_id": "77".repeat(16)}));
     let source = DownloadSource {
         agent_id: AgentId([3; 32]),
         peer_id: DeviceIdentity::generate().unwrap().peer_id(),
@@ -382,8 +440,153 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
             assert_eq!(event["details"]["expression"], term);
         }
     }
+    let authority = AgentId([0x21; 32]);
+    let reference = asl_types::protocol::SemanticContextRef {
+        authority,
+        namespace: 4,
+        revision: 1,
+        digest: Hash32([0x31; 32]),
+    };
+    let context_expression = WireFrame::ContextExpression(asl_types::protocol::ContextExpression {
+        message_id: Id128([9; 16]),
+        root_task_id: Id128([10; 16]),
+        created_at_ms: 2,
+        expires_at_ms: 100,
+        required_contexts: vec![reference],
+        expression: Expression::from_json(&json!([
+            "meaning",
+            [
+                "concept",
+                alloy_primitives::hex::encode(authority.0),
+                4,
+                1,
+                7
+            ]
+        ]))
+        .unwrap(),
+    });
+    assert!(mailbox.observe_with_evaluation(
+        source.clone(),
+        [2; 16],
+        None,
+        &context_expression,
+        3,
+        Some(&crate::semantic_context::SemanticEvaluation::Unresolved),
+    ));
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), host.output.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let notification: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(notification["method"], "notifications/resources/updated");
+    let read = host.request("resources/read", json!({"uri":uri})).await;
+    let state: Value =
+        serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    let event = &state["events"].as_array().unwrap().last().unwrap()["event"];
+    assert_eq!(event["kind"], "context_expression");
+    assert!(event["details"]["control_cbor_hex"].as_str().is_some());
+    assert_eq!(
+        event["details"]["semantic_evaluation"],
+        json!(["unresolved"])
+    );
     host.request("resources/unsubscribe", json!({"uri":uri}))
         .await;
     assert!(!mailbox.interested());
+    host.close().await;
+}
+
+#[tokio::test]
+async fn bootstrap_resource_maps_core_readiness_without_paths_or_secrets() {
+    use crate::{
+        network_identity::NetworkAdmissionStatus, outgoing_query_channel, paths::AppPaths,
+        transfer::tests::Fixture,
+    };
+
+    let temp = Fixture::new();
+    let home = temp.path().join("bootstrap");
+    AppPaths::open(&home).unwrap();
+    let (queries, _queries) = outgoing_query_channel();
+    let (downloads, _downloads) = crate::downloads::download_channel();
+    let (readiness, readiness_rx) =
+        tokio::sync::watch::channel(NetworkAdmissionStatus::TrustConfigurationMissing);
+    let key = Key::new(rand::random());
+    let mailbox = crate::agent_mail::Mailbox::default();
+    let worker = McpWorker::spawn_with_mail_and_readiness(
+        home.clone(),
+        HostGrant {
+            key: key.clone(),
+            recovery_key: None,
+            recovery_results: false,
+            scope: QueryScope::ContactsOnly,
+            inbox: None,
+            expressions: true,
+            agent_push: false,
+            groups_admin: false,
+        },
+        queries,
+        downloads,
+        mailbox.port.clone(),
+        None,
+        readiness_rx,
+    )
+    .unwrap();
+    let mut host = Host::attach(home, key, Some(worker)).await;
+    let listed = host.request("resources/list", json!({})).await;
+    assert!(
+        listed["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|resource| resource["uri"] == "asl://agent/bootstrap-v1")
+    );
+
+    for (status, expected, next_step) in [
+        (
+            NetworkAdmissionStatus::TrustConfigurationMissing,
+            "network_profile_missing",
+            "configure_trusted_network_profile",
+        ),
+        (
+            NetworkAdmissionStatus::DeviceDirectoryMissing,
+            "device_directory_missing",
+            "complete_device_registration",
+        ),
+        (
+            NetworkAdmissionStatus::DeviceDirectoryUnavailable,
+            "device_directory_unavailable",
+            "restore_signed_device_directory",
+        ),
+        (
+            NetworkAdmissionStatus::ChainUnavailable,
+            "network_unavailable",
+            "retry_when_network_is_available",
+        ),
+        (
+            NetworkAdmissionStatus::RegistryAnchorMissing,
+            "registration_required",
+            "complete_identity_registration",
+        ),
+        (NetworkAdmissionStatus::Active, "network_ready", "none"),
+    ] {
+        readiness.send_replace(status);
+        let bootstrap = host.bootstrap().await;
+        assert_eq!(bootstrap["schema"], "asl-agent-bootstrap-v1");
+        assert_eq!(bootstrap["schema_version"], 1);
+        assert_eq!(bootstrap["network_readiness"], expected);
+        assert_eq!(bootstrap["next_step"], next_step);
+        assert_eq!(bootstrap["query_scope"], "contacts_only");
+        assert_eq!(
+            bootstrap["available_capabilities"],
+            json!([
+                "query",
+                "fetch",
+                "send_expression",
+                "send_context_expression"
+            ])
+        );
+        assert!(!bootstrap.to_string().contains("ASL_HOME"));
+        assert!(!bootstrap.to_string().contains("secret"));
+    }
     host.close().await;
 }

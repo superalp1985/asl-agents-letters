@@ -1,7 +1,5 @@
 mod evaluator;
 
-#[cfg(windows)]
-pub(crate) use evaluator::interpret_contextual_expression;
 pub use evaluator::{
     ConformanceReadySemanticContextBundle, Rational, SemanticConcept, SemanticEvaluation,
     SemanticValue, check_context_conformance, evaluate_semantic_expression,

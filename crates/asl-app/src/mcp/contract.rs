@@ -1,9 +1,16 @@
+use std::collections::BTreeMap;
+
 use asl_agent::QueryScope;
 use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
     error::ErrorCode,
-    ids::Id128,
-    protocol::{Expression, Intent, ResultShape},
+    ids::{AgentId, Hash32, Id128},
+    protocol::{
+        Act, ActAction, ActType, ConceptRef, ContextExpression, Expression, Intent,
+        MAX_ACT_ACTION_ARGS, MAX_ACT_ATTACHMENTS, MAX_ACT_NL_BYTES,
+        MAX_SEMANTIC_CONTEXT_DEPENDENCIES, ResultShape, SemanticContextRef, TypedValue, WireFrame,
+        encode_control,
+    },
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -17,6 +24,11 @@ pub(super) enum ServerFrame {
     Reply(Result<Value, ErrorCode>),
 }
 
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EmptyArgs {}
+
+#[allow(clippy::enum_variant_names)]
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Request {
@@ -28,7 +40,17 @@ pub(super) enum Request {
     SubscribeAgentEvents,
     UnsubscribeAgentEvents,
     LocalCapabilities,
+    AgentBootstrap,
     SendExpression(ExpressionArgs),
+    SendContextExpression(ContextExpressionArgs),
+    SendAct(ActArgs),
+    GroupList,
+    GroupCreate,
+    GroupInvite(GroupInviteArgs),
+    DirectOpen(AgentTargetArgs),
+    RenewActBudget(RenewActBudgetArgs),
+    RequestContext(ContextRequestArgs),
+    ConfirmContext(ConfirmContextArgs),
     ReceiveOffer(ReceiveOfferArgs),
     RecoveryTask(TaskArgs),
     RecoveryEvents(RecoveryEventsArgs),
@@ -97,6 +119,341 @@ impl ExpressionArgs {
             .map_err(|_| ErrorCode::InvalidMessage)?;
         Ok((self.target, root, expression))
     }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ContextExpressionArgs {
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub target: String,
+    #[schemars(length(equal = 32))]
+    pub root: Option<String>,
+    pub expression: Vec<Value>,
+    #[schemars(length(min = 1, max = MAX_SEMANTIC_CONTEXT_DEPENDENCIES))]
+    pub required_contexts: Vec<ContextRefArgs>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ContextRefArgs {
+    #[schemars(length(equal = 64))]
+    pub authority: String,
+    pub namespace: u32,
+    #[schemars(range(min = 1))]
+    pub revision: u16,
+    #[schemars(length(equal = 64))]
+    pub digest: String,
+}
+
+impl ContextExpressionArgs {
+    pub(super) fn validate(
+        self,
+    ) -> Result<(String, Option<Id128>, Expression, Vec<SemanticContextRef>), ErrorCode> {
+        let (kind, id) = self
+            .target
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if kind != "agent" || id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let root = self.root.as_deref().map(parse_id).transpose()?;
+        let expression = Expression::from_json(&Value::Array(self.expression))
+            .map_err(|_| ErrorCode::InvalidMessage)?;
+        let required_contexts = self
+            .required_contexts
+            .into_iter()
+            .map(|reference| {
+                Ok(SemanticContextRef {
+                    authority: AgentId(
+                        alloy_primitives::hex::decode_to_array(&reference.authority)
+                            .map_err(|_| ErrorCode::InvalidMessage)?,
+                    ),
+                    namespace: reference.namespace,
+                    revision: reference.revision,
+                    digest: Hash32(
+                        alloy_primitives::hex::decode_to_array(&reference.digest)
+                            .map_err(|_| ErrorCode::InvalidMessage)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, ErrorCode>>()?;
+        let probe = WireFrame::ContextExpression(ContextExpression {
+            message_id: Id128([1; 16]),
+            root_task_id: Id128([2; 16]),
+            created_at_ms: 0,
+            expires_at_ms: 1,
+            required_contexts: required_contexts.clone(),
+            expression: expression.clone(),
+        });
+        encode_control(&probe).map_err(|_| ErrorCode::InvalidMessage)?;
+        Ok((self.target, root, expression, required_contexts))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ActArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    #[schemars(length(equal = 32))]
+    pub message_id: Option<String>,
+    #[schemars(length(equal = 32))]
+    pub conversation_id: Option<String>,
+    pub act_type: String,
+    #[schemars(length(equal = 32))]
+    pub reply_to: Option<String>,
+    #[schemars(length(min = 1, max = MAX_ACT_NL_BYTES))]
+    pub nl_body: Option<String>,
+    pub action: Option<ActActionArgs>,
+    #[schemars(length(max = MAX_ACT_ATTACHMENTS))]
+    pub attachments: Vec<String>,
+    #[schemars(length(equal = 32))]
+    pub causal_root: Option<String>,
+    #[schemars(range(min = 0))]
+    pub hop: Option<u32>,
+    #[schemars(range(min = 1))]
+    pub expires_at_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ActActionArgs {
+    pub vocabulary_id: u16,
+    pub concept_id: u32,
+    #[schemars(length(max = MAX_ACT_ACTION_ARGS))]
+    pub args: Vec<ActArgumentArgs>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ActArgumentArgs {
+    pub key: u32,
+    pub value: Vec<Value>,
+}
+
+impl ActArgs {
+    pub(super) fn validate(self) -> Result<(Hash32, Act), ErrorCode> {
+        let room = Hash32(
+            alloy_primitives::hex::decode_to_array(&self.room)
+                .map_err(|_| ErrorCode::InvalidMessage)?,
+        );
+        let message_id = self
+            .message_id
+            .as_deref()
+            .map(parse_id)
+            .transpose()?
+            .unwrap_or(Id128([0; 16]));
+        let conversation_id = self
+            .conversation_id
+            .as_deref()
+            .map(parse_id)
+            .transpose()?
+            .unwrap_or(Id128([0; 16]));
+        let act_type = match self.act_type.as_str() {
+            "inform" => ActType::Inform,
+            "ask" => ActType::Ask,
+            "request" => ActType::Request,
+            "propose" => ActType::Propose,
+            "accept" => ActType::Accept,
+            "reject" => ActType::Reject,
+            "commit" => ActType::Commit,
+            "cancel" => ActType::Cancel,
+            "ack" => ActType::Ack,
+            "clarify" => ActType::Clarify,
+            _ => return Err(ErrorCode::InvalidMessage),
+        };
+        let reply_to = self.reply_to.as_deref().map(parse_id).transpose()?;
+        let action = self
+            .action
+            .map(|action| {
+                let mut args = BTreeMap::new();
+                for argument in action.args {
+                    if args
+                        .insert(
+                            argument.key,
+                            TypedValue::from_json(&Value::Array(argument.value))
+                                .map_err(|_| ErrorCode::InvalidMessage)?,
+                        )
+                        .is_some()
+                    {
+                        return Err(ErrorCode::InvalidMessage);
+                    }
+                }
+                Ok(ActAction {
+                    action_id: ConceptRef {
+                        vocabulary_id: action.vocabulary_id,
+                        concept_id: action.concept_id,
+                    },
+                    args,
+                })
+            })
+            .transpose()?;
+        let attachments = self
+            .attachments
+            .iter()
+            .map(|attachment| {
+                alloy_primitives::hex::decode_to_array(attachment)
+                    .map(Hash32)
+                    .map_err(|_| ErrorCode::InvalidMessage)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let causal_root = self
+            .causal_root
+            .as_deref()
+            .map(parse_id)
+            .transpose()?
+            .unwrap_or(Id128([0; 16]));
+        Ok((
+            room,
+            Act {
+                message_id,
+                conversation_id,
+                act_type,
+                reply_to,
+                nl_body: self.nl_body,
+                action,
+                attachments,
+                causal_root,
+                hop: self.hop.unwrap_or(0),
+                expires_at_ms: self.expires_at_ms,
+            },
+        ))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupInviteArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub target: String,
+}
+
+impl GroupInviteArgs {
+    pub(super) fn validate(self) -> Result<(Hash32, AgentId), ErrorCode> {
+        let room = Hash32(
+            alloy_primitives::hex::decode_to_array(&self.room)
+                .map_err(|_| ErrorCode::InvalidMessage)?,
+        );
+        let (kind, target) = self
+            .target
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if kind != "agent" {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let agent = AgentId(
+            alloy_primitives::hex::decode_to_array(target)
+                .map_err(|_| ErrorCode::InvalidMessage)?,
+        );
+        Ok((room, agent))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AgentTargetArgs {
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub target: String,
+}
+
+impl AgentTargetArgs {
+    pub(super) fn validate(self) -> Result<AgentId, ErrorCode> {
+        let (kind, target) = self
+            .target
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if kind != "agent" {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        alloy_primitives::hex::decode_to_array(target)
+            .map(AgentId)
+            .map_err(|_| ErrorCode::InvalidMessage)
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RenewActBudgetArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{32}$"))]
+    pub conversation_id: String,
+    #[schemars(range(min = 1, max = 1_000_000))]
+    pub additional_messages: u32,
+    #[schemars(range(min = 1, max = 720))]
+    pub window_hours: u32,
+}
+
+impl RenewActBudgetArgs {
+    pub(super) fn validate(self) -> Result<(String, u32, u64), ErrorCode> {
+        if self.conversation_id.len() != 32
+            || !self
+                .conversation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || !(1..=1_000_000).contains(&self.additional_messages)
+            || !(1..=720).contains(&self.window_hours)
+        {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        Ok((
+            self.conversation_id,
+            self.additional_messages,
+            u64::from(self.window_hours) * 60 * 60 * 1_000,
+        ))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ContextRequestArgs {
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub target: String,
+    #[schemars(length(equal = 64))]
+    pub authority: String,
+    pub namespace: u32,
+    #[schemars(range(min = 1))]
+    pub revision: u16,
+    #[schemars(length(equal = 64))]
+    pub digest: String,
+}
+
+impl ContextRequestArgs {
+    pub(super) fn validate(self) -> Result<(String, SemanticContextRef), ErrorCode> {
+        let (kind, id) = self
+            .target
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if kind != "agent" || id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let reference = SemanticContextRef {
+            authority: AgentId(
+                alloy_primitives::hex::decode_to_array(&self.authority)
+                    .map_err(|_| ErrorCode::InvalidMessage)?,
+            ),
+            namespace: self.namespace,
+            revision: self.revision,
+            digest: Hash32(
+                alloy_primitives::hex::decode_to_array(&self.digest)
+                    .map_err(|_| ErrorCode::InvalidMessage)?,
+            ),
+        };
+        let probe = WireFrame::ContextRequest(asl_types::protocol::ContextRequest {
+            message_id: Id128([1; 16]),
+            reference,
+            expires_at_ms: 1,
+        });
+        encode_control(&probe).map_err(|_| ErrorCode::InvalidMessage)?;
+        Ok((self.target, reference))
+    }
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfirmContextArgs {
+    #[schemars(length(equal = 32))]
+    pub request_id: String,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -225,4 +582,68 @@ pub(super) fn parse_id(value: &str) -> Result<Id128, ErrorCode> {
     alloy_primitives::hex::decode_to_slice(value, &mut bytes)
         .map_err(|_| ErrorCode::InvalidMessage)?;
     Ok(Id128(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn contextual_expression_requires_exact_references_for_external_scopes() {
+        let authority = "21".repeat(32);
+        let digest = "31".repeat(32);
+        let args = ContextExpressionArgs {
+            target: format!("agent:{authority}"),
+            root: None,
+            expression: vec![json!("meaning"), json!(["concept", authority, 4, 1, 7])],
+            required_contexts: vec![ContextRefArgs {
+                authority: authority.clone(),
+                namespace: 4,
+                revision: 1,
+                digest,
+            }],
+        };
+        assert!(args.validate().is_ok());
+
+        let incomplete = ContextExpressionArgs {
+            target: format!("agent:{authority}"),
+            root: None,
+            expression: vec![json!("meaning"), json!(["concept", authority, 4, 1, 7])],
+            required_contexts: Vec::new(),
+        };
+        assert_eq!(
+            incomplete.validate().unwrap_err(),
+            ErrorCode::InvalidMessage
+        );
+    }
+
+    #[test]
+    fn context_request_binds_a_direct_agent_to_one_full_reference() {
+        let authority = "21".repeat(32);
+        let digest = "31".repeat(32);
+        let args = ContextRequestArgs {
+            target: format!("agent:{}", "41".repeat(32)),
+            authority: authority.clone(),
+            namespace: 4,
+            revision: 1,
+            digest: digest.clone(),
+        };
+        let (target, reference) = args.validate().unwrap();
+        assert_eq!(target, format!("agent:{}", "41".repeat(32)));
+        assert_eq!(reference.authority, AgentId([0x21; 32]));
+        assert_eq!(reference.digest, Hash32([0x31; 32]));
+
+        let group_target = ContextRequestArgs {
+            target: format!("group:{}", "41".repeat(32)),
+            authority,
+            namespace: 4,
+            revision: 1,
+            digest,
+        };
+        assert_eq!(
+            group_target.validate().unwrap_err(),
+            ErrorCode::InvalidMessage
+        );
+    }
 }

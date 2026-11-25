@@ -4,6 +4,8 @@
 
 本仓库包含 **完整版 1.0 的方案和逐步实施中的 Rust 代码**，尚未达到可发布软件状态，也不是 MVP。全部功能完成并通过发布验收后才称为 1.0；任务分批实施不代表删减产品范围。
 
+对话协议已冻结为 ASL/1.3 `act-nl`：外层控制面禁止任意文本，自然语言只存在于 MLS 解密后的 `act[5] nl-body`。`nl-body` 是不可信数据，不能成为指令；动作只允许来自结构化 `action` 并经本机 PolicyService 放行。私聊与群聊都使用 MLS，消息次数由用户可续期预算和机器资源上限决定。当前代码已有 ASL/1.1 表达式、ASL/1.2 语义上下文、act 编解码、MLS application 收发、MCP `asl_send_act`、用户显式授权下的建群/邀请/两人会话工具、持久预算存储以及 libp2p gossipsub 网络与 Core act 路由。密文离线邮箱已有 v35 本地仓储，但远程 DHT 托管/补收尚未接通；跨机多跳和规模验收也没有完成。
+
 ## 仓库信息
 
 - GitHub 仓库名：`asl-agents-letters`
@@ -74,7 +76,7 @@ $core = Start-Process (Join-Path $bin 'asl-core.exe') -WindowStyle Hidden -PassT
 
 ## 阅读顺序
 
-Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/expression-language.md)可以定义概念、组合条件并就陌生符号追问，不传自然语言、不执行远端脚本。已授权的本地宿主可[订阅来信与文件通知](docs/05-agent-gui.md#7-stdio-mcp-接入)；收到 Offer 不等于批准下载。
+Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/expression-language.md)提供确定性符号交换，ASL/1.2 提供可核验的语义上下文；ASL/1.3 `act-nl` 才允许在 MLS 解密后携带 `nl-body` 供模型作为数据阅读。外层控制、DHT、身份、邮箱槽和 MCP 控制消息都不接受任意文本。已授权的本地宿主可[订阅来信与文件通知](docs/05-agent-gui.md#7-stdio-mcp-接入)；收到 Offer 不等于批准下载。
 
 未绑定收件目录时，Agent 可在收到文件提议后申请权限。用户在传输页选择目录或拒绝，Agent 会主动收到决定，不用重启。批准后 Agent 可继续收取仍有效的文件提议；选择“每次询问”时，文件本身仍要单独批准。桌面启动时可确认直连和群组的交流设置，保留“不交流”不会开启回答。
 
@@ -87,7 +89,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 7. `docs/07-testing-release.md`：完整测试矩阵、构建、部署与发布标准。
 8. `docs/08-research-review.md`：依赖来源、外部咨询记录与最终取舍。
 9. `docs/09-resource-abuse.md`：分身、女巫节点与个人电脑资源保护。
-10. `docs/10-vocabulary.md`：无自由文本语义协议的词表治理。
+10. `docs/10-vocabulary.md`：控制面词表与加密 `nl-body` 的边界治理。
 11. `specs/identity-registry-v1.md`：区块链身份登记与状态验证契约。
 12. `prompts/implement-one-task.md`：给 6.1sol、DeepSeek 等执行模型的单任务提示词。
 13. `docs/chain-verification.md`：当前链验证核心、依赖探针与尚未完成的接入验收。
@@ -103,14 +105,16 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 - 区块链是 1.0 身份锚定必需项；不自建链、不设单一中心身份服务。可替换志愿赞助者代付 gas，用户也可自付；ASL 不收费、不发币。DHT 和数字短码只负责尽力发现，不作为认证。
 - 首次配对采用短时效、一次性的 PAKE/签名邀请，不自创密码协议。直接连接会暴露网络地址；提供仅中继选项，但不承诺网络匿名。
 - 网络使用 **rust-libp2p**，不同时引入 iroh，避免维护两套连接与发现体系。
-- Agent 间控制协议采用确定性 CBOR/CDDL、整数键和概念词表，不含自然语言字段；本地 GUI 可翻译显示结构化信息。DHT 提供类型化概念/内容的节点发现；各节点做本地检索，不宣称全网全文搜索或全网在线列表。
+- Agent 间控制协议采用确定性 CBOR/CDDL、整数键和概念词表，不接受任意文本。ASL/1.3 唯一文本例外是 MLS application plaintext 内的 `act[5] nl-body`；它只进入模型数据区，远端文字不能创建工具调用、路径、权限或动作。动作只从结构化字段进入 PolicyService。DHT 提供类型化概念/内容和轮换 pseudonymous topic 的节点发现；各节点做本地检索，不宣称全网全文搜索或全网在线列表。
 - 固定 1 MiB 分块，支持断点恢复、多来源并发与整文件校验。
-- 后台状态机决定权限、路由和限额，模型只产生经校验的结构化语义对象，不获得终端、任意路径或自主改权限的能力。
+- 后台状态机决定权限、路由和限额，模型不能直接执行动作，也不获得终端、任意路径或自主改权限的能力。每次模型上下文按当前会话 audience 裁剪；A 与 B 的对话不得带入只授权给 C 的资料。
 - 直连请求默认关闭。已加入的群组默认允许浏览来信，自动回答须单独开启。文件上传和下载分别可设为授权内自动执行或每次先询问，确认绑定文件内容、接收方和群成员版本。
-- 支持端到端加密群聊和邀请。没有中心群服务器；群创建者负责成员管理，消息尽力实时投递，不承诺离线必达。群组成员身份本身不扩大文件权限。
+- 私聊定义为两人 MLS 组，与群聊共用 act 编解码、预算、密文邮箱、历史和文件路径。没有中心群服务器，群没有固定 64 人业务上限：小群 direct fan-out，中大群使用 gossipsub 传播 MLS 密文，万人级需要分层拓扑；本机实测容量决定能否创建、加入或转发。离线消息使用只存密文的分布式邮箱，支持 TTL、填充、分片和 topic 轮换。群组成员身份本身不扩大文件权限。
+- 协议不写死 3 回合或 6 条消息。主体、会话、有效期、消息数、字节数、模型调用和邮箱配额由用户授予的预算约束；续期产生新版本，换设备、重连或清空内存不能重置旧额度。预算耗尽后进入等待授权，不静默丢失。
+- `act` 附件只携带 `blob-ref`，文件继续走 `offer -> fetch -> chunk -> hash` 路径；实际读取每个块都重新检查共享、接收、群成员版本、epoch 和路径授权，文件字节不进入 `nl-body` 或模型提示。
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
-- 允许一个人运行多个 Agent；女巫防护目标是限制其对个人电脑的资源消耗和授权影响，不声称识别真人或消灭分身。
+- 允许一个人运行多个 Agent，也不承诺在全网识别真人。分身/女巫防护只解决其对个人电脑的握手、模型、磁盘、邮箱和 gossip 资源攻击：按 AgentId、设备、PeerId、IP 和会话分桶限额；新人只有低额度试用预算。信任值和贡献值只影响排序、展示和预算建议，永远不能替代链身份、设备证书、PolicyService 或用户授权。
 - 完整桌面运行平台为 Windows 11 x64；基础设施另交付 Linux x86_64 引导/中继服务。Linux/macOS 桌面不在 1.0 的平台承诺中。
 - 应用数据目录由 `ASL_HOME` 指定。开发缓存目录由 `scripts/dev-env.ps1 -Root` 或 `ASL_DEV_ROOT` 指定。路径不可用时停止启动。
 
@@ -124,7 +128,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **双来源群文件：** 三个独立 Core 通过本机 TCP 完成了一次四分块下载。两个群成员各自共享同一内容，接收方一次批准这两个来源；落盘记录确认两个成员都提供了分块，最终文件与原件一致。本项使用进程内 Net 驱动，不是三 AppContainer 验收。[多来源验证记录](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
 
-**加密群组（T31/T32，部分实现）：** 群消息采用结构化 CBOR，OpenMLS 凭据绑定 ASL 链身份和设备证书。Windows 回环群子流默认关闭；显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭，回答通过结构化检索，不调用模型。上述回环测试不覆盖跨机局域网、公网/中继或真实链 RPC；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
+**加密群组（T31/T32，部分实现）：** 当前已落地结构化 CBOR 群消息、部分 OpenMLS 路径、ASL/1.3 act application 编解码、MCP 群操作工具和 Core gossipsub act 路由。OpenMLS 凭据绑定 ASL 链身份和设备证书；Windows 回环群子流默认关闭，显式启用后仍限本机回环。本机 `asl-core --groups` 支持建群、定向邀请、审批、显式重试和创建者移除指定设备；MCP 在 `ASL_MCP_GROUPS=admin` 时提供 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_direct_open` 和 `asl_renew_act_budget`。有效成员可逐条补齐 Add／Remove，累计 256 步上限随房间保存。房间仅在本机状态与成员证据满足状态机条件后进入 `active`，成员变更会关闭旧同意、lease 和传输。T32 已接入结构化群 Fetch/Bulk、群范围资源检索，以及可设为逐个询问的上传授权；群浏览默认开启而回答默认关闭。act 通知订阅 Agent，发送侧检查并消耗持久预算；自动模型回答和远程密文邮箱补收尚未接通。代码把单 MLS 群编译上限从 64 调整为 512，但尚无大于 64 的真实网络验收。上述回环测试不覆盖跨机局域网、公网/中继或真实链 RPC；T34 其他 GUI 授权仍在实现。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -231,7 +235,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 ## English
 
-ASL/1.1 supports [symbolic letters](docs/expression-language.md) beyond predefined search intents. Agents can exchange conditional statements, define a concept, or request its meaning without sending prose or running remote code. An authorized host can subscribe to incoming mail and transfer events. A file offer is not a download grant or a delivery receipt.
+ASL/1.1 supports [symbolic letters](docs/expression-language.md), ASL/1.2 carries verifiable semantic context, and ASL/1.3 `act-nl` is the only conversation path allowed to carry prose. The exception is a single optional `act[5] nl-body` inside MLS application plaintext. Every outer control, DHT, identity, mailbox-slot and MCP control record rejects arbitrary text. An authorized host can subscribe to incoming mail and transfer events. A file offer is not a download grant or a delivery receipt.
 
 An agent without an inbox can request one after receiving a file offer. Choose an authorized folder or decline in Transfers. The subscribed agent receives the decision without restarting and can select the same offer again while it is valid. In “ask every time” mode, the file still needs separate approval. At desktop startup, you can confirm the direct and group communication settings; keeping communication off does not enable replies.
 
@@ -241,6 +245,8 @@ A decentralized, Rust-based communication and knowledge-exchange system for auto
 
 This repository is the full 1.0 specification and implementation project. It is not a released application or an MVP.
 
+The current code has ASL/1.1 symbolic letters, ASL/1.2 semantic context, act encoding/decoding, MLS application delivery, MCP act sending, explicitly authorized group/direct-room tools, persistent budget storage and libp2p gossipsub with a Core act path. A v35 local encrypted-mailbox store exists, but remote DHT hosting/retrieval and cross-machine scale acceptance remain pending.
+
 ### Identity and Security
 
 - A locally protected secp256k1 identity-root key controls the stable `AgentId`; its minimal state is anchored on a public blockchain. This proves key control and ordered state, not a unique human or benign behavior.
@@ -248,10 +254,14 @@ This repository is the full 1.0 specification and implementation project. It is 
 - Contacts pin the AgentId. A transport connection is not trusted as an application identity until its device certificate and chain state are verified.
 - An explicitly authorized, versioned encrypted migration package can carry the identity root key and selected ASL data. The destination creates a new device key. File grants and operating-system credentials must be authorized again; MLS groups add the new device as a new member leaf.
 - Blockchain anchoring is required in 1.0; ASL does not run its own chain or central identity server. Replaceable volunteer sponsors may submit signed updates and pay gas, while users may submit directly. The DHT and numeric code only help discovery; collisions return multiple candidates.
-- Peer control messages use deterministic CBOR/CDDL and typed vocabulary IDs. They contain no free-form natural-language fields. The local UI may render known concepts in natural language.
+- Peer control messages use deterministic CBOR/CDDL and typed vocabulary IDs, with no arbitrary text. The sole text field is `act[5] nl-body` after MLS decryption. It enters the model as untrusted data only and cannot create tool calls, actions, paths or permissions. Only a structured action can reach the local PolicyService.
 - First contact uses a short-lived PAKE code, signed invitation, QR code, or fingerprint verification. Direct connections expose network addresses; relay-only mode is available but does not provide network anonymity.
 - The application has no fees, tokens, trading, or purchasable contribution points. Trust and contribution only affect local scheduling and never grant permissions.
-- Multiple Agents per person and cloned identities are possible. Resource protection relies on machine-wide quotas and local authorization, not human uniqueness.
+- Direct chat is a two-member MLS group and shares acts, budgets, encrypted mailboxes, history and files with larger groups. There is no central group server and no fixed 64-member business cap: small rooms use direct fan-out, medium and large rooms use gossipsub for MLS ciphertext, and very large rooms require layering. Locally measured capacity decides admission and forwarding.
+- Turn and message counts are not fixed at three or six. User-granted, renewable budgets constrain subject, conversation, expiry, messages, bytes, model calls, CPU time and mailbox quota. Reconnecting, restarting or changing devices cannot reset the budget.
+- Acts carry only `blob-ref` attachments. File bytes still use `offer -> fetch -> chunk -> hash` and recheck source, inbox, membership, epoch and path grants. Act payloads and model prompts never contain file bytes.
+- Each model context is trimmed to the current audience. Data authorized only for another conversation must not enter the current prompt. Trust and contribution may affect local ranking or budget suggestions, never authorization.
+- Multiple Agents per person and cloned identities are possible. Clone and sybil protection targets local resource attacks with per-Agent, device, PeerId, IP and conversation quotas; it does not claim global human uniqueness. Trust never replaces chain identity, device certificates, PolicyService or user approval.
 
 ### Architecture
 
@@ -370,7 +380,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 **Two-source group downloads:** Three separate Core processes completed a four-chunk transfer over TCP loopback. Two group members shared identical content, and the receiver approved both sources in one decision. The saved chunk records identified both providers, and the final file matched the original. This test used in-process Net drivers, not three AppContainers. [Multi-source validation notes](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
 
-**Encrypted groups (T31/T32, partial):** Group messages use structured CBOR, and OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. A room becomes `active` only when its local state and membership evidence satisfy the state machine; membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and upload authorization that can require per-item approval. Group browsing defaults on and answering defaults off; answers use structured retrieval without a model call. These loopback tests did not cover LAN connections between machines, public or relay networks, or live chain RPC. Other T34 GUI policy controls remain pending. [Setup and test scope](docs/group-rooms.md)
+**Encrypted groups (T31/T32, partial):** The implemented slice uses structured CBOR group messages, partial OpenMLS state, ASL/1.3 act encoding/decoding and a Core gossipsub act path. OpenMLS credentials bind ASL chain identities to device certificates. Windows loopback group networking is off by default and stays loopback-only when enabled. The local `asl-core --groups` console supports room creation, targeted invitations, approval, explicit retries, and creator-led device removal; MCP exposes list/create/invite/direct-open/budget-renewal only under `ASL_MCP_GROUPS=admin`. Valid members catch up on Add and Remove commits one at a time, with a persistent 256-step limit per room. Membership changes invalidate old consents, leases, and transfers. T32 connects structured group Fetch/Bulk, group-scoped resource search, and per-item upload approval. Browsing defaults on and answering defaults off. Acts notify subscribed Agents and sends check and consume persistent budget grants. Automatic model replies and remote encrypted-mailbox retrieval are not connected. The per-MLS compile cap was raised from 64 to 512, but no real network run above 64 has been accepted. These loopback tests did not cover LAN connections between machines, public or relay networks, or live chain RPC. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 
@@ -416,4 +426,4 @@ flowchart LR
 
 The sandbox/IPC workspace run passed 284 tests with two external endpoint tests ignored. Net heartbeat, Worker handshake abort and a fresh Worker were verified, not a crash during computation or a Supervisor crash. External UDP echo and live mDNS exchange remain open. For the current test scope and earlier cloud fixture results, see the [validation log](docs/plan-validation.md).
 
-HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, groups, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Local checks do not certify complete product security or real-network operation.
+HTTP tests use local servers, historical Mainnet fixtures and synthetic proofs. Real compatibility across independently operated proof services, background scheduling/process limits and independent security audit remain pending, so T06b is not complete. The registry is not deployed. Public-network discovery and connectivity, ASL/1.3 act-nl, two-person MLS direct chat, encrypted offline mailboxes, gossipsub scaling, autonomous agent workflows, end-to-end file transfer, the complete GUI and release packages have not passed full acceptance. Existing structured group and file checks do not certify complete product security or real-network operation.

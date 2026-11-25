@@ -380,7 +380,11 @@ fn frame_metadata(
         | WireFrame::PairingInvite(_)
         | WireFrame::PairingExchange(_)
         | WireFrame::GroupEnvelope(_)
-        | WireFrame::Expression(_) => None,
+        | WireFrame::Expression(_)
+        | WireFrame::ContextRequest(_)
+        | WireFrame::ContextOffer(_)
+        | WireFrame::ContextAgreement(_)
+        | WireFrame::ContextExpression(_) => None,
     }
 }
 

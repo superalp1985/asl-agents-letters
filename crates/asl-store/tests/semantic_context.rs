@@ -173,13 +173,14 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
     connection
         .execute_batch(
             "DROP TABLE semantic_context_candidates;
-             DELETE FROM schema_migrations WHERE version=33;",
+             DROP TABLE semantic_context_resources;
+             DELETE FROM schema_migrations WHERE version>32;",
         )
         .unwrap();
     drop(connection);
 
     let store = open_store(&path).unwrap();
-    assert_eq!(store.schema_version(), 33);
+    assert_eq!(store.schema_version(), 34);
     assert_eq!(
         store.get_setting("test.preserved").unwrap().as_deref(),
         Some("\"yes\"")

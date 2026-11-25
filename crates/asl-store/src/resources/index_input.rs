@@ -1,7 +1,10 @@
 use std::{path::Path, str};
 
 use asl_policy::{AuthorizedFile, snapshot_files::StagedSnapshot};
-use asl_types::{error::AslError, protocol::ConceptRef};
+use asl_types::{
+    error::AslError,
+    protocol::{ConceptRef, MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES},
+};
 
 use crate::search::{LocalIndexText, PreparedIndex};
 
@@ -15,8 +18,9 @@ pub(super) fn copy_and_prepare(
     home: &Path,
     source: &mut AuthorizedFile,
     relative: &Path,
+    capture_context: bool,
     progress: impl FnMut() -> Result<(), AslError>,
-) -> Result<(StagedSnapshot, PreparedIndex), AslError> {
+) -> Result<(StagedSnapshot, PreparedIndex, Option<Vec<u8>>), AslError> {
     let basename = relative
         .file_name()
         .and_then(|s| s.to_str())
@@ -29,12 +33,19 @@ pub(super) fn copy_and_prepare(
             .any(|allowed| ext.eq_ignore_ascii_case(allowed))
     });
     let mut body = String::new();
-    let staged =
-        StagedSnapshot::copy_from_observing_first_chunk(home, source, progress, |chunk| {
-            if text {
-                body.push_str(text_prefix(chunk));
-            }
-        })?;
+    let mut first_chunk = true;
+    let mut context_bytes = (capture_context
+        && (1..=MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES as u64).contains(&source.len()))
+    .then(Vec::new);
+    let staged = StagedSnapshot::copy_from_observing_chunks(home, source, progress, |chunk| {
+        if first_chunk && text {
+            body.push_str(text_prefix(chunk));
+        }
+        first_chunk = false;
+        if let Some(bytes) = context_bytes.as_mut() {
+            bytes.extend_from_slice(chunk);
+        }
+    })?;
     let index = PreparedIndex::new(LocalIndexText {
         title: &title,
         summary: "",
@@ -45,7 +56,7 @@ pub(super) fn copy_and_prepare(
             &[]
         },
     })?;
-    Ok((staged, index))
+    Ok((staged, index, context_bytes))
 }
 
 fn text_prefix(chunk: &[u8]) -> &str {

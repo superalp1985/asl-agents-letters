@@ -2,8 +2,8 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     protocol::{
-        Answer, ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupPacket,
-        Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
+        Act, Answer, ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody,
+        GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -22,6 +22,7 @@ pub enum GroupApplication {
     FetchPending(FetchPending),
     Error(ProtocolError),
     Expression(ExpressionLetter),
+    Act(Act),
 }
 
 impl GroupApplication {
@@ -35,6 +36,7 @@ impl GroupApplication {
             Self::FetchPending(_) => "fetch_pending",
             Self::Error(_) => "error",
             Self::Expression(_) => "expression",
+            Self::Act(_) => "act",
         }
     }
 
@@ -48,34 +50,42 @@ impl GroupApplication {
             Self::FetchPending(pending) => pending.message_id,
             Self::Error(error) => error.message_id,
             Self::Expression(letter) => letter.message_id,
+            Self::Act(act) => act.message_id,
         }
     }
 
     pub fn decode(plaintext: &[u8]) -> Result<Self, AslError> {
-        match decode_control(plaintext)? {
-            WireFrame::Query(query) => Ok(Self::Query(query)),
-            WireFrame::Answer(answer) => Ok(Self::Answer(answer)),
-            WireFrame::Offer(offer) => Ok(Self::Offer(offer)),
-            WireFrame::FetchRequest(request) => Ok(Self::FetchRequest(request)),
-            WireFrame::FetchGrant(grant) => Ok(Self::FetchGrant(grant)),
-            WireFrame::FetchPending(pending) => Ok(Self::FetchPending(pending)),
-            WireFrame::Error(error) => Ok(Self::Error(error)),
-            WireFrame::Expression(letter) => Ok(Self::Expression(letter)),
-            _ => Err(AslError::InvalidMessage),
+        if let Ok(frame) = decode_control(plaintext) {
+            return match frame {
+                WireFrame::Query(query) => Ok(Self::Query(query)),
+                WireFrame::Answer(answer) => Ok(Self::Answer(answer)),
+                WireFrame::Offer(offer) => Ok(Self::Offer(offer)),
+                WireFrame::FetchRequest(request) => Ok(Self::FetchRequest(request)),
+                WireFrame::FetchGrant(grant) => Ok(Self::FetchGrant(grant)),
+                WireFrame::FetchPending(pending) => Ok(Self::FetchPending(pending)),
+                WireFrame::Error(error) => Ok(Self::Error(error)),
+                WireFrame::Expression(letter) => Ok(Self::Expression(letter)),
+                _ => Err(AslError::InvalidMessage),
+            };
         }
+        Act::decode(plaintext).map(Self::Act)
     }
 
     pub fn encode(self) -> Result<Vec<u8>, AslError> {
-        encode_control(&match self {
-            Self::Query(query) => WireFrame::Query(query),
-            Self::Answer(answer) => WireFrame::Answer(answer),
-            Self::Offer(offer) => WireFrame::Offer(offer),
-            Self::FetchRequest(request) => WireFrame::FetchRequest(request),
-            Self::FetchGrant(grant) => WireFrame::FetchGrant(grant),
-            Self::FetchPending(pending) => WireFrame::FetchPending(pending),
-            Self::Error(error) => WireFrame::Error(error),
-            Self::Expression(letter) => WireFrame::Expression(letter),
-        })
+        match self {
+            Self::Act(act) => act.encode(),
+            frame => encode_control(&match frame {
+                Self::Query(query) => WireFrame::Query(query),
+                Self::Answer(answer) => WireFrame::Answer(answer),
+                Self::Offer(offer) => WireFrame::Offer(offer),
+                Self::FetchRequest(request) => WireFrame::FetchRequest(request),
+                Self::FetchGrant(grant) => WireFrame::FetchGrant(grant),
+                Self::FetchPending(pending) => WireFrame::FetchPending(pending),
+                Self::Error(error) => WireFrame::Error(error),
+                Self::Expression(letter) => WireFrame::Expression(letter),
+                Self::Act(_) => unreachable!(),
+            }),
+        }
     }
 }
 
@@ -130,6 +140,18 @@ pub fn open_application(
     peer_leaf: LeafNodeIndex,
     packet: &GroupPacket,
 ) -> Result<GroupApplication, AslError> {
+    let (application, sender) = open_application_with_sender(candidate, provider, packet)?;
+    if sender != peer_leaf {
+        return Err(AslError::PolicyDenied);
+    }
+    Ok(application)
+}
+
+pub fn open_application_with_sender(
+    candidate: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+    packet: &GroupPacket,
+) -> Result<(GroupApplication, LeafNodeIndex), AslError> {
     if !matches!(&packet.body, GroupBody::Application(_))
         || packet.group_id.as_bytes() != candidate.group_id().as_slice()
         || packet.epoch != candidate.epoch().as_u64()
@@ -140,13 +162,14 @@ pub fn open_application(
     let message = candidate
         .process_message(provider, read_group_message(packet)?)
         .map_err(|_| AslError::InvalidMessage)?;
-    if message.sender() != &Sender::Member(peer_leaf) {
+    let Sender::Member(sender) = message.sender() else {
         return Err(AslError::PolicyDenied);
-    }
+    };
+    let sender = *sender;
     let ProcessedMessageContent::ApplicationMessage(application) = message.into_content() else {
         return Err(AslError::InvalidMessage);
     };
-    GroupApplication::decode(&application.into_bytes())
+    Ok((GroupApplication::decode(&application.into_bytes())?, sender))
 }
 
 #[cfg(test)]
@@ -196,6 +219,24 @@ mod tests {
         ] {
             assert!(GroupApplication::decode(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn act_application_round_trips_without_an_outer_control_frame() {
+        let application = GroupApplication::Act(Act {
+            message_id: Id128([1; 16]),
+            conversation_id: Id128([2; 16]),
+            act_type: asl_types::protocol::ActType::Inform,
+            reply_to: None,
+            nl_body: Some("agent-readable data".into()),
+            action: None,
+            attachments: vec![Hash32([3; 32])],
+            causal_root: Id128([4; 16]),
+            hop: 0,
+            expires_at_ms: None,
+        });
+        let bytes = application.clone().encode().unwrap();
+        assert_eq!(GroupApplication::decode(&bytes).unwrap(), application);
     }
 
     #[test]

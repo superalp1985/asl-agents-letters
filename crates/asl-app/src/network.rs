@@ -122,6 +122,19 @@ pub enum NetworkCommand {
         operation_id: [u8; 16],
         key: [u8; 32],
     },
+    GossipSubscribe {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    GossipUnsubscribe {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    GossipPublish {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+        payload: Vec<u8>,
+    },
 }
 
 impl NetworkCommand {
@@ -258,6 +271,21 @@ impl NetworkCommand {
             Self::StopProviding { operation_id, key } => {
                 IpcMessage::StopProviding { operation_id, key }
             }
+            Self::GossipSubscribe { operation_id, key } => {
+                IpcMessage::GossipSubscribe { operation_id, key }
+            }
+            Self::GossipUnsubscribe { operation_id, key } => {
+                IpcMessage::GossipUnsubscribe { operation_id, key }
+            }
+            Self::GossipPublish {
+                operation_id,
+                key,
+                payload,
+            } => IpcMessage::GossipPublish {
+                operation_id,
+                key,
+                payload,
+            },
         })
     }
 }
@@ -297,6 +325,12 @@ pub enum NetworkEvent {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    GossipReceived {
+        key: [u8; 32],
+        propagation_source: PeerId,
+        message_id: [u8; 32],
+        payload: Vec<u8>,
     },
     /// The device transport is authenticated; the Agent identity is not.
     TransportConnected {
@@ -462,6 +496,17 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 lookup_id,
                 status,
                 providers,
+            }),
+            IpcMessage::GossipReceived {
+                key,
+                propagation_source,
+                message_id,
+                payload,
+            } => Ok(Self::GossipReceived {
+                key,
+                propagation_source,
+                message_id,
+                payload,
             }),
             IpcMessage::PeerAuthenticated {
                 connection_id,

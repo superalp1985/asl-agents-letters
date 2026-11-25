@@ -132,11 +132,13 @@
 - Existing inbox/share grants and `authorized`/`ask` decisions gate all package bytes.
 
 - [x] Add fixed codec vectors for request, offer, agreement and contextual expression, with structural rejection cases.
-- [x] Test unsupported peer minor and mismatched Offer binding, plus missing package, authorized receipt and agreement across two independent Core/MCP hosts on TCP loopback.
+- [ ] Test unsupported peer minor and mismatched Offer binding, plus missing package, authorized receipt and agreement across two independent Core/MCP hosts on TCP loopback.
 - [ ] Exercise offer expiry through the complete runtime and separately cover upload/revocation races for context transfers.
 - [ ] Test that no package bytes are sent or written before the existing upload/download decision, including revocation races.
 - [x] Implement new frames without changing ASL/1.1 fields or tool meanings; never downgrade to text.
 - [ ] Run the focused protocol, store, MCP, and two-Core tests as one acceptance pass.
+
+Implementation status (2026-11-25): direct `ContextExpression` send/receive is wired through MCP and Core. Sending checks the active controller, exact package reference, dependency graph, and conformance vectors; receiving reports the full CBOR frame plus a local evaluation state and acknowledges the message only under the existing answer setting. Group delivery, ContextRequest/Offer/Agreement runtime routing, authorized package transfer/import, expiry/revocation races, and two-Core acceptance remain incomplete.
 
 ### Task 6: Release Gate
 

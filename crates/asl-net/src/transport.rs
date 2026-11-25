@@ -20,9 +20,11 @@ use crate::relay::{
     relay_route_address,
 };
 mod behaviour;
+mod gossip;
 mod profile_publication;
 mod requests;
 use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
+pub use gossip::{GossipMessage, GossipTopic, MAX_GOSSIP_PAYLOAD_BYTES, MAX_GOSSIP_SUBSCRIPTIONS};
 use requests::Requests;
 
 use asl_types::ids::PeerId;
@@ -299,6 +301,7 @@ pub enum TransportEvent {
         request: RequestToken,
         response: GroupPacket,
     },
+    GossipMessage(GossipMessage),
     RequestFailed {
         connection_id: LocalConnectionId,
         request: RequestToken,
@@ -329,6 +332,7 @@ pub struct LocalTransport {
     pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
     pending_dht_provider_lookups: HashMap<kad::QueryId, PendingDhtProviderLookup>,
     profile_publication: Option<profile_publication::Publication>,
+    gossip_subscriptions: HashSet<GossipTopic>,
 }
 
 struct PendingDhtProviderLookup {
@@ -397,6 +401,7 @@ impl LocalTransport {
             pending_dht_records: HashMap::new(),
             pending_dht_provider_lookups: HashMap::new(),
             profile_publication: None,
+            gossip_subscriptions: HashSet::new(),
         })
     }
 
@@ -822,6 +827,11 @@ impl LocalTransport {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Group(event)) => {
                     if let Some(event) = self.handle_group(event) {
+                        return Ok(event);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossip(event)) => {
+                    if let Some(event) = self.handle_gossip(event) {
                         return Ok(event);
                     }
                 }

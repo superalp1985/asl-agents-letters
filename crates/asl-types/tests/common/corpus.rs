@@ -16,9 +16,9 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 24;
-pub const ACCEPTED_COUNT: usize = 19;
-pub const REJECTED_COUNT: usize = 5;
+pub const VECTOR_COUNT: usize = 33;
+pub const ACCEPTED_COUNT: usize = 23;
+pub const REJECTED_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -107,6 +107,10 @@ pub fn vector_cases() -> Vec<VectorCase> {
                 WireFrame::PairingExchange(_) => ("pairing-exchange-v1", "pairing-exchange"),
                 WireFrame::GroupEnvelope(_) => ("group-envelope-v1", "group-envelope"),
                 WireFrame::Expression(_) => ("expression-letter-v1", "expression-letter"),
+                WireFrame::ContextRequest(_) => ("context-request-v1", "context-request"),
+                WireFrame::ContextOffer(_) => ("context-offer-v1", "context-offer"),
+                WireFrame::ContextAgreement(_) => ("context-agreement-v1", "context-agreement"),
+                WireFrame::ContextExpression(_) => ("context-expression-v1", "context-expression"),
             };
             VectorCase {
                 name,
@@ -229,7 +233,48 @@ pub fn vector_cases() -> Vec<VectorCase> {
             bytes: cbor2::to_canonical_vec(&Value::Map(fields)).unwrap(),
         });
     }
+    let invalid_context_fields: [(&str, u64, u64, u64); 5] = [
+        ("context-request-zero-expiry-v1", 16, 7, 0),
+        ("context-request-zero-revision-v1", 16, 5, 0),
+        ("context-offer-oversized-v1", 17, 9, 8_388_609),
+        ("context-offer-zero-expiry-v1", 17, 10, 0),
+        ("context-agreement-unknown-status-v1", 18, 8, 3),
+    ];
+    for (name, kind, field, value) in invalid_context_fields {
+        let frame = frames
+            .iter()
+            .find(|frame| frame_kind(frame) == kind)
+            .unwrap();
+        let mut encoded: Value = cbor2::from_slice(&encode_frame(frame).unwrap()).unwrap();
+        let Value::Map(fields) = &mut encoded else {
+            panic!("encoded frame must be a map");
+        };
+        let key = Value::Integer(Integer::from(field));
+        let (_, current) = fields.iter_mut().find(|(entry, _)| *entry == key).unwrap();
+        *current = Value::Integer(Integer::from(value));
+        cases.push(VectorCase {
+            name,
+            root: match kind {
+                16 => "context-request",
+                17 => "context-offer",
+                18 => "context-agreement",
+                _ => unreachable!(),
+            },
+            codec: Codec::Frame,
+            accepted: false,
+            bytes: cbor2::to_canonical_vec(&encoded).unwrap(),
+        });
+    }
     cases
+}
+
+fn frame_kind(frame: &WireFrame) -> u64 {
+    match frame {
+        WireFrame::ContextRequest(_) => 16,
+        WireFrame::ContextOffer(_) => 17,
+        WireFrame::ContextAgreement(_) => 18,
+        _ => 0,
+    }
 }
 
 pub fn check_case_counts(cases: &[VectorCase]) -> CorpusResult<()> {
@@ -247,12 +292,12 @@ pub fn check_case_counts(cases: &[VectorCase]) -> CorpusResult<()> {
     if cases.len() != VECTOR_COUNT
         || accepted != ACCEPTED_COUNT
         || rejected != REJECTED_COUNT
-        || frames != 16
+        || frames != 20
         || records != 3
         || unique_names.len() != cases.len()
     {
         return Err(
-            "expected 24 unique vectors: 16 frames + 3 records accepted, 5 rejected".into(),
+            "expected 33 unique vectors: 20 frames + 3 records accepted, 10 rejected".into(),
         );
     }
     Ok(())

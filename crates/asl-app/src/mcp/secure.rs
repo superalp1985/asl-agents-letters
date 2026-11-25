@@ -14,6 +14,10 @@ const HANDSHAKE_BYTES: usize = 48; // X25519 e + authentication tag; no payload.
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_RECORD_BYTES: usize = u16::MAX as usize;
 const TAG_BYTES: usize = 16;
+const MAX_MESSAGE_BYTES: usize = 512 * 1024;
+const FRAGMENT_MAGIC: &[u8; 8] = b"ASLMCPF1";
+const FRAGMENT_HEADER_BYTES: usize = 16;
+const MAX_FRAGMENT_BYTES: usize = MAX_RECORD_BYTES - TAG_BYTES - FRAGMENT_HEADER_BYTES;
 
 pub(super) struct SecurePipe<S> {
     stream: S,
@@ -21,6 +25,8 @@ pub(super) struct SecurePipe<S> {
     header: [u8; 2],
     encrypted: Vec<u8>,
     read: usize,
+    received_message: Vec<u8>,
+    received_message_size: Option<usize>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
@@ -76,18 +82,98 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
             header: [0; 2],
             encrypted: Vec::new(),
             read: 0,
+            received_message: Vec::new(),
+            received_message_size: None,
         })
     }
 
     pub async fn send(&mut self, value: &impl Serialize) -> Result<(), AslError> {
         let plain = serde_json::to_vec(value).map_err(|_| AslError::InvalidMessage)?;
-        if plain.len() > MAX_RECORD_BYTES - TAG_BYTES {
+        if plain.len() > MAX_MESSAGE_BYTES {
             return Err(AslError::QuotaExceeded);
         }
+        if plain.len() <= MAX_RECORD_BYTES - TAG_BYTES {
+            self.send_record(&plain).await?;
+        } else {
+            let total = u32::try_from(plain.len()).map_err(|_| AslError::QuotaExceeded)?;
+            for (offset, chunk) in plain.chunks(MAX_FRAGMENT_BYTES).enumerate() {
+                let offset = offset
+                    .checked_mul(MAX_FRAGMENT_BYTES)
+                    .ok_or(AslError::QuotaExceeded)?;
+                let mut fragment = Vec::with_capacity(FRAGMENT_HEADER_BYTES + chunk.len());
+                fragment.extend_from_slice(FRAGMENT_MAGIC);
+                fragment.extend_from_slice(&total.to_be_bytes());
+                fragment.extend_from_slice(
+                    &u32::try_from(offset)
+                        .map_err(|_| AslError::QuotaExceeded)?
+                        .to_be_bytes(),
+                );
+                fragment.extend_from_slice(chunk);
+                self.send_record(&fragment).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, AslError> {
+        loop {
+            let plain = self.receive_record().await?;
+            if !plain.starts_with(FRAGMENT_MAGIC) {
+                if self.received_message_size.is_some() {
+                    return Err(AslError::InvalidMessage);
+                }
+                return serde_json::from_slice(&plain).map_err(|_| AslError::InvalidMessage);
+            }
+            if plain.len() < FRAGMENT_HEADER_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            let total = u32::from_be_bytes(
+                plain[8..12]
+                    .try_into()
+                    .map_err(|_| AslError::InvalidMessage)?,
+            ) as usize;
+            let offset = u32::from_be_bytes(
+                plain[12..16]
+                    .try_into()
+                    .map_err(|_| AslError::InvalidMessage)?,
+            ) as usize;
+            let chunk = &plain[FRAGMENT_HEADER_BYTES..];
+            if !(MAX_RECORD_BYTES - TAG_BYTES + 1..=MAX_MESSAGE_BYTES).contains(&total)
+                || chunk.is_empty()
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            match self.received_message_size {
+                None if offset == 0 => {
+                    self.received_message = Vec::with_capacity(total);
+                    self.received_message_size = Some(total);
+                }
+                Some(expected) if expected == total => {}
+                _ => return Err(AslError::InvalidMessage),
+            }
+            if offset != self.received_message.len()
+                || self
+                    .received_message
+                    .len()
+                    .checked_add(chunk.len())
+                    .is_none_or(|length| length > total)
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            self.received_message.extend_from_slice(chunk);
+            if self.received_message.len() == total {
+                self.received_message_size = None;
+                let complete = std::mem::take(&mut self.received_message);
+                return serde_json::from_slice(&complete).map_err(|_| AslError::InvalidMessage);
+            }
+        }
+    }
+
+    async fn send_record(&mut self, plain: &[u8]) -> Result<(), AslError> {
         let mut encrypted = vec![0; plain.len() + TAG_BYTES];
         let len = self
             .noise
-            .write_message(&plain, &mut encrypted)
+            .write_message(plain, &mut encrypted)
             .map_err(|_| AslError::InvalidMessage)?;
         self.stream.write_u16(len as u16).await?;
         self.stream.write_all(&encrypted[..len]).await?;
@@ -95,7 +181,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
         Ok(())
     }
 
-    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, AslError> {
+    async fn receive_record(&mut self) -> Result<Vec<u8>, AslError> {
         // A select may stop polling this reader for a write. Keep framing
         // progress on the pipe and advance the Noise nonce only on a full record.
         while self.read < self.header.len() {
@@ -121,7 +207,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecurePipe<S> {
             .map_err(|_| AslError::PolicyDenied)?;
         self.read = 0;
         self.encrypted.clear();
-        serde_json::from_slice(&plain[..len]).map_err(|_| AslError::InvalidMessage)
+        plain.truncate(len);
+        Ok(plain)
     }
 
     fn add_read(&mut self, n: usize) -> Result<(), AslError> {
@@ -180,5 +267,17 @@ mod tests {
         let (send, received) = tokio::join!(send, b.receive::<String>());
         send.unwrap();
         assert_eq!(received.unwrap(), "message longer than the pipe buffer");
+    }
+
+    #[tokio::test]
+    async fn large_authenticated_message_is_split_across_noise_records() {
+        let (a, b) = tokio::io::duplex(16 * 1024);
+        let key = [42; 32];
+        let (a, b) = tokio::join!(SecurePipe::initiate(a, &key), SecurePipe::respond(b, &key));
+        let (mut a, mut b) = (a.unwrap(), b.unwrap());
+        let message = "context-frame".repeat(12_000);
+        let (sent, received) = tokio::join!(a.send(&message), b.receive::<String>());
+        sent.unwrap();
+        assert_eq!(received.unwrap(), message);
     }
 }

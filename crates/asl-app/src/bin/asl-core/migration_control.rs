@@ -14,6 +14,20 @@ use zeroize::Zeroizing;
 
 pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     match args {
+        [command, expected_agent_id] if command == "import-legacy-root" => {
+            let expected_agent_id = expected_agent_id
+                .to_str()
+                .ok_or(AslError::InvalidIdentity)?;
+            asl_app::profile_setup::migrate_legacy_core_profile(expected_agent_id, false)
+        }
+        [command, expected_agent_id, format]
+            if command == "import-legacy-root" && format == "--json" =>
+        {
+            let expected_agent_id = expected_agent_id
+                .to_str()
+                .ok_or(AslError::InvalidIdentity)?;
+            asl_app::profile_setup::migrate_legacy_core_profile(expected_agent_id, true)
+        }
         [command, destination, options @ ..] if command == "export" => {
             let mut selection = Selection::default();
             for option in options {

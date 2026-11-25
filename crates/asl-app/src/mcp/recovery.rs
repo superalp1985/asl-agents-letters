@@ -264,6 +264,7 @@ impl DownloadAttempt {
                         *self = Self::Started(ticket);
                     }
                 }
+                Ok(Some(DownloadEvent::ContextCandidate { .. })) => {}
                 Ok(Some(DownloadEvent::Completed(_))) => return false,
                 Ok(Some(DownloadEvent::Failed(error))) | Err(error) => {
                     *self = Self::Failed(error_code(error));

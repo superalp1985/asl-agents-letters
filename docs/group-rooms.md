@@ -1,12 +1,23 @@
 # T31 群组接线记录
 
+## 2026-11-25 增量：act、两人会话、MCP 与 gossipsub
+
+本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
+
+- `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
+- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。邀请仍由目标设备本机批准。
+- 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
+- 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
+- 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
+- 远程密文邮箱托管/补收尚未接通；v35 只有本地 opaque 邮箱和预算仓储。
+
 ## 已实现：群消息编解码
 
 群子流沿用冻结的 `/asl/group/1.0.0`、4 字节大端长度前缀和确定性 CBOR `group-envelope`。收发只接受群 envelope；整帧上限 256 KiB，envelope 内的 MLS 密文上限 64 KiB。默认不注册群子流；显式回环构造器例外。编解码本身不认证身份、不授权群成员、不匹配回复。
 
 `GroupPacket` 对操作 `1` 内的 `group-membership` 进行二次确定性 CBOR 校验，限制请求和回复种类、完全匹配群 ID、请求 ID、预期 epoch 和邀请 ID。网络 codec 只检查外层，传输适配器和 Core 分别检查消息及各自的连接、待决请求绑定。OpenMLS 适配器核验普通 KeyPackage、单收件项 Welcome、解密后的群 ID/epoch/套件及本机叶子，并检查 Application/Commit 是相符的 MLS 私有消息。同步绑定由 MLS exporter 派生，不发送原始 epoch authenticator。完整消息表见 [协议](03-protocol.md#群子流)。
 
-MLS 应用明文通过 `group-application` 校验，只复用既有 Query、Answer、Offer、FetchRequest 和 FetchGrant。没有自由文本、未知字节载荷或嵌套群 envelope；外层 CBOR 字段和值不变。FetchRequest 只能由当前 `active` 且成员 epoch 精确匹配的房间成员发起；FetchGrant 使用原群应用外层消息 ID 关联请求，内部 Grant 的消息 ID 仍保持独立。
+MLS 应用明文通过 `group-application` 校验，支持既有 Query、Answer、Offer、FetchRequest、FetchGrant、表达式信件和 ASL/1.3 act。除 act `nl-body` 外不接受自由文本、未知字节载荷或嵌套群 envelope；外层 CBOR 字段和值不变。FetchRequest 只能由当前 `active` 且成员 epoch 精确匹配的房间成员发起；FetchGrant 使用原群应用外层消息 ID 关联请求，内部 Grant 的消息 ID 仍保持独立。
 
 集成夹具使用固定 OpenMLS 0.9.2、RustCrypto 0.6.0 和测试身份，真实执行 KeyPackage、Welcome、应用消息认证与解密、移除提交，检查被移除成员不能读取下一 epoch 的消息。夹具的 BasicCredential 不等于 ASL 链身份；测试并不验收实际群邀请、持久化、成员授权、生产子进程或公网。
 
@@ -121,7 +132,7 @@ Core 在独立候选中收发准备，要求调用方指定精确房间版本；
 
 发方只加密一次，密文和发送状态落盘后再入队。SQLite 写锁保护版本及身份检查和入队边界，较新的成员变更已落盘时不按旧名单入队。同一密文的各条请求使用独立的本机传输凭据。离线不补发，不自动重试；入队不表示送达。已经入队或已发送的旧消息不能召回，接收方只处理自己的当前 epoch。
 
-正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识，不展示内容，不把消息交给普通 Agent。发方可在可信 Core 的本机类型化控制通道提交 Query、Answer、Offer、FetchRequest 或 FetchGrant，只报告本机入队结果，不暴露终端、MCP、Worker 或远端发送命令。回环默认关闭；普通成员互发、GUI、公网、LAN 和中继仍未开放。
+正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复或向 Agent 交付 act。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识。可信 Core/MCP 现在可按用户授权创建房间、邀请、发送 act 和续期消息预算；`nl-body` 不作为控制命令。回环默认关闭；跨机普通成员互发、GUI、公网、LAN 和中继仍需各自验收。
 
 ## 已实现：群内文件传输授权链
 

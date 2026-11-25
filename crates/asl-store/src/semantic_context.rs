@@ -1,9 +1,10 @@
 use asl_types::{
     error::AslError,
-    ids::Hash32,
+    ids::{Hash32, Id128},
     protocol::{
         MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES, SemanticContextRef, SignedSemanticContextBundle,
     },
+    task::ResourceKey,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -18,7 +19,53 @@ pub enum SemanticContextCandidateInsert {
     AlreadyPresent,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticContextResource {
+    pub resource_key: ResourceKey,
+    pub content_id: Hash32,
+    pub file_size: u64,
+}
+
 impl Store {
+    pub fn semantic_context_resources(
+        &self,
+        reference: SemanticContextRef,
+    ) -> Result<Vec<SemanticContextResource>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT resource_key,content_id,file_size FROM semantic_context_resources
+                 WHERE authority=?1 AND namespace=?2 AND revision=?3 AND digest=?4
+                 ORDER BY resource_key LIMIT 64",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    reference.authority.as_bytes(),
+                    i64::from(reference.namespace),
+                    i64::from(reference.revision),
+                    reference.digest.as_bytes()
+                ],
+                |row| {
+                    let key: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    let size: i64 = row.get(2)?;
+                    Ok((key, content, size))
+                },
+            )
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let (key, content, size) = row.map_err(database_error)?;
+            Ok(SemanticContextResource {
+                resource_key: ResourceKey(Id128(parse_hex::<16>(&key)?)),
+                content_id: Hash32(parse_hex::<32>(&content)?),
+                file_size: u64::try_from(size).map_err(|_| AslError::InvalidDatabase)?,
+            })
+        })
+        .collect()
+    }
+
     /// Stores a structurally valid, content-addressed package candidate.
     ///
     /// This does not authenticate its signature or make its definitions
@@ -154,4 +201,10 @@ impl Store {
         tx.commit().map_err(database_error)?;
         Ok(removed == 1)
     }
+}
+
+fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], AslError> {
+    let mut bytes = [0; N];
+    hex::decode_to_slice(value, &mut bytes).map_err(|_| AslError::InvalidDatabase)?;
+    Ok(bytes)
 }

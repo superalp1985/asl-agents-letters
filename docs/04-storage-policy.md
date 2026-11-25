@@ -36,7 +36,7 @@ Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重
 
 ## 2. 数据表
 
-当前版本为 SQLite v27。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
+当前版本为 SQLite v35。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；远程邮箱传输尚未接通。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
 
 v22 增加 `observed_remote_profiles`，保存 Core 已验签的远端公开主题投影。每个 Agent 一条、总量最多 200 条，不保存头像或原始报文。只读面板按有效期、链观察与本机撤销状态过滤；该表不用于身份、权限或信任判定。
 
@@ -58,15 +58,15 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
 | 群组 | asl_groups、group_members、group_events、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、定向入群邀请与有期限密文事件 |
-| 内容 | snapshots、resources、resource_fts、derivation_sources | 物理内容、授权引用、本机检索索引和溯源 |
-| 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、CBOR 语义帧、重试与去重 |
+| 内容 | snapshots、resources、resource_fts、derivation_sources、semantic_context_candidates、semantic_context_resources | 物理内容、授权引用、本机检索索引、溯源和已验证语义上下文候选/精确资源关联 |
+| 任务 | tasks、messages、offers、outbox、processed_requests | v35+ 前的有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
 | 本机观察 | direct_inbound_observations | 有界、短期的结构化直连请求浏览记录，不含请求正文或回复 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |
 | 证据 | trust_events、contribution_events、model_calls、security_events | 本地评价、调用状态和脱敏审计 |
 
-T19 已将 `tasks`、`messages`、`outbox` 和 `processed_requests` 接入 `asl-store`：任务预算、消息方向/类型、有限重试和请求去重在 SQLite 事务中持久化，重启后不会仅因内存状态丢失而再次回答旧请求。`messages.body_cbor` 保存已通过现有确定性 CBOR 编解码器的结构化控制帧；这表示本地存储路径已实现，不表示真实 Core/Net handler、完整公网会话或所有协议帧的端到端接入已完成。`fetch_grant`、lease 及其他传输授权不写入聊天消息和 outbox。
+T19 已将 `tasks`、`messages`、`outbox` 和 `processed_requests` 接入 `asl-store`：旧结构化会话的任务预算、消息方向/类型、有限重试和请求去重在 SQLite 事务中持久化，重启后不会仅因内存状态丢失而再次回答旧请求。`messages.body_cbor` 只保存现有确定性 CBOR 控制帧，不能用来表示 ASL/1.3 `act-nl` 的自然语言正文。这表示旧本地存储路径已实现，不表示真实 Core/Net handler、完整公网会话或所有协议帧的端到端接入已完成。`fetch_grant`、lease 及其他传输授权不写入聊天消息和 outbox。
 
-T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。发起检索前在一个事务内占用 AgentId/message ID 去重键并推进 AgentId/root-task 的三轮、六条语义消息预算；回答交给 Net 前在当前授权事务内再预留一条语义消息。请求去重和会话预算均跨进程重启和设备迁移保留，过期十分钟。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。GUI 概览可将本机模式设为关闭、只浏览或回答；默认关闭，设置通过 `asl-core --direct-inbound` 进入同一 Core 控制路径。
+T27 将 `processed_requests` 和 `direct_inbound_conversations` 接入生产直连处理路径。现有切片在一个事务内占用 AgentId/message ID 去重键并推进旧的 AgentId/root-task 三轮、六条语义消息额度；这是兼容当前代码的旧规则，不是最终对话预算。ASL/1.3 起改由 `conversation_budget_grants` 持久化主体、会话范围、有效期、消息数、字节数、模型调用数和资源额度，续期只能增加新版本，不能通过重连、更换设备或清空内存重置。请求去重跨进程重启和设备迁移保留。直连回复暂不进入 T19 `messages` 或 outbox。SQLite 当前授权与本机回答设置在交给 Net 前再次检查；本地持久化和 CBOR 结构分别验收，不代表公网联调通过。GUI 概览可将本机模式设为关闭、只浏览或回答；默认关闭，设置通过 `asl-core --direct-inbound` 进入同一 Core 控制路径。
 
 MCP 运行时补授收件目录复用 `write_grants`。`settings` 只保留一条十分钟有效的本机请求及决定；只有持有对应等待通道的已认证订阅会话可取得临时绑定，不按宿主名恢复。拒绝、过期或旧请求 ID 都不会授予目录。下载仍按当前目录状态、额度和逐文件策略处理。直连上传在资源读取授权通过后，使用当前已验证会话和证书登记接收设备；该登记不授予联系人或资源权限。
 
@@ -82,13 +82,32 @@ SQLite v31 的显式下载续接授权与查询日志分离。授权绑定已开
 
 SQLite v32 的审批状态共享只保存审批 ID 与恢复身份摘要，引用原收件审批，不另建下载或审批。首次读到过期记录时移除共享绑定；原审批被清理时随外键删除。每次读取重新核对恢复身份、收件授权版本和群组成员版本。不复制文件路径、Offer、凭证或批准能力；不自动把旧审批共享给宿主。
 
+SQLite v33 增加 `semantic_context_candidates`，只缓存已通过结构校验的有界签名候选，主键绑定 authority/namespace/revision/digest，不把“已缓存”解释为签名、链身份、依赖图或一致性向量已经通过。v34 增加 `semantic_context_resources`，仅把导入文件中确实观察到、且仍能通过共享句柄授权复验的 `.aslc` 内容与精确语义引用关联；缓存不会扩大该文件的 shared audience。
+
 T34 本机身份绑定切片：SQLite v18 将旧 AgentId pin 迁移为绑定状态，最多保留 200 条待确认/忽略的发现候选及 64 条待办本机动作。UI 从只读 Dashboard 投影展示本机 16 位短码、候选和绑定；修改通过相邻 `asl-core --bindings` 子命令排入 Core 动作队列，不由 GUI 直接写库。发布默认为关闭；启用时只发布短码 provider 指针，搜索只用于发现候选。Supervisor 仅在链身份、设备证书与认证 PeerId 全部通过后记录候选；绑定须由本机明确批准，且批准时要求该精确 AgentId/PeerId 仍处于当前已核验连接。批准不触发旧 `/asl/pair/1.0.0` 请求/响应，也不创建 `authorized_contacts`、资源 grant、群组成员或文件权限；撤销会封锁 Agent 并断开现有连接，重启时从本机撤销状态恢复封锁。动作返回值仅表示排队，不表示绑定、发现或网络发布已经完成；DHT 不可达仍会导致查找失败。尚未包含身份迁移包、公开链注册流程或公网 DHT 可达性验收。
 
 T28 实现类型化派生经验记录：只接收已由 `ValidatedDecision` 校验的 claims；本地生成来源、时间和 `derived_unverified` 标签，模型不能指定路径、验证状态或发布策略。写入目录使用独立 `write_grant`，固定目录身份、create-new 文件和字节额度；每个来源都需通过 `WriteDerived`，公开还需每个来源同时通过 `PublishRecord`，否则仅本地私有。记录以 JSON 落盘并进入本地索引；来源或写入授权撤销后，派生记录级联停用并从 FTS 移除。该切片尚不表示经验收集流程已接入后台自主运行或 GUI。
 
 T29 将本机观察按 integrity/availability/evidence/promise 分开保存；出站请求成功、超时或断连只影响 availability，块 hash 成败只影响 integrity。偏好与信誉读取不写 `authorized_contacts`，检索候选始终从该授权表产生。贡献事件只接受完成任务、匹配任务 AgentId、匹配资源来源 AgentId 且状态为 `verified` 的远端资源；同一 `task_id + content_id + help_kind` 全机只记一次，全 AgentId 共用滚动 24 小时 100 条上限。传输完成、哈希通过或模型自报有用都不会单独记贡献。远端资源来源归因尚未接入完整导入/使用流程，因此缺少来源 AgentId 的资源不会自动产生贡献。
 
-数据库是本机数据边界，不是线上协议：`local_task_text`、资源标题/摘要、模型片段和 GUI 标签可包含本地文本，但不能未经映射复制到 ASL peer message、DHT 记录、链上状态或 MLS 应用明文。线上结构使用 `body_cbor` 等有界 BLOB。公开 profile、offer 和语义任务必须遵循 `schemas/asl-v1.cddl`，不得因数据库使用 JSON 或 TEXT 就将这些字段发送出去。
+数据库是本机数据边界，不是线上协议：`local_task_text`、资源标题/摘要、模型片段和 GUI 标签可包含本地文本，但不能未经映射复制到 ASL 外层控制帧、DHT 记录或链上状态。ASL/1.3 唯一允许的自然语言是 MLS 解密后的 `act[5] nl-body`；不可信远端正文只能作为本机数据区内容保存和交给模型阅读，不能成为本地策略、系统提示、工具指令、路径或动作。线上控制结构继续使用 `body_cbor` 等有界 BLOB。公开 profile、offer 和语义任务必须遵循 `schemas/asl-v1.cddl`，不得因数据库使用 JSON 或 TEXT 就将这些字段发送出去。
+
+## 2.1 v35 增量存储（底座已实现）
+
+当前 v1–v34 迁移保持不变；v35 已通过新迁移增加下列表。`asl-store::mailbox` 已实现 opaque 密文槽/分片的写入、读取、签收、TTL 清理，以及持久预算授予、有限续期和原子扣减。远程 DHT 托管、Core/Net 邮箱命令、GUI 预算续期和离线补收仍未接线，不能把本地仓储 API 当作完整离线邮箱。
+
+| 表或等价仓储 | 责任 | 约束 |
+| --- | --- | --- |
+| `conversation_rooms` | 私聊/群聊到 MLS group_id、角色、状态和容量等级的唯一映射 | 私聊是两人 MLS 组，和群聊共用 act、预算、历史、邮箱和附件路径 |
+| `conversation_budget_grants` | 主体、会话范围、消息/字节/模型调用/CPU/邮箱额度、期限和续期链 | 原子扣减；重启、换设备、重连不能重置；信任值和贡献值不参与授权 |
+| `conversation_act_events` | act-id、conversation-id、类型、因果根、reply-to、MLS epoch、处理状态和回复关联 | 去重与排序使用结构字段；`nl-body` 单独标记 untrusted data，不作为动作来源 |
+| `conversation_attachment_refs` | act 到 blob-ref、offer、下载授权和状态 | 只存引用；字节仍走 `offer/fetch/chunk/hash`，不嵌入 act |
+| `mailbox_slots` | 轮换 topic、密文摘要、大小桶、TTL、签收和本机配额 | 只存 envelope 密文与路由元数据，不存 `nl-body`、身份资料、文件名或明文主题 |
+| `mailbox_shards` | 分片序号、密文摘要、宿主能力和重组状态 | 不得保存明文；容量不足时明确排队/拒绝 |
+| `gossip_topic_state` | 群/epoch 绑定、主题轮换、mesh 健康度和本地资源预算 | 主题不包含群名、Agent 名或长期稳定标签；gossip 只传播密文 |
+| `local_capacity_measurements` | 本机容量等级、测量时间和参数 | 只作本机准入与路由选择，不成为身份可信度、权限或收费门槛 |
+
+会话历史、预算、act 事件、附件引用、邮箱和容量表都必须引用当前已验证的 AgentId、设备证书和 MLS epoch。邮箱内容的持久化边界是密文；本机解密后的历史按本地保留策略另存，但必须带 conversation audience、来源和不可信数据标记。清理邮箱槽、密文分片和过期容量样本时，不删除仍有效的共享源文件或未发送的本地 outbox。
 
 秘密不进 settings、messages 或 security_events。日志中的 peer 可截断显示，完整身份只存业务表；lease、API Key、私钥和模型端点认证头不进入诊断。
 

@@ -13,6 +13,16 @@ fn run() -> Result<(), asl_types::error::AslError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
         [] => asl_app::supervisor::run_from_environment(),
+        [command, setup_args @ ..] if command == "setup" => {
+            #[cfg(windows)]
+            {
+                asl_app::profile_setup::run(setup_args)
+            }
+            #[cfg(not(windows))]
+            {
+                Err(asl_types::error::AslError::PlatformUnavailable)
+            }
+        }
         #[cfg(windows)]
         [command, flag, home] if command == "mcp" && flag == "--home" => {
             match portable::active_agent()? {

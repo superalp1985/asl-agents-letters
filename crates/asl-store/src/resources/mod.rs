@@ -21,11 +21,14 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     manifest::{Manifest, decode_manifest},
+    protocol::SignedSemanticContextBundle,
     task::{GrantId, ResourceKey},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::{Store, current_time_ms, database_error, open_store};
+use crate::{
+    Store, current_time_ms, database_error, open_store, semantic_context::SemanticContextResource,
+};
 use grants::ImportAuthority;
 use reservations::Hold;
 
@@ -73,6 +76,13 @@ impl SnapshotBroker {
 
     pub fn set_reconcile_stop(&mut self, stop: Arc<AtomicBool>) {
         self.reconcile_stop = Some(stop);
+    }
+
+    pub fn semantic_context_resources(
+        &self,
+        reference: asl_types::protocol::SemanticContextRef,
+    ) -> Result<Vec<SemanticContextResource>, AslError> {
+        self.store.semantic_context_resources(reference)
     }
 
     pub fn open_snapshot(&self, content_id: Hash32) -> Result<StoredSnapshotReader, AslError> {
@@ -160,12 +170,34 @@ impl SnapshotBroker {
             }
             Ok(())
         };
-        let db = &mut self.store.connection;
-        let (mut staged, index) =
-            index_input::copy_and_prepare(&self.home, source, Path::new(relative), || {
-                progress(db)
-            })?;
+        let (mut staged, index, context_bytes) = {
+            let db = &mut self.store.connection;
+            index_input::copy_and_prepare(
+                &self.home,
+                source,
+                Path::new(relative),
+                source_is_context_package(relative),
+                || progress(db),
+            )?
+        };
         let content_id = staged.content_id();
+        let context_reference = context_bytes.and_then(|package_bytes| {
+            let parsed = SignedSemanticContextBundle::decode(&package_bytes)
+                .and_then(|signed| Ok((signed.bundle.context_ref()?, signed.encode()?)));
+            let Ok((reference, canonical)) = parsed else {
+                return None;
+            };
+            if canonical != package_bytes
+                || self
+                    .store
+                    .put_semantic_context_candidate(&package_bytes, current_time_ms())
+                    .is_err()
+            {
+                return None;
+            }
+            Some(reference)
+        });
+        let db = &mut self.store.connection;
         recovery::claim_install(db, hold, content_id)?;
         // New objects stay exclusively pinned. Do not hold a SQLite writer
         // while copying or verifying a large blob; the rows are the visibility gate.
@@ -220,6 +252,24 @@ impl SnapshotBroker {
         if !indexed {
             index.write(&tx, &key, content_id.into())?;
         }
+        if let Some(reference) = context_reference {
+            tx.execute(
+                "INSERT OR IGNORE INTO semantic_context_resources(
+                    resource_key,authority,namespace,revision,digest,content_id,file_size,indexed_at_ms
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    hex::encode(key.0.0),
+                    reference.authority.as_bytes(),
+                    i64::from(reference.namespace),
+                    i64::from(reference.revision),
+                    reference.digest.as_bytes(),
+                    content,
+                    size,
+                    now
+                ],
+            )
+            .map_err(database_error)?;
+        }
         reservations::finish(&tx, hold, "consumed", "done")?;
         if let Err(error) = tx.execute_batch("COMMIT") {
             if !tx.is_autocommit() && tx.rollback().is_ok() {
@@ -232,6 +282,13 @@ impl SnapshotBroker {
         staged.retain_installed();
         Ok(key)
     }
+}
+
+fn source_is_context_package(relative: &str) -> bool {
+    Path::new(relative)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("aslc"))
 }
 
 fn immediate(conn: &mut Connection) -> Result<Transaction<'_>, AslError> {

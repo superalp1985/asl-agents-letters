@@ -18,11 +18,16 @@ use asl_store::{
 };
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32, Id128, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     manifest::{Manifest, content_id, encode_manifest},
+    protocol::{
+        Expression, SemanticConceptDefinition, SemanticConformanceVector, SemanticContextBundle,
+        SemanticContextRef, SignedSemanticContextBundle,
+    },
     task::{GroupId, TransferId},
 };
 use rusqlite::Connection;
+use serde_json::json;
 use tempfile::TempDir;
 
 struct Fixture {
@@ -113,6 +118,83 @@ impl Fixture {
             group: None,
         }
     }
+}
+
+#[test]
+fn completed_context_download_is_cached_only_for_the_offered_reference() {
+    let fixture = Fixture::new();
+    let authority = AgentId([0x21; 32]);
+    let bundle = SemanticContextBundle {
+        authority,
+        namespace: 7,
+        revision: 3,
+        kernel_revision: 1,
+        dependencies: Vec::new(),
+        concepts: vec![SemanticConceptDefinition {
+            concept_id: 9,
+            arity: 0,
+            definition: Expression::from_json(&json!([
+                "meaning_is",
+                [
+                    "concept",
+                    authority
+                        .0
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    7,
+                    3,
+                    9
+                ],
+                0,
+                ["int", "42"]
+            ]))
+            .unwrap(),
+        }],
+        vectors: vec![SemanticConformanceVector {
+            concept_id: 9,
+            case_id: 1,
+            inputs: Vec::new(),
+            expected: Expression::from_json(&json!(["int", "42"])).unwrap(),
+        }],
+    };
+    let reference = bundle.context_ref().unwrap();
+    let bytes = SignedSemanticContextBundle {
+        bundle,
+        signature: Signature65([0x55; 65]),
+    }
+    .encode()
+    .unwrap();
+    let request = fixture.valid_request(&bytes);
+    let mut broker = fixture.open_with_mode(DownloadMode::Automatic);
+    let info = broker.begin_download(&request).unwrap();
+    broker
+        .assign_chunk(info.transfer_id.clone(), &fixture.peer, 0)
+        .unwrap();
+    broker
+        .write_chunk(info.transfer_id.clone(), &fixture.peer, 0, &bytes)
+        .unwrap();
+    broker.complete(info.transfer_id.clone()).unwrap();
+
+    assert!(
+        broker
+            .cache_downloaded_semantic_context(&info.transfer_id, reference, 1)
+            .unwrap()
+    );
+    let changed = SemanticContextRef {
+        digest: Hash32([0x99; 32]),
+        ..reference
+    };
+    assert!(
+        !broker
+            .cache_downloaded_semantic_context(&info.transfer_id, changed, 1)
+            .unwrap()
+    );
+    let store = open_store(&fixture.home.join("state/asl.sqlite3")).unwrap();
+    assert_eq!(
+        store.semantic_context_candidate(reference).unwrap(),
+        Some(bytes)
+    );
 }
 
 #[test]

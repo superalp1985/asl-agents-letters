@@ -12,6 +12,7 @@ const SCOPE_VAR: &str = "ASL_MCP_SCOPE";
 const INBOX_VAR: &str = "ASL_MCP_INBOX_GRANT";
 const AGENT_PUSH_VAR: &str = "ASL_MCP_AGENT_PUSH";
 const EXPRESSIONS_VAR: &str = "ASL_MCP_EXPRESSIONS";
+const GROUPS_VAR: &str = "ASL_MCP_GROUPS";
 
 pub(super) type Key = Zeroizing<[u8; 32]>;
 
@@ -23,6 +24,7 @@ pub(crate) struct HostGrant {
     pub(super) inbox: Option<Id128>,
     pub(super) agent_push: bool,
     pub(super) expressions: bool,
+    pub(super) groups_admin: bool,
 }
 
 impl HostGrant {
@@ -44,15 +46,17 @@ impl HostGrant {
         let inbox = optional_var(INBOX_VAR)?;
         let push = optional_var(AGENT_PUSH_VAR)?;
         let expressions = optional_var(EXPRESSIONS_VAR)?;
+        let groups = optional_var(GROUPS_VAR)?;
         match (
             key,
             scope.as_deref(),
             inbox,
             push.as_deref(),
             expressions.as_deref(),
+            groups.as_deref(),
         ) {
-            (None, None, None, None, None) => Ok(None),
-            (Some(key), Some(scope), inbox, push, expressions) => Ok(Some(Self {
+            (None, None, None, None, None, None) => Ok(None),
+            (Some(key), Some(scope), inbox, push, expressions, groups) => Ok(Some(Self {
                 key,
                 recovery_key,
                 recovery_results,
@@ -73,6 +77,11 @@ impl HostGrant {
                 expressions: match expressions {
                     None => false,
                     Some("send") => true,
+                    _ => return Err(AslError::InvalidPolicyState),
+                },
+                groups_admin: match groups {
+                    None | Some("none") => false,
+                    Some("admin") => true,
                     _ => return Err(AslError::InvalidPolicyState),
                 },
             })),

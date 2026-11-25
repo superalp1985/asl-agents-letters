@@ -27,6 +27,7 @@ pub enum SemanticValue {
 
 #[cfg(windows)]
 impl SemanticValue {
+    #[allow(dead_code)]
     pub(crate) fn to_host_value(&self) -> Json {
         use serde_json::json;
         let concept = |value: &SemanticConcept| {
@@ -177,6 +178,17 @@ pub enum SemanticEvaluation {
     Invalid,
 }
 
+#[cfg(windows)]
+impl SemanticEvaluation {
+    pub(crate) fn to_host_value(&self) -> Json {
+        match self {
+            Self::Value(value) => serde_json::json!(["value", value.to_host_value()]),
+            Self::Unresolved => serde_json::json!(["unresolved"]),
+            Self::Invalid => serde_json::json!(["invalid"]),
+        }
+    }
+}
+
 impl ConformanceReadySemanticContextBundle {
     pub fn bundle(&self) -> &SemanticContextBundle {
         self.authenticated.bundle()
@@ -233,6 +245,7 @@ pub fn check_context_conformance(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 pub(crate) fn interpret_contextual_expression(
     expression: &Expression,
     packages: Vec<AuthenticatedSemanticContextBundle>,

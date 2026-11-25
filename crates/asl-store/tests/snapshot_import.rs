@@ -8,8 +8,17 @@ use std::{
 
 use asl_policy::{Audience, reconcile::ReconcileDriver};
 use asl_store::resources::SnapshotBroker;
-use asl_types::{error::AslError, task::GrantId};
+use asl_types::{
+    error::AslError,
+    ids::{AgentId, Signature65},
+    protocol::{
+        Expression, SemanticConceptDefinition, SemanticConformanceVector, SemanticContextBundle,
+        SignedSemanticContextBundle,
+    },
+    task::GrantId,
+};
 use rusqlite::Connection;
+use serde_json::json;
 use tempfile::TempDir;
 
 struct Fixture {
@@ -81,6 +90,82 @@ fn equal_content_shares_objects_not_grants_and_reimport_is_idempotent() {
     f.broker.revoke_directory(&public).unwrap();
     assert!(!f.broker.refresh_source(&a).unwrap());
     assert!(f.broker.refresh_source(&b).unwrap());
+}
+
+#[test]
+fn imported_aslc_resources_are_indexed_by_exact_semantic_reference() {
+    let mut f = Fixture::new();
+    let authority = AgentId([0x21; 32]);
+    let bundle = SemanticContextBundle {
+        authority,
+        namespace: 7,
+        revision: 3,
+        kernel_revision: 1,
+        dependencies: Vec::new(),
+        concepts: vec![SemanticConceptDefinition {
+            concept_id: 9,
+            arity: 0,
+            definition: Expression::from_json(&json!([
+                "meaning_is",
+                [
+                    "concept",
+                    authority
+                        .0
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    7,
+                    3,
+                    9
+                ],
+                0,
+                ["int", "42"]
+            ]))
+            .unwrap(),
+        }],
+        vectors: vec![SemanticConformanceVector {
+            concept_id: 9,
+            case_id: 1,
+            inputs: Vec::new(),
+            expected: Expression::from_json(&json!(["int", "42"])).unwrap(),
+        }],
+    };
+    let reference = bundle.context_ref().unwrap();
+    let bytes = SignedSemanticContextBundle {
+        bundle,
+        signature: Signature65([0x33; 65]),
+    }
+    .encode()
+    .unwrap();
+    fs::write(f.source.join("context.aslc"), &bytes).unwrap();
+    let grant = f
+        .broker
+        .authorize_directory(
+            &f.source,
+            &["aslc".to_owned()],
+            &Audience::Contacts,
+            16 << 20,
+        )
+        .unwrap();
+    let key = f
+        .broker
+        .import_source(&grant, Path::new("context.aslc"))
+        .unwrap();
+
+    let rows = f.broker.semantic_context_resources(reference).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resource_key, key);
+    assert_eq!(rows[0].file_size, bytes.len() as u64);
+    assert_ne!(rows[0].content_id, reference.digest);
+
+    f.broker.revoke_directory(&grant).unwrap();
+    assert_eq!(
+        f.broker
+            .semantic_context_resources(reference)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

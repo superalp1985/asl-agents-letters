@@ -138,6 +138,33 @@ impl Store {
         Ok(read_mls_room_snapshot(&self.connection, wire_id, false)?.map(|(snapshot, _)| snapshot))
     }
 
+    pub fn list_mls_room_ids(&self) -> Result<Vec<(Hash32, GroupId)>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT wire_group_id,local_group_id
+                 FROM mls_room_states
+                 ORDER BY wire_group_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        rows.into_iter()
+            .map(|(wire, local)| {
+                let wire = wire.try_into().map_err(|_| AslError::InvalidDatabase)?;
+                let mut decoded = [0; 16];
+                hex::decode_to_slice(local.as_bytes(), &mut decoded)
+                    .map_err(|_| AslError::InvalidDatabase)?;
+                Ok((Hash32(wire), GroupId(Id128(decoded))))
+            })
+            .collect()
+    }
+
     pub fn mls_room_progress(&self, wire_id: Hash32) -> Result<Option<(String, u64)>, AslError> {
         self.connection
             .query_row(

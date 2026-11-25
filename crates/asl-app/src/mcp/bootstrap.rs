@@ -11,21 +11,25 @@ pub(super) fn report(
     recovery: bool,
     capabilities: &Value,
 ) -> Value {
-    use NetworkAdmissionStatus::*;
-
     let (readiness, next_step) = match admission {
-        TrustConfigurationMissing => (
+        NetworkAdmissionStatus::TrustConfigurationMissing => (
             "network_profile_missing",
             "configure_trusted_network_profile",
         ),
-        DeviceDirectoryMissing => ("device_directory_missing", "complete_device_registration"),
-        DeviceDirectoryUnavailable => (
+        NetworkAdmissionStatus::DeviceDirectoryMissing => {
+            ("device_directory_missing", "complete_device_registration")
+        }
+        NetworkAdmissionStatus::DeviceDirectoryUnavailable => (
             "device_directory_unavailable",
             "restore_signed_device_directory",
         ),
-        ChainUnavailable => ("network_unavailable", "retry_when_network_is_available"),
-        RegistryAnchorMissing => ("registration_required", "complete_identity_registration"),
-        Active => ("network_ready", "none"),
+        NetworkAdmissionStatus::ChainUnavailable => {
+            ("network_unavailable", "retry_when_network_is_available")
+        }
+        NetworkAdmissionStatus::RegistryAnchorMissing => {
+            ("registration_required", "complete_identity_registration")
+        }
+        NetworkAdmissionStatus::Active => ("network_ready", "none"),
     };
     let mut available = vec!["query"];
     if !recovery {
@@ -36,7 +40,8 @@ pub(super) fn report(
     }
     for name in [
         "send_expression",
-        "semantic_contexts",
+        "send_context_expression",
+        "request_context",
         "receive_offer",
         "task_recovery",
         "recovery_query",
@@ -48,10 +53,6 @@ pub(super) fn report(
             available.push(name);
         }
     }
-    let scope = match scope {
-        QueryScope::ContactsOnly => "contacts_only",
-        QueryScope::Public => "public",
-    };
     json!({
         "schema": "asl-agent-bootstrap-v1",
         "schema_version": 1,
@@ -59,7 +60,10 @@ pub(super) fn report(
         "local_identity": "ready",
         "network_readiness": readiness,
         "next_step": next_step,
-        "query_scope": scope,
+        "query_scope": match scope {
+            QueryScope::ContactsOnly => "contacts_only",
+            QueryScope::Public => "public",
+        },
         "available_capabilities": available,
     })
 }

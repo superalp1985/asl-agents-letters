@@ -37,6 +37,34 @@ impl Expression {
         self.0.encode()
     }
 
+    pub(crate) fn is_definition_of(
+        &self,
+        authority: AgentId,
+        namespace: u32,
+        revision: u16,
+        concept_id: u32,
+        arity: u8,
+    ) -> bool {
+        let Term::MeaningIs(reference, declared_arity, _) = &self.0 else {
+            return false;
+        };
+        reference.authority == authority
+            && reference.namespace == namespace
+            && reference.revision == revision
+            && reference.id == concept_id
+            && *declared_arity == arity
+    }
+
+    pub fn referenced_concepts(&self) -> Vec<(AgentId, u32, u16, u32)> {
+        let mut references = Vec::new();
+        self.0.collect_concepts(&mut references);
+        references.sort_unstable_by_key(|(authority, namespace, revision, id)| {
+            (authority.0, *namespace, *revision, *id)
+        });
+        references.dedup();
+        references
+    }
+
     pub(super) fn from_cbor(value: &Cbor) -> Result<Self, AslError> {
         Self::parse(Input::Cbor(value))
     }
@@ -48,6 +76,52 @@ impl Expression {
     fn parse(input: Input<'_>) -> Result<Self, AslError> {
         let mut budget = MAX_NODES;
         Term::parse(input, Scope::default(), MAX_DEPTH, &mut budget).map(Self)
+    }
+}
+
+impl Term {
+    fn collect_concepts(&self, output: &mut Vec<(AgentId, u32, u16, u32)>) {
+        match self {
+            Self::Concept(reference)
+            | Self::Meaning(reference)
+            | Self::MeaningIs(reference, _, _)
+            | Self::Apply(reference, _) => {
+                output.push((
+                    reference.authority,
+                    reference.namespace,
+                    reference.revision,
+                    reference.id,
+                ));
+                match self {
+                    Self::MeaningIs(_, _, body) => body.collect_concepts(output),
+                    Self::Apply(_, args) => {
+                        for arg in args {
+                            arg.collect_concepts(output);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Self::Op(_, args) | Self::Tuple(args) => {
+                for arg in args {
+                    arg.collect_concepts(output);
+                }
+            }
+            Self::Let(value, body) | Self::Define(_, value, body) | Self::If(value, body, _) => {
+                value.collect_concepts(output);
+                body.collect_concepts(output);
+                if let Self::If(_, _, alternate) = self {
+                    alternate.collect_concepts(output);
+                }
+            }
+            Self::Call(_, args) => {
+                for arg in args {
+                    arg.collect_concepts(output);
+                }
+            }
+            Self::Request(value) | Self::Assert(value) => value.collect_concepts(output),
+            Self::Int(_) | Self::Decimal(_, _) | Self::Bool(_) | Self::Var(_) => {}
+        }
     }
 }
 

@@ -2,8 +2,9 @@ use asl_types::{
     error::ErrorCode,
     ids::{Hash32, Id128, PeerId},
     protocol::{
-        MediaKind, Offer, ProtocolError, WireFrame, decode_control, decode_frame, encode_control,
-        encode_frame,
+        ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
+        MediaKind, Offer, ProtocolError, SemanticContextRef, WireFrame, decode_control,
+        decode_frame, encode_control, encode_frame,
     },
 };
 use cbor2::{Value, value::Integer};
@@ -25,6 +26,10 @@ fn replace_value(bytes: &[u8], key: u64, replacement: Value) -> Vec<u8> {
         .unwrap();
     *value = replacement;
     cbor2::to_vec(&value).unwrap()
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
@@ -269,6 +274,152 @@ fn error_codes_use_fixed_numeric_wire_values() {
     }))
     .unwrap();
     assert!(decode_frame(&replace_value(&valid, 3, Value::Integer(Integer::from(18)))).is_err());
+}
+
+#[test]
+fn asl12_semantic_context_frames_round_trip_and_bind_exact_references() {
+    let authority = asl_types::ids::AgentId([0x31; 32]);
+    let reference = SemanticContextRef {
+        authority,
+        namespace: 17,
+        revision: 3,
+        digest: Hash32([0x42; 32]),
+    };
+    let request_id = Id128([0x11; 16]);
+    let frames = [
+        WireFrame::ContextRequest(ContextRequest {
+            message_id: Id128([1; 16]),
+            reference,
+            expires_at_ms: 200,
+        }),
+        WireFrame::ContextOffer(ContextOffer {
+            message_id: Id128([2; 16]),
+            request_id,
+            reference,
+            content_id: Hash32([0x53; 32]),
+            file_size: 4096,
+            expires_at_ms: 200,
+        }),
+        WireFrame::ContextAgreement(ContextAgreement {
+            message_id: Id128([3; 16]),
+            request_id,
+            reference,
+            status: ContextAgreementStatus::Conformant,
+        }),
+        WireFrame::ContextExpression(ContextExpression {
+            message_id: Id128([4; 16]),
+            root_task_id: Id128([5; 16]),
+            created_at_ms: 100,
+            expires_at_ms: 200,
+            required_contexts: vec![reference],
+            expression: asl_types::protocol::Expression::from_json(&serde_json::json!([
+                "meaning",
+                ["concept", hex_bytes(&authority.0), 17, 3, 9]
+            ]))
+            .unwrap(),
+        }),
+    ];
+    for frame in frames {
+        let encoded = encode_control(&frame).unwrap();
+        assert_eq!(decode_control(&encoded).unwrap(), frame);
+    }
+}
+
+#[test]
+fn contextual_expression_rejects_missing_duplicate_and_unreferenced_contexts() {
+    let first = SemanticContextRef {
+        authority: asl_types::ids::AgentId([0x21; 32]),
+        namespace: 1,
+        revision: 1,
+        digest: Hash32([0x41; 32]),
+    };
+    let second = SemanticContextRef {
+        authority: asl_types::ids::AgentId([0x22; 32]),
+        namespace: 2,
+        revision: 1,
+        digest: Hash32([0x42; 32]),
+    };
+    let expression = || {
+        asl_types::protocol::Expression::from_json(&serde_json::json!([
+            "tuple",
+            [
+                [
+                    "meaning",
+                    ["concept", hex_bytes(&first.authority.0), 1, 1, 5]
+                ],
+                [
+                    "meaning",
+                    ["concept", hex_bytes(&second.authority.0), 2, 1, 6]
+                ]
+            ]
+        ]))
+        .unwrap()
+    };
+    let frame = |required_contexts| {
+        WireFrame::ContextExpression(ContextExpression {
+            message_id: Id128([7; 16]),
+            root_task_id: Id128([8; 16]),
+            created_at_ms: 10,
+            expires_at_ms: 20,
+            required_contexts,
+            expression: expression(),
+        })
+    };
+    assert!(encode_frame(&frame(vec![first])).is_err());
+    assert!(encode_frame(&frame(vec![first, first, second])).is_err());
+    assert!(
+        encode_frame(&frame(vec![
+            first,
+            second,
+            SemanticContextRef {
+                digest: Hash32([0x43; 32]),
+                ..second
+            }
+        ]))
+        .is_err()
+    );
+    assert!(encode_frame(&frame(vec![second, first])).is_err());
+}
+
+#[test]
+fn semantic_context_frames_reject_expiry_zero_ids_and_empty_content() {
+    let reference = SemanticContextRef {
+        authority: asl_types::ids::AgentId([0x31; 32]),
+        namespace: 17,
+        revision: 3,
+        digest: Hash32([0x42; 32]),
+    };
+    assert!(
+        encode_frame(&WireFrame::ContextRequest(ContextRequest {
+            message_id: Id128([0; 16]),
+            reference,
+            expires_at_ms: 200,
+        }))
+        .is_err()
+    );
+    assert!(
+        encode_frame(&WireFrame::ContextOffer(ContextOffer {
+            message_id: Id128([1; 16]),
+            request_id: Id128([0; 16]),
+            reference,
+            content_id: Hash32([0; 32]),
+            file_size: 0,
+            expires_at_ms: 200,
+        }))
+        .is_err()
+    );
+    assert!(
+        encode_frame(&WireFrame::ContextAgreement(ContextAgreement {
+            message_id: Id128([2; 16]),
+            request_id: Id128([3; 16]),
+            reference: SemanticContextRef {
+                digest: Hash32([0; 32]),
+                ..reference
+            },
+            status: ContextAgreementStatus::Unresolved,
+        }))
+        .is_err()
+    );
 }
 
 #[test]

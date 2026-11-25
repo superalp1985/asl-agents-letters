@@ -175,6 +175,7 @@ async fn next_connected(
             | TransportEvent::BulkResponse { .. }
             | TransportEvent::GroupRequest { .. }
             | TransportEvent::GroupResponse { .. }
+            | TransportEvent::GossipMessage(_)
             | TransportEvent::RequestFailed { .. } => {}
         }
     }

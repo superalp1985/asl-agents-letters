@@ -12,7 +12,7 @@ use super::{
 
 pub const MAX_GROUP_PAYLOAD_BYTES: usize = 65_536;
 pub const MAX_GROUP_MLS_OBJECT_BYTES: usize = MAX_GROUP_PAYLOAD_BYTES - 128;
-pub const MAX_GROUP_MEMBERS: usize = 64;
+pub const MAX_GROUP_MEMBERS: usize = 512;
 const MEMBERSHIP_VERSION: u64 = 1;
 const MAX_EPOCH: u64 = i64::MAX as u64;
 

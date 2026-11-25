@@ -35,6 +35,15 @@ fn main() {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        [flag, output] if flag == "--initialize-profile" && output == "--json" => {
+            asl_app::profile_setup::initialize_core_profile(true)
+        }
+        [flag, output] if flag == "--initialize-profile" && output == "--text" => {
+            asl_app::profile_setup::initialize_core_profile(false)
+        }
+        [flag] if flag == "--initialize-profile" => {
+            asl_app::profile_setup::initialize_core_profile(false)
+        }
         [] => asl_app::supervisor::run_from_environment(),
         [flag, mode] if flag == "--direct-inbound" => mode
             .to_str()

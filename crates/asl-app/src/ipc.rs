@@ -6,7 +6,10 @@ use asl_net::{
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
     dht::MAX_DHT_VALUE_BYTES,
     relay::MAX_RELAY_ENDPOINT_BYTES,
-    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
+    transport::{
+        DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, MAX_GOSSIP_PAYLOAD_BYTES,
+        TransportKind,
+    },
 };
 use asl_types::{
     error::AslError,
@@ -64,7 +67,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=59)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -78,7 +81,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Net, Self::Core, 36..=39 | 45..=47)
-                | (Self::Net, Self::Core, 52..=53)
+                | (Self::Net, Self::Core, 52..=53 | 63)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -416,6 +419,25 @@ pub enum IpcMessage {
     DecideDhtRecord {
         candidate_id: [u8; 16],
         accept: bool,
+    },
+    GossipSubscribe {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    GossipUnsubscribe {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    GossipPublish {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+        payload: Vec<u8>,
+    },
+    GossipReceived {
+        key: [u8; 32],
+        propagation_source: PeerId,
+        message_id: [u8; 32],
+        payload: Vec<u8>,
     },
 }
 
@@ -1183,6 +1205,72 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.push(u8::from(*accept));
             40
         }
+        IpcMessage::GossipSubscribe { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            60
+        }
+        IpcMessage::GossipUnsubscribe { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            61
+        }
+        IpcMessage::GossipPublish {
+            operation_id,
+            key,
+            payload,
+        } => {
+            if *operation_id == [0; 16]
+                || payload.is_empty()
+                || payload.len() > MAX_GOSSIP_PAYLOAD_BYTES
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            body.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(payload);
+            62
+        }
+        IpcMessage::GossipReceived {
+            key,
+            propagation_source,
+            message_id,
+            payload,
+        } => {
+            if payload.is_empty() || payload.len() > MAX_GOSSIP_PAYLOAD_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer = propagation_source.as_bytes();
+            if peer.is_empty() || peer.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(key);
+            body.extend_from_slice(
+                &u16::try_from(peer.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer);
+            body.extend_from_slice(message_id);
+            body.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(payload);
+            63
+        }
     };
     if HEADER_BYTES + body.len() > MAX_IPC_FRAME_BYTES {
         return Err(AslError::InvalidMessage);
@@ -1596,6 +1684,53 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 lookup_id: body[..16].try_into().unwrap(),
                 status,
                 providers,
+            })
+        }
+        60 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::GossipSubscribe {
+            operation_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        61 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::GossipUnsubscribe {
+            operation_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        62 if body.len() >= 50 && body[..16] != [0; 16] => {
+            let payload_len = u16::from_be_bytes(body[48..50].try_into().unwrap()) as usize;
+            if payload_len == 0
+                || payload_len > MAX_GOSSIP_PAYLOAD_BYTES
+                || body.len() != 50 + payload_len
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::GossipPublish {
+                operation_id: body[..16].try_into().unwrap(),
+                key: body[16..48].try_into().unwrap(),
+                payload: body[50..].to_vec(),
+            })
+        }
+        63 if body.len() >= 68 => {
+            let key = body[..32].try_into().unwrap();
+            let peer_len = u16::from_be_bytes(body[32..34].try_into().unwrap()) as usize;
+            if peer_len == 0 || peer_len > 128 || body.len() < 34 + peer_len + 32 + 2 {
+                return Err(AslError::InvalidMessage);
+            }
+            let peer_end = 34 + peer_len;
+            let payload_offset = peer_end + 32;
+            let payload_len =
+                u16::from_be_bytes(body[payload_offset..payload_offset + 2].try_into().unwrap())
+                    as usize;
+            if payload_len == 0
+                || payload_len > MAX_GOSSIP_PAYLOAD_BYTES
+                || body.len() != payload_offset + 2 + payload_len
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::GossipReceived {
+                key,
+                propagation_source: PeerId::from_bytes(body[34..peer_end].to_vec())
+                    .map_err(|_| AslError::InvalidMessage)?,
+                message_id: body[peer_end..payload_offset].try_into().unwrap(),
+                payload: body[payload_offset + 2..].to_vec(),
             })
         }
         22 if body.len() >= 36 => Ok(IpcMessage::ControlRequested {
@@ -2044,6 +2179,9 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         57 => 16 + MAX_DHT_VALUE_BYTES,
         58 => 32,
         59 => 48,
+        60..=61 => 48,
+        62 => 50 + MAX_GOSSIP_PAYLOAD_BYTES,
+        63 => 34 + 128 + 32 + 2 + MAX_GOSSIP_PAYLOAD_BYTES,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2558,6 +2696,25 @@ mod tests {
             IpcMessage::NetworkError {
                 code: NetworkErrorCode::Capacity,
             },
+            IpcMessage::GossipSubscribe {
+                operation_id: [51; 16],
+                key: [52; 32],
+            },
+            IpcMessage::GossipUnsubscribe {
+                operation_id: [53; 16],
+                key: [54; 32],
+            },
+            IpcMessage::GossipPublish {
+                operation_id: [55; 16],
+                key: [56; 32],
+                payload: vec![57; 32],
+            },
+            IpcMessage::GossipReceived {
+                key: [58; 32],
+                propagation_source: DeviceIdentity::generate().unwrap().peer_id(),
+                message_id: [59; 32],
+                payload: vec![60; 32],
+            },
         ];
         for message in messages {
             let (sender, receiver) = match message {
@@ -2581,6 +2738,7 @@ mod tests {
                 | IpcMessage::BulkReceived { .. }
                 | IpcMessage::GroupRequested { .. }
                 | IpcMessage::GroupReceived { .. }
+                | IpcMessage::GossipReceived { .. }
                 | IpcMessage::RequestFailed { .. }
                 | IpcMessage::NetworkError { .. } => (IpcRole::Net, IpcRole::Core),
                 IpcMessage::Shutdown
@@ -2603,7 +2761,10 @@ mod tests {
                 | IpcMessage::PublishProfile { .. }
                 | IpcMessage::CancelProfile { .. }
                 | IpcMessage::LookupProfile { .. }
-                | IpcMessage::DecideDhtRecord { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::DecideDhtRecord { .. }
+                | IpcMessage::GossipSubscribe { .. }
+                | IpcMessage::GossipUnsubscribe { .. }
+                | IpcMessage::GossipPublish { .. } => (IpcRole::Core, IpcRole::Net),
                 IpcMessage::ReserveRelay { .. } | IpcMessage::DialViaRelays { .. } => {
                     (IpcRole::Core, IpcRole::Net)
                 }
