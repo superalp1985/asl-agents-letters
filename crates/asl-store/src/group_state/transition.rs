@@ -188,6 +188,7 @@ pub(super) fn commit_candidate(
                             | "fetch_pending"
                             | "error"
                             | "expression"
+                            | "act"
                     ) =>
             {
                 let deadline = browse_deadline(tx, now, expires_at_ms)?;
