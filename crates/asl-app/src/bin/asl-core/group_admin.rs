@@ -35,6 +35,13 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             room: hex_id(room, 64)?,
             device: device_peer(device)?,
         }),
+        [op, tag, room, device] if op == "reject-request" => {
+            Some(AdminRequest::RejectJoinRequest {
+                tag: text(tag)?.into(),
+                room: hex_id(room, 64)?,
+                device: device_peer(device)?,
+            })
+        }
         [
             op,
             tag,

@@ -73,6 +73,10 @@ pub enum LocalGroupAction {
         room: Hash32,
         peer: PeerId,
     },
+    RejectJoinRequest {
+        room: Hash32,
+        device: PeerId,
+    },
     /// Trusted in-process callers only; not parsed by the local console.
     /// Sending an expression requires an explicit action through this path.
     SendApplication {
@@ -1124,6 +1128,12 @@ impl Supervisor {
                 }
                 return Ok(json!({"state": "rejected"}));
             }
+            LocalGroupAction::RejectJoinRequest { room, device } => {
+                if !store.finish_group_invite_request(room, &device, false, now_ms)? {
+                    return Err(AslError::NotFound);
+                }
+                return Ok(json!({"state": "rejected"}));
+            }
             _ => {}
         }
 
@@ -1278,6 +1288,7 @@ impl Supervisor {
             LocalGroupAction::List
             | LocalGroupAction::Room(_)
             | LocalGroupAction::Reject(_)
+            | LocalGroupAction::RejectJoinRequest { .. }
             | LocalGroupAction::ConfigureInbound { .. } => unreachable!(),
         }
     }

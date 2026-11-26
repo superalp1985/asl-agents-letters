@@ -1045,6 +1045,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - SQLite v38 新增 `group_invite_requests`。群主只接受当前认证连接、精确 AgentId/PeerId、当前活动房间和本地创建者设备；每群最多 32 条待处理、每 Agent 每小时 5 条、全局每小时 64 条。重复请求复用原记录，活动成员不产生提示；成功定向邀请后标记 approved，过期记录由群清理周期收敛。
 - 群管理刷新将待处理请求和在线准入连接关联；`asl_group_invite_request` 只向一个已准入群主的现有连接入队请求并返回 `queued`，不声称群主已收到或已批准。Agent 事件流收到结构化 `group_invite_request` 通知，不含远端自由文本。
 - 首次完整回归发现两个群进程夹具失败：快照刷新请求使用 `VIEW_LIMIT=200`，而加入请求存储层上限是 100，导致 `InvalidMessage`；现在群管理使用独立的 100 条请求视图上限。另一个 v32 升级测试只删除旧版表，已补上 v38 `group_invite_requests` 清理。
+- 群主拒绝路径绑定单次管理快照、完整 room 和 device：`reject-request <tag> <room> <device>` 与 GUI 确认走同一持久状态机。定向测试覆盖错误 tag/room/device、过期快照和 store rejected 状态；`asl-ui` 群管理 5 项原测试继续通过。
 - 最终完整工作区：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 忽略。最终错误聚合改动后，`cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1` 为 303 通过、0 失败、5 忽略；严格 Clippy、格式、schema exporter、CDDL（25 接受、10 拒绝）和 `git diff --check` 通过。
 - 尚未执行真实双设备请求、群主 GUI 点击、拒绝审计或公网送达验收。
 

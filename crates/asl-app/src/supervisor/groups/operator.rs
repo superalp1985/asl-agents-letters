@@ -131,6 +131,17 @@ impl Supervisor {
                     AdminOutcome::MemberRemoved,
                 )
             }
+            AdminRequest::RejectJoinRequest { room, device, .. } => {
+                let live = groups.store.managed_mls_rooms(&self.device_peer_id)?;
+                let selected = current_room(&issued, room, &live)?;
+                (
+                    LocalGroupAction::RejectJoinRequest {
+                        room: wire_id(&selected.room)?,
+                        device: peer_from_text(device)?,
+                    },
+                    AdminOutcome::JoinRequestRejected,
+                )
+            }
             AdminRequest::SetAccess {
                 room,
                 policy_revision,

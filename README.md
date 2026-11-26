@@ -213,7 +213,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 群组网络开启后，群组页列出发给本机设备且仍有效的邀请，可同意、拒绝或重试已批准的加入请求。命令行 `asl-core --group-invites list` 给出每条邀请的 `tag`，用 `--group-invites approve|reject|retry <tag>` 提交本机决定。加入请求排队不等于已成为成员；LAN/Internet/relay 配置已经允许，但真实公网群组仍需双机验收。
 
-发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。群主成员区可以设置成员文字/文件/邀请权限、管理员和禁言设备；这些设置通过 MLS 加密的 `group-policy` 下发，不是本地标签。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
+发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。加入/重入请求可明确批准或拒绝；拒绝使用 `asl-core --group-admin reject-request <tag> <room> <device>`，绑定当前快照和精确设备。群主成员区可以设置成员文字/文件/邀请权限、管理员和禁言设备；这些设置通过 MLS 加密的 `group-policy` 下发，不是本地标签。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
 
 刷新还能看到已入群的设备、角色、禁言和发送权限。群主可在名单中确认移出成员（`--group-admin remove <tag> <room> <device>`），也可用 `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>` 提交群权限；三个开关分别填 `on` 或 `off`，后两项是逗号分隔的完整 base58 设备 ID，空串表示清空。这会改变后续消息和 Offer 范围，不能收回已经收到的消息。
 

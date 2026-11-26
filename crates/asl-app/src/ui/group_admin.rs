@@ -52,6 +52,7 @@ enum Confirmation {
     Create,
     Invite,
     JoinRequest { room: String, connection: String },
+    RejectJoinRequest { room: String, device: String },
     Remove { agent: String, device: String },
 }
 
@@ -70,6 +71,10 @@ impl Form {
                     && room.and_then(|room| self.removal_member(room)).is_none())
                 || (matches!(self.confirmation, Some(Confirmation::JoinRequest { .. }))
                     && self.join_request(snapshot).is_none())
+                || (matches!(
+                    self.confirmation,
+                    Some(Confirmation::RejectJoinRequest { .. })
+                ) && self.join_request(snapshot).is_none())
         });
         if self.tag.as_deref() != tag || selection_missing {
             self.clear_selection();
@@ -203,6 +208,22 @@ impl Form {
                                 snapshot.tag.as_str().into(),
                                 room.as_str().into(),
                                 connection.as_str().into(),
+                            ],
+                        )),
+                    ),
+                    Confirmation::RejectJoinRequest { room, device } => (
+                        label(
+                            *language,
+                            "确认拒绝该加入请求？",
+                            "Reject this join request?",
+                        ),
+                        Some(LocalAction::new(
+                            "group-admin",
+                            [
+                                "reject-request".into(),
+                                snapshot.tag.as_str().into(),
+                                room.as_str().into(),
+                                device.as_str().into(),
                             ],
                         )),
                     ),
@@ -479,17 +500,36 @@ impl Form {
                 } else {
                     ui.weak(label(language, "目标当前不在线", "Target is offline"));
                 }
+                if ui
+                    .add_enabled(
+                        ready && action.is_none(),
+                        egui::Button::new(label(language, "拒绝", "Reject")),
+                    )
+                    .clicked()
+                {
+                    self.confirmation = Some(Confirmation::RejectJoinRequest {
+                        room: request.room.clone(),
+                        device: request.device.clone(),
+                    });
+                }
             });
         }
     }
 
     fn join_request<'a>(&self, snapshot: &'a AdminSnapshot) -> Option<&'a AdminJoinRequest> {
-        let Confirmation::JoinRequest { room, connection } = self.confirmation.as_ref()? else {
-            return None;
-        };
-        snapshot.join_requests.iter().find(|request| {
-            request.room == *room && request.connection.as_deref() == Some(connection.as_str())
-        })
+        match self.confirmation.as_ref()? {
+            Confirmation::JoinRequest { room, connection } => {
+                snapshot.join_requests.iter().find(|request| {
+                    request.room == *room
+                        && request.connection.as_deref() == Some(connection.as_str())
+                })
+            }
+            Confirmation::RejectJoinRequest { room, device } => snapshot
+                .join_requests
+                .iter()
+                .find(|request| request.room == *room && request.device == *device),
+            _ => None,
+        }
     }
 
     fn review_removal(&mut self, member: &AdminMember) {
@@ -809,6 +849,11 @@ fn outcome_text(outcome: &AdminOutcome, language: Language) -> &'static str {
             language,
             "上次操作：成员移除已在本机提交",
             "Member removal submitted locally",
+        ),
+        AdminOutcome::JoinRequestRejected => label(
+            language,
+            "上次操作：加入请求已拒绝",
+            "Join request rejected",
         ),
         AdminOutcome::AccessUpdated => label(
             language,

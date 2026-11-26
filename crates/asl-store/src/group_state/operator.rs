@@ -32,6 +32,11 @@ pub enum AdminRequest {
         room: String,
         device: String,
     },
+    RejectJoinRequest {
+        tag: String,
+        room: String,
+        device: String,
+    },
     SetAccess {
         tag: String,
         room: String,
@@ -53,6 +58,7 @@ pub enum AdminOutcome {
     Created,
     InviteQueued,
     MemberRemoved,
+    JoinRequestRejected,
     AccessUpdated,
     Failed,
     Unconfirmed,
@@ -150,6 +156,13 @@ impl AdminSnapshot {
                             .is_some_and(|r| {
                                 r.members.iter().any(|m| !m.creator && &m.device == device)
                             })
+                }
+                AdminRequest::RejectJoinRequest { tag, room, device } => {
+                    tag == &self.tag
+                        && self
+                            .join_requests
+                            .iter()
+                            .any(|request| &request.room == room && &request.device == device)
                 }
                 AdminRequest::SetAccess {
                     tag,
@@ -547,5 +560,57 @@ mod tests {
             store.local_group_admin_status(35).unwrap(),
             Some(AdminOutcome::Queued)
         );
+    }
+
+    #[test]
+    fn reject_join_request_is_bound_to_the_reviewed_room_and_device() {
+        let snapshot = AdminSnapshot {
+            tag: "view".into(),
+            rooms: vec![],
+            peers: vec![],
+            join_requests: vec![AdminJoinRequest {
+                room: "11".repeat(32),
+                agent: "agent".into(),
+                device: "device".into(),
+                connection: None,
+                expires_ms: 50,
+            }],
+            expires_ms: 100,
+        };
+        assert!(snapshot.permits_selection(
+            &AdminRequest::RejectJoinRequest {
+                tag: "view".into(),
+                room: "11".repeat(32),
+                device: "device".into(),
+            },
+            10,
+        ));
+        for request in [
+            AdminRequest::RejectJoinRequest {
+                tag: "other".into(),
+                room: "11".repeat(32),
+                device: "device".into(),
+            },
+            AdminRequest::RejectJoinRequest {
+                tag: "view".into(),
+                room: "22".repeat(32),
+                device: "device".into(),
+            },
+            AdminRequest::RejectJoinRequest {
+                tag: "view".into(),
+                room: "11".repeat(32),
+                device: "other".into(),
+            },
+        ] {
+            assert!(!snapshot.permits_selection(&request, 10));
+        }
+        assert!(!snapshot.permits_selection(
+            &AdminRequest::RejectJoinRequest {
+                tag: "view".into(),
+                room: "11".repeat(32),
+                device: "device".into(),
+            },
+            100,
+        ));
     }
 }

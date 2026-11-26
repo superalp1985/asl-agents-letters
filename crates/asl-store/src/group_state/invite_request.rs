@@ -476,6 +476,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+
+        let rejected_requester = AgentId([5; 32]);
+        let rejected_device = peer(5);
+        register(&store, rejected_requester, &rejected_device);
+        let rejected = store
+            .record_group_invite_request(input(
+                &owner,
+                wire,
+                5,
+                rejected_requester,
+                &rejected_device,
+                30_000 + GROUP_INVITE_REQUEST_TTL_MS,
+                30_000,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .finish_group_invite_request(wire, &rejected_device, false, 30_001)
+                .unwrap()
+        );
+        let state: String = store
+            .connection
+            .query_row(
+                "SELECT state FROM group_invite_requests WHERE request_id=?1",
+                [hex::encode(rejected.request_id.0)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "rejected");
     }
 
     #[test]
