@@ -51,6 +51,6 @@
 
 ## Windows 测试包
 
-- 离线 release 便携包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-124257.zip`
-- 文件大小：48,694,340 字节；SHA-256：`BC507138128E9CDBFE687EE1C22C90D1FAE6E7D6A3385EC8E0523F494C926EEF`
-- 包内 18 个文件，包含 `asl-core.exe`、`asl-ui.exe`、启动/更新脚本、SHA256SUMS、SBOM、第三方许可和 MPL sources。`asl-core.exe` 与 `asl-ui.exe` 的 release 二进制均返回 `0.1.0`。
+- 离线 release 便携包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-final-125045.zip`
+- 文件大小：48,684,435 字节；SHA-256：`BDC39BF371AFD37E7BAC81A80DAC795B08D00BD190BE26920E07DAD38330B47C`
+- 包内 18 个文件，包含 `asl-core.exe`、`asl-ui.exe`、启动/更新脚本、SHA256SUMS、SBOM、第三方许可和 MPL sources。

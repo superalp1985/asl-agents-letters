@@ -1070,6 +1070,6 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 
 ### 2026-11-26 Windows 离线测试包
 
-- `scripts/package-windows.ps1 -Offline` 完成 release 构建并生成 `E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-124257.zip`。这是未签名测试候选，不是正式发布包。
-- ZIP 大小 48,694,340 字节，SHA-256 `BC507138128E9CDBFE687EE1C22C90D1FAE6E7D6A3385EC8E0523F494C926EEF`；包内 18 个文件，含启动/更新脚本、`asl-core.exe`、`asl-ui.exe`、`SHA256SUMS.txt`、SBOM、第三方许可与 MPL sources。
-- release `asl-core.exe` 和 `asl-ui.exe` 均返回版本 `0.1.0`。尚未执行解包后 GUI 总测、真实托盘/DPI、公网双机、真实链 RPC 和签名更新验收。
+- `scripts/package-windows.ps1 -Offline` 完成 release 构建并生成 `E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-final-125045.zip`。这是未签名测试候选，不是正式发布包。
+- ZIP 大小 48,684,435 字节，SHA-256 `BDC39BF371AFD37E7BAC81A80DAC795B08D00BD190BE26920E07DAD38330B47C`；包内 18 个文件，含启动/更新脚本、`asl-core.exe`、`asl-ui.exe`、`SHA256SUMS.txt`、SBOM、第三方许可与 MPL sources。
+- 尚未执行解包后 GUI 总测、真实托盘/DPI、公网双机、真实链 RPC 和签名更新验收。
