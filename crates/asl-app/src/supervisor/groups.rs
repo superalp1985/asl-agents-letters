@@ -341,6 +341,15 @@ impl Supervisor {
             now_ms,
             |command| enqueue(net, command),
         );
+        if let Ok(Some(MlsNetworkOutcome::InviteRequested {
+            request,
+            connection_id,
+        })) = &result
+        {
+            let _ = self
+                .mailbox
+                .observe_group_invite_request(request, *connection_id);
+        }
         if let Ok(Some(MlsNetworkOutcome::ApplicationReceived {
             connection_id,
             wire_id,
@@ -897,7 +906,12 @@ impl Supervisor {
             let now = Instant::now();
             if now >= groups.next_prune {
                 groups.next_prune = now + PRUNE_INTERVAL;
-                groups.cleanup_failed = groups.store.prune_mls_expired(unix_time_ms()?).is_err();
+                let now_ms = unix_time_ms()?;
+                groups.cleanup_failed = groups
+                    .store
+                    .prune_mls_expired(now_ms)
+                    .and_then(|()| groups.store.prune_expired_group_invite_requests(now_ms))
+                    .is_err();
             }
             if self.net.is_running()
                 && self.network_admission_status == NetworkAdmissionStatus::Active
@@ -1026,10 +1040,25 @@ impl Supervisor {
                         }))
                     })
                     .collect::<Result<Vec<_>, AslError>>()?;
+                let invite_requests = store
+                    .list_group_invite_requests(local_peer, now_ms, 100)?
+                    .into_iter()
+                    .map(|request| {
+                        json!({
+                            "request": hex::encode(request.request_id.0),
+                            "room": hex::encode(request.wire_id.0),
+                            "agent": hex::encode(request.requester.0),
+                            "device": peer_text(&request.device),
+                            "mls_epoch": request.mls_epoch,
+                            "expires_at_ms": request.expires_at_ms
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 return Ok(json!({
                     "rooms": rooms,
                     "pending": pending,
-                    "approved": approved
+                    "approved": approved,
+                    "invite_requests": invite_requests
                 }));
             }
             LocalGroupAction::Room(id) => {
@@ -1191,6 +1220,8 @@ impl Supervisor {
                     now_ms,
                     |command| enqueue(net, command),
                 )?;
+                let (_, device) = admission.admitted_peer_identity(connection_id, now_ms)?;
+                let _ = store.finish_group_invite_request(room, &device, true, now_ms);
                 Ok(json!({"queued": true}))
             }
             LocalGroupAction::Remove { room, peer } => {

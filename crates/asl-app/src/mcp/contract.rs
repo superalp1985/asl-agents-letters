@@ -50,6 +50,7 @@ pub(super) enum Request {
     GroupMembers(GroupRoomArgs),
     GroupSetAccess(GroupSetAccessArgs),
     GroupInvite(GroupInviteArgs),
+    GroupInviteRequest(GroupInviteRequestArgs),
     DirectOpen(AgentTargetArgs),
     RenewActBudget(RenewActBudgetArgs),
     RequestContext(ContextRequestArgs),
@@ -391,6 +392,15 @@ pub(super) struct GroupInviteArgs {
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct GroupInviteRequestArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub owner: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GroupRoomArgs {
     #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
     pub room: String,
@@ -470,6 +480,26 @@ impl GroupInviteArgs {
                 .map_err(|_| ErrorCode::InvalidMessage)?,
         );
         Ok((room, agent))
+    }
+}
+
+impl GroupInviteRequestArgs {
+    pub(super) fn validate(self) -> Result<(Hash32, AgentId), ErrorCode> {
+        let room = parse_hash32(&self.room)?;
+        let (kind, owner) = self
+            .owner
+            .split_once(':')
+            .ok_or(ErrorCode::InvalidMessage)?;
+        if kind != "agent" {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let owner = AgentId(
+            alloy_primitives::hex::decode_to_array(owner).map_err(|_| ErrorCode::InvalidMessage)?,
+        );
+        if owner.0 == [0; 32] {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        Ok((room, owner))
     }
 }
 

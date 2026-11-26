@@ -353,7 +353,8 @@ group-envelope = {
 ; MLS objects are complete TLS-encoded MLSMessage values, never agent text.
 group-membership = group-invite / group-key-package / group-welcome /
                    group-commit / group-sync-request / group-sync-commit /
-                   group-at-head / group-sync-unavailable / group-receipt
+                   group-at-head / group-sync-unavailable / group-receipt /
+                   group-invite-request
 group-mls-object = bstr .size (1..65408)
 group-invite = [1, 0, agent-id, peer-id, time-ms]
 group-key-package = [1, 1, id128, group-mls-object]
@@ -364,6 +365,7 @@ group-sync-commit = [1, 5, group-mls-object]
 group-at-head = [1, 6, hash32]
 group-sync-unavailable = [1, 7]
 group-receipt = [1, 8]
+group-invite-request = [1, 9, agent-id, peer-id, time-ms]
 
 ; Numeric limits, enum assignments, cardinality, vocabulary ownership,
 ; and cross-field rules are normative in docs/03-protocol.md.

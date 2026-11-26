@@ -171,3 +171,35 @@ fn sync_replies_are_for_one_base_epoch_and_at_head_matches_the_binding() {
         assert!(request.match_reply(&membership(response)).is_err());
     }
 }
+
+#[test]
+fn invite_requests_are_short_lived_control_requests() {
+    let mut peer = vec![0x12, 0x20];
+    peer.extend_from_slice(&[8; 32]);
+    let device = PeerId::from_bytes(peer).unwrap();
+    let request = membership(Member::InviteRequest {
+        agent: AgentId([7; 32]),
+        device: device.clone(),
+        expires_at_ms: 500,
+    });
+    let encoded = request.body.clone();
+    let GroupBody::Membership(body) = encoded else {
+        unreachable!();
+    };
+    assert_eq!(
+        Member::decode(&body.clone().encode().unwrap()).unwrap(),
+        body
+    );
+    request.validate_request().unwrap();
+    request.match_reply(&membership(Member::Receipt)).unwrap();
+    assert!(membership(Member::Receipt).validate_request().is_err());
+    assert!(
+        membership(Member::InviteRequest {
+            agent: AgentId([0; 32]),
+            device,
+            expires_at_ms: 500,
+        })
+        .into_envelope()
+        .is_err()
+    );
+}

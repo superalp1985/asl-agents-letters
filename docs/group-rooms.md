@@ -5,7 +5,7 @@
 本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
-- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。邀请仍由目标设备本机批准。
+- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_group_invite_request`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
 - 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
@@ -67,6 +67,12 @@ Core 为本机新群生成随机创建者承诺，OpenMLS 和 SQLite 使用由�
 显式启用的群组传输和 Net IPC 复用已有连接、请求超时与有界句柄表。Net 把回复与原子流、认证连接和消息关联；送入 Core 的每次请求凭据独立于线上消息 ID。入站回复使用原连接上的单次 IPC 句柄，不能借其他协议或另一连接送出。群组启用后可跟随当前 `address_scope` 使用 loopback、LAN、Internet 或 relay；默认生产 Net 子进程不协商群子流。
 
 Core 群驱动仅处理 Invite、KeyPackage 和对应回复。持久化后未能入队的 Invite 可以显式重试，不换邀请 ID、不延长期限。Invite 先保存后提示，只回复结构化 Receipt，不表示本机同意。获批 KeyPackage 只有在成功交给 Net 队列后才登记待决记录；它绑定当前准入连接、原邀请及设备、完整线上群 ID、原始请求、单次发送凭据和本机房间信息。最多五条待决记录；超时、断开或对应请求失败解除待决绑定，但不消耗持久审批。重试只使用原 KeyPackage 和新发送凭据，迟到、错连接或重复 Welcome 不能再次入群。Welcome 通过匹配后仍须经过完整 MLS/SQLite 检查。
+
+## 已实现：加入与重入请求
+
+希望加入或在新设备上重入的 Agent 可向完整群 ID 的群主发送 `InviteRequest`。请求只包含请求方 AgentId、当前设备 PeerId 和最多 5 分钟期限；`epoch=0` 表示请求方不需要预先知道当前 MLS head。群主 Core 只接受通过当前认证连接的精确 AgentId/PeerId、当前活动房间和本地创建者设备，并把请求写入 SQLite v38 的有界本机队列。每群最多 32 条待处理请求，每 Agent 每小时 5 条、全局每小时 64 条；重复请求复用同一记录，已是活动成员的设备不产生提示。
+
+群管理刷新把仍有效的请求和当前已准入连接关联；只有目标设备仍在线时 GUI 才显示“审批并邀请”。确认后走原有定向 Invite、KeyPackage、Welcome 和本机再次审批路径；数据库在该邀请成功入队后把请求标记为 approved。请求本身不提供 MLS 快照、群密钥、成员资格、目录授权或文件访问，也没有自由文本。
 
 期限只在本机流转，不改线上协议。Net 将 Core 的出队期限换为单调时钟期限，协商后仍用同一截止时间限制写请求、关闭发送端、读回复和接收完成事件。入站以锁定版本 `libp2p-request-response 0.30.0` 在协商完成后克隆子流 codec 的时点为起点，不晚于 libp2p 自身工作计时器；读帧、Net 回复句柄、写回复及关闭发送端共用该期限。转发到 Core 只公布当时剩余时间，不从转发点续期；Core 继续用本机系统时间检查 IPC 到期。已经完整交给传输层的请求属于在途：即使本机关闭发送端超时，对端仍可能读到完整帧并处理，超时不等于远端没有提交。发方先持久保存 Welcome，符合条件的重试只取回原回复，不重复 Add。
 

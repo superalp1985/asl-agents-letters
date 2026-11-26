@@ -303,6 +303,7 @@ async fn serve(
                     | Request::GroupMembers(_)
                     | Request::GroupSetAccess(_)
                     | Request::GroupInvite(_)
+                    | Request::GroupInviteRequest(_)
                     | Request::DirectOpen(_)
                     | Request::RenewActBudget(_)
                     | Request::RequestContext(_)
@@ -321,6 +322,9 @@ async fn serve(
                     Request::GroupMembers(args) => group_members(mail, grant, args).await,
                     Request::GroupSetAccess(args) => group_set_access(mail, grant, args).await,
                     Request::GroupInvite(args) => group_invite(mail, grant, args).await,
+                    Request::GroupInviteRequest(args) => {
+                        group_invite_request(mail, grant, args).await
+                    }
                     Request::DirectOpen(args) => direct_open(mail, grant, args).await,
                     Request::RenewActBudget(args) => {
                         renew_act_budget(mail, grant, args).await
@@ -546,6 +550,20 @@ async fn group_invite(
         .ok_or(ErrorCode::PolicyDenied)?;
     let (room, agent) = args.validate()?;
     mail.group_invite(room, agent).await.map_err(error_code)
+}
+
+async fn group_invite_request(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupInviteRequestArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, owner) = args.validate()?;
+    mail.group_invite_request(room, owner)
+        .await
+        .map_err(error_code)
 }
 
 async fn direct_open(

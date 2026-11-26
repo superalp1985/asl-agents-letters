@@ -3,15 +3,19 @@ use std::collections::BTreeMap;
 use asl_agent::{QueryScope, runner::InboundMode};
 use asl_groups::GroupApplication;
 use asl_store::{
-    Store, act_history::ActDirection, group_access::GroupAccessKind,
-    group_state::GroupInboundPolicy, mailbox::ConversationBudgetRenewal,
+    Store,
+    act_history::ActDirection,
+    group_access::GroupAccessKind,
+    group_state::{GROUP_INVITE_REQUEST_TTL_MS, GroupInboundPolicy},
+    mailbox::ConversationBudgetRenewal,
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{
         Act, ContextAgreement, ContextAgreementStatus, ContextExpression, ContextRequest,
-        Expression, ExpressionLetter, SemanticContextRef, WireFrame, encode_frame,
+        Expression, ExpressionLetter, GroupBody, GroupMembership, GroupPacket, SemanticContextRef,
+        WireFrame, encode_frame,
     },
 };
 use serde_json::{Value, json};
@@ -222,6 +226,9 @@ impl Supervisor {
             }
             MailCommand::GroupInvite { room, agent, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.invite_group_agent(room, agent));
+            }
+            MailCommand::GroupInviteRequest { room, owner, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.request_group_join(room, owner));
             }
             MailCommand::DirectOpen { agent, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.open_direct_room(agent));
@@ -934,6 +941,65 @@ impl Supervisor {
             "room": alloy_primitives::hex::encode(room.0),
             "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
             "queued": queued,
+        }))
+    }
+
+    fn request_group_join(&mut self, room: Hash32, owner: AgentId) -> Result<Value, AslError> {
+        if room.0 == [0; 32] || owner.0 == [0; 32] {
+            return Err(AslError::InvalidMessage);
+        }
+        let now = unix_time_ms()?;
+        if self.network_admission_status != NetworkAdmissionStatus::Active {
+            return Err(AslError::InvalidIdentity);
+        }
+        let connections = self
+            .admission
+            .as_ref()
+            .ok_or(AslError::InvalidIdentity)?
+            .admitted_connections(now)
+            .into_iter()
+            .filter(|(agent, _, _)| *agent == owner)
+            .map(|(_, connection, _)| connection)
+            .collect::<Vec<_>>();
+        if connections.is_empty() {
+            return Err(AslError::NotFound);
+        }
+        let expires_at_ms = now.saturating_add(GROUP_INVITE_REQUEST_TTL_MS);
+        let deadline_ms =
+            now.saturating_add(asl_net::transport::REQUEST_TIMEOUT.as_millis() as u64);
+        let mut queued = 0_u64;
+        let mut delivery_error = None;
+        for connection_id in connections {
+            let request = GroupPacket {
+                message_id: Id128(fresh_id()?),
+                group_id: room,
+                epoch: 0,
+                body: GroupBody::Membership(GroupMembership::InviteRequest {
+                    agent: self.agent_id(),
+                    device: self.device_peer_id.clone(),
+                    expires_at_ms,
+                }),
+            };
+            let command = NetworkCommand::SendGroup {
+                connection_id,
+                request_handle: fresh_id()?,
+                deadline_ms,
+                request,
+            };
+            match self.net.try_send(&command.into_ipc()?) {
+                Ok(true) => queued += 1,
+                Ok(false) => delivery_error = Some(AslError::SandboxUnavailable),
+                Err(error) => delivery_error = Some(error),
+            }
+        }
+        if queued == 0 {
+            return Err(delivery_error.unwrap_or(AslError::NotFound));
+        }
+        Ok(json!({
+            "room": alloy_primitives::hex::encode(room.0),
+            "owner": format!("agent:{}", alloy_primitives::hex::encode(owner.0)),
+            "queued": queued,
+            "expires_at_ms": expires_at_ms,
         }))
     }
 

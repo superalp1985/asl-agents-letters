@@ -3,6 +3,7 @@
 
 mod application;
 mod invite;
+mod invite_request;
 pub mod invite_review;
 #[cfg(test)]
 mod invite_tests;
@@ -20,6 +21,9 @@ mod transition;
 
 pub use application::MlsApplicationAuthority;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
+pub use invite_request::{
+    GROUP_INVITE_REQUEST_TTL_MS, GroupInviteRequest, GroupInviteRequestInput,
+};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use policy::{GroupInboundPolicy, GroupInboundSwitch};
 pub use recovery::{MlsMemberEvidence, MlsRoomActivation, MlsRoomRecovery};

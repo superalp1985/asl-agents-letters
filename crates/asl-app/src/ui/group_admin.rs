@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use asl_app::network_settings::NetworkSettingsV1;
 use asl_store::{
     dashboard::Dashboard,
-    group_state::operator::{AdminMember, AdminOutcome, AdminPeer, AdminRoom, AdminSnapshot},
+    group_state::operator::{
+        AdminJoinRequest, AdminMember, AdminOutcome, AdminPeer, AdminRoom, AdminSnapshot,
+    },
 };
 use asl_types::error::AslError;
 use eframe::egui::{self, RichText};
@@ -49,6 +51,7 @@ struct RosterContext<'a> {
 enum Confirmation {
     Create,
     Invite,
+    JoinRequest { room: String, connection: String },
     Remove { agent: String, device: String },
 }
 
@@ -65,6 +68,8 @@ impl Form {
                 || (self.peer.is_some() && self.selected_peer(snapshot).is_none())
                 || (matches!(self.confirmation, Some(Confirmation::Remove { .. }))
                     && room.and_then(|room| self.removal_member(room)).is_none())
+                || (matches!(self.confirmation, Some(Confirmation::JoinRequest { .. }))
+                    && self.join_request(snapshot).is_none())
         });
         if self.tag.as_deref() != tag || selection_missing {
             self.clear_selection();
@@ -132,6 +137,7 @@ impl Form {
         ui.add_enabled_ui(ready, |ui| {
             self.select_targets(ui, snapshot, *language);
         });
+        self.show_join_requests(ui, snapshot, ready, *language, action);
         let room = self.selected_room(snapshot);
         let peer = self.selected_peer(snapshot);
         if let Some(room) = room {
@@ -183,6 +189,22 @@ impl Form {
                                 ],
                             )
                         }),
+                    ),
+                    Confirmation::JoinRequest { room, connection } => (
+                        label(
+                            *language,
+                            "确认批准该加入请求并发送邀请？",
+                            "Approve this join request and send an invite?",
+                        ),
+                        Some(LocalAction::new(
+                            "group-admin",
+                            [
+                                "invite".into(),
+                                snapshot.tag.as_str().into(),
+                                room.as_str().into(),
+                                connection.as_str().into(),
+                            ],
+                        )),
                     ),
                     Confirmation::Remove { .. } => return,
                 };
@@ -416,6 +438,58 @@ impl Form {
                     }
                 });
         });
+    }
+
+    fn show_join_requests(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AdminSnapshot,
+        ready: bool,
+        language: Language,
+        action: &mut Option<LocalAction>,
+    ) {
+        if snapshot.join_requests.is_empty() {
+            return;
+        }
+        ui.separator();
+        ui.label(
+            RichText::new(label(language, "待审批加入请求", "Pending join requests")).strong(),
+        );
+        for request in &snapshot.join_requests {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{} · {} · {}",
+                    short(&request.room, 12),
+                    short(&request.agent, 12),
+                    short(&request.device, 12)
+                ));
+                if request.connection.is_some() {
+                    if ui
+                        .add_enabled(
+                            ready && action.is_none(),
+                            egui::Button::new(label(language, "审批并邀请", "Review and invite")),
+                        )
+                        .clicked()
+                    {
+                        self.confirmation = Some(Confirmation::JoinRequest {
+                            room: request.room.clone(),
+                            connection: request.connection.clone().unwrap_or_default(),
+                        });
+                    }
+                } else {
+                    ui.weak(label(language, "目标当前不在线", "Target is offline"));
+                }
+            });
+        }
+    }
+
+    fn join_request<'a>(&self, snapshot: &'a AdminSnapshot) -> Option<&'a AdminJoinRequest> {
+        let Confirmation::JoinRequest { room, connection } = self.confirmation.as_ref()? else {
+            return None;
+        };
+        snapshot.join_requests.iter().find(|request| {
+            request.room == *room && request.connection.as_deref() == Some(connection.as_str())
+        })
     }
 
     fn review_removal(&mut self, member: &AdminMember) {
@@ -803,6 +877,7 @@ mod tests {
                 device: "owner-device".into(),
                 connection: "owner-connection".into(),
             }],
+            join_requests: vec![],
         }
     }
 

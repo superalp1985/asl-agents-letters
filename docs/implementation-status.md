@@ -26,6 +26,7 @@
 | --- | --- | --- |
 | 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；群子流可跟随 loopback/LAN/Internet/relay 地址策略，默认关闭 | 真实双机公网/NAT/relay、跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
 | 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员管理动作、群主转移和更细粒度逐文件策略 |
+| 群加入/重入请求 | 经认证连接的结构化 `InviteRequest`、5 分钟期限、群主本机审批队列、设备/Agent 精确绑定、每群 32 条及每 Agent 每小时 5 条上限、在线连接复核后复用定向邀请 | 拒绝动作的独立审计、真实双机审批和跨设备迁移全链路验收 |
 | 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer、Offer 可进入密文邮箱等待补收 | 公网跨机、真实两设备大文件验收；邮箱只保存 Offer/密文，文件字节仍走在线授权传输；Offer 本身不是下载许可 |
 | 预算 | 消息数授予、续期、发送侧原子扣减 | 字节、模型调用、CPU、邮箱复合额度与 GUI 策略 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
@@ -36,14 +37,14 @@
 - 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取，离线 Offer 需来源设备在 Offer 有效期内重新上线后才可进入在线分块传输。
 - Act 历史的语义排序和跨保留期索引；当前只有当前用户可解密、最多扫描 1,000 条的本地子串搜索及显式 JSON 导出。
 - 提示注入红队、跨 audience 外泄测试和分身资源压力测试。
-- 两台真实设备上的建群、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
+- 两台真实设备上的建群、加入/重入请求、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
 - 分层万人群和完整发布包。
 
 ## 最近一次整体检查
 
-- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0，**0 失败、13 项环境/子进程用途忽略**；包含 Act 自动回复与本地证据、DHT 密文邮箱、Act 历史保留/迁移、群组进程、文件审批和 v37 迁移。此前 `identity_migration` 的唯一失败来自夹具把 Act/查询期限设为 60 秒，已改为 7 天；单测与完整工作区重跑均通过。
-- `cargo +1.100.0 clippy -p asl-store -p asl-app -p asl-net --all-targets --features desktop-ui --locked --offline -- -D warnings`：通过。
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0，**0 失败、13 项环境/子进程用途忽略**；包含 ASL/1.3 act、DHT 密文邮箱、Act 历史搜索/导出、群加入/重入请求、群组进程、文件审批和 v38 迁移。首次回归发现群管理快照 200 条上限与请求列表 100 条上限不一致，已统一；v32 升级夹具也已显式清理 v38 表。
+- 最终改动后的 `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：303 通过、0 失败、5 忽略；`cargo +1.100.0 clippy -p asl-types -p asl-store -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings`：通过。
 - `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，35 个向量中 25 接受、10 拒绝，签名是合成夹具。
-- `scripts/validate-cddl.ps1`：本轮本机 PATH 缺少 `cddl` 命令，未执行成功；此前独立运行记录仍只对应当时快照。
+- `scripts/validate-cddl.ps1`：通过；两个 CDDL 文件语法符合，25 接受、10 拒绝符合预期。
 - 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。

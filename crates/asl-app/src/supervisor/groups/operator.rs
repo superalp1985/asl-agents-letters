@@ -2,12 +2,15 @@ use super::{LocalGroupAction, NetworkAdmissionStatus, Supervisor, fresh_id};
 use crate::agent_mail::GroupAccessUpdate;
 use alloy_primitives::hex;
 use asl_store::group_state::operator::{
-    AdminOutcome, AdminPeer, AdminRequest, AdminRoom, AdminSnapshot, SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
+    AdminJoinRequest, AdminOutcome, AdminPeer, AdminRequest, AdminRoom, AdminSnapshot,
+    SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, PeerId},
 };
+
+const JOIN_REQUEST_VIEW_LIMIT: u32 = 100;
 
 impl Supervisor {
     pub(super) fn poll_group_operator(&mut self, now: u64) {
@@ -61,12 +64,34 @@ impl Supervisor {
         };
         if request == &AdminRequest::Refresh {
             let rooms = groups.store.managed_mls_rooms(&self.device_peer_id)?;
+            let peers = peers().take(VIEW_LIMIT).collect::<Vec<_>>();
+            let join_requests = groups
+                .store
+                .list_group_invite_requests(&self.device_peer_id, now, JOIN_REQUEST_VIEW_LIMIT)?
+                .into_iter()
+                .map(|request| {
+                    let agent = bs58::encode(request.requester.as_bytes()).into_string();
+                    let device = bs58::encode(request.device.as_bytes()).into_string();
+                    let connection = peers
+                        .iter()
+                        .find(|peer| peer.agent == agent && peer.device == device)
+                        .map(|peer| peer.connection.clone());
+                    AdminJoinRequest {
+                        room: hex::encode(request.wire_id.0),
+                        agent,
+                        device,
+                        connection,
+                        expires_ms: request.expires_at_ms,
+                    }
+                })
+                .collect();
             return Ok((
                 AdminOutcome::Ready,
                 Some(AdminSnapshot {
                     tag: hex::encode(fresh_id()?),
                     rooms,
-                    peers: peers().take(VIEW_LIMIT).collect(),
+                    peers,
+                    join_requests,
                     expires_ms: now.saturating_add(SNAPSHOT_WINDOW_MS),
                 }),
             ));
@@ -233,6 +258,7 @@ mod tests {
             tag: "view".into(),
             rooms: vec![room.clone()],
             peers: vec![peer.clone()],
+            join_requests: vec![],
             expires_ms: 30,
         };
         let resolve = |r: &AdminRoom, p: Option<AdminPeer>| {

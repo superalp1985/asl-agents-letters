@@ -26,9 +26,10 @@ use super::{
     client::Client,
     contract::{
         ActArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs, ContextRequestArgs,
-        EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, GroupRoomArgs, GroupSetAccessArgs,
-        QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs, RecoveryDownloadDecisionArgs,
-        RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
+        EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, GroupInviteRequestArgs,
+        GroupRoomArgs, GroupSetAccessArgs, QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs,
+        RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs,
+        Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -46,6 +47,7 @@ const GROUP_CREATE: &str = "asl_group_create";
 const GROUP_MEMBERS: &str = "asl_group_members";
 const GROUP_SET_ACCESS: &str = "asl_group_set_access";
 const GROUP_INVITE: &str = "asl_group_invite";
+const GROUP_INVITE_REQUEST: &str = "asl_group_invite_request";
 const DIRECT_OPEN: &str = "asl_direct_open";
 const RENEW_ACT_BUDGET: &str = "asl_renew_act_budget";
 const REQUEST_CONTEXT: &str = "asl_request_context";
@@ -287,6 +289,12 @@ impl ServerHandler for ToolServer {
                     schema_for_input::<GroupInviteArgs>().map_err(|_| invalid_arguments())?,
                 ));
                 tools.push(Tool::new(
+                    GROUP_INVITE_REQUEST,
+                    "Request that an admitted group owner invite this device into a room. The owner must approve locally; this does not grant membership.",
+                    schema_for_input::<GroupInviteRequestArgs>()
+                        .map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
                     DIRECT_OPEN,
                     "Create a two-person MLS conversation with one admitted Agent. The recipient still approves the targeted invitation locally.",
                     schema_for_input::<AgentTargetArgs>().map_err(|_| invalid_arguments())?,
@@ -479,6 +487,11 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
         }
         GROUP_LIST | GROUP_CREATE => Err(invalid_arguments()),
         GROUP_INVITE => Ok(Request::GroupInvite(parse_arguments(arguments)?)),
+        GROUP_INVITE_REQUEST => {
+            let args: GroupInviteRequestArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::GroupInviteRequest(args))
+        }
         DIRECT_OPEN => Ok(Request::DirectOpen(parse_arguments(arguments)?)),
         RENEW_ACT_BUDGET => Ok(Request::RenewActBudget(parse_arguments(arguments)?)),
         REQUEST_CONTEXT => Ok(Request::RequestContext(parse_arguments(arguments)?)),
@@ -702,6 +715,22 @@ mod tests {
         let bad_room = CallToolRequestParams::new(GROUP_MEMBERS)
             .with_arguments(object(json!({ "room": "00" })));
         assert!(parse_request(bad_room).is_err());
+
+        let request =
+            CallToolRequestParams::new(GROUP_INVITE_REQUEST).with_arguments(object(json!({
+                "room": "55".repeat(32),
+                "owner": format!("agent:{}", "66".repeat(32)),
+            })));
+        assert!(matches!(
+            parse_request(request),
+            Ok(Request::GroupInviteRequest(_))
+        ));
+        let bad_owner =
+            CallToolRequestParams::new(GROUP_INVITE_REQUEST).with_arguments(object(json!({
+                "room": "55".repeat(32),
+                "owner": "peer:00",
+            })));
+        assert!(parse_request(bad_owner).is_err());
     }
 
     #[test]

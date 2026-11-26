@@ -20,15 +20,15 @@
 | Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
 | 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；T31 本机目录续签已接入 | 严格 CBOR、当前链控制者签名、目录承诺、目录续签序号持久化；Profile 的 DHT 发布、远端记录历史持久化与真实公开投递仍待接入 |
-| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
-| T27 Agent 查询 | 入站授权直答、出站联系人直询和公开 DHT provider 查找已接入 | 当前通过的是旧确定性 query/answer 路径，不是 ASL/1.3 act-nl。act、提示注入隔离、audience 裁剪、可续期预算、邮箱唤醒和公网互通仍未验收 |
+| T14 传输与身份握手 | Core 身份闸门、地址策略、DHT、mDNS、relay 与 TCP/QUIC 路径已有实现和局部测试，整项仍未公网验收 | TCP/QUIC loopback、真实双节点 DHT、relay v2 和 AppContainer 网络有定向证据；真实 LAN、NAT 打洞、双机重启补收、多运营商链 RPC 和完整公网互测仍待完成 |
+| T27 Agent 查询 | 入站授权直答、出站联系人直询、公开 DHT provider、ASL/1.3 act、自动回复和密文邮箱已接入 | act 控制面/数据面、audience 裁剪、双许可本地证据、持久预算和邮箱补收有局部测试；提示注入红队、缓存证据过期恢复、真实双机与公网互通仍未验收 |
 | T30 本机 MCP | 四个工具、Core 启动授权、加密会话和收件授权已接入 | 真实 stdio 子进程到真实 Core 覆盖离线查询和会话隔离；另用实际 MCP 消息处理、认证 TCP 回环、链准入夹具验证 Offer、批准与 NTFS 发布。不是公网或生产跨进程下载全链路。命令与分项结果见[实施计划](06-implementation-plan.md#t30--本机-stdio-mcp) |
 | T31/T32 三节点群消息 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t31-三节点容器回环验收) | 含邀请审批、结构化问答、浏览开关和剔除在线成员；不含跨容器传文件、真实链 RPC 或跨机网络 |
 | T32 双节点群文件 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t32-跨容器群文件验收) | 单来源、双端逐文件审批、两个分块和收件文件逐字节核对；不含多来源并发、断点续传或跨机网络 |
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
-| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无 act 历史、模型本地证据自动选取、真实两设备重启补收、跨机多跳/规模验收 |
-| 两人 MLS 私聊（G00） | 待实现验收 | 必须与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、群权限、gossipsub 与容量分级 | v36 本地密文/群权限仓储、libp2p gossipsub、Core act/Policy 路径部分实现 | 邮箱远程托管/补收、真实多设备策略同步和分层拓扑待实现；direct/gossip 由本机容量选择，不设固定 64 人业务上限 |
+| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复、双许可本地证据、Act 历史搜索/导出和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无缓存证据过期恢复、真实两设备重启补收、跨机多跳/规模验收 |
+| 两人 MLS 私聊（G00） | 已走两人 MLS 房间工具，真实双机验收未完成 | 与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
+| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v38、libp2p gossipsub、Core act/Policy、群权限、加入/重入请求路径已部分实现 | 拒绝审计、真实多设备策略同步、真实双机邮箱/群请求、公网/NAT/relay 和分层拓扑待验收；不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：

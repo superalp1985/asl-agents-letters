@@ -100,6 +100,11 @@ pub(crate) enum MailCommand {
         agent: AgentId,
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
+    GroupInviteRequest {
+        room: Hash32,
+        owner: AgentId,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     DirectOpen {
         agent: AgentId,
         reply: oneshot::Sender<Result<Value, AslError>>,
@@ -284,6 +289,16 @@ impl MailPort {
     ) -> Result<Value, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::GroupInvite { room, agent, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_invite_request(
+        &self,
+        room: Hash32,
+        owner: AgentId,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupInviteRequest { room, owner, reply })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 
@@ -868,6 +883,29 @@ impl Mailbox {
             .send(MailEvent {
                 kind: "act",
                 details,
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn observe_group_invite_request(
+        &mut self,
+        request: &asl_store::group_state::GroupInviteRequest,
+        connection: [u8; 16],
+    ) -> bool {
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "group_invite_request",
+                details: json!({
+                    "request_id": hex::encode(request.request_id.0),
+                    "room": format!("group:{}", hex::encode(request.wire_id.0)),
+                    "agent": format!("agent:{}", hex::encode(request.requester.0)),
+                    "device": bs58::encode(request.device.as_bytes()).into_string(),
+                    "connection_id": hex::encode(connection),
+                    "mls_epoch": request.mls_epoch,
+                    "expires_at_ms": request.expires_at_ms,
+                    "state": "pending_local_approval",
+                }),
             })
             .is_ok()
     }

@@ -99,11 +99,22 @@ pub struct AdminPeer {
     pub connection: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminJoinRequest {
+    pub room: String,
+    pub agent: String,
+    pub device: String,
+    pub connection: Option<String>,
+    pub expires_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdminSnapshot {
     pub tag: String,
     pub rooms: Vec<AdminRoom>,
     pub peers: Vec<AdminPeer>,
+    #[serde(default)]
+    pub join_requests: Vec<AdminJoinRequest>,
     pub expires_ms: u64,
 }
 
@@ -455,6 +466,7 @@ mod tests {
                 tag: "v".into(),
                 rooms: vec![],
                 peers: vec![],
+                join_requests: vec![],
                 expires_ms: now + 10,
             };
             store

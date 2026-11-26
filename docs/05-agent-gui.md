@@ -123,7 +123,7 @@ Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派�
 
 **表达式与主动通知。** 用户可在 Core 启动环境中分别设置 `ASL_MCP_EXPRESSIONS=send` 和 `ASL_MCP_AGENT_PUSH=1`。前者允许宿主用 `asl_send_expression` 向已准入的在线 Agent 或当前群组投递；直连或群的回答开关也必须允许发送。返回 `message_id` 表示已入本机发送队列，不等于远端确认。目标格式、符号语法与示例见 [表达式信件](expression-language.md)，宿主也可读取 `asl://protocol/expression-v1`。
 
-ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。
+ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、加入/重入请求、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。`asl_group_invite_request` 只向一个已准入群主设备发送包含完整 room、本机 AgentId/PeerId 和 5 分钟期限的结构化请求；群主刷新后仍需本机审批，请求本身不创建成员资格。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。
 
 已验证身份与语义包可用时，还可调用 `asl_send_context_expression` 给单个 Agent 发送绑定精确上下文摘要的表达式。Core 在发送前重新验证包签名、依赖和一致性向量；接收端事件携带完整 ASL CBOR（`control_cbor_hex`）及本机求值状态。缺包或无法验证时状态为 `unresolved`，不会回退成自由文本。该入口目前不向群发送，也不代表 ContextRequest/Offer 文件同步已完成。
 
@@ -195,7 +195,7 @@ ASL/1.3 完成后，会话视图以私聊和群聊统一呈现。每条 act 显�
 
 节点页查找完整 AgentId 时先查当前可展示投影。命中不发网，未命中才请求 DHT；打开节点页本身不披露查找键。概览页选图后显示隔离清洗的预览；只有点击「允许引用此头像」才批准将其内容 ID 附在已获公开授权的身份资料上。换图、移除、撤回均使旧预览的批准失效。远端列表目前只显示引用，不获取图片。
 
-群组管理依赖运行中的 Core。刷新列出本设备创建的活动房间和当前已准入的连接，不扫描网络；界面分别展示 AgentId 和设备 PeerId。选择群与连接后，本机确认才发起邀请。刷新、超时或连接变化不能沿用旧选择，Core 不自动重试；创建或邀请完成后可再刷新。一条邀请排队成功不意味着送达或成为成员，成员变更以已提交的 MLS 状态为准。群子流可随地址策略使用 loopback、LAN、Internet 或 relay，但真实公网群组仍需双机验收。
+群组管理依赖运行中的 Core。刷新列出本设备创建的活动房间、当前已准入的连接和 5 分钟内的加入/重入请求；界面分别展示 AgentId 和设备 PeerId。请求只有在对应设备仍在线且同一连接仍通过准入时才出现“审批并邀请”；本机确认后复用定向邀请事务。刷新、超时或连接变化不能沿用旧选择，Core 不自动重试；创建或邀请完成后可再刷新。一条请求或邀请排队成功不意味着送达或成为成员，成员变更以已提交的 MLS 状态为准。群子流可随地址策略使用 loopback、LAN、Internet 或 relay，但真实公网群组仍需双机验收。
 
 节点页列出最近见过的节点，并将稳定 AgentId 和设备 PeerId 分列。网络隐私区域提示直连 IP 暴露和中继元数据边界。若已有合法中继地址，可通过节点页或 `asl-core --network relay-only on|off` 为下次启动保存仅中继限制。关闭限制恢复原文件策略，不会修改该文件或放宽文件本身指定的仅中继模式。群组网络可与中继配置并用，群消息仍是 MLS 密文。若已启用限制而中继配置丢失，下次启动拒绝而不回退直连。此设置只约束 ASL 对等传输，不改链或模型服务的连接，也不撤回此前发布的地址。
 

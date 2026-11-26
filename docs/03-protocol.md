@@ -97,11 +97,11 @@ PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode �
 
 | 请求 | 允许的回复 | 回复 epoch |
 | --- | --- | --- |
-| Application、Invite、Commit | Receipt | 请求 epoch |
+| Application、Invite、InviteRequest、Commit | Receipt | 请求 epoch |
 | KeyPackage | Welcome，回显邀请 ID | 请求 epoch + 1 |
 | SyncRequest | SyncCommit、AtHead、SyncUnavailable | 请求 epoch |
 
-Invite 通过 envelope 的消息 ID 标识邀请，写明目标 AgentId、目标 PeerId 和过期时间；不带群名、成员表或留言。KeyPackage 是接受邀请后的新请求，显式携带原邀请 ID。每个回复必须匹配原请求的消息 ID、完整群 ID 和已认证对端。Receipt 只表示收到了对应请求，不表示同意入群、持久写入或资源授权。
+Invite 通过 envelope 的消息 ID 标识邀请，写明目标 AgentId、目标 PeerId 和过期时间；不带群名、成员表或留言。InviteRequest 由希望加入或重新加入的设备发往群主，使用 `epoch=0` 表示请求方不知道当前 head；群主收到后必须以当前认证连接、群创建者和活动房间重新绑定 AgentId/PeerId，再把请求写入短期本机审批队列。该请求不携带群名、自由文本或成员资格推断。KeyPackage 是接受邀请后的新请求，显式携带原邀请 ID。每个回复必须匹配原请求的消息 ID、完整群 ID 和已认证对端。Receipt 只表示收到了对应请求，不表示同意入群、持久写入或资源授权。
 
 ASL 创建者证明是 MLS `GroupContext` 的私用扩展 `0xF720`，不改外层 CBOR。扩展数据是 `0x01 || random_nonce[32] || creator_agent_id[32] || canonical_creator_peer_id[1..128]`，线上群 ID 是 `SHA-256(ASCII "ASL-MLS-ROOM-v1\0" || extension_data)`。`RequiredCapabilities` 必须列出 `0xF720`，每个叶子必须声明支持；创建者使用当前已验证设备，身份承诺在同一群内不可变。收到 Welcome 时须独立重算承诺，从已验证树中定位该 AgentId/PeerId 的叶子，再要求 MLS 签名者索引与该叶子相同，且设备证书与原邀请和当前认证连接一致。不能以 Welcome 签名者、叶子序号或未验证 SQL 角色推导创建者。缺少扩展或必需能力的开发房间不能通过 Core 对账，不自动升级或启用群权限。不支持该能力的旧开发 KeyPackage 不能在此房间重用，需重新邀请和审批。
 

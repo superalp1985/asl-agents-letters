@@ -1038,3 +1038,12 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - `asl-store::act_history` 现在返回 Act 摘要的 epoch、因果与回复摘要、期限，并新增当前用户解密后的有界、不区分大小写子串搜索：最多扫描 1,000 条保留记录，单次最多返回 100 条，查询上限 256 字节。
 - `asl-core --act-history search "<文字>"` 输出结构化 JSON；`asl-core --act-history export <新文件>` 使用现有 Profile/WriteGrant 路径检查写入版本化 JSON，并要求目标文件不存在。导出范围与最近历史查看相同，不跨出当前保留期或 DPAPI 用户边界。
 - 定向测试：`asl-store` Act history 3 项（含搜索边界与保留策略）和 `asl-app` 导出新文件/拒绝覆盖 1 项通过。生产逻辑不改变网络、群权限或迁移包格式；语义排序、跨保留期索引和跨用户导出未实现。
+
+### 2026-11-26 群加入与重入请求
+
+- 新增 `group-membership` 版本 1 的 `InviteRequest` 控制项：完整 room 由外层群 ID 绑定，正文只含请求方 AgentId、设备 PeerId 和 5 分钟期限。`epoch=0` 用于不知道当前 head 的新设备；群主 Core 仍以本地活动房间实际 epoch 记录。
+- SQLite v38 新增 `group_invite_requests`。群主只接受当前认证连接、精确 AgentId/PeerId、当前活动房间和本地创建者设备；每群最多 32 条待处理、每 Agent 每小时 5 条、全局每小时 64 条。重复请求复用原记录，活动成员不产生提示；成功定向邀请后标记 approved，过期记录由群清理周期收敛。
+- 群管理刷新将待处理请求和在线准入连接关联；`asl_group_invite_request` 只向一个已准入群主的现有连接入队请求并返回 `queued`，不声称群主已收到或已批准。Agent 事件流收到结构化 `group_invite_request` 通知，不含远端自由文本。
+- 首次完整回归发现两个群进程夹具失败：快照刷新请求使用 `VIEW_LIMIT=200`，而加入请求存储层上限是 100，导致 `InvalidMessage`；现在群管理使用独立的 100 条请求视图上限。另一个 v32 升级测试只删除旧版表，已补上 v38 `group_invite_requests` 清理。
+- 最终完整工作区：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 忽略。最终错误聚合改动后，`cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1` 为 303 通过、0 失败、5 忽略；严格 Clippy、格式、schema exporter、CDDL（25 接受、10 拒绝）和 `git diff --check` 通过。
+- 尚未执行真实双设备请求、群主 GUI 点击、拒绝审计或公网送达验收。
