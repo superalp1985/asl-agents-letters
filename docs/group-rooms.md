@@ -13,7 +13,7 @@
 
 ## 已实现：群消息编解码
 
-群子流沿用冻结的 `/asl/group/1.0.0`、4 字节大端长度前缀和确定性 CBOR `group-envelope`。收发只接受群 envelope；整帧上限 256 KiB，envelope 内的 MLS 密文上限 64 KiB。默认不注册群子流；显式回环构造器例外。编解码本身不认证身份、不授权群成员、不匹配回复。
+群子流沿用冻结的 `/asl/group/1.0.0`、4 字节大端长度前缀和确定性 CBOR `group-envelope`。收发只接受群 envelope；整帧上限 256 KiB，envelope 内的 MLS 密文上限 64 KiB。默认不注册群子流；显式群组构造器例外。启用后可由同一地址策略使用 loopback、LAN、Internet 或 relay；公网端到端仍需双机验收。编解码本身不认证身份、不授权群成员、不匹配回复。
 
 `GroupPacket` 对操作 `1` 内的 `group-membership` 进行二次确定性 CBOR 校验，限制请求和回复种类、完全匹配群 ID、请求 ID、预期 epoch 和邀请 ID。网络 codec 只检查外层，传输适配器和 Core 分别检查消息及各自的连接、待决请求绑定。OpenMLS 适配器核验普通 KeyPackage、单收件项 Welcome、解密后的群 ID/epoch/套件及本机叶子，并检查 Application/Commit 是相符的 MLS 私有消息。同步绑定由 MLS exporter 派生，不发送原始 epoch authenticator。完整消息表见 [协议](03-protocol.md#群子流)。
 

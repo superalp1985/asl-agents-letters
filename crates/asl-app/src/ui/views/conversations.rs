@@ -88,6 +88,13 @@ pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64, language: Language) 
                             .as_deref()
                             .unwrap_or_default()
                             .chars()
+                            .map(|character| {
+                                if character.is_control() {
+                                    ' '
+                                } else {
+                                    character
+                                }
+                            })
                             .take(120)
                             .collect::<String>(),
                         row.agent_id.clone().unwrap_or_default(),

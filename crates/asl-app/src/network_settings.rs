@@ -109,9 +109,6 @@ impl NetworkSettingsV1 {
                 .any(|address| address.len() > MAX_RELAY_ENDPOINT_BYTES)
             || (self.address_scope == NetworkAddressScopeV1::RelayOnly
                 && (self.listen_on_interfaces || self.relay_addresses.is_empty()))
-            || (self.loopback_groups
-                && (self.address_scope != NetworkAddressScopeV1::LoopbackOnly
-                    || !self.relay_addresses.is_empty()))
         {
             return Err(AslError::InvalidIdentity);
         }
@@ -241,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_reject_group_opt_in_with_non_loopback_scope_or_relay() {
+    fn settings_allow_group_opt_in_with_lan_internet_and_relay() {
         let mut settings = NetworkSettingsV1 {
             loopback_groups: true,
             ..NetworkSettingsV1::default()
@@ -252,7 +249,7 @@ mod tests {
             NetworkAddressScopeV1::Hybrid,
         ] {
             settings.address_scope = scope;
-            assert!(settings.validate().is_err());
+            assert!(settings.validate().is_ok());
         }
 
         let relay_peer_id = libp2p_identity::Keypair::generate_ed25519()
@@ -262,9 +259,13 @@ mod tests {
         for scope in [
             NetworkAddressScopeV1::LoopbackOnly,
             NetworkAddressScopeV1::RelayOnly,
+            NetworkAddressScopeV1::InternetOnly,
         ] {
             settings.address_scope = scope;
-            assert!(settings.validate().is_err());
+            if scope == NetworkAddressScopeV1::RelayOnly {
+                settings.listen_on_interfaces = false;
+            }
+            assert!(settings.validate().is_ok());
         }
     }
 

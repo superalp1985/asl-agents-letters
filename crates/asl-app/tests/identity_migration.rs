@@ -56,6 +56,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+    let retained_until_ms = now + 7 * 24 * 60 * 60 * 1000;
     store
         .record_trust_observation(
             contact,
@@ -74,7 +75,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
                 message_id: [3; 16].into(),
                 root_task_id: [4; 16].into(),
                 created_at_ms: now,
-                expires_at_ms: now + 60_000,
+                expires_at_ms: retained_until_ms,
                 intent_id: Intent::LocateResource,
                 topics: vec![ConceptRef::RUST],
                 constraints: vec![],
@@ -95,7 +96,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
             causal_root: [7; 16].into(),
             body: Some("migrated act preview"),
             now_ms: now,
-            expires_at_ms: now + 60_000,
+            expires_at_ms: retained_until_ms,
         })
         .unwrap();
     drop(store);

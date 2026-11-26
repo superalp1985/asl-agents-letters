@@ -1018,9 +1018,17 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 
 ### 2026-11-26 本地证据、Act 历史与迁移
 
-- 新增 `supervisor::auto_reply_evidence`：在线群 `Ask` 先经当前群 search snapshot，最多选择 4 个同时具备群作用域 `ReadChunk` 与 `ModelInput` permit 的本地文本，截断 1200 字符送入模型；查询正文不解释为路径、URL、action 或工具。Provider 本地/远端模式从已批准注册表配置传入，LocalOnly 授权不会误判为远端。
+- 新增 `supervisor::auto_reply_evidence`：在线群 `Ask` 先经当前群 search snapshot，最多选择 4 个同时具备群作用域 `ReadChunk` 与 `ModelInput` permit 的本地文本，截断 1200 字符送入模型；查询正文不解释为路径、URL、action 或工具。Provider 本地/远端模式从已批准注册表配置传入，LocalOnly 授权不会误判为远端。DHT 邮箱和 gossip 经 MLS 验证后，可用缓存且仍在有效期内的链/设备证据重建同一群 requester，因此离线补收的 `Ask` 也能使用相同证据选择；缓存缺失或过期时回退 data-free。
 - `conversation_act_events` 现实际记录收发 Act 的 conversation/act ID、epoch、类型、因果/回复引用、方向和保留时间。本地正文在 Windows 上按当前用户 DPAPI 保护，夜间/重启可读；群「浏览来信」关闭时不记录入站正文，保留期选择 0 会清除 Act 历史。
 - 活动页直接显示 Act 的方向、类型和 120 字符预览。身份迁移的 `history` 选择会从未过期 Act 历史解密到 age 加密迁移包，再在目标设备重新 DPAPI 保护；不会复制旧设备密钥、目录授权或 MLS 私钥。
 - 邮箱 Offer 的领取不再死绑接收时的连接：若 Offer 来自离线邮箱，用户/Agent 在来源设备后来上线且仍处同一群 epoch 时可以重新解析当前连接再进入既有双端传输审批；Offer 本身仍不是下载授权。
-- 定向验证：`asl-app` 自动证据 3 项、Act history 2 项、Dashboard Act 预览 1 项、三 Core 群消息 1 项、双 Core 群文件 1 项、桌面会话分组 1 项、身份迁移含 Act 1 项通过。完整工作区测试退出码 0，0 失败、13 项按环境/子进程用途忽略。
+- 群组网络不再由代码强制回环：`NetworkSettingsV1`、Transport 地址策略和 relay 预约现在允许群子流跟随 loopback/LAN/Internet/RelayOnly 配置；默认仍关闭群组网络。这是配置接线，不替代真实双机公网、NAT 打洞或 relay 群消息验收。
+- 定向验证：`asl-app` 自动证据 3 项、`asl-store` cached requester 1 项、Act history 2 项、Dashboard Act 预览 1 项、三 Core 群消息 1 项、双 Core 群文件 1 项、桌面会话分组 1 项、身份迁移含 Act 1 项通过。完整工作区测试退出码 0，0 失败、13 项按环境/子进程用途忽略。
 - 严格 Clippy（`asl-store`/`asl-app`，含 `desktop-ui`）、格式、schema exporter（35 向量）和 `git diff --check` 通过。未覆盖真实双机迁移包、旧版本包兼容抽样、DPAPI 跨用户、邮箱 Offer 重新上线竞态或 GUI 不同 DPI 的人工检查。
+
+### 2026-11-26 迁移夹具期限修正与最终集中验证
+
+- 完整工作区测试曾只剩 `encrypted_migration_preserves_selected_data_with_a_fresh_device` 失败：测试把 Act 历史和直连查询的 `expires_at_ms` 设为 `now + 60_000`，age/scrypt 导入在负载下接近或超过该窗口，目标端 Dashboard 加载时 Act 已过期。测试夹具改为 7 天保留窗口，生产迁移逻辑未改。
+- 精确回归 `cargo +1.100.0 test -p asl-app --test identity_migration --locked --offline -- --nocapture --test-threads=1`：1 项通过，用时 58.71 秒。
+- 最终集中验证：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略；`cargo +1.100.0 clippy -p asl-store -p asl-app -p asl-net --all-targets --features desktop-ui --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、`git diff --check` 和 schema exporter（35 向量：25 接受、10 拒绝）均通过。
+- 本轮仍未验收真实双机公网/NAT/relay、真实链 RPC、跨用户 DPAPI、MLS 群密钥跨设备迁移或人工 DPI/窗口检查；不可用上述集中测试替代这些范围。

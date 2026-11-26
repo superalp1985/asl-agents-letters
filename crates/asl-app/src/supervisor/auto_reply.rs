@@ -23,6 +23,7 @@ use super::{Supervisor, groups::LocalGroupAction, unix_time_ms};
 
 const MAX_QUEUED_REPLIES: usize = 8;
 const MAX_RECENT_REQUESTS: usize = 256;
+const MAX_MODEL_CALLS_PER_MINUTE: usize = 6;
 const CONVERSATION_COOLDOWN: Duration = Duration::from_secs(5);
 
 pub(super) struct AutoReplyRuntime {
@@ -33,6 +34,7 @@ pub(super) struct AutoReplyRuntime {
     recent: VecDeque<Id128>,
     recent_set: HashMap<Id128, ()>,
     cooldowns: HashMap<Id128, Instant>,
+    model_calls: VecDeque<Instant>,
 }
 
 struct Job {
@@ -68,6 +70,7 @@ impl AutoReplyRuntime {
             recent: VecDeque::new(),
             recent_set: HashMap::new(),
             cooldowns: HashMap::new(),
+            model_calls: VecDeque::new(),
         })
     }
 
@@ -78,8 +81,11 @@ impl AutoReplyRuntime {
         evidence: Option<AutoReplyEvidenceContext>,
         now: Instant,
     ) -> bool {
+        self.model_calls
+            .retain(|started| now.saturating_duration_since(*started) < Duration::from_secs(60));
         if self.recent_set.contains_key(&request.message_id)
             || self.queued >= MAX_QUEUED_REPLIES
+            || self.model_calls.len() >= MAX_MODEL_CALLS_PER_MINUTE
             || self
                 .cooldowns
                 .get(&request.conversation_id)
@@ -94,6 +100,7 @@ impl AutoReplyRuntime {
         }) {
             Ok(()) => {
                 self.queued += 1;
+                self.model_calls.push_back(now);
                 true
             }
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,

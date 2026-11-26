@@ -13,7 +13,7 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
     task::{GroupId, ResourceKey},
 };
-use rusqlite::{ErrorCode, Transaction, TransactionBehavior, params};
+use rusqlite::{ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
     MAX_KEYS,
@@ -34,6 +34,78 @@ pub struct GroupRequester {
 }
 
 impl Store {
+    /// Reconstructs the current local group capability from already-verified
+    /// MLS membership and cached chain/device evidence. Use only after the MLS
+    /// sender leaf has been authenticated for this exact room and epoch.
+    pub fn cached_group_requester(
+        &self,
+        wire_id: Hash32,
+        agent: AgentId,
+        peer: &PeerId,
+        now_ms: u64,
+    ) -> Result<Option<GroupRequester>, AslError> {
+        let Some(snapshot) = self.mls_room_snapshot(wire_id)? else {
+            return Ok(None);
+        };
+        if self
+            .mls_room_progress(wire_id)?
+            .is_none_or(|(state, _)| state != "active")
+        {
+            return Ok(None);
+        }
+        let now = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
+        let agent_text = agent_text(agent);
+        let peer_text = peer_text(peer);
+        let row = self
+            .connection
+            .query_row(
+                "SELECT r.sequence,r.controller_address,r.state_commitment,
+                        d.certificate_expires_ms
+                 FROM identity_registry_states r
+                 JOIN device_identities d ON d.agent_id=r.agent_id
+                 JOIN agents a ON a.agent_id=r.agent_id
+                 WHERE r.agent_id=?1 AND r.status='active'
+                   AND d.peer_id=?2 AND d.revoked_at_ms IS NULL
+                   AND d.certificate_expires_ms>?3
+                   AND a.identity_state IN ('pending_anchor','verified')",
+                params![agent_text, peer_text, now],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((sequence, controller, commitment, certificate_expires)) = row else {
+            return Ok(None);
+        };
+        let session_expires_at_ms = u64::try_from(certificate_expires)
+            .map_err(|_| AslError::InvalidDatabase)?
+            .min(now_ms.saturating_add(60_000));
+        Ok(Some(GroupRequester {
+            direct: DirectRequester {
+                agent,
+                peer: peer.clone(),
+                session_expires_at_ms,
+                registry_sequence: u64::try_from(sequence)
+                    .map_err(|_| AslError::InvalidDatabase)?,
+                directory_commitment: commitment
+                    .try_into()
+                    .map_err(|_| AslError::InvalidDatabase)?,
+                controller: controller
+                    .try_into()
+                    .map_err(|_| AslError::InvalidDatabase)?,
+            },
+            wire_id,
+            group_id: snapshot.local_id,
+            membership_epoch: snapshot.version.membership_epoch,
+        }))
+    }
+
     pub fn group_search_snapshot(
         &self,
         requester: &GroupRequester,

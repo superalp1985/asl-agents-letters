@@ -418,22 +418,7 @@ impl Supervisor {
                 if GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
                 {
                     let evidence = requester.as_ref().and_then(|member| {
-                        let paths = AppPaths::open_existing(home).ok()?;
-                        let provider = ModelEndpointAccess::new(&paths)
-                            .first_authorized_config()
-                            .ok()
-                            .flatten()?;
-                        let provider_local =
-                            provider.mode == asl_agent::gateway::ProviderMode::Local;
-                        super::auto_reply_evidence::select_auto_reply_evidence(
-                            &groups.store,
-                            libraries,
-                            member,
-                            provider.id,
-                            provider_local,
-                            act.nl_body.as_deref()?,
-                        )
-                        .ok()
+                        select_auto_reply_evidence(&groups.store, libraries, home, member, act)
                     });
                     super::auto_reply::queue_auto_reply(auto_reply, *wire_id, act, evidence);
                 }
@@ -574,8 +559,12 @@ impl Supervisor {
             return Err(AslError::InvalidMessage);
         }
         let directories = HashMap::new();
-        let (Some(groups), Some(admission)) = (self.groups.as_mut(), self.admission.as_mut())
-        else {
+        let (Some(groups), Some(admission), libraries, home) = (
+            self.groups.as_mut(),
+            self.admission.as_mut(),
+            &self.libraries,
+            &self.home,
+        ) else {
             return Ok(());
         };
         let mailbox = &mut self.mailbox;
@@ -629,7 +618,15 @@ impl Supervisor {
         if let GroupApplication::Act(act) = &application
             && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
         {
-            super::auto_reply::queue_auto_reply(auto_reply, key, act, None);
+            let evidence = groups
+                .store
+                .cached_group_requester(key, agent, &peer, now_ms)
+                .ok()
+                .flatten()
+                .and_then(|member| {
+                    select_auto_reply_evidence(&groups.store, libraries, home, &member, act)
+                });
+            super::auto_reply::queue_auto_reply(auto_reply, key, act, evidence);
         }
         if let GroupApplication::Act(act) = &application
             && mailbox.interested()
@@ -1424,6 +1421,30 @@ fn select_invite(
 fn peer_text(peer: &PeerId) -> String {
     libp2p_identity::PeerId::from_bytes(peer.as_bytes())
         .map_or_else(|_| hex::encode(peer.as_bytes()), |peer| peer.to_base58())
+}
+
+fn select_auto_reply_evidence(
+    store: &Store,
+    libraries: &crate::libraries::LocalLibraries,
+    home: &Path,
+    requester: &GroupRequester,
+    act: &Act,
+) -> Option<super::auto_reply_evidence::AutoReplyEvidenceContext> {
+    let paths = AppPaths::open_existing(home).ok()?;
+    let provider = ModelEndpointAccess::new(&paths)
+        .first_authorized_config()
+        .ok()
+        .flatten()?;
+    let provider_local = provider.mode == asl_agent::gateway::ProviderMode::Local;
+    super::auto_reply_evidence::select_auto_reply_evidence(
+        store,
+        libraries,
+        requester,
+        provider.id,
+        provider_local,
+        act.nl_body.as_deref()?,
+    )
+    .ok()
 }
 
 pub(super) fn record_act_history(

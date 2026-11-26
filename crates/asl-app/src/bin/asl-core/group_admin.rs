@@ -65,7 +65,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let database = paths.existing_state_database()?;
     let store = open_store_read_only(&database)?;
     let config = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
-    if !config.loopback_groups || store.force_relay_only()? {
+    if !config.loopback_groups {
         return Err(AslError::PolicyDenied);
     }
     let agent = AgentIdentity::load_protected(&paths.agent_root_key())?.agent_id();

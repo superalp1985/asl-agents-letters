@@ -359,10 +359,15 @@ impl LocalTransport {
         Self::build(identity, false)
     }
 
-    /// Enables only the loopback group adapter. The caller still needs to
+    /// Enables the MLS group adapter. The caller still needs to
     /// authorize each group operation against an admitted ASL session.
-    pub fn new_with_loopback_groups(identity: Keypair) -> io::Result<Self> {
+    pub fn new_with_groups(identity: Keypair) -> io::Result<Self> {
         Self::build(identity, true)
+    }
+
+    /// Backward-compatible name for the group-enabled constructor.
+    pub fn new_with_loopback_groups(identity: Keypair) -> io::Result<Self> {
+        Self::new_with_groups(identity)
     }
 
     fn build(identity: Keypair, loopback_groups: bool) -> io::Result<Self> {
@@ -479,9 +484,6 @@ impl LocalTransport {
     }
 
     pub fn set_address_policy(&mut self, policy: AddressPolicy) -> io::Result<()> {
-        if self.swarm.behaviour().group.is_enabled() && policy != AddressPolicy::LoopbackOnly {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
         if self.policy_configured
             || self.network_started
             || !self.listeners.is_empty()
@@ -533,9 +535,6 @@ impl LocalTransport {
     }
 
     pub fn reserve_relay(&mut self, address: &Multiaddr) -> io::Result<libp2p::PeerId> {
-        if self.swarm.behaviour().group.is_enabled() {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
         let endpoint = parse_relay_endpoint(address)?;
         if endpoint.peer_id == *self.swarm.local_peer_id()
             || (self.address_policy != AddressPolicy::RelayOnly
@@ -1718,25 +1717,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn loopback_group_transport_cannot_enable_public_addresses_or_relays() {
+    #[tokio::test]
+    async fn group_transport_can_enable_public_addresses() {
         let mut transport =
             LocalTransport::new_with_loopback_groups(Keypair::generate_ed25519()).unwrap();
-        assert_eq!(
-            transport
-                .set_address_policy(AddressPolicy::Hybrid)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        let relay = endpoint().with(Protocol::P2p(peer()));
-        assert_eq!(
-            transport.reserve_relay(&relay).unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        transport
-            .set_address_policy(AddressPolicy::LoopbackOnly)
-            .unwrap();
+        transport.set_address_policy(AddressPolicy::Hybrid).unwrap();
     }
 
     #[test]

@@ -43,9 +43,7 @@ pub(super) fn show(
     let fixed = config
         .as_ref()
         .is_ok_and(|c| c.address_scope == NetworkAddressScopeV1::RelayOnly);
-    let can_enable = config
-        .as_ref()
-        .is_ok_and(|c| !c.relay_addresses.is_empty() && !c.loopback_groups);
+    let can_enable = config.as_ref().is_ok_and(|c| !c.relay_addresses.is_empty());
     let mut checked = fixed || data.force_relay_only;
     if ui
         .add_enabled(
@@ -80,14 +78,6 @@ pub(super) fn show(
                 language,
                 "本机配置固定为仅中继",
                 "Local configuration is fixed to relay-only",
-            ),
-        ),
-        Ok(c) if c.loopback_groups => ui.colored_label(
-            MUTED,
-            label(
-                language,
-                "回环群组模式不可与中继并用",
-                "Loopback groups cannot use relays",
             ),
         ),
         Ok(c) if c.relay_addresses.is_empty() => ui.colored_label(

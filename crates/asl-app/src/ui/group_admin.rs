@@ -52,8 +52,8 @@ enum Confirmation {
     Remove { agent: String, device: String },
 }
 
-pub(super) fn enabled(config: &Result<NetworkSettingsV1, AslError>, data: &Dashboard) -> bool {
-    !data.force_relay_only && config.as_ref().is_ok_and(|cfg| cfg.loopback_groups)
+pub(super) fn enabled(config: &Result<NetworkSettingsV1, AslError>, _data: &Dashboard) -> bool {
+    config.as_ref().is_ok_and(|cfg| cfg.loopback_groups)
 }
 
 impl Form {
@@ -87,8 +87,8 @@ impl Form {
         if !*loopback_enabled {
             ui.weak(label(
                 *language,
-                "回环群组未启用",
-                "Loopback groups are disabled",
+                "群组网络未启用",
+                "Group networking is disabled",
             ));
             return;
         }

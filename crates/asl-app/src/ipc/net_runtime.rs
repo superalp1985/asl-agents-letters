@@ -53,7 +53,7 @@ async fn run_async(
     let peer_id = identity.peer_id();
     let keypair = identity.into_keypair();
     let transport = if loopback_groups {
-        LocalTransport::new_with_loopback_groups(keypair)?
+        LocalTransport::new_with_groups(keypair)?
     } else {
         LocalTransport::new(keypair)?
     };
