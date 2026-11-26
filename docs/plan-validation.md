@@ -1066,6 +1066,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - Dashboard 新增 `group_rejoin_hints`，只读取 SQLite v39 `migration_group_hints` 最多 100 条；测试确认线索出现时 `groups` 仍为空，不伪造 MLS 房间。
 - 群组页显示迁移后的群名、完整 Group ID、群主 AgentId、最后 epoch、复制和“请求重入”按钮，并明确标注“线索不是成员资格”。按钮映射到 `group-admin request-join <room> <owner>`，复用 Core 的 5 分钟结构化请求。`asl-ui` 25 项 UI 测试通过，store 定向投影测试和 AgentId 规范解析测试通过。
 - MCP 群管理增加 `asl_group_reject_join_request`，只接受完整 room 和 canonical PeerId；Supervisor 再次核对当前设备是该房间 creator 后调用同一持久 rejected 状态机。参数解析、`asl-app --all-targets --features desktop-ui` 编译和严格 Clippy 通过。
+- 拒绝状态把记录期限延长 1 小时；同群同设备在该窗口内重发 `InviteRequest` 会被忽略，不触发 Agent 通知，也不重复进入待审批队列。定向测试覆盖 rejected 后立即重试仍返回空结果。
 
 ### 2026-11-26 Windows 离线测试包
 

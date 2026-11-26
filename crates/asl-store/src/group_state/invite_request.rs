@@ -106,8 +106,9 @@ impl Store {
         let device_text = peer_text(device);
         if query_request(
             &tx,
-            "WHERE r.group_id=?1 AND r.requester_peer_id=?2 AND r.state='pending'",
-            params![local_id, device_text],
+            "WHERE r.group_id=?1 AND r.requester_peer_id=?2
+               AND r.state IN ('pending','rejected') AND r.expires_at_ms>?3",
+            params![local_id, device_text, now],
         )?
         .is_some()
         {
@@ -220,17 +221,24 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, AslError> {
         let now = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
+        let rejected_until = now.saturating_add(60 * 60 * 1_000);
         let changed = self
             .connection
             .execute(
-                "UPDATE group_invite_requests SET state=?3
+                "UPDATE group_invite_requests
+                 SET state=?3,
+                     expires_at_ms=CASE
+                       WHEN ?3='rejected' AND expires_at_ms<?4 THEN ?4
+                       ELSE expires_at_ms
+                     END
                  WHERE state='pending' AND requester_peer_id=?2
                    AND group_id=(SELECT local_group_id FROM mls_room_states
                                  WHERE wire_group_id=?1)",
                 params![
                     wire_id.as_bytes(),
                     peer_text(device),
-                    if approved { "approved" } else { "rejected" }
+                    if approved { "approved" } else { "rejected" },
+                    rejected_until
                 ],
             )
             .map_err(database_error)?;
@@ -506,6 +514,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "rejected");
+        assert!(
+            store
+                .record_group_invite_request(input(
+                    &owner,
+                    wire,
+                    5,
+                    rejected_requester,
+                    &rejected_device,
+                    30_002 + GROUP_INVITE_REQUEST_TTL_MS,
+                    30_002,
+                ))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

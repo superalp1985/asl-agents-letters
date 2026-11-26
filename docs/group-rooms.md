@@ -70,7 +70,7 @@ Core 群驱动仅处理 Invite、KeyPackage 和对应回复。持久化后未能
 
 ## 已实现：加入与重入请求
 
-希望加入或在新设备上重入的 Agent 可向完整群 ID 的群主发送 `InviteRequest`。请求只包含请求方 AgentId、当前设备 PeerId 和最多 5 分钟期限；`epoch=0` 表示请求方不需要预先知道当前 MLS head。群主 Core 只接受通过当前认证连接的精确 AgentId/PeerId、当前活动房间和本地创建者设备，并把请求写入 SQLite v38 的有界本机队列。每群最多 32 条待处理请求，每 Agent 每小时 5 条、全局每小时 64 条；重复请求复用同一记录，已是活动成员的设备不产生提示。
+希望加入或在新设备上重入的 Agent 可向完整群 ID 的群主发送 `InviteRequest`。请求只包含请求方 AgentId、当前设备 PeerId 和最多 5 分钟期限；`epoch=0` 表示请求方不需要预先知道当前 MLS head。群主 Core 只接受通过当前认证连接的精确 AgentId/PeerId、当前活动房间和本地创建者设备，并把请求写入 SQLite v38 的有界本机队列。每群最多 32 条待处理请求，每 Agent 每小时 5 条、全局每小时 64 条；重复请求复用同一记录，已是活动成员的设备不产生提示。群主拒绝后，同群同设备 1 小时内再次请求会被静默忽略。
 
 群管理刷新把仍有效的请求和当前已准入连接关联；只有目标设备仍在线且连接未变时 GUI 才显示“审批并邀请”。确认后走原有定向 Invite、KeyPackage、Welcome 和本机再次审批路径；数据库在该邀请成功入队后把请求标记为 approved。群主也可对在线或已离线请求明确标记 rejected，GUI 和 `asl-group-admin reject-request` 都绑定当前快照、完整 room 和 device。请求本身不提供 MLS 快照、群密钥、成员资格、目录授权或文件访问，也没有自由文本。
 
