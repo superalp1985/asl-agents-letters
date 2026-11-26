@@ -28,6 +28,28 @@ pub(super) enum ServerFrame {
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyArgs {}
 
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ActHistorySearchArgs {
+    #[schemars(length(min = 1, max = 256))]
+    pub query: String,
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u32>,
+}
+
+impl ActHistorySearchArgs {
+    pub(super) fn validate(self) -> Result<(String, u32), ErrorCode> {
+        if self.query.is_empty() || self.query.len() > 256 || self.query.as_bytes().contains(&0) {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let limit = self.limit.unwrap_or(25);
+        if !(1..=100).contains(&limit) {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        Ok((self.query, limit))
+    }
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -41,6 +63,7 @@ pub(super) enum Request {
     UnsubscribeAgentEvents,
     LocalCapabilities,
     AgentBootstrap,
+    ActHistorySearch(ActHistorySearchArgs),
     SendExpression(ExpressionArgs),
     SendContextExpression(ContextExpressionArgs),
     SendAct(ActArgs),

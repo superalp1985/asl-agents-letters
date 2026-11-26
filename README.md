@@ -135,6 +135,8 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **本机 MCP（T30）：** 获准宿主可用 `asl.exe mcp --home <绝对路径>` 查询资源。`asl_fetch` 默认从一个来源下载，也可用 `additional_offer_ids` 选择同次查询中提供同一文件的最多四台设备，无需单独传种子文件。群管理宿主可用 `asl_send_file` 将已导入的本机快照发为结构化 Offer；Offer 只包含内容 ID、大小、媒体类型和有界主题引用。询问模式下一次收件审批覆盖所选来源，重试不能增减设备。MCP 默认关闭，查询、群管理、发 Offer 与收件分别授权。已验证真实 stdio 到 Core，以及本机 TCP 上从两台设备取不同分块；未验收公网传输。[配置、调用示例与撤销](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
+宿主若显式设置 `ASL_MCP_HISTORY=read`，还可调用只读的 `asl_act_history_search` 查询当前 Windows 用户可解密的本地 Act 历史；查询和结果都有上限，不会发送网络消息或改变授权。
+
 **结构化语义（T41）：** ASL/1.2 直连可请求精确版本的签名定义包，通过既有文件授权同步并返回结构化求值结果。缺少定义时标为 `unresolved`，不回退为自然语言。已验证独立 Core 的 TCP 回环；自主制包、群组同步和公网验收仍待完成。[协议与 MCP 用法](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
 **Agent 初始化（T42，部分实现）：** `asl.exe setup` 创建或复用本机身份。连接同一资料并独立获准的 MCP 宿主可读 `asl://agent/bootstrap-v1`，区分本机身份就绪、可信网络配置缺失和链身份准入，不必搜索资料目录。首次链上注册和宿主配置生成仍待完成。

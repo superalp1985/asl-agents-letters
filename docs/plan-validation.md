@@ -1055,3 +1055,8 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - `asl_group_list` 把线索以 `state: needs_rejoin` 返回，Agent 可把完整 room 和 owner 交给 `asl_group_invite_request`。成功 Welcome 进入本机房间的事务会删除对应线索；线索只是导航信息，不是入群凭证。
 - 定向验证：`migration::tests::group_hints_export_ids_and_owner_without_mls_state`、v35→v39 迁移和含 `groups` 的加密身份迁移通过，并断言迁移 JSON 不含源 sealed snapshot、目标端没有伪 MLS 房间。
 - 最终完整工作区再次通过：0 失败、13 忽略；严格 Clippy、格式、schema exporter（35 向量：25 接受、10 拒绝）、CDDL（25 接受、10 拒绝）和 `git diff --check` 均通过。
+
+### 2026-11-26 MCP Act 历史搜索
+
+- `ASL_MCP_HISTORY=read` 是独立本机授权；未设置时 `asl_act_history_search` 不出现在工具列表。工具只调用现有 `Store::search_act_history`，查询上限 256 字节、默认 25 条、最多 100 条，结果只返回有界结构化字段，不发送网络消息。
+- 参数解析测试覆盖合法查询、空/超长查询、0/101 上限和未知字段拒绝；`asl-app --all-targets --features desktop-ui` 编译、严格 Clippy 和当前 `asl-app` 库 304 通过/5 忽略通过。真实 MCP 宿主跨进程搜索尚未单独执行。

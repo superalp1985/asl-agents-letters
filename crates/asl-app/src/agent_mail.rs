@@ -53,6 +53,11 @@ impl Target {
 }
 
 pub(crate) enum MailCommand {
+    ActHistorySearch {
+        query: String,
+        limit: u32,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     Send {
         target: Target,
         scope: QueryScope,
@@ -157,6 +162,20 @@ pub(crate) struct MailPort {
 }
 
 impl MailPort {
+    pub(crate) async fn act_history_search(
+        &self,
+        query: String,
+        limit: u32,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::ActHistorySearch {
+            query,
+            limit,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
     pub(crate) async fn request_task_inbox(&self) -> Result<InboxDecision, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::RequestTaskInbox { reply })?;

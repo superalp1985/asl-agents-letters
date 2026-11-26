@@ -220,6 +220,7 @@ async fn serve(
         "send_act": !is_recovery && grant.expressions && mail.is_some(),
         "send_file": !is_recovery && grant.groups_admin && mail.is_some(),
         "groups_admin": !is_recovery && grant.groups_admin && mail.is_some(),
+        "act_history": !is_recovery && grant.act_history && mail.is_some(),
         "request_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "confirm_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "receive_offer": push && mail.is_some(),
@@ -298,6 +299,7 @@ async fn serve(
                     | Request::SendContextExpression(_)
                     | Request::SendAct(_)
                     | Request::SendFile(_)
+                    | Request::ActHistorySearch(_)
                     | Request::GroupList
                     | Request::GroupCreate
                     | Request::GroupMembers(_)
@@ -312,6 +314,9 @@ async fn serve(
                     | Request::ReceiveOffer(_)
                         if is_recovery => Err(ErrorCode::PolicyDenied),
                     Request::SendExpression(args) => send_expression(mail, grant, args).await,
+                    Request::ActHistorySearch(args) => {
+                        act_history_search(mail, grant, args).await
+                    }
                     Request::SendContextExpression(args) => {
                         send_context_expression(mail, grant, args).await
                     }
@@ -562,6 +567,20 @@ async fn group_invite_request(
         .ok_or(ErrorCode::PolicyDenied)?;
     let (room, owner) = args.validate()?;
     mail.group_invite_request(room, owner)
+        .await
+        .map_err(error_code)
+}
+
+async fn act_history_search(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::ActHistorySearchArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.act_history)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (query, limit) = args.validate()?;
+    mail.act_history_search(query, limit)
         .await
         .map_err(error_code)
 }

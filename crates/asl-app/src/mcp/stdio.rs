@@ -25,11 +25,11 @@ use serde_json::{Value, json};
 use super::{
     client::Client,
     contract::{
-        ActArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs, ContextRequestArgs,
-        EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs, GroupInviteRequestArgs,
-        GroupRoomArgs, GroupSetAccessArgs, QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs,
-        RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs,
-        Request, SendFileArgs, TaskArgs,
+        ActArgs, ActHistorySearchArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs,
+        ContextRequestArgs, EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs,
+        GroupInviteRequestArgs, GroupRoomArgs, GroupSetAccessArgs, QueryArgs, ReceiveOfferArgs,
+        RecoveryDownloadArgs, RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs,
+        RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -42,6 +42,7 @@ const SEND: &str = "asl_send_expression";
 const SEND_CONTEXT: &str = "asl_send_context_expression";
 const SEND_ACT: &str = "asl_send_act";
 const SEND_FILE: &str = "asl_send_file";
+const ACT_HISTORY_SEARCH: &str = "asl_act_history_search";
 const GROUP_LIST: &str = "asl_group_list";
 const GROUP_CREATE: &str = "asl_group_create";
 const GROUP_MEMBERS: &str = "asl_group_members";
@@ -305,6 +306,14 @@ impl ServerHandler for ToolServer {
                     schema_for_input::<RenewActBudgetArgs>().map_err(|_| invalid_arguments())?,
                 ));
             }
+            if caps["act_history"] == true {
+                tools.push(Tool::new(
+                    ACT_HISTORY_SEARCH,
+                    "Search a bounded view of local, current-user-decryptable Act history. This is a local read-only tool and does not send network messages.",
+                    schema_for_input::<ActHistorySearchArgs>()
+                        .map_err(|_| invalid_arguments())?,
+                ));
+            }
             if caps["request_context"] == true {
                 tools.push(Tool::new(
                     REQUEST_CONTEXT,
@@ -472,6 +481,11 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
             let args: SendFileArgs = parse_arguments(arguments)?;
             args.clone().validate().map_err(|_| invalid_arguments())?;
             Ok(Request::SendFile(args))
+        }
+        ACT_HISTORY_SEARCH => {
+            let args: ActHistorySearchArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::ActHistorySearch(args))
         }
         GROUP_LIST if arguments.is_empty() => Ok(Request::GroupList),
         GROUP_CREATE if arguments.is_empty() => Ok(Request::GroupCreate),
@@ -681,6 +695,28 @@ mod tests {
             }),
         ] {
             let request = CallToolRequestParams::new(SEND_FILE).with_arguments(object(invalid));
+            assert!(parse_request(request).is_err());
+        }
+    }
+
+    #[test]
+    fn act_history_search_accepts_only_bounded_local_queries() {
+        let valid = CallToolRequestParams::new(ACT_HISTORY_SEARCH)
+            .with_arguments(object(json!({ "query": "Rust ownership", "limit": 25 })));
+        assert!(matches!(
+            parse_request(valid),
+            Ok(Request::ActHistorySearch(_))
+        ));
+        for invalid in [
+            json!({}),
+            json!({ "query": "" }),
+            json!({ "query": "x".repeat(257) }),
+            json!({ "query": "rust", "limit": 0 }),
+            json!({ "query": "rust", "limit": 101 }),
+            json!({ "query": "rust", "path": "unexpected" }),
+        ] {
+            let request =
+                CallToolRequestParams::new(ACT_HISTORY_SEARCH).with_arguments(object(invalid));
             assert!(parse_request(request).is_err());
         }
     }

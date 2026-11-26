@@ -125,6 +125,8 @@ Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派�
 
 ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、加入/重入请求、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。`asl_group_invite_request` 只向一个已准入群主设备发送包含完整 room、本机 AgentId/PeerId 和 5 分钟期限的结构化请求；群主刷新后仍需本机审批，请求本身不创建成员资格。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。
 
+设置 `ASL_MCP_HISTORY=read` 会额外暴露 `asl_act_history_search`。它只读当前 Windows 用户可解密的本地 Act 历史，查询最多 256 字节、默认返回 25 条且最多 100 条；结果只回给已认证的本机 MCP 宿主，不触发网络发送、模型调用或权限变更。该授权与群管理、表达式和收件授权相互独立。
+
 已验证身份与语义包可用时，还可调用 `asl_send_context_expression` 给单个 Agent 发送绑定精确上下文摘要的表达式。Core 在发送前重新验证包签名、依赖和一致性向量；接收端事件携带完整 ASL CBOR（`control_cbor_hex`）及本机求值状态。缺包或无法验证时状态为 `unresolved`，不会回退成自由文本。该入口目前不向群发送，也不代表 ContextRequest/Offer 文件同步已完成。
 
 后者允许宿主在初始化后调用 `resources/subscribe` 订阅 `asl://agent/inbound-events`。不需要定时查询：收到 `notifications/resources/updated` 后，调用 `resources/read`，按 `sequence` 处理尚未读取的事件；`dropped` 表示缓冲区丢弃的数量。当前实现的收件箱按会话保存在内存中，有界，不保证离线送达，也不自动启动模型；这是已实现状态，不是最终目标。ASL/1.3 计划把私聊和群聊的离线密文交给分布式邮箱补收，托管节点只保存密文、TTL、大小桶和分片；邮箱路径尚未实现或验收。未订阅、宿主离线或关闭浏览时，当前不为它留存新的被动来信；主动查询的结果只属于发起该任务的会话。

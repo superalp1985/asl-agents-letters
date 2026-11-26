@@ -159,6 +159,13 @@ impl Supervisor {
             return;
         };
         match command {
+            MailCommand::ActHistorySearch {
+                query,
+                limit,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.search_act_history(query, limit));
+            }
             MailCommand::RequestTaskInbox { reply } if !reply.is_closed() => {
                 let _ = reply.send(unix_time_ms().and_then(|now| {
                     self.mailbox
@@ -1000,6 +1007,34 @@ impl Supervisor {
             "owner": format!("agent:{}", alloy_primitives::hex::encode(owner.0)),
             "queued": queued,
             "expires_at_ms": expires_at_ms,
+        }))
+    }
+
+    fn search_act_history(&self, query: String, limit: u32) -> Result<Value, AslError> {
+        let now = i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidPolicyState)?;
+        let store = asl_store::open_store_read_only(&self.state_database)?;
+        let entries = store
+            .search_act_history(now, &query, limit)?
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "conversation_id": row.conversation_id,
+                    "act_id": alloy_primitives::hex::encode(row.act_id),
+                    "mls_epoch": row.mls_epoch,
+                    "direction": row.direction.as_str(),
+                    "act_kind": row.act_kind,
+                    "causal_root": alloy_primitives::hex::encode(row.causal_root),
+                    "reply_to": row.reply_to.map(alloy_primitives::hex::encode),
+                    "body": row.body,
+                    "received_at_ms": row.created_at_ms,
+                    "expires_at_ms": row.expires_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "query": query,
+            "limit": limit,
+            "entries": entries,
         }))
     }
 

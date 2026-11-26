@@ -96,6 +96,9 @@ impl Client {
             Request::SendFile(_) if connection.capabilities["send_file"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
+            Request::ActHistorySearch(_) if connection.capabilities["act_history"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
             Request::GroupList
             | Request::GroupCreate
             | Request::GroupMembers(_)
