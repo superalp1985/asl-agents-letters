@@ -1219,9 +1219,6 @@ impl Supervisor {
             }
             LocalGroupAction::SetAccess { room, update } => self.set_group_access(room, update),
             LocalGroupAction::Dial { address, peer } => {
-                if !address.ip().is_loopback() {
-                    return Err(AslError::PolicyDenied);
-                }
                 enqueue(
                     net,
                     NetworkCommand::Dial {

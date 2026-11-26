@@ -273,7 +273,7 @@ mod tests {
             .unwrap()
             .public()
             .to_peer_id();
-        let address = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 12345));
+        let address = SocketAddr::from(([203, 0, 113, 7], 12345));
         assert!(matches!(
             parse(&format!("dial {address} {peer}")),
             Ok(LocalGroupAction::Dial { address: got, peer: id }) if got == address && id.as_bytes() == peer.to_bytes()

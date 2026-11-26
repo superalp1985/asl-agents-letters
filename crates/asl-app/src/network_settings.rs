@@ -44,6 +44,8 @@ pub struct NetworkSettingsV1 {
     pub quic_port: u16,
     #[serde(default)]
     pub relay_addresses: Vec<String>,
+    /// Compatibility key name. This enables group streams for the configured
+    /// address scope; it is not restricted to loopback.
     #[serde(default)]
     pub loopback_groups: bool,
 }
