@@ -225,7 +225,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 直连接收可设为关闭、只浏览或允许回答。只浏览会在活动页显示已认证请求的意图、主题编号、约束数量和结果类型。活动页可将直连浏览记录设为「不保存」或 1 至 7 天，默认 7 天，最多 200 条。缩短期限会立即清理过期记录，选「不保存」会清空已有直连浏览记录。
 
-活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型、身份编号和 Act 的截断正文预览。Act 正文在 Windows 上按本机用户 DPAPI 保护，默认保留 7 天，并随「群来信保留期」缩短或关闭。窗口最多列出最近 100 条仍在保留期内的会话事件。直连和群来信的浏览记录可分别保留 0 至 7 天；选择不保存会清空相应浏览记录，不关闭自动回答或删除群同步日志。
+活动页还可展开最近的会话。直连按任务和设备分组，群消息按群组分组。详情显示时间、收发方向、结构化消息类型、身份编号和 Act 的截断正文预览。Act 正文在 Windows 上按本机用户 DPAPI 保护，默认保留 7 天，并随「群来信保留期」缩短或关闭。窗口最多列出最近 100 条仍在保留期内的会话事件。本机可用 `asl-core --act-history search "<文字>"` 在最多 1,000 条可解密历史中搜索，或用 `asl-core --act-history export <新文件>` 显式导出版本化 JSON；导出不覆盖已有文件。直连和群来信的浏览记录可分别保留 0 至 7 天；选择不保存会清空相应浏览记录，不关闭自动回答或删除群同步日志。
 
 群组页有两个适用于本机所有群组的开关：「浏览来信」和「允许自动回答」。修改即时生效。活动页仅显示收到时已开启浏览的群来信类型与发送设备。文件传输继续使用单独的目录和收发授权。
 
@@ -361,7 +361,7 @@ Nodes can enable relay-only mode for the next Core start. Configure relay addres
 
 Pause the ASL peer network in Nodes or with `asl-core --network pause on|off`. Pausing closes peer connections, listeners, and relay reservations and persists across Core restarts. It does not pause chain RPC or local services. Resuming uses the address policy and device identity from the current Core session. Peers must pass admission again, and in-flight queries are not replayed. The saved request and the last report are shown separately.
 
-Expand a conversation in Activity to see when each event occurred, its direction, structured message type, participating identities and a bounded Act body preview. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events. Set inbound direct and group browsing history separately to 0–7 days. Zero clears the corresponding browsing history without disabling automatic replies or removing the group synchronization journal. Selected Act history is carried by the passphrase-encrypted migration package and re-protected with the target Windows user's DPAPI.
+Expand a conversation in Activity to see when each event occurred, its direction, structured message type, participating identities and a bounded Act body preview. Direct exchanges are grouped by task and device. Group events are grouped by room. The view includes the latest 100 retained conversation events. Use `asl-core --act-history search "<text>"` for a bounded local substring search over up to 1,000 decryptable entries, or `asl-core --act-history export <new-file>` to write versioned JSON without replacing an existing file. Set inbound direct and group browsing history separately to 0–7 days. Zero clears the corresponding browsing history without disabling automatic replies or removing the group synchronization journal. Selected Act history is carried by the passphrase-encrypted migration package and re-protected with the target Windows user's DPAPI.
 
 The current pixel icon and mascot are original, pixel-by-pixel assets in the repository. Their provenance and system-font boundary are recorded in [`docs/licenses/asl-ui-assets.txt`](docs/licenses/asl-ui-assets.txt).
 

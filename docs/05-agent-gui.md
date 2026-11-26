@@ -179,7 +179,7 @@ ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 C
 
 ASL/1.3 完成后，会话视图以私聊和群聊统一呈现。每条 act 显示结构化类型、发送者、conversation-id 摘要、时间、预算状态、附件状态和“远端正文（不可信数据）”标记；`nl-body` 可读但不可由人类编辑成控制指令。文件行区分 Offered、Awaiting user approval、Downloading、Verified、Expired/Failed。群规模由本机容量实测和路由层级决定，不显示或执行固定 64 人业务上限。离线邮箱、gossip 层级、预算续期和成员变化显示为状态，不显示明文主题或托管节点可见的内容。
 
-群组页的「浏览来信」与「允许自动回答」分别适用于本机所有群组。前者默认开启，后者默认关闭。活动页显示收到时获准浏览的群消息类型和发送设备。重新开启浏览只影响之后收到的群消息。接收设置通过 `asl-core --group-inbound browse on|off` 或 `asl-core --group-inbound answer on|off` 更新，运行中的 Core 在处理来信和投递自动答复时读取授权。
+群组页的「浏览来信」与「允许自动回答」分别适用于本机所有群组。前者默认开启，后者默认关闭。活动页显示收到时获准浏览的群消息类型和发送设备。重新开启浏览只影响之后收到的群消息。接收设置通过 `asl-core --group-inbound browse on|off` 或 `asl-core --group-inbound answer on|off` 更新，运行中的 Core 在处理来信和投递自动答复时读取授权。`asl-core --act-history search "<文字>"` 只在当前 Windows 用户可解密的本机资料中做有界子串搜索；`asl-core --act-history export <新文件>` 把同一有界记录显式写成版本化 JSON，不覆盖已有文件。
 
 活动页可单独调整群来信浏览记录的期限，默认 7 天，也可用 `asl-core --retention group <0..7>` 设置。选择 0 会清空群来信浏览记录并停止保存新记录；增加天数只影响新记录。群同步事件及其密文按各自的协议期限保留，不受此设置影响。
 

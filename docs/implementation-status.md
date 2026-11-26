@@ -17,7 +17,7 @@
 | 两人/小群 MLS 房间工具 | `supervisor/groups.rs`、MCP 群工具 | 三 Core direct 群消息进程测试和双 Core 群文件双端审批测试通过 |
 | v35 opaque 邮箱/预算仓储与 v36 群权限 | `specs/schema-v35.sql`、`specs/schema-v36.sql`、`crates/asl-store/src/mailbox.rs`、`group_access.rs` | v34→v36、幂等、覆盖拒绝、TTL、配额、预算和群权限 8 项通过 |
 | Act 自动模型回复 | `crates/asl-agent/src/act_reply.rs`、`supervisor/auto_reply.rs` | 仅对 `Ask` 生成 `Inform/Clarify`；严格 JSON，禁止 action/tool/path，远端正文只作 untrusted data；使用本机已批准模型端点；asl-agent 全部目标测试通过 |
-| Act 本地证据、历史与迁移 | `supervisor/auto_reply_evidence.rs`、`asl-store/src/act_history.rs`、`asl-store/src/migration.rs` | 在线群请求按当前群 audience 搜索最多 4 个同时具备 ReadChunk/ModelInput permit 的文本片段；收发 Act 元数据及 DPAPI 保护的本地正文进入 7 天可配置保留，GUI 显示截断预览；history 迁移选择会经加密迁移包携带 Act 历史并在目标设备重新 DPAPI 保护 |
+| Act 本地证据、历史与迁移 | `supervisor/auto_reply_evidence.rs`、`asl-store/src/act_history.rs`、`asl-app/src/act_history_export.rs`、`asl-store/src/migration.rs` | 在线群请求按当前群 audience 搜索最多 4 个同时具备 ReadChunk/ModelInput permit 的文本片段；收发 Act 元数据及 DPAPI 保护的本地正文进入 7 天可配置保留，GUI 显示截断预览；本机可按不区分大小写的子串检索最近 1,000 条保留历史，并由用户显式导出到新 JSON 文件；history 迁移选择会经加密迁移包携带 Act 历史并在目标设备重新 DPAPI 保护 |
 | DHT 密文邮箱网络闭环 | `crates/asl-net/src/mailbox.rs`、`transport/mailbox.rs`、`supervisor/mailbox_wire.rs` | 8 KiB 带 hash 记录、16 分片批次、3 天轮换 epoch、7 天本地 TTL、已知联系人和群成员拉取、MLS 再验证；真实双节点 DHT put/get 通过 |
 
 ## 部分完成
@@ -34,7 +34,7 @@
 ## 尚未实现
 
 - 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取，离线 Offer 需来源设备在 Offer 有效期内重新上线后才可进入在线分块传输。
-- Act 历史全文搜索和独立明文导出；当前只有 7 天可配置正文预览、活动元数据及加密迁移包中的 history 选项。
+- Act 历史的语义排序和跨保留期索引；当前只有当前用户可解密、最多扫描 1,000 条的本地子串搜索及显式 JSON 导出。
 - 提示注入红队、跨 audience 外泄测试和分身资源压力测试。
 - 两台真实设备上的建群、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
 - 分层万人群和完整发布包。

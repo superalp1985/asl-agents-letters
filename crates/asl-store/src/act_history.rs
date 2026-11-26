@@ -6,7 +6,9 @@ use crate::{
 };
 
 const MAX_BODY_BYTES: usize = 32 * 1024;
-const MAX_ROWS: u32 = 1_000;
+pub const MAX_ACT_HISTORY_ROWS: u32 = 1_000;
+const MAX_SEARCH_RESULTS: u32 = 100;
+const MAX_QUERY_BYTES: usize = 256;
 const DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
 const UTF8_PREFIX: &[u8] = b"ASL-ACT-BODY-UTF8-v1\0";
 
@@ -17,7 +19,7 @@ pub enum ActDirection {
 }
 
 impl ActDirection {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::In => "in",
             Self::Out => "out",
@@ -55,10 +57,15 @@ pub struct StoredActHistory<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActHistoryRow {
     pub conversation_id: String,
+    pub act_id: [u8; 32],
+    pub mls_epoch: u64,
     pub direction: ActDirection,
     pub act_kind: u16,
+    pub causal_root: [u8; 32],
+    pub reply_to: Option<[u8; 32]>,
     pub body: Option<String>,
     pub created_at_ms: i64,
+    pub expires_at_ms: i64,
 }
 
 impl Store {
@@ -138,13 +145,14 @@ impl Store {
         now_ms: i64,
         limit: u32,
     ) -> Result<Vec<ActHistoryRow>, AslError> {
-        if now_ms < 0 || limit == 0 || limit > MAX_ROWS {
+        if now_ms < 0 || limit == 0 || limit > MAX_ACT_HISTORY_ROWS {
             return Err(AslError::InvalidMessage);
         }
         let mut statement = self
             .connection
             .prepare_cached(
-                "SELECT conversation_id,direction,act_kind,ciphertext,received_at_ms
+                "SELECT conversation_id,act_id,mls_epoch,direction,act_kind,
+                        causal_root,reply_to,ciphertext,received_at_ms,expires_at_ms
                  FROM conversation_act_events
                  WHERE expires_at_ms>?1 AND direction IN ('in','out')
                  ORDER BY received_at_ms DESC,conversation_id,act_id LIMIT ?2",
@@ -152,33 +160,66 @@ impl Store {
             .map_err(database_error)?;
         statement
             .query_map(params![now_ms, i64::from(limit)], |row| {
-                let direction = match row.get::<_, String>(1)?.as_str() {
+                let direction = match row.get::<_, String>(3)?.as_str() {
                     "in" => ActDirection::In,
                     "out" => ActDirection::Out,
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
-                Ok((
-                    row.get::<_, String>(0)?,
-                    direction,
-                    u16::try_from(row.get::<_, i64>(2)?)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(database_error)?
-            .map(|row| {
-                let (conversation_id, direction, act_kind, body, created_at_ms) =
-                    row.map_err(database_error)?;
                 Ok(ActHistoryRow {
-                    conversation_id,
+                    conversation_id: row.get(0)?,
+                    act_id: row
+                        .get::<_, Vec<u8>>(1)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    mls_epoch: u64::try_from(row.get::<_, i64>(2)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     direction,
-                    act_kind,
-                    body: unprotect_body(&body)?,
-                    created_at_ms,
+                    act_kind: u16::try_from(row.get::<_, i64>(4)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    causal_root: row
+                        .get::<_, Vec<u8>>(5)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    reply_to: row
+                        .get::<_, Option<Vec<u8>>>(6)?
+                        .map(|value| value.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
+                        .transpose()?,
+                    body: unprotect_body(&row.get::<_, Vec<u8>>(7)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    created_at_ms: row.get(8)?,
+                    expires_at_ms: row.get(9)?,
                 })
             })
-            .collect()
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn search_act_history(
+        &self,
+        now_ms: i64,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<ActHistoryRow>, AslError> {
+        if query.is_empty()
+            || query.len() > MAX_QUERY_BYTES
+            || query.as_bytes().contains(&0)
+            || limit == 0
+            || limit > MAX_SEARCH_RESULTS
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        let query = query.to_lowercase();
+        let rows = self.recent_act_history(now_ms, MAX_ACT_HISTORY_ROWS)?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| {
+                row.body
+                    .as_ref()
+                    .is_some_and(|body| body.to_lowercase().contains(&query))
+            })
+            .take(limit as usize)
+            .collect())
     }
 
     pub fn prune_act_history(&mut self, now_ms: i64) -> Result<usize, AslError> {
@@ -406,6 +447,48 @@ mod tests {
                 .recent_act_history(current_time_ms(), 10)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn searches_only_decrypted_local_history_with_bounded_results() {
+        let (_directory, mut store) = fixture();
+        let now = current_time_ms() as u64;
+        for (index, body) in ["Rust ownership", "rust channels", "unrelated"]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .record_act_history(ActHistoryRecord {
+                    conversation_id: "00112233445566778899aabbccddeeff",
+                    message_id: Id128([index as u8 + 1; 16]),
+                    mls_epoch: index as u64,
+                    direction: ActDirection::In,
+                    act_kind: 0,
+                    reply_to: None,
+                    causal_root: Id128([9; 16]),
+                    body: Some(body),
+                    now_ms: now + index as u64,
+                    expires_at_ms: now + 7 * DAY_MS as u64,
+                })
+                .unwrap();
+        }
+        let rows = store
+            .search_act_history(current_time_ms(), "RUST", 2)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body.as_deref(), Some("rust channels"));
+        assert_eq!(rows[1].body.as_deref(), Some("Rust ownership"));
+        assert!(store.search_act_history(current_time_ms(), "", 1).is_err());
+        assert!(
+            store
+                .search_act_history(current_time_ms(), "rust", 0)
+                .is_err()
+        );
+        assert!(
+            store
+                .search_act_history(current_time_ms(), &"x".repeat(MAX_QUERY_BYTES + 1), 1)
+                .is_err()
         );
     }
 }

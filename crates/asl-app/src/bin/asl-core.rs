@@ -1,5 +1,7 @@
 #[path = "asl-core/access_control.rs"]
 mod access_control;
+#[path = "asl-core/act_history_control.rs"]
+mod act_history_control;
 #[path = "asl-core/avatar_control.rs"]
 mod avatar_control;
 #[path = "asl-core/bindings_control.rs"]
@@ -53,6 +55,7 @@ fn main() {
             .and_then(asl_app::supervisor::set_direct_inbound_from_environment),
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
+        [flag, args @ ..] if flag == "--act-history" => act_history_control::run(args),
         [flag, args @ ..] if flag == "--avatar" => avatar_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
         [flag, args @ ..] if flag == "--contact-invites" => contact_invite_control::run(args),

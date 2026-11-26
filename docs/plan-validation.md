@@ -1032,3 +1032,9 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 精确回归 `cargo +1.100.0 test -p asl-app --test identity_migration --locked --offline -- --nocapture --test-threads=1`：1 项通过，用时 58.71 秒。
 - 最终集中验证：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略；`cargo +1.100.0 clippy -p asl-store -p asl-app -p asl-net --all-targets --features desktop-ui --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、`git diff --check` 和 schema exporter（35 向量：25 接受、10 拒绝）均通过。
 - 本轮仍未验收真实双机公网/NAT/relay、真实链 RPC、跨用户 DPAPI、MLS 群密钥跨设备迁移或人工 DPI/窗口检查；不可用上述集中测试替代这些范围。
+
+### 2026-11-26 Act 历史搜索与显式导出
+
+- `asl-store::act_history` 现在返回 Act 摘要的 epoch、因果与回复摘要、期限，并新增当前用户解密后的有界、不区分大小写子串搜索：最多扫描 1,000 条保留记录，单次最多返回 100 条，查询上限 256 字节。
+- `asl-core --act-history search "<文字>"` 输出结构化 JSON；`asl-core --act-history export <新文件>` 使用现有 Profile/WriteGrant 路径检查写入版本化 JSON，并要求目标文件不存在。导出范围与最近历史查看相同，不跨出当前保留期或 DPAPI 用户边界。
+- 定向测试：`asl-store` Act history 3 项（含搜索边界与保留策略）和 `asl-app` 导出新文件/拒绝覆盖 1 项通过。生产逻辑不改变网络、群权限或迁移包格式；语义排序、跨保留期索引和跨用户导出未实现。
