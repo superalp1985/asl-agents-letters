@@ -1055,7 +1055,10 @@ impl Supervisor {
                         json!({
                             "request": hex::encode(request.request_id.0),
                             "room": hex::encode(request.wire_id.0),
-                            "agent": hex::encode(request.requester.0),
+                            "agent": format!(
+                                "agent:{}",
+                                hex::encode(request.requester.0)
+                            ),
                             "device": peer_text(&request.device),
                             "mls_epoch": request.mls_epoch,
                             "expires_at_ms": request.expires_at_ms
@@ -1574,7 +1577,7 @@ fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslEr
     Ok(json!({
         "id": hex::encode(invite.id.0),
         "room": hex::encode(invite.wire_id.0),
-        "inviter": hex::encode(invite.inviter.0),
+        "inviter": format!("agent:{}", hex::encode(invite.inviter.0)),
         "device": peer_text(&invite.inviter_device),
         "kind": if store.mls_room_progress(invite.wire_id)?.is_some() { "rejoin" } else { "join" },
         "base_epoch": invite.base_epoch,
