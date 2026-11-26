@@ -1054,11 +1054,25 @@ impl Supervisor {
                         })
                     })
                     .collect::<Vec<_>>();
+                let migration_group_hints = store
+                    .migration_group_hints()?
+                    .into_iter()
+                    .map(|hint| {
+                        json!({
+                            "room": hex::encode(hint.wire_id),
+                            "name": hint.local_name,
+                            "owner": format!("agent:{}", hex::encode(hint.owner.0)),
+                            "last_epoch": hint.last_epoch,
+                            "state": "needs_rejoin"
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 return Ok(json!({
                     "rooms": rooms,
                     "pending": pending,
                     "approved": approved,
-                    "invite_requests": invite_requests
+                    "invite_requests": invite_requests,
+                    "migration_group_hints": migration_group_hints
                 }));
             }
             LocalGroupAction::Room(id) => {

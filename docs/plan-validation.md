@@ -1047,3 +1047,10 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 首次完整回归发现两个群进程夹具失败：快照刷新请求使用 `VIEW_LIMIT=200`，而加入请求存储层上限是 100，导致 `InvalidMessage`；现在群管理使用独立的 100 条请求视图上限。另一个 v32 升级测试只删除旧版表，已补上 v38 `group_invite_requests` 清理。
 - 最终完整工作区：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 忽略。最终错误聚合改动后，`cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1` 为 303 通过、0 失败、5 忽略；严格 Clippy、格式、schema exporter、CDDL（25 接受、10 拒绝）和 `git diff --check` 通过。
 - 尚未执行真实双设备请求、群主 GUI 点击、拒绝审计或公网送达验收。
+
+### 2026-11-26 无密钥迁移群线索
+
+- `Selection.groups` 从源库导出最多 512 条 `active/needs_sync` 群线索：完整线上 Group ID、群名、群主 AgentId 和最后 epoch。迁移包不包含 `sealed_snapshot`、MLS 私钥、成员资格、文件授权或群策略；导入后写入 SQLite v39 `migration_group_hints`，不会创建本机 MLS 房间。
+- `asl_group_list` 把线索以 `state: needs_rejoin` 返回，Agent 可把完整 room 和 owner 交给 `asl_group_invite_request`。成功 Welcome 进入本机房间的事务会删除对应线索；线索只是导航信息，不是入群凭证。
+- 定向验证：`migration::tests::group_hints_export_ids_and_owner_without_mls_state`、v35→v39 迁移和含 `groups` 的加密身份迁移通过，并断言迁移 JSON 不含源 sealed snapshot、目标端没有伪 MLS 房间。
+- 最终完整工作区再次通过：0 失败、13 忽略；严格 Clippy、格式、schema exporter（35 向量：25 接受、10 拒绝）、CDDL（25 接受、10 拒绝）和 `git diff --check` 均通过。

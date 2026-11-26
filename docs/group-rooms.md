@@ -74,6 +74,8 @@ Core 群驱动仅处理 Invite、KeyPackage 和对应回复。持久化后未能
 
 群管理刷新把仍有效的请求和当前已准入连接关联；只有目标设备仍在线时 GUI 才显示“审批并邀请”。确认后走原有定向 Invite、KeyPackage、Welcome 和本机再次审批路径；数据库在该邀请成功入队后把请求标记为 approved。请求本身不提供 MLS 快照、群密钥、成员资格、目录授权或文件访问，也没有自由文本。
 
+身份迁移选择 `groups` 时，目标端只得到 SQLite v39 的 `migration_group_hints`：完整 Group ID、群名、群主 AgentId 和最后 epoch。`asl_group_list` 将其标为 `needs_rejoin`；Agent 用完整 room/owner 发送 `InviteRequest`。成功 Welcome 时同一事务删除线索，不复制旧 MLS 叶子或群密钥。
+
 期限只在本机流转，不改线上协议。Net 将 Core 的出队期限换为单调时钟期限，协商后仍用同一截止时间限制写请求、关闭发送端、读回复和接收完成事件。入站以锁定版本 `libp2p-request-response 0.30.0` 在协商完成后克隆子流 codec 的时点为起点，不晚于 libp2p 自身工作计时器；读帧、Net 回复句柄、写回复及关闭发送端共用该期限。转发到 Core 只公布当时剩余时间，不从转发点续期；Core 继续用本机系统时间检查 IPC 到期。已经完整交给传输层的请求属于在途：即使本机关闭发送端超时，对端仍可能读到完整帧并处理，超时不等于远端没有提交。发方先持久保存 Welcome，符合条件的重试只取回原回复，不重复 Add。
 
 ## 已实现：正式进程中的群组网络与本机审批

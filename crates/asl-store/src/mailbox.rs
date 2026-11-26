@@ -952,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn v35_through_v38_migrations_create_all_new_tables() {
+    fn v35_through_v39_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
         assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         for table in [
@@ -970,6 +970,7 @@ mod tests {
             "contact_invite_prompts",
             "contact_invite_actions",
             "group_invite_requests",
+            "migration_group_hints",
         ] {
             let exists: bool = store
                 .connection
@@ -1003,7 +1004,8 @@ mod tests {
                  DROP TABLE group_access_members;
                  DROP TABLE group_access_policies;
                  DROP TABLE group_invite_requests;
-                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38);",
+                 DROP TABLE migration_group_hints;
+                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39);",
             )
             .unwrap();
         drop(connection);

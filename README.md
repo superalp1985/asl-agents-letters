@@ -102,7 +102,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 ## 已冻结的决定
 
 - 长期 Agent 身份由本地 secp256k1 根密钥控制，并在公共链登记最小状态；每台设备有独立 libp2p PeerId，并持有根密钥签发的设备证书。链上登记证明密钥控制和状态，不证明现实主体或善意。联系人固定 AgentId，而不是地址或设备。
-- 身份迁移通过用户授权的版本化加密包保留身份根密钥和选定的 ASL 数据；目标设备生成新设备密钥。目录授权和 OS 凭据不迁移，MLS 群组在新设备重新入组。
+- 身份迁移通过用户授权的版本化加密包保留身份根密钥和选定的 ASL 数据；目标设备生成新设备密钥。选择 `groups` 时只迁移群 ID、群名、群主 AgentId 和最后 epoch 作为重入线索，不复制 MLS ratchet 或群密钥；目标设备生成新的 MLS 叶子并由群主审批。目录授权和 OS 凭据不迁移。
 - 区块链是 1.0 身份锚定必需项；不自建链、不设单一中心身份服务。可替换志愿赞助者代付 gas，用户也可自付；ASL 不收费、不发币。DHT 和数字短码只负责尽力发现，不作为认证。
 - 首次配对采用短时效、一次性的 PAKE/签名邀请，不自创密码协议。直接连接会暴露网络地址；提供仅中继选项，但不承诺网络匿名。
 - 网络使用 **rust-libp2p**，不同时引入 iroh，避免维护两套连接与发现体系。
@@ -255,7 +255,7 @@ The current code has ASL/1.1 symbolic letters, ASL/1.2 semantic context, act enc
 - A locally protected secp256k1 identity-root key controls the stable `AgentId`; its minimal state is anchored on a public blockchain. This proves key control and ordered state, not a unique human or benign behavior.
 - Each device has its own libp2p key and `PeerId`. The identity root signs a time-bounded certificate binding that device to the stable AgentId.
 - Contacts pin the AgentId. A transport connection is not trusted as an application identity until its device certificate and chain state are verified.
-- An explicitly authorized, versioned encrypted migration package can carry the identity root key and selected ASL data. The destination creates a new device key. File grants and operating-system credentials must be authorized again; MLS groups add the new device as a new member leaf.
+- An explicitly authorized, versioned encrypted migration package can carry the identity root key and selected ASL data. The destination creates a new device key. Selecting `groups` carries only room IDs, names, owner AgentIds and last epochs as rejoin hints; MLS ratchet state and group keys are never copied. The owner must approve a new MLS leaf. File grants and operating-system credentials must be authorized again.
 - Blockchain anchoring is required in 1.0; ASL does not run its own chain or central identity server. Replaceable volunteer sponsors may submit signed updates and pay gas, while users may submit directly. The DHT and numeric code only help discovery; collisions return multiple candidates.
 - Peer control messages use deterministic CBOR/CDDL and typed vocabulary IDs, with no arbitrary text. The sole text field is `act[5] nl-body` after MLS decryption. It enters the model as untrusted data only and cannot create tool calls, actions, paths or permissions. Only a structured action can reach the local PolicyService.
 - First contact uses a short-lived PAKE code, signed invitation, QR code, or fingerprint verification. Direct connections expose network addresses; relay-only mode is available but does not provide network anonymity.
@@ -331,7 +331,7 @@ In the same PowerShell 7 session, run `.\scripts\package-windows.ps1 -OutputZip 
 
 ### Desktop Controls
 
-The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Act events also show direction, type and a bounded preview; their bodies are protected with the current Windows user's DPAPI and follow the group retention setting, up to seven days. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. The encrypted migration package can carry selected Act history, but MLS group keys, directory grants and the window size/DPI acceptance matrix remain separate. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
+The nine desktop views include contacts, groups, activity, transfers, and permissions. The GUI reads a local snapshot and delegates permission changes to `asl-core`. In browse-only mode, Activity shows the intent, topic IDs, constraint count and result type of authenticated direct requests. Act events also show direction, type and a bounded preview; their bodies are protected with the current Windows user's DPAPI and follow the group retention setting, up to seven days. Choose one to seven days of direct history (default seven, up to 200 observations) or turn storage off. Shortening the limit removes expired entries immediately. Turning storage off clears direct browsing history. The encrypted migration package can carry selected Act history and text-free group rejoin hints, but never MLS group keys, directory grants or the window size/DPI acceptance matrix. See the [implementation plan](docs/06-implementation-plan.md) and [validation log](docs/plan-validation.md).
 
 Nodes shows the current chain checkpoint and lets you approve a new slot and Beacon root checked against an independent trusted source. Core checks the approved candidate once on its next start. If verification fails, it keeps the previous snapshot. You can cancel before verification starts, and Core does not pick a trusted source for you. `asl-core --checkpoint status` shows the same state at the command line.
 

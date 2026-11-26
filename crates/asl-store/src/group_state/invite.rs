@@ -551,6 +551,11 @@ fn replace_paused_room(
     )
     .map_err(database_error)?;
     close_room_invites(tx, join.room.wire_id)?;
+    tx.execute(
+        "DELETE FROM migration_group_hints WHERE wire_group_id=?1",
+        [join.room.wire_id.as_bytes()],
+    )
+    .map_err(database_error)?;
     Ok(RoomVersion {
         revision: next_revision as u64,
         mls_epoch: join.room.mls_epoch,

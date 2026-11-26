@@ -112,6 +112,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
             contacts: true,
             trust: true,
             history: true,
+            groups: true,
         },
     )
     .unwrap();
@@ -142,6 +143,13 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
     );
     assert!(!target_paths.signed_device_directory().exists());
     let target_database = target_paths.state().join("asl.sqlite3");
+    assert!(
+        open_store(&target_database)
+            .unwrap()
+            .migration_group_hints()
+            .unwrap()
+            .is_empty()
+    );
     let view = Dashboard::load(&target_database).unwrap();
     assert_eq!(view.contact_bindings.len(), 2);
     assert!(

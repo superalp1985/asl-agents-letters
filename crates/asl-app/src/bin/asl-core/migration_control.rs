@@ -35,6 +35,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                     Some("contacts") => selection.contacts = true,
                     Some("trust") => selection.trust = true,
                     Some("history") => selection.history = true,
+                    Some("groups") => selection.groups = true,
                     _ => return Err(AslError::InvalidMessage),
                 }
             }

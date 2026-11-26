@@ -184,13 +184,14 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
              DROP TABLE group_access_members;
              DROP TABLE group_access_policies;
              DROP TABLE group_invite_requests;
+             DROP TABLE migration_group_hints;
              DELETE FROM schema_migrations WHERE version>32;",
         )
         .unwrap();
     drop(connection);
 
     let store = open_store(&path).unwrap();
-    assert_eq!(store.schema_version(), 38);
+    assert_eq!(store.schema_version(), 39);
     assert_eq!(
         store.get_setting("test.preserved").unwrap().as_deref(),
         Some("\"yes\"")

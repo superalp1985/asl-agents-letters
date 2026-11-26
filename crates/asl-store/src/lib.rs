@@ -38,7 +38,7 @@ pub mod semantic_context;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 38;
+const SCHEMA_VERSION: i64 = 39;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -77,6 +77,7 @@ const SCHEMA_V35: &str = include_str!("../../../specs/schema-v35.sql");
 const SCHEMA_V36: &str = include_str!("../../../specs/schema-v36.sql");
 const SCHEMA_V37: &str = include_str!("../../../specs/schema-v37.sql");
 const SCHEMA_V38: &str = include_str!("../../../specs/schema-v38.sql");
+const SCHEMA_V39: &str = include_str!("../../../specs/schema-v39.sql");
 
 pub struct Store {
     connection: Connection,
@@ -313,6 +314,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 38 {
             apply_migration_in_transaction(&transaction, SCHEMA_V38, 38, now)?;
+        }
+        if version < 39 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V39, 39, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
