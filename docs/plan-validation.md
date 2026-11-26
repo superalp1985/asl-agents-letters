@@ -1073,3 +1073,10 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - `scripts/package-windows.ps1 -Offline` 完成 release 构建并生成 `E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-final-125045.zip`。这是未签名测试候选，不是正式发布包。
 - ZIP 大小 48,684,435 字节，SHA-256 `BDC39BF371AFD37E7BAC81A80DAC795B08D00BD190BE26920E07DAD38330B47C`；包内 18 个文件，含启动/更新脚本、`asl-core.exe`、`asl-ui.exe`、`SHA256SUMS.txt`、SBOM、第三方许可与 MPL sources。
 - 尚未执行解包后 GUI 总测、真实托盘/DPI、公网双机、真实链 RPC 和签名更新验收。
+
+### 2026-11-26 链持久化夹具碰撞修复
+
+- 全工作区串行回归曾单次失败于 `chain::persistence::tests::positive_proof_is_reverified_after_restart_without_renewing_expiry`，创建 resolver 时返回 `InvalidLocalState`。生产链逻辑未改；测试数据库只使用进程 ID 和静态序号，PID 复用时可命中旧文件。
+- 测试数据库文件名增加 128 位随机后缀。精确用例连续运行 3 次通过；该修改只在 `cfg(test)` 中，不进入 Windows 测试包运行时。
+- 修复后的完整工作区验证：`cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0；所有非忽略用例通过，环境门槛和子进程入口用例按标记忽略。随后 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。
+- 本轮验证范围仍是当前 Windows 主机上的构建、单元/集成/契约/本机进程回环测试；没有新增公网双机、真实链 RPC、跨用户 DPAPI、真实托盘/DPI 或独立安全审计证据。

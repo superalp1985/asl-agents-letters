@@ -48,6 +48,8 @@
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，35 个向量中 25 接受、10 拒绝，签名是合成夹具。
 - `scripts/validate-cddl.ps1`：通过；两个 CDDL 文件语法符合，25 接受、10 拒绝符合预期。
 - 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。
+- 最终全量回归曾出现一次 `positive_proof_is_reverified_after_restart_without_renewing_expiry` 的 `InvalidLocalState`；定位为测试数据库名在 PID 复用时潜在碰撞，已加入随机后缀。精确测试连续 3 次通过；修复后的 `cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0，所有非忽略用例通过。
+- 同一工作树的 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。上面的测试和 Clippy 覆盖当前工作区；仍未覆盖真实双机公网/NAT/relay、真实链 RPC、真实窗口/DPI 或独立安全审计。
 
 ## Windows 测试包
 

@@ -25,9 +25,10 @@ impl TestChainDatabase {
         std::fs::create_dir_all(&base).unwrap();
         Self {
             path: base.join(format!(
-                "chain-{}-{}.sqlite3",
+                "chain-{}-{}-{:032x}.sqlite3",
                 std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
+                NEXT.fetch_add(1, Ordering::Relaxed),
+                rand::random::<u128>()
             )),
         }
     }
