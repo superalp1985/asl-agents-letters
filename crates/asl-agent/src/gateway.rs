@@ -204,15 +204,29 @@ pub struct AuthorizedPrompt {
 }
 
 impl AuthorizedPrompt {
+    /// Builds a prompt that contains no local private evidence.
+    ///
+    /// The provider is still checked by [`ModelGateway`] when the request is
+    /// dispatched, including the user's enabled/disabled choice. Callers that
+    /// include local evidence must use [`AuthorizedPrompt::new`] with current
+    /// `ModelInput` permits instead.
+    pub fn data_free(provider_id: ProviderId, content: String) -> Result<Self, ModelGatewayError> {
+        validate_prompt_content(&content)?;
+        Ok(Self {
+            provider_id,
+            content,
+            permits: Vec::new(),
+            instruction: SYSTEM_INSTRUCTION,
+        })
+    }
+
     pub fn new(
         provider_id: ProviderId,
         content: String,
         permits: Vec<Permit>,
     ) -> Result<Self, ModelGatewayError> {
-        if content.is_empty()
-            || content.len() > MAX_PROMPT_BYTES
-            || content.chars().count() > MAX_PROMPT_CHARS
-            || permits.is_empty()
+        validate_prompt_content(&content)?;
+        if permits.is_empty()
             || permits.len() > 4
             || permits.iter().any(|permit| {
                 permit.operation() != asl_policy::AccessOperation::ModelInput
@@ -240,6 +254,16 @@ impl AuthorizedPrompt {
     pub(crate) fn content(&self) -> &str {
         &self.content
     }
+}
+
+fn validate_prompt_content(content: &str) -> Result<(), ModelGatewayError> {
+    if content.is_empty()
+        || content.len() > MAX_PROMPT_BYTES
+        || content.chars().count() > MAX_PROMPT_CHARS
+    {
+        return Err(ModelGatewayError::InvalidPrompt);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for AuthorizedPrompt {

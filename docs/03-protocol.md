@@ -26,7 +26,7 @@ ASL/1.2 增加摘要绑定的语义上下文帧（kind 16-19）。`ContextExpres
 
 ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame`，只能作为 MLS `Application` 解密后的 `group-application` 明文；私聊是两人 MLS 组，与群聊共用同一 act 路径。act 控制字段包括 message/conversation/causal ID、act type、reply-to、结构化 action、blob-ref 附件、hop 和期限；唯一可选任意文本字段是 `act[5] nl-body`，最多 32 KiB。`nl-body` 是不可信远端数据，不能成为系统/开发者指令、工具调用、路径、授权、目标或动作。动作只能来自结构化 `action` 并经 PolicyService；文件字节仍走 `offer/fetch/chunk/hash`，act 只携带 blob-ref。
 
-当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。远程持久加密邮箱补收、自动模型回答、跨设备历史和大规模跨机验收仍未完成；本文不能据此宣称这些能力完整可用。
+当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。回答开启时，`Ask` 可由本机已批准模型生成严格解析的 `Inform/Clarify`，模型不能返回 action、tool、path 或附件控制字段。DHT 密文邮箱已接 8 KiB 记录、分片批次、3 天轮换键和 7 天 TTL；已知联系人或群成员可拉取并用 MLS 重新验证发送者。邮箱不携带文件字节，不提供远端送达回执；真实两设备、公网/NAT/relay 和跨设备历史仍待验收。
 
 ASL/1.3 群内还定义了 `group-policy` 控制值：它只在 MLS 解密后由群创建者（群主）发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId 和禁言 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是该群创建者，再原子替换本机策略。成员端对入站 act 和文件 Offer 都重新检查该策略；策略消息本身不进入自然语言数据区，也记录为无文本控制事件。
 

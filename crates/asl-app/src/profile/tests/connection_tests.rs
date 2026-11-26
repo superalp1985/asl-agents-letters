@@ -1478,5 +1478,58 @@ fn dht_records_are_cached_only_after_key_signature_and_chain_admission() {
         }]
     );
     assert!(wrong_key.events.is_empty());
+
+    let mailbox = asl_net::mailbox::MailboxRecord {
+        recipient_id: root.agent_id().0,
+        sender_id: [9; 32],
+        topic_id: [10; 32],
+        mailbox_id: [11; 32],
+        shard_id: [12; 32],
+        epoch: 1,
+        shard_index: 0,
+        shard_count: 1,
+        expires_at_ms: NOW + LIFETIME,
+        ciphertext: vec![13; 32],
+    };
+    let mailbox_key = mailbox.record_key().unwrap();
+    let mailbox_accepted = admission.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id: [123; 16],
+            key: mailbox_key.as_ref().try_into().unwrap(),
+            value: mailbox.encode().unwrap(),
+        },
+        NOW,
+    );
+    assert_eq!(
+        mailbox_accepted.commands,
+        vec![NetworkCommand::DecideDhtRecord {
+            candidate_id: [123; 16],
+            accept: true,
+        }]
+    );
+    assert!(matches!(
+        mailbox_accepted.events.as_slice(),
+        [AdmittedNetworkEvent::MailboxRecordAvailable(record)] if record == &mailbox
+    ));
+
+    let mut wrong_recipient = mailbox;
+    wrong_recipient.recipient_id = [14; 32];
+    let wrong_key = wrong_recipient.record_key().unwrap();
+    let rejected_mailbox = admission.handle_event(
+        NetworkEvent::DhtRecordCandidate {
+            candidate_id: [124; 16],
+            key: wrong_key.as_ref().try_into().unwrap(),
+            value: wrong_recipient.encode().unwrap(),
+        },
+        NOW,
+    );
+    assert_eq!(
+        rejected_mailbox.commands,
+        vec![NetworkCommand::DecideDhtRecord {
+            candidate_id: [124; 16],
+            accept: false,
+        }]
+    );
+    assert!(rejected_mailbox.events.is_empty());
     drop(database);
 }

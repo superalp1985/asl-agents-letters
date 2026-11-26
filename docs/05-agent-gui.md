@@ -167,9 +167,9 @@ ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 C
 
 ### 7.1 ASL/1.3 对话主线（部分实现）
 
-当前已真实接入 act 编解码、MLS application 收发、入站事件通知、`untrusted_remote_data` 隔离标记、MCP 发 act、显式管理授权下的房间创建/邀请/两人会话工具、群主策略控制、持久预算仓储，以及 libp2p gossipsub 到 Core act 的处理路径。还提供 `asl_send_file`，把本机已授权快照的结构化 Offer 发往现有 MLS 会话。群主策略可限制成员文字、文件和邀请权限，并可指定管理员和禁言设备；入站 act/Offer 也会在成员端重新检查策略。act 历史持久化、自动模型回复、远程密文邮箱托管/补收和跨机多跳验收仍未完成；这些能力不得在 UI 中标为已完成。`nl-body` 始终作为不可信远端数据交付，结构化 `action` 单独经 PolicyService。私聊是两人 MLS 组，与群聊共用同一 act 事件路径；不得为私聊增加明文 IPC。
+当前已真实接入 act 编解码、MLS application 收发、入站事件通知、`untrusted_remote_data` 隔离标记、MCP 发 act、显式管理授权下的房间创建/邀请/两人会话工具、群主策略控制、持久预算仓储，以及 libp2p gossipsub 到 Core act 的处理路径。还提供 `asl_send_file`，把本机已授权快照的结构化 Offer 发往现有 MLS 会话。回答开启时，`Ask` 会通过本机已批准模型生成严格结构的 `Inform/Clarify`；模型不能返回 action、tool、path 或附件控制字段。群 act 和 Offer 会进入带 TTL 的 DHT 密文邮箱，已知联系人或群成员可轮换拉取并继续经 MLS 验证。act 历史持久化、模型本地证据自动选取、audience 自动裁剪、送达回执和跨机多跳验收仍未完成；这些能力不得在 UI 中标为已完成。`nl-body` 始终作为不可信远端数据交付，结构化 `action` 单独经 PolicyService。私聊是两人 MLS 组，与群聊共用同一 act 事件路径；不得为私聊增加明文 IPC。
 
-附件只以 `blob-ref` 出现在 act 中。宿主按现有 `file_offer`、`asl_send_file`、`asl_receive_offer`、`asl_fetch` 和收件授权路径处理；`asl_send_file` 只能引用已导入快照，不接受路径或文件字节。下载完成事件只表示文件已到达或缓存，不把文件字节放进 act、事件正文或模型提示。远程邮箱补收、跨机 gossip 多跳和 64 人以上验收完成前，MCP/UI 必须继续标注这些边界。
+附件只以 `blob-ref` 出现在 act 中。宿主按现有 `file_offer`、`asl_send_file`、`asl_receive_offer`、`asl_fetch` 和收件授权路径处理；`asl_send_file` 只能引用已导入快照，不接受路径或文件字节。下载完成事件只表示文件已到达或缓存，不把文件字节放进 act、事件正文或模型提示。DHT 密文邮箱已可补收群 act/Offer，但文件字节仍须在线授权传输；真实双机重启补收、跨机 gossip 多跳和 64 人以上验收完成前，MCP/UI 必须继续标注这些边界。
 
 ## 8. 单窗口 GUI
 

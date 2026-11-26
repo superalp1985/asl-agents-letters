@@ -980,7 +980,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 单 MLS 群编译硬上限从 64 调整为 512；这是资源上限，不是跨机大群验收。libp2p gossipsub 网络层、Net IPC 命令/事件、Core 订阅/发布以及 gossip act 的 MLS/房间成员重验路径已接线；尚无跨机多跳群聊收敛验收。
 - 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项、三 Core 群消息进程测试 1 项和双 Core 群文件双端审批测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 与工作区全目标编译通过；`scripts/validate-cddl.ps1` 语法通过（24 接受、10 拒绝，含独立 act 向量）。
 - 群消息进程测试首次运行发现 active room 列表把 TEXT `local_group_id` 当 BLOB 读取；修复为严格 32-hex 解码后重跑通过。`group_file_crosses_core_processes_with_two_approvals` 也通过，验证双 Core 群文件双端审批、分块下载和最终内容。两测试验证 direct 路径，不是 gossipsub 多跳或跨机。
-- v35 迁移和 opaque 邮箱/预算仓储已实现并测试，但尚未接入远程 DHT 托管、邮箱收发、Core/Agent 预算 UI 或离线补收。
+- v35 迁移和 opaque 邮箱/预算仓储已实现并测试；本段是当时快照，远程 DHT 托管、邮箱收发和已知发送者离线补收后来已接线，见本文件末尾的 2026-11-26 Act 自动回复与 DHT 密文邮箱记录。Core/Agent 预算 UI 和送达回执仍未完成。
 - 未运行最新工作区全量测试、严格 Clippy、真实两设备建群/邀请/act 互通、群文件回归、提示注入红队、离线邮箱投递、512 人大群或公网/链 RPC。上述功能不得仅凭本轮编译和局部测试标为完整验收。
 
 ### 2026-11-26 Agent 文件 Offer MCP 入口与工作区基线
@@ -1006,3 +1006,12 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 安全复核后追加：完整 AgentId 查询使用 `lookup-agent` 在同一动作中保存目标 `AgentId`，公开发现使用 `ASL-AGENT-LOOKUP-v1` 专用 DHT provider 键，Core 只记录精确相等且通过链/设备准入的候选，不再把长号降级成短码后接受其他 Agent；临时短码编码为同时绑定邀请人 AgentId 和签发设备 PeerId 的 `ASL-CONTACT-INVITE-CODE:1:...`。完整 signed envelope 在 DHT 拨号前先查本地链控制者并验签；短码连接在 DHT provider 过滤和发送 Pairing 前都必须命中绑定的 AgentId/PeerId。公开精确发现默认关闭，用户开启后才发布该 provider，不授予联系人/文件权限。重启时无内存连接上下文的 pending prompt 自动关闭，Pairing 回复先进入 Net 再提交本地 receipt，拨号和 outgoing 请求按操作/连接/到期回收；Pairing 邀请 24 小时签名上限与 store 消费上限已统一。`send_network_command(ReplyPairing)` 只确认帧已写入 Net IPC，仍不等同远端实际收到；持久回复 outbox/远端送达确认尚未实现。
 - 安全修复后的全工作区回归：首次运行唯一失败为既有 `model_endpoint_settings::cli_approval_controls_an_existing_gateway_without_restarting` 在本机 mock socket 上遇到 `Os { code: 10035, kind: WouldBlock }` 后返回 `ProviderUnavailable`。该 fixture 接受连接后继承 Windows 非阻塞状态，已改为显式 `set_nonblocking(false)`；精确用例随后 0.19 秒通过，并再次执行同命令全工作区测试，退出码 0。邀请修复相关的 `asl-store` 精确 lookup、`asl-app` 邀请类型、Core CLI 绑定/邀请参数测试和桌面目标编译均通过。
 - 最终统一运行（含精确 AgentId DHT 键、设备绑定短码、Pairing 上限统一和 endpoint fixture 修复）：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；本轮 `--list` 枚举 929 项，忽略项仍为显式环境门槛/子进程入口。先前一次失败来自 `agent_setup` 仍断言 schema v36，修正为 v37 后重跑通过。跨两台真实设备、公网 DHT 可达性、二维码被真实摄像头扫描和跨机邀请确认仍未验收。
+
+### 2026-11-26 Act 自动回复与 DHT 密文邮箱
+
+- `asl-agent::act_reply` 只把 `Ask` act 转为严格结构的 `Inform` 或 `Clarify`。远端 `nl_body` 和本地证据 excerpt 都放在 untrusted JSON 数据区；回复解析拒绝 action、tool、path、附件和未知字段，正文上限 8 KiB。`AuthorizedPrompt::data_free` 允许已批准模型端点在没有本地私有证据时调用，带本地证据的路径仍要求 ReadChunk + ModelInput permit。
+- `supervisor::auto_reply` 仅在群组开关允许回答时排队，使用注册表顺序中第一个已批准 provider；模型失败不发伪造回复，单会话 5 秒冷却，队列和最近请求均有界。当前应用接线使用 data-free 提示；本地证据选择接口已存在，但尚未把文件候选自动装进该后台回复。
+- 新增 `asl-net::mailbox` 8 KiB 二进制记录：recipient/sender/topic/mailbox/shard、epoch、分片、TTL 和 BLAKE3 hash，记录键域分离。DHT store 只接受键与路由字段一致的密文邮箱记录；传输入口支持 put/get，并用真实双节点 TCP/Noise 测试验证 put 完成和 raw get。
+- `supervisor::mailbox_wire` 将群 act/Offer 的 MLS 密文写入本地 opaque 槽，按 3 天轮换 epoch 组成最多 16 个 8 KiB 分片批次，发布到 DHT；已知联系人或群成员按最近 3 个 epoch 拉取，重组后仍由 MLS 验证实际成员/epoch。HTTP/relay/NAT 可达性仍来自现有配置化 libp2p 地址策略，不写死地址。
+- 定向验证：`asl-net` mailbox lib 10 项、DHT limits 7 项、`asl-agent` 全目标 46 项、`asl-app` IPC round-trip 1 项和 DHT mailbox admission 1 项通过。完整工作区 `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略。
+- `cargo +1.100.0 clippy -p asl-agent -p asl-net -p asl-store -p asl-app --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、schema exporter（35 向量，25 接受、10 拒绝）和 `git diff --check` 通过。未完成真实两设备重启补收、送达回执、NAT/relay 邮箱矩阵、模型本地证据自动选取或公网 DHT 验收；不得把这些定向测试写成公网完成。

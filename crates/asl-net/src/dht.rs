@@ -1,10 +1,14 @@
-use std::{borrow::Cow, collections::HashMap, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128},
     protocol::ConceptRef,
-    record::{RecordKind, RecordPayload, decode_record},
+    record::{RecordKind, RecordPayload, SignedRecord, decode_record},
 };
 pub use libp2p::kad::RecordKey;
 use libp2p::{
@@ -14,6 +18,8 @@ use libp2p::{
         store::{self, MemoryStore, MemoryStoreConfig, RecordStore},
     },
 };
+
+use crate::mailbox::{MailboxRecord, decode_mailbox_record_for_key};
 
 pub const MAX_DHT_VALUE_BYTES: usize = 8 * 1024;
 pub const MAX_DHT_RECORDS: usize = 10_000;
@@ -170,33 +176,37 @@ impl RecordStore for BoundedRecordStore {
         if record.key.as_ref().len() != KEY_BYTES || record.value.len() > MAX_DHT_VALUE_BYTES {
             return Err(store::Error::ValueTooLarge);
         }
-        let signed = decode_record(&record.value).map_err(|_| store::Error::ValueTooLarge)?;
-        let payload = &signed.record.payload;
-        if !matches!(
-            payload,
-            RecordPayload::Profile(_)
-                | RecordPayload::DeviceDirectory(_)
-                | RecordPayload::ShortCode(_)
-        ) || record_key_for_payload(payload).map_err(|_| store::Error::ValueTooLarge)?
-            != record.key
-        {
-            return Err(store::Error::ValueTooLarge);
+        let now_ms = unix_time_millis()?;
+        let mut record = record;
+        let validated = validate_record_value(&record.key, &record.value, now_ms)?;
+        if let ValidatedRecord::Mailbox(mailbox) = &validated {
+            record.expires =
+                Some(Instant::now() + Duration::from_millis(mailbox.expires_at_ms - now_ms));
         }
 
         let existing_size = self.record_sizes.get(&record.key).copied().unwrap_or(0);
         if let Some(existing) = self.inner.get(&record.key) {
             if !existing.is_expired(Instant::now()) {
-                let previous =
-                    decode_record(&existing.value).map_err(|_| store::Error::ValueTooLarge)?;
-                let previous_record = &previous.record;
-                let candidate = &signed.record;
-                if previous_record.payload.agent_id() != candidate.payload.agent_id()
-                    || previous_record.payload.kind() != candidate.payload.kind()
-                    || candidate.sequence < previous_record.sequence
-                    || (candidate.sequence == previous_record.sequence
-                        && existing.value != record.value)
-                {
-                    return Err(store::Error::ValueTooLarge);
+                let previous = validate_record_value(&record.key, &existing.value, now_ms)?;
+                match (&validated, previous) {
+                    (ValidatedRecord::Mailbox(_), ValidatedRecord::Mailbox(_)) => {
+                        // A sender may replace its own rotating mailbox batch.
+                        // MLS still authenticates the opaque payload; the DHT
+                        // key is only a bounded store-and-forward slot.
+                    }
+                    (ValidatedRecord::Identity(candidate), ValidatedRecord::Identity(previous)) => {
+                        let previous_record = &previous.record;
+                        let candidate = &candidate.record;
+                        if previous_record.payload.agent_id() != candidate.payload.agent_id()
+                            || previous_record.payload.kind() != candidate.payload.kind()
+                            || candidate.sequence < previous_record.sequence
+                            || (candidate.sequence == previous_record.sequence
+                                && existing.value != record.value)
+                        {
+                            return Err(store::Error::ValueTooLarge);
+                        }
+                    }
+                    _ => return Err(store::Error::ValueTooLarge),
                 }
             } else {
                 self.inner.remove(&record.key);
@@ -291,6 +301,47 @@ impl RecordStore for BoundedRecordStore {
     }
 }
 
+enum ValidatedRecord {
+    Identity(SignedRecord),
+    Mailbox(MailboxRecord),
+}
+
+fn validate_record_value(
+    key: &RecordKey,
+    value: &[u8],
+    now_ms: u64,
+) -> store::Result<ValidatedRecord> {
+    if let Ok(signed) = decode_record(value) {
+        let payload = &signed.record.payload;
+        if matches!(
+            payload,
+            RecordPayload::Profile(_)
+                | RecordPayload::DeviceDirectory(_)
+                | RecordPayload::ShortCode(_)
+        ) && record_key_for_payload(payload).map_err(|_| store::Error::ValueTooLarge)? == *key
+        {
+            return Ok(ValidatedRecord::Identity(signed));
+        }
+    }
+
+    let mailbox =
+        decode_mailbox_record_for_key(key, value).map_err(|_| store::Error::ValueTooLarge)?;
+    mailbox
+        .validate_at(now_ms)
+        .map_err(|_| store::Error::ValueTooLarge)?;
+    Ok(ValidatedRecord::Mailbox(mailbox))
+}
+
+fn unix_time_millis() -> store::Result<u64> {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| store::Error::ValueTooLarge)?
+            .as_millis(),
+    )
+    .map_err(|_| store::Error::ValueTooLarge)
+}
+
 fn provider_record_size(record: &ProviderRecord) -> usize {
     record.key.as_ref().len()
         + record.provider.to_bytes().len()
@@ -305,7 +356,24 @@ fn provider_record_size(record: &ProviderRecord) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox::{MAX_MAILBOX_RECORD_BYTES, MailboxRecord, mailbox_record_key};
     use asl_types::record::{ShortCodeClaim, encode_record_payload};
+
+    fn mailbox_record(ciphertext: Vec<u8>) -> MailboxRecord {
+        let now_ms = unix_time_millis().unwrap();
+        MailboxRecord {
+            recipient_id: [11; 32],
+            sender_id: [12; 32],
+            topic_id: [13; 32],
+            mailbox_id: [14; 32],
+            shard_id: [15; 32],
+            epoch: 9,
+            shard_index: 0,
+            shard_count: 1,
+            expires_at_ms: now_ms + 60_000,
+            ciphertext,
+        }
+    }
 
     #[test]
     fn public_key_functions_require_supported_concepts_and_fixed_short_codes() {
@@ -339,5 +407,71 @@ mod tests {
             key,
             handle_key(asl_types::record::short_code(agent)).unwrap()
         );
+    }
+
+    #[test]
+    fn store_accepts_only_valid_mailbox_records_for_mailbox_keys() {
+        let peer = PeerId::random();
+        let mut store = BoundedRecordStore::new(peer);
+        let mailbox = mailbox_record(b"opaque-ciphertext".to_vec());
+        let key = mailbox.record_key().unwrap();
+        let value = mailbox.encode().unwrap();
+        let record = Record {
+            key: key.clone(),
+            value: value.clone(),
+            publisher: None,
+            expires: None,
+        };
+
+        store.put(record.clone()).unwrap();
+        store.put(record).unwrap();
+        let mut replacement = mailbox_record(b"new-opaque-batch".to_vec());
+        replacement.mailbox_id = [16; 32];
+        let replacement_value = replacement.encode().unwrap();
+        store
+            .put(Record {
+                key: replacement.record_key().unwrap(),
+                value: replacement_value.clone(),
+                publisher: None,
+                expires: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store.get(&replacement.record_key().unwrap()).unwrap().value,
+            replacement_value
+        );
+        assert!(matches!(
+            store.put(Record {
+                key: replacement.record_key().unwrap(),
+                value: b"arbitrary text".to_vec(),
+                publisher: None,
+                expires: None,
+            }),
+            Err(store::Error::ValueTooLarge)
+        ));
+        assert_eq!(store.record_count(), 1);
+    }
+
+    #[test]
+    fn store_rejects_mailbox_records_under_the_wrong_key() {
+        let peer = PeerId::random();
+        let mut store = BoundedRecordStore::new(peer);
+        let mailbox = mailbox_record(b"opaque-ciphertext".to_vec());
+        let wrong_key = mailbox_record_key([21; 32], [12; 32], 9, 0).unwrap();
+
+        assert!(matches!(
+            store.put(Record {
+                key: wrong_key,
+                value: mailbox.encode().unwrap(),
+                publisher: None,
+                expires: None,
+            }),
+            Err(store::Error::ValueTooLarge)
+        ));
+    }
+
+    #[test]
+    fn mailbox_record_store_limit_matches_dht_limit() {
+        assert_eq!(MAX_MAILBOX_RECORD_BYTES, MAX_DHT_VALUE_BYTES);
     }
 }

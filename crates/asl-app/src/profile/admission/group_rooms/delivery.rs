@@ -66,7 +66,7 @@ impl CoreAdmission {
                 application,
                 now_ms,
             },
-            false,
+            true,
             enqueue,
         )
     }

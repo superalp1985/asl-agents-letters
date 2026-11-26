@@ -97,6 +97,10 @@ fn cli_approval_controls_an_existing_gateway_without_restarting() {
     assert!(!cli(&["allow", &id.0, "stale"]).status.success());
     assert!(cli(&["allow", &id.0, reviewed]).status.success());
     assert!(status().authorized);
+    assert_eq!(
+        ModelEndpointAccess::new(&paths).first_authorized().unwrap(),
+        Some(id.clone())
+    );
 
     assert!(AuthorizedPrompt::new(id.clone(), "unapproved".into(), vec![]).is_err());
     assert_eq!(
@@ -179,6 +183,10 @@ fn cli_approval_controls_an_existing_gateway_without_restarting() {
     assert!(cli(&["revoke", &id.0]).status.success());
     save(&original);
     assert!(!status().authorized);
+    assert_eq!(
+        ModelEndpointAccess::new(&paths).first_authorized().unwrap(),
+        None
+    );
     assert_eq!(
         invoke(1).unwrap_err(),
         ModelGatewayError::AuthorizationDenied

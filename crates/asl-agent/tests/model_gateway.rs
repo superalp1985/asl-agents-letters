@@ -470,6 +470,19 @@ fn authorized_prompt_uses_only_registered_endpoint_and_returns_model_text() {
 }
 
 #[test]
+fn data_free_prompt_dispatches_without_model_input_permits() {
+    let server = MockServer::start(success_response());
+    let gateway = build_model_gateway(provider_config(server.endpoint.clone(), true));
+    let (policy, _) = authorized_policy(provider_id(), true);
+    let prompt = AuthorizedPrompt::data_free(provider_id(), "data-free input".into()).unwrap();
+    let result = runtime().block_on(gateway.complete(&provider_id(), prompt, &policy, NOW_MS));
+    assert_eq!(result.unwrap().as_str(), r#"{"kind":"answer"}"#);
+    let request = server.join();
+    let body: serde_json::Value = serde_json::from_slice(request_body(&request)).unwrap();
+    assert_eq!(body["messages"][1]["content"], "data-free input");
+}
+
+#[test]
 fn url_in_prompt_is_never_contacted_as_an_http_target() {
     let (target, trap) = trap_listener();
     let server = MockServer::start(success_response());

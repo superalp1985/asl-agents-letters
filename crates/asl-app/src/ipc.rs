@@ -67,7 +67,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=65)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -300,6 +300,14 @@ pub enum IpcMessage {
     FindProviders {
         lookup_id: [u8; 16],
         key: [u8; 32],
+    },
+    LookupDhtRecord {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    PublishMailboxRecord {
+        operation_id: [u8; 16],
+        record: Vec<u8>,
     },
     StartProviding {
         operation_id: [u8; 16],
@@ -1095,6 +1103,26 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             44
         }
+        IpcMessage::LookupDhtRecord { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            64
+        }
+        IpcMessage::PublishMailboxRecord {
+            operation_id,
+            record,
+        } => {
+            if *operation_id == [0; 16] || asl_net::mailbox::MailboxRecord::decode(record).is_err()
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(record);
+            65
+        }
         IpcMessage::StartProviding { operation_id, key } => {
             if *operation_id == [0; 16] {
                 return Err(AslError::InvalidMessage);
@@ -1585,6 +1613,19 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             lookup_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
         }),
+        64 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::LookupDhtRecord {
+            operation_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        65 if (18..=17 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES).contains(&body.len())
+            && body[..16] != [0; 16]
+            && asl_net::mailbox::MailboxRecord::decode(&body[16..]).is_ok() =>
+        {
+            Ok(IpcMessage::PublishMailboxRecord {
+                operation_id: body[..16].try_into().unwrap(),
+                record: body[16..].to_vec(),
+            })
+        }
         54 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::StartProviding {
             operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
@@ -2182,6 +2223,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         60..=61 => 48,
         62 => 50 + MAX_GOSSIP_PAYLOAD_BYTES,
         63 => 34 + 128 + 32 + 2 + MAX_GOSSIP_PAYLOAD_BYTES,
+        64 => 48,
+        65 => 16 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2696,6 +2739,27 @@ mod tests {
             IpcMessage::NetworkError {
                 code: NetworkErrorCode::Capacity,
             },
+            IpcMessage::LookupDhtRecord {
+                operation_id: [61; 16],
+                key: [62; 32],
+            },
+            IpcMessage::PublishMailboxRecord {
+                operation_id: [63; 16],
+                record: asl_net::mailbox::MailboxRecord {
+                    recipient_id: [64; 32],
+                    sender_id: [65; 32],
+                    topic_id: [66; 32],
+                    mailbox_id: [67; 32],
+                    shard_id: [68; 32],
+                    epoch: 1,
+                    shard_index: 0,
+                    shard_count: 1,
+                    expires_at_ms: u64::MAX - 1,
+                    ciphertext: vec![69; 16],
+                }
+                .encode()
+                .unwrap(),
+            },
             IpcMessage::GossipSubscribe {
                 operation_id: [51; 16],
                 key: [52; 32],
@@ -2755,6 +2819,8 @@ mod tests {
                 | IpcMessage::ReplyGroup { .. }
                 | IpcMessage::SetAddressPolicy { .. }
                 | IpcMessage::FindProviders { .. }
+                | IpcMessage::LookupDhtRecord { .. }
+                | IpcMessage::PublishMailboxRecord { .. }
                 | IpcMessage::StartProviding { .. }
                 | IpcMessage::StopProviding { .. }
                 | IpcMessage::PrepareProfile { .. }

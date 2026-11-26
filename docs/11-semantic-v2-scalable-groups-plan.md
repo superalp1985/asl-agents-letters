@@ -1,6 +1,6 @@
 # 修订计划：结构化控制 + 加密自然语言、按性能伸缩的群聊与不限次交流
 
-状态：第 4 版实现基线（2026-11-26）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 已用于表达式信件，ASL/1.2 已用于签名语义上下文，ASL/1.3 新增 `act-nl`；当前存储 schema 为 v36。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、发送侧持久预算、libp2p gossipsub 网络与 Core act 路由、v35 opaque 邮箱底座、v36 群主策略/管理员/禁言投影已经落地；远程邮箱补收、自动模型回复、完整 audience 隔离和大规模跨机验收仍未完成。
+状态：第 4 版实现基线（2026-11-26）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 已用于表达式信件，ASL/1.2 已用于签名语义上下文，ASL/1.3 新增 `act-nl`；当前存储 schema 为 v37。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、发送侧持久预算、libp2p gossipsub 网络与 Core act 路由、v35 opaque 邮箱底座、v36 群主策略/管理员/禁言投影、v37 有期限联系人邀请已经落地。回答开启时，`Ask` act 可由本机已批准模型生成严格结构的 `Inform/Clarify`；DHT 密文邮箱可投递和补收群 act/Offer。模型本地证据自动选取、完整 audience 隔离、真实两设备重启补收和大规模跨机验收仍未完成。
 
 ## 0. 决策记录（2026-11-25）
 
@@ -346,7 +346,7 @@ v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_ac
 - `gossip_topic_state`：主题、群/epoch 绑定、轮换时间、mesh 健康度和本地资源预算。
 - `local_capacity_measurements`：本机容量等级、测量时间和参数；不能成为身份权限。
 
-私聊与群聊复用现有 MLS 房间表；conversation-id 映射继续使用 `mls_room_states.local_group_id`。邮箱 API 只接受密文字节，不解析内容。远程 DHT/relay 邮箱传输尚未接通。
+私聊与群聊复用现有 MLS 房间表；conversation-id 映射继续使用 `mls_room_states.local_group_id`。邮箱 API 只接受密文字节，不解析内容。DHT 邮箱投递和已知发送者轮换拉取已接通；真实双机、送达回执、公网/NAT/relay 与重启补收仍未验收。
 
 ### 7.4 当前对齐结果
 
@@ -367,8 +367,8 @@ v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_ac
 当前实现状态以代码、README、`docs/06-implementation-plan.md` 恢复点和 `docs/07-testing-release.md` 为准：
 
 - 已实现：严格确定性 CBOR、ASL/1.1 表达式、ASL/1.2 语义上下文、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v36、查询/文件基础、OpenMLS 群房间、群文件授权、act codec、act MLS 收发、MCP 发 act、群/MCP 管理、群主策略/管理员/禁言投影、p2p/gossipsub 网络层及 Core act/Policy 路径。
-- 部分实现：两人 MLS 会话工具已存在但缺两台真实设备验收；gossipsub 有真实双节点网络测试和 Core 路径，但缺跨机多跳/规模验收；v35 有 opaque 邮箱仓储但远程 DHT/relay 投递未接；v36 已有群主策略和管理员/禁言投影，但缺真实多设备策略同步验收；发送预算已持久扣减和可续期，其他复合额度未接。
-- 尚未实现：自动模型回复、act 历史持久化、audience 自动裁剪、远程邮箱补收、分层拓扑、完整 GUI 操作、提示注入红队和公网/链 RPC 全链路验收。
+- 部分实现：两人 MLS 会话工具已存在但缺两台真实设备验收；gossipsub 有真实双节点网络测试和 Core 路径，但缺跨机多跳/规模验收；v35 opaque 邮箱仓储之上已接 DHT 密文投递和已知发送者补收，但缺真实双机重启、送达回执和公网/NAT/relay 验收；v36 已有群主策略和管理员/禁言投影，但缺真实多设备策略同步验收；发送预算已持久扣减和可续期，其他复合额度未接。
+- 尚未实现：模型本地证据自动选取、act 历史持久化、audience 自动裁剪、邮箱送达回执、真实两设备重启补收、分层拓扑、完整 GUI 操作、提示注入红队和公网/链 RPC 全链路验收。
 
 待实现：
 
@@ -486,4 +486,4 @@ T14–T18 已有的安全切片不删除、不回退。只有与本计划明确�
 - 新增 `act` / `nl-body` 的接受/拒绝固定向量：合法正文通过；非 `act[5]` 位置的 tstr、非法 UTF-8、NUL、超长正文、未知必需字段、错误 MLS sender、重复 act-id 全部拒绝。
 - `scripts/validate-cddl.ps1` 与 `docs/protocol-vectors.md` 同步扩充；A25 按 7.4 改写，不再把「act[5] 合法文本」判为缺陷。
 - 注入红队（4.6）、audience 外泄、预算耗尽与容量门槛按 8.4–8.6 集中执行，并如实记录实际命令与结果。
-- 当前已有 act 2 项、asl-groups 11 项、asl-net 35 项、mailbox 6 项、gossip IPC 1 项和 MCP 契约 4 项定向测试通过；CDDL 语法通过。未运行工作区全量测试、严格 Clippy、真实两设备 act 互通、远程邮箱、跨机 gossip 或规模验收，不得把计划项写成全量通过。
+- 当前已有 act、asl-groups、真实双节点 DHT mailbox put/get、mailbox 本地分片、gossip IPC 和 MCP 契约定向测试通过；asl-agent 全目标、严格 Clippy 和格式检查也通过。仍未完成真实两设备 act 互通、重启补收、公网/NAT/relay、跨机 gossip 或规模验收，不得把计划项写成全量通过。

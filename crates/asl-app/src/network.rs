@@ -114,6 +114,14 @@ pub enum NetworkCommand {
         lookup_id: [u8; 16],
         key: [u8; 32],
     },
+    LookupDhtRecord {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    PublishMailboxRecord {
+        operation_id: [u8; 16],
+        record: asl_net::mailbox::MailboxRecord,
+    },
     StartProviding {
         operation_id: [u8; 16],
         key: [u8; 32],
@@ -281,6 +289,16 @@ impl NetworkCommand {
                 accept,
             },
             Self::FindProviders { lookup_id, key } => IpcMessage::FindProviders { lookup_id, key },
+            Self::LookupDhtRecord { operation_id, key } => {
+                IpcMessage::LookupDhtRecord { operation_id, key }
+            }
+            Self::PublishMailboxRecord {
+                operation_id,
+                record,
+            } => IpcMessage::PublishMailboxRecord {
+                operation_id,
+                record: record.encode()?,
+            },
             Self::StartProviding { operation_id, key } => {
                 IpcMessage::StartProviding { operation_id, key }
             }

@@ -268,6 +268,7 @@ pub enum AdmittedNetworkEvent {
         registry_sequence: u64,
         record: Vec<u8>,
     },
+    MailboxRecordAvailable(asl_net::mailbox::MailboxRecord),
 }
 
 #[derive(Default)]
@@ -1022,6 +1023,25 @@ impl CoreAdmission {
             candidate_id,
             accept: false,
         };
+        if let Ok(record) = asl_net::mailbox::decode_mailbox_record_for_key(
+            &asl_net::dht::RecordKey::new(&key),
+            &value,
+        ) {
+            if record.recipient_id != self.local_hello.agent_id.0
+                || record.validate_at(now_ms).is_err()
+            {
+                batch.commands.push(reject());
+            } else {
+                batch.commands.push(NetworkCommand::DecideDhtRecord {
+                    candidate_id,
+                    accept: true,
+                });
+                batch
+                    .events
+                    .push(AdmittedNetworkEvent::MailboxRecordAvailable(record));
+            }
+            return;
+        }
         let Ok(signed) = decode_record(&value) else {
             batch.commands.push(reject());
             return;

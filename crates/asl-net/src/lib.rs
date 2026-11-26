@@ -3,6 +3,7 @@
 pub mod address_policy;
 pub mod codec;
 pub mod dht;
+pub mod mailbox;
 pub mod pairing;
 pub mod relay;
 pub mod transport;

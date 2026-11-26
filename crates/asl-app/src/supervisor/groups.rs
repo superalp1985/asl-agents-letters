@@ -304,21 +304,12 @@ impl Supervisor {
 
     pub(super) fn route_group_event(&mut self, event: NetworkEvent, now_ms: u64) {
         if let NetworkEvent::GossipReceived { key, payload, .. } = &event {
-            let mailbox = &mut self.mailbox;
-            if let (Some(groups), Some(admission)) = (self.groups.as_mut(), self.admission.as_mut())
-            {
-                let _ = Self::handle_group_gossip(
-                    mailbox,
-                    groups,
-                    admission,
-                    Hash32(*key),
-                    payload,
-                    now_ms,
-                );
-            }
+            let _ = self.handle_group_gossip(Hash32(*key), payload, now_ms);
             return;
         }
-        let (Some(groups), Some(admission)) = (&mut self.groups, &mut self.admission) else {
+        let (Some(groups), Some(admission), auto_reply) =
+            (&mut self.groups, &mut self.admission, &mut self.auto_reply)
+        else {
             return;
         };
         if groups.cleanup_failed {
@@ -403,6 +394,12 @@ impl Supervisor {
                             .unwrap_or(false),
                         _ => true,
                     });
+            if member_allowed
+                && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
+                && let GroupApplication::Act(act) = application.as_ref()
+            {
+                super::auto_reply::queue_auto_reply(auto_reply, *wire_id, act);
+            }
             if member_allowed
                 && self.mailbox.interested()
                 && let Some(member) = requester.as_ref()
@@ -524,10 +521,8 @@ impl Supervisor {
         }
     }
 
-    fn handle_group_gossip(
-        mailbox: &mut crate::agent_mail::Mailbox,
-        groups: &mut LoopbackGroups,
-        admission: &mut crate::profile::CoreAdmission,
+    pub(super) fn handle_group_gossip(
+        &mut self,
         key: Hash32,
         payload: &[u8],
         now_ms: u64,
@@ -541,6 +536,12 @@ impl Supervisor {
             return Err(AslError::InvalidMessage);
         }
         let directories = HashMap::new();
+        let (Some(groups), Some(admission)) = (self.groups.as_mut(), self.admission.as_mut())
+        else {
+            return Ok(());
+        };
+        let mailbox = &mut self.mailbox;
+        let auto_reply = &mut self.auto_reply;
         let Some((application, agent, peer)) =
             admission.apply_mls_gossip(&mut groups.store, &packet, &directories, now_ms)?
         else {
@@ -576,17 +577,44 @@ impl Supervisor {
             return Ok(());
         }
         if let GroupApplication::Act(act) = &application
+            && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
+        {
+            super::auto_reply::queue_auto_reply(auto_reply, key, act);
+        }
+        if let GroupApplication::Act(act) = &application
             && mailbox.interested()
             && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
         {
             mailbox.observe_act(
                 crate::downloads::DownloadSource {
                     agent_id: agent,
+                    peer_id: peer.clone(),
+                },
+                [0; 16],
+                (key, packet.epoch, binding.clone()),
+                act,
+                now_ms,
+            );
+        }
+        let frame = match application {
+            GroupApplication::Query(query) => Some(WireFrame::Query(query)),
+            GroupApplication::Answer(answer) => Some(WireFrame::Answer(answer)),
+            GroupApplication::Offer(offer) => Some(WireFrame::Offer(offer)),
+            GroupApplication::Expression(expression) => Some(WireFrame::Expression(expression)),
+            _ => None,
+        };
+        if let Some(frame) = frame
+            && mailbox.interested()
+            && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
+        {
+            mailbox.observe(
+                crate::downloads::DownloadSource {
+                    agent_id: agent,
                     peer_id: peer,
                 },
                 [0; 16],
-                (key, packet.epoch, binding),
-                act,
+                Some((key, packet.epoch, binding)),
+                &frame,
                 now_ms,
             );
         }

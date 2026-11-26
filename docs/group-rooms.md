@@ -9,7 +9,7 @@
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
 - 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
-- 远程密文邮箱托管/补收尚未接通；v35 只有本地 opaque 邮箱和预算仓储，v36 只有群主策略和管理员/禁言投影。
+- DHT 密文邮箱已接群 act/Offer 的分片投递和已知成员拉取；v35 提供本地 opaque 仓储与预算，v36 提供群主策略和管理员/禁言投影。真实两设备重启补收、送达回执和公网/NAT/relay 仍未验收。
 
 ## 已实现：群消息编解码
 

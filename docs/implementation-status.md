@@ -16,6 +16,8 @@
 | gossipsub IPC 与 Core act 路径 | `crates/asl-app/src/ipc/`、`supervisor/groups.rs` | IPC round-trip 1 项和全工作区编译；无跨机多跳验收 |
 | 两人/小群 MLS 房间工具 | `supervisor/groups.rs`、MCP 群工具 | 三 Core direct 群消息进程测试和双 Core 群文件双端审批测试通过 |
 | v35 opaque 邮箱/预算仓储与 v36 群权限 | `specs/schema-v35.sql`、`specs/schema-v36.sql`、`crates/asl-store/src/mailbox.rs`、`group_access.rs` | v34→v36、幂等、覆盖拒绝、TTL、配额、预算和群权限 8 项通过 |
+| Act 自动模型回复 | `crates/asl-agent/src/act_reply.rs`、`supervisor/auto_reply.rs` | 仅对 `Ask` 生成 `Inform/Clarify`；严格 JSON，禁止 action/tool/path，远端正文只作 untrusted data；使用本机已批准模型端点；asl-agent 全部目标测试通过 |
+| DHT 密文邮箱网络闭环 | `crates/asl-net/src/mailbox.rs`、`transport/mailbox.rs`、`supervisor/mailbox_wire.rs` | 8 KiB 带 hash 记录、16 分片批次、3 天轮换 epoch、7 天本地 TTL、已知联系人和群成员拉取、MLS 再验证；真实双节点 DHT put/get 通过 |
 
 ## 部分完成
 
@@ -23,14 +25,14 @@
 | --- | --- | --- |
 | 群伸缩 | 单 MLS 编译上限 512；direct fan-out、gossipsub 网络和 Core act 路由 | 跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
 | 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员管理动作、群主转移和更细粒度逐文件策略 |
-| 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer | 远程 DHT 邮箱、公网跨机、真实两设备大文件验收；Offer 本身不是下载许可 |
+| 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer、Offer 可进入密文邮箱等待补收 | 公网跨机、真实两设备大文件验收；邮箱只保存 Offer/密文，文件字节仍走在线授权传输；Offer 本身不是下载许可 |
 | 预算 | 消息数授予、续期、发送侧原子扣减 | 字节、模型调用、CPU、邮箱复合额度与 GUI 策略 |
-| 浏览/回答 | 入站 act 主动通知；浏览关闭时不交付 act | 模型自动回复流水线、audience 自动裁剪、GUI 会话操作 |
+| 浏览/回答 | 入站 act 主动通知；浏览关闭时不交付 act；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；模型失败保持无回复 | 本地资源证据自动进入模型、audience 自动裁剪、GUI 会话操作 |
 | 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
 
 ## 尚未实现
 
-- DHT/relay 上的远程密文邮箱投递、拉取、主题轮换和离线补收；当前只有本地 opaque 仓储。
+- 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取。
 - act 历史持久化和跨设备迁移。
 - 提示注入红队、跨 audience 外泄测试和分身资源压力测试。
 - 两台真实设备上的建群、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
@@ -38,8 +40,9 @@
 
 ## 最近一次整体检查
 
-- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：**904 通过、0 失败、13 忽略**；包含 `asl_send_file`、群主策略、v36 迁移和 UI 成员权限显示。
-- `cargo +1.100.0 clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0，**0 失败、13 项环境/子进程用途忽略**；包含 Act 自动回复、DHT 密文邮箱 put/get、群主策略、v37 迁移和 UI 成员权限显示。
+- `cargo +1.100.0 clippy -p asl-agent -p asl-net -p asl-store -p asl-app --all-targets --locked --offline -- -D warnings`：通过；全工作区全目标测试也已完成。
+- `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，35 个向量中 25 接受、10 拒绝，签名是合成夹具。
 - `scripts/validate-cddl.ps1`：本轮本机 PATH 缺少 `cddl` 命令，未执行成功；此前独立运行记录仍只对应当时快照。
-- 全量测试未覆盖公网、跨机多跳、真实链 RPC、远程密文邮箱、真实窗口/DPI 或安全审计。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。
+- 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。

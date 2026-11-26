@@ -772,6 +772,13 @@ impl Supervisor {
                 }
             },
         )?;
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
         groups
             .store
             .consume_conversation_budget(&conversation_id, 1, now_i64)?;
@@ -848,6 +855,13 @@ impl Supervisor {
                 }
             },
         )?;
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
         let envelope = sent.packet.into_envelope()?;
         let payload = encode_frame(&WireFrame::GroupEnvelope(envelope))?;
         let _ = self.net.try_send(

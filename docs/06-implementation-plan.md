@@ -661,7 +661,7 @@ T27 直连集成旧切片（2026-11-20，兼容状态）：`Supervisor::run()` �
 
 T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPort`，只接受本地类型化 `OutgoingTask` 且限 `ContactsOnly`；队列最多 16 项、同时运行最多 8 项。Core 从本机 `authorized_contacts` 与当前已准入会话的交集中，按本地授权顺序挑选现有在线联系人；没有通过身份准入的 PeerId 不进入查询路由。发送前仍由 `CoreAdmission` 对该连接重验链身份，再通过原 Net request-response 通道发送固定 CBOR `Query`。Answer、Offer、Error 只按 request ID/AgentId/连接关联，Answer/Offer 还须匹配 root task 与有效期限；Offer 只接受资源型任务。结果经有界结构事件端口回交调用方，不自动追问、不自动拉取文件，也不调用模型。QueryRouter 终结任务后释放状态槽。
 
-T27 计划 11 增量（部分实现）：act 编解码、MLS application 收发、入站主动通知、`untrusted_remote_data` 隔离、MCP 发 act、发送侧持久预算、gossipsub 网络与 Core act 路由已接入；`ASL_MCP_GROUPS=admin` 下可建群、邀请和创建两人 MLS 会话。仍未接入 act 历史、自动模型回复、audience 自动裁剪、预算续期 UI、远程加密邮箱唤醒和跨机规模验收；在这些功能完成前，不宣称“无限制交流”或“任意内容可理解”已完整验收。
+T27 计划 11 增量（部分实现）：act 编解码、MLS application 收发、入站主动通知、`untrusted_remote_data` 隔离、MCP 发 act、发送侧持久预算、gossipsub 网络与 Core act 路由已接入；`ASL_MCP_GROUPS=admin` 下可建群、邀请和创建两人 MLS 会话。回答开启时，`Ask` 会被送到本机已批准模型端点，只接受严格结构的 `Inform/Clarify`；远端正文和本地证据接口均按 untrusted data 隔离，模型不能生成 action/tool/path。群 act 和 Offer 会写入 DHT 密文邮箱，已知联系人或群成员按 3 天轮换键和 16 个 8 KiB 分片拉取，MLS 再验证真实发送者。仍未接入模型证据自动选取、act 历史、audience 自动裁剪、预算续期 UI、送达回执和跨机规模验收；在这些功能完成前，不宣称“无限制交流”或“任意内容可理解”已完整验收。
 
 出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；contacts-only 只向已在线且本地列入 `authorized_contacts` 的联系人直询，Public scope 已接入 DHT provider 查询和准入后直询。bootstrap 配置/节点入口、资源 provider 发布、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
 

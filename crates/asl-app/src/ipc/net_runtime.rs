@@ -9,7 +9,7 @@ use asl_net::{
     codec::{BulkRequest, BulkResponse},
     transport::{
         AuthenticatedPeer, DialFailure, GossipTopic, LocalConnectionId, LocalTransport,
-        REQUEST_TIMEOUT, RequestToken, ResponseToken, TransportEvent,
+        MailboxPutQuery, REQUEST_TIMEOUT, RequestToken, ResponseToken, TransportEvent,
     },
 };
 use asl_transfer::scheduler::MAX_ACTIVE_PER_SOURCE;
@@ -117,6 +117,7 @@ struct NetworkBridge {
     responses: HashMap<[u8; 16], PendingResponse>,
     requests: HashMap<([u8; 16], [u8; 16], NetworkProtocol), PendingRequest>,
     pending_dials: HashMap<PeerId, [u8; 16]>,
+    pending_mailbox_puts: HashMap<MailboxPutQuery, [u8; 16]>,
 }
 
 impl NetworkBridge {
@@ -129,6 +130,7 @@ impl NetworkBridge {
             responses: HashMap::new(),
             requests: HashMap::new(),
             pending_dials: HashMap::new(),
+            pending_mailbox_puts: HashMap::new(),
         }
     }
 
@@ -213,6 +215,29 @@ impl NetworkBridge {
             IpcMessage::FindProviders { lookup_id, key } => {
                 let result = self.transport.find_providers(key, lookup_id).map(|_| ());
                 self.send_operation_result(lookup_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::LookupDhtRecord { operation_id, key } => {
+                let result = self
+                    .transport
+                    .get_record(asl_net::dht::RecordKey::new(&key))
+                    .map(|_| ());
+                self.send_operation_result(operation_id, result, writer)?;
+                Ok(false)
+            }
+            IpcMessage::PublishMailboxRecord {
+                operation_id,
+                record,
+            } => {
+                let result = asl_net::mailbox::MailboxRecord::decode(&record)
+                    .map_err(|_| io::ErrorKind::InvalidInput.into())
+                    .and_then(|record| self.transport.put_mailbox_record(&record));
+                match result {
+                    Ok(query_id) => {
+                        self.pending_mailbox_puts.insert(query_id, operation_id);
+                    }
+                    Err(error) => self.send_operation_result(operation_id, Err(error), writer)?,
+                }
                 Ok(false)
             }
             IpcMessage::StartProviding { operation_id, key } => {
@@ -1011,6 +1036,20 @@ impl NetworkBridge {
                 };
                 self.send_operation_result(operation_id, result, writer)
                     .map_err(|_| AslError::SandboxUnavailable)?;
+            }
+            TransportEvent::MailboxRecordPut {
+                query_id,
+                succeeded,
+            } => {
+                if let Some(operation_id) = self.pending_mailbox_puts.remove(&query_id) {
+                    let result = if succeeded {
+                        Ok(())
+                    } else {
+                        Err(io::ErrorKind::NotConnected.into())
+                    };
+                    self.send_operation_result(operation_id, result, writer)
+                        .map_err(|_| AslError::SandboxUnavailable)?;
+                }
             }
             TransportEvent::InboundRejected => {}
             TransportEvent::Connected { connection } => {

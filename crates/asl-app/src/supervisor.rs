@@ -62,6 +62,7 @@ use asl_store::{
     dashboard::LocalIdentityProjection, open_store, search::direct::open_direct_store,
 };
 
+mod auto_reply;
 mod avatar_download;
 mod bindings;
 mod contact_invites;
@@ -70,6 +71,8 @@ mod directory;
 mod groups;
 #[cfg(windows)]
 mod mail;
+#[cfg(windows)]
+mod mailbox_wire;
 mod network_pause;
 mod network_report;
 mod profile_signing;
@@ -89,7 +92,11 @@ const DIRECTORY_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct Supervisor {
     #[cfg(windows)]
+    auto_reply: auto_reply::AutoReplyRuntime,
+    #[cfg(windows)]
     mailbox: crate::agent_mail::Mailbox,
+    #[cfg(windows)]
+    mailbox_wire: mailbox_wire::MailboxWireRuntime,
     agent_identity: AgentIdentity,
     device_peer_id: PeerId,
     libraries: LocalLibraries,
@@ -181,9 +188,15 @@ impl Supervisor {
                 network_settings.loopback_groups,
             )?
         };
+        #[cfg(windows)]
+        let auto_reply = auto_reply::AutoReplyRuntime::spawn(&paths)?;
         let mut supervisor = Self {
             #[cfg(windows)]
+            auto_reply,
+            #[cfg(windows)]
             mailbox: Default::default(),
+            #[cfg(windows)]
+            mailbox_wire: Default::default(),
             agent_identity,
             device_peer_id,
             libraries,
@@ -498,55 +511,64 @@ impl Supervisor {
         let outbound =
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
-            |supervisor, event| match event {
-                event @ AdmittedNetworkEvent::ControlRequest {
-                    request: WireFrame::FetchRequest(_),
-                    ..
-                } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
+            |supervisor, event| {
                 #[cfg(windows)]
-                event @ AdmittedNetworkEvent::ControlRequest {
-                    request: WireFrame::ContextRequest(_),
-                    ..
-                } => supervisor.handle_context_request(&mut transfer.borrow_mut(), event),
-                event @ AdmittedNetworkEvent::BulkRequest { .. } => {
-                    supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
-                }
-                event @ AdmittedNetworkEvent::ControlRequest { .. } => {
-                    supervisor.handle_direct_inbound(&mut inbound, event)
-                }
-                event => {
-                    let mut transfer = transfer.borrow_mut();
-                    let now_ms = unix_time_ms()?;
-                    let Some(event) =
-                        avatars
-                            .borrow_mut()
-                            .route(supervisor, &mut transfer, event, now_ms)?
-                    else {
-                        return Ok(());
-                    };
-                    let Some(event) =
-                        supervisor.route_transfer_event(&mut transfer, event, now_ms)?
-                    else {
-                        return Ok(());
-                    };
+                supervisor.observe_mailbox_operation(&event);
+                match event {
                     #[cfg(windows)]
-                    if matches!(
-                        &event,
-                        AdmittedNetworkEvent::ControlResponse {
-                            response: WireFrame::ContextOffer(_) | WireFrame::ContextAgreement(_),
-                            ..
+                    AdmittedNetworkEvent::MailboxRecordAvailable(record) => {
+                        supervisor.deliver_mailbox_record(&record, unix_time_ms()?)
+                    }
+                    event @ AdmittedNetworkEvent::ControlRequest {
+                        request: WireFrame::FetchRequest(_),
+                        ..
+                    } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
+                    #[cfg(windows)]
+                    event @ AdmittedNetworkEvent::ControlRequest {
+                        request: WireFrame::ContextRequest(_),
+                        ..
+                    } => supervisor.handle_context_request(&mut transfer.borrow_mut(), event),
+                    event @ AdmittedNetworkEvent::BulkRequest { .. } => {
+                        supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
+                    }
+                    event @ AdmittedNetworkEvent::ControlRequest { .. } => {
+                        supervisor.handle_direct_inbound(&mut inbound, event)
+                    }
+                    event => {
+                        let mut transfer = transfer.borrow_mut();
+                        let now_ms = unix_time_ms()?;
+                        let Some(event) =
+                            avatars
+                                .borrow_mut()
+                                .route(supervisor, &mut transfer, event, now_ms)?
+                        else {
+                            return Ok(());
+                        };
+                        let Some(event) =
+                            supervisor.route_transfer_event(&mut transfer, event, now_ms)?
+                        else {
+                            return Ok(());
+                        };
+                        #[cfg(windows)]
+                        if matches!(
+                            &event,
+                            AdmittedNetworkEvent::ControlResponse {
+                                response: WireFrame::ContextOffer(_)
+                                    | WireFrame::ContextAgreement(_),
+                                ..
+                            }
+                        ) {
+                            supervisor.observe_context_response(&event)?;
                         }
-                    ) {
-                        supervisor.observe_context_response(&event)?;
+                        if supervisor.net.is_running() {
+                            outbound.borrow_mut().handle_event(&event, now_ms)?;
+                        }
+                        driver.borrow_mut()(
+                            supervisor,
+                            &mut transfer,
+                            DownloadDriverEvent::Network(&event),
+                        )
                     }
-                    if supervisor.net.is_running() {
-                        outbound.borrow_mut().handle_event(&event, now_ms)?;
-                    }
-                    driver.borrow_mut()(
-                        supervisor,
-                        &mut transfer,
-                        DownloadDriverEvent::Network(&event),
-                    )
                 }
             },
             |supervisor, observation| {
@@ -1263,6 +1285,10 @@ impl Supervisor {
             if now >= next_agent_tick {
                 #[cfg(windows)]
                 self.poll_local_groups()?;
+                #[cfg(windows)]
+                self.poll_auto_act_replies()?;
+                #[cfg(windows)]
+                self.poll_mailbox_wire()?;
                 self.poll_contact_bindings()?;
                 self.poll_contact_invites()?;
                 self.poll_profile_signing(now, unix_time_ms()?);

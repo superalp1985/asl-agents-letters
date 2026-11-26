@@ -26,7 +26,7 @@
 | T31/T32 三节点群消息 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t31-三节点容器回环验收) | 含邀请审批、结构化问答、浏览开关和剔除在线成员；不含跨容器传文件、真实链 RPC 或跨机网络 |
 | T32 双节点群文件 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t32-跨容器群文件验收) | 单来源、双端逐文件审批、两个分块和收件文件逐字节核对；不含多来源并发、断点续传或跨机网络 |
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
-| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub 网络与 Core act 路由已接入；其余待实现 | act/群/IPC/MCP 定向测试和编译通过；`asl-net` 真实双节点 gossipsub 通过。尚无 act 历史、模型自动回复、远程密文邮箱和跨机多跳/规模验收 |
+| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无 act 历史、模型本地证据自动选取、真实两设备重启补收、跨机多跳/规模验收 |
 | 两人 MLS 私聊（G00） | 待实现验收 | 必须与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
 | 加密邮箱、群权限、gossipsub 与容量分级 | v36 本地密文/群权限仓储、libp2p gossipsub、Core act/Policy 路径部分实现 | 邮箱远程托管/补收、真实多设备策略同步和分层拓扑待实现；direct/gossip 由本机容量选择，不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |

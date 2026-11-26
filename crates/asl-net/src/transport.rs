@@ -21,6 +21,7 @@ use crate::relay::{
 };
 mod behaviour;
 mod gossip;
+mod mailbox;
 mod profile_publication;
 mod requests;
 use behaviour::{AslBehaviour, BehaviourEvent, DiscoveryEvent};
@@ -239,6 +240,10 @@ pub enum TransportEvent {
         operation_id: [u8; 16],
         succeeded: bool,
     },
+    MailboxRecordPut {
+        query_id: MailboxPutQuery,
+        succeeded: bool,
+    },
     InboundRejected,
     DialFailed {
         peer_id: PeerId,
@@ -312,6 +317,8 @@ pub enum TransportEvent {
     },
 }
 
+pub type MailboxPutQuery = libp2p::kad::QueryId;
+
 /// Driven by polling `next_event` in a Tokio runtime with I/O and time enabled.
 /// Construction opens no sockets. Dropping the adapter shuts down its transports.
 pub struct LocalTransport {
@@ -331,6 +338,7 @@ pub struct LocalTransport {
     reserved_relays: HashSet<libp2p::PeerId>,
     pending_dht_records: HashMap<[u8; 16], (kad::Record, tokio::time::Instant)>,
     pending_dht_provider_lookups: HashMap<kad::QueryId, PendingDhtProviderLookup>,
+    pending_mailbox_puts: HashMap<kad::QueryId, RecordKey>,
     profile_publication: Option<profile_publication::Publication>,
     gossip_subscriptions: HashSet<GossipTopic>,
 }
@@ -400,6 +408,7 @@ impl LocalTransport {
             reserved_relays: HashSet::new(),
             pending_dht_records: HashMap::new(),
             pending_dht_provider_lookups: HashMap::new(),
+            pending_mailbox_puts: HashMap::new(),
             profile_publication: None,
             gossip_subscriptions: HashSet::new(),
         })
@@ -1140,6 +1149,9 @@ impl LocalTransport {
     }
 
     fn handle_dht(&mut self, event: kad::Event) -> io::Result<Option<TransportEvent>> {
+        if let Some(progress) = self.handle_mailbox_put_progress(&event) {
+            return Ok(Some(progress));
+        }
         if let Some(progress) = self.handle_profile_publication_progress(&event) {
             return Ok(Some(progress));
         }
