@@ -7,6 +7,7 @@ use std::{
 use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub mod act_history;
 pub mod avatar_publication;
 pub mod avatar_receipts;
 pub mod chain;

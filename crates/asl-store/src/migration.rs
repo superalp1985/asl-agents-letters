@@ -5,11 +5,15 @@ use asl_types::{
 use rusqlite::{Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{Store, chain::agent_text, database_error, inbound_observations::DAY_MS};
+use crate::{
+    Store, act_history::ActDirection, act_history::StoredActHistory, chain::agent_text,
+    database_error, inbound_observations::DAY_MS,
+};
 
 const CONTACT_LIMIT: usize = 10_000;
 const TRUST_LIMIT: usize = 20_000;
 const HISTORY_LIMIT: usize = 200;
+const ACT_LIMIT: usize = 200;
 
 #[derive(Clone, Copy, Default)]
 pub struct Selection {
@@ -24,6 +28,8 @@ pub struct PortableRecords {
     contacts: Vec<Contact>,
     trust: Vec<Trust>,
     history: Vec<Observation>,
+    #[serde(default)]
+    acts: Vec<PortableAct>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -58,6 +64,21 @@ struct Observation {
     result_shape: u8,
     constraint_count: u8,
     topics: Vec<(u16, u32)>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PortableAct {
+    conversation_id: String,
+    act_id: [u8; 32],
+    mls_epoch: u64,
+    direction: String,
+    act_kind: u16,
+    causal_root: [u8; 32],
+    reply_to: Option<[u8; 32]>,
+    body: Option<String>,
+    received_at_ms: i64,
+    expires_at_ms: i64,
 }
 
 impl Store {
@@ -134,6 +155,69 @@ impl Store {
                 .map_err(database_error)?
                 .collect::<Result<_, _>>()
                 .map_err(database_error)?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT conversation_id,act_id,mls_epoch,direction,act_kind,
+                            causal_root,reply_to,ciphertext,received_at_ms,expires_at_ms
+                     FROM conversation_act_events WHERE expires_at_ms>?1
+                     ORDER BY received_at_ms DESC,conversation_id,act_id LIMIT ?2",
+                )
+                .map_err(database_error)?;
+            let act_rows = statement
+                .query_map(params![now, (ACT_LIMIT + 1) as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        blob::<32>(row, 1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        blob::<32>(row, 5)?,
+                        row.get::<_, Option<Vec<u8>>>(6)?
+                            .map(|value| {
+                                value.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
+                            })
+                            .transpose()?,
+                        row.get::<_, Vec<u8>>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                })
+                .map_err(database_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?;
+            drop(statement);
+            records.acts = act_rows
+                .into_iter()
+                .map(
+                    |(
+                        conversation_id,
+                        act_id,
+                        mls_epoch,
+                        direction,
+                        act_kind,
+                        causal_root,
+                        reply_to,
+                        body,
+                        received_at_ms,
+                        expires_at_ms,
+                    )| {
+                        Ok(PortableAct {
+                            conversation_id,
+                            act_id,
+                            mls_epoch: u64::try_from(mls_epoch)
+                                .map_err(|_| AslError::InvalidDatabase)?,
+                            direction,
+                            act_kind: u16::try_from(act_kind)
+                                .map_err(|_| AslError::InvalidDatabase)?,
+                            causal_root,
+                            reply_to,
+                            body: crate::act_history::decode_stored_body(&body)?,
+                            received_at_ms,
+                            expires_at_ms,
+                        })
+                    },
+                )
+                .collect::<Result<Vec<_>, AslError>>()?;
         }
         records.check_limits()?;
         tx.commit().map_err(database_error)?;
@@ -151,6 +235,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        let act_days = crate::group_observations::group_observation_days(&tx)?;
         if tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM agents UNION ALL SELECT 1 FROM contact_bindings
@@ -233,6 +318,34 @@ impl Store {
             )
             .map_err(database_error)?;
         }
+        for row in records.acts {
+            let direction = match row.direction.as_str() {
+                "in" => ActDirection::In,
+                "out" => ActDirection::Out,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            if row.expires_at_ms <= now {
+                continue;
+            }
+            crate::act_history::restore_act_history_on(
+                &tx,
+                act_days,
+                StoredActHistory {
+                    conversation_id: &row.conversation_id,
+                    act_id: row.act_id,
+                    mls_epoch: row.mls_epoch,
+                    direction,
+                    act_kind: row.act_kind,
+                    causal_root: row.causal_root,
+                    reply_to: row.reply_to,
+                    body: row.body.as_deref(),
+                    received_at_ms: u64::try_from(row.received_at_ms)
+                        .map_err(|_| AslError::InvalidMessage)?,
+                    expires_at_ms: u64::try_from(row.expires_at_ms)
+                        .map_err(|_| AslError::InvalidMessage)?,
+                },
+            )?;
+        }
         tx.commit().map_err(database_error)
     }
 }
@@ -242,6 +355,7 @@ impl PortableRecords {
         if self.contacts.len() > CONTACT_LIMIT
             || self.trust.len() > TRUST_LIMIT
             || self.history.len() > HISTORY_LIMIT
+            || self.acts.len() > ACT_LIMIT
         {
             return Err(AslError::QuotaExceeded);
         }
@@ -262,4 +376,10 @@ fn read_agent(row: &Row<'_>, index: usize) -> rusqlite::Result<[u8; 32]> {
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(rusqlite::Error::InvalidQuery)
+}
+
+fn blob<const N: usize>(row: &Row<'_>, index: usize) -> rusqlite::Result<[u8; N]> {
+    row.get::<_, Vec<u8>>(index)?
+        .try_into()
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }

@@ -1015,3 +1015,12 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - `supervisor::mailbox_wire` 将群 act/Offer 的 MLS 密文写入本地 opaque 槽，按 3 天轮换 epoch 组成最多 16 个 8 KiB 分片批次，发布到 DHT；已知联系人或群成员按最近 3 个 epoch 拉取，重组后仍由 MLS 验证实际成员/epoch。HTTP/relay/NAT 可达性仍来自现有配置化 libp2p 地址策略，不写死地址。
 - 定向验证：`asl-net` mailbox lib 10 项、DHT limits 7 项、`asl-agent` 全目标 46 项、`asl-app` IPC round-trip 1 项和 DHT mailbox admission 1 项通过。完整工作区 `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略。
 - `cargo +1.100.0 clippy -p asl-agent -p asl-net -p asl-store -p asl-app --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、schema exporter（35 向量，25 接受、10 拒绝）和 `git diff --check` 通过。未完成真实两设备重启补收、送达回执、NAT/relay 邮箱矩阵、模型本地证据自动选取或公网 DHT 验收；不得把这些定向测试写成公网完成。
+
+### 2026-11-26 本地证据、Act 历史与迁移
+
+- 新增 `supervisor::auto_reply_evidence`：在线群 `Ask` 先经当前群 search snapshot，最多选择 4 个同时具备群作用域 `ReadChunk` 与 `ModelInput` permit 的本地文本，截断 1200 字符送入模型；查询正文不解释为路径、URL、action 或工具。Provider 本地/远端模式从已批准注册表配置传入，LocalOnly 授权不会误判为远端。
+- `conversation_act_events` 现实际记录收发 Act 的 conversation/act ID、epoch、类型、因果/回复引用、方向和保留时间。本地正文在 Windows 上按当前用户 DPAPI 保护，夜间/重启可读；群「浏览来信」关闭时不记录入站正文，保留期选择 0 会清除 Act 历史。
+- 活动页直接显示 Act 的方向、类型和 120 字符预览。身份迁移的 `history` 选择会从未过期 Act 历史解密到 age 加密迁移包，再在目标设备重新 DPAPI 保护；不会复制旧设备密钥、目录授权或 MLS 私钥。
+- 邮箱 Offer 的领取不再死绑接收时的连接：若 Offer 来自离线邮箱，用户/Agent 在来源设备后来上线且仍处同一群 epoch 时可以重新解析当前连接再进入既有双端传输审批；Offer 本身仍不是下载授权。
+- 定向验证：`asl-app` 自动证据 3 项、Act history 2 项、Dashboard Act 预览 1 项、三 Core 群消息 1 项、双 Core 群文件 1 项、桌面会话分组 1 项、身份迁移含 Act 1 项通过。完整工作区测试退出码 0，0 失败、13 项按环境/子进程用途忽略。
+- 严格 Clippy（`asl-store`/`asl-app`，含 `desktop-ui`）、格式、schema exporter（35 向量）和 `git diff --check` 通过。未覆盖真实双机迁移包、旧版本包兼容抽样、DPAPI 跨用户、邮箱 Offer 重新上线竞态或 GUI 不同 DPI 的人工检查。

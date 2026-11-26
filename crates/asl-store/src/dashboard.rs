@@ -1,5 +1,9 @@
 //! A bounded, local observation snapshot. None of these rows grant permission.
-use std::{path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 use asl_types::{
     error::AslError,
@@ -128,6 +132,7 @@ pub struct ActivityRow {
     pub kind: String,
     pub peer_id: String,
     pub agent_id: Option<String>,
+    pub preview: Option<String>,
 }
 
 pub struct NodeRow {
@@ -497,6 +502,7 @@ fn read_binding_code_public(database: &Connection) -> Result<bool, AslError> {
 }
 
 fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
+    let now = current_time_ms();
     let mut statement = database
         .prepare(
             "SELECT created_at_ms,scope,kind,peer_id,agent_id,context_id,direction FROM (
@@ -512,8 +518,8 @@ fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
              ) ORDER BY created_at_ms DESC,scope,event_id LIMIT 100",
         )
         .map_err(database_error)?;
-    statement
-        .query_map([current_time_ms()], |row| {
+    let mut rows = statement
+        .query_map([now], |row| {
             Ok(ActivityRow {
                 created_at_ms: row.get(0)?,
                 scope: row.get(1)?,
@@ -522,11 +528,90 @@ fn read_activity(database: &Connection) -> Result<Vec<ActivityRow>, AslError> {
                 agent_id: row.get(4)?,
                 context_id: row.get(5)?,
                 direction: row.get(6)?,
+                preview: None,
             })
         })
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)
+        .map_err(database_error)?;
+    drop(statement);
+
+    let mut history = database
+        .prepare(
+            "SELECT a.received_at_ms,a.direction,a.conversation_id,
+                    coalesce(g.sender_peer_id,''),p.agent_id,a.ciphertext
+             FROM conversation_act_events a
+             LEFT JOIN group_events g
+               ON g.group_id=a.conversation_id AND g.created_at_ms=a.received_at_ms
+             LEFT JOIN peers p ON p.peer_id=g.sender_peer_id
+             WHERE a.expires_at_ms>?1
+             ORDER BY a.received_at_ms DESC,a.conversation_id,a.act_id
+             LIMIT 100",
+        )
+        .map_err(database_error)?;
+    let history_rows = history
+        .query_map([now], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    drop(history);
+
+    let mut previews = HashMap::new();
+    let existing = rows
+        .iter()
+        .filter_map(|row| {
+            row.direction
+                .as_ref()
+                .map(|direction| (row.created_at_ms, row.context_id.clone(), direction.clone()))
+        })
+        .collect::<HashSet<_>>();
+    for (created, direction, conversation, peer, agent, body) in history_rows {
+        let preview = crate::act_history::decode_stored_body(&body)?;
+        if direction == "in" {
+            previews.insert(
+                (created, conversation.clone(), direction.clone()),
+                preview.clone(),
+            );
+        }
+        if !existing.contains(&(created, conversation.clone(), direction.clone())) {
+            rows.push(ActivityRow {
+                created_at_ms: created,
+                scope: "group".into(),
+                context_id: conversation,
+                direction: Some(direction),
+                kind: "act".into(),
+                peer_id: peer,
+                agent_id: agent,
+                preview,
+            });
+        }
+    }
+    for row in &mut rows {
+        if row.scope == "group" && row.direction.as_deref() == Some("in") {
+            row.preview = previews
+                .remove(&(row.created_at_ms, row.context_id.clone(), "in".into()))
+                .flatten();
+        }
+    }
+    rows.sort_by(|left, right| {
+        right
+            .created_at_ms
+            .cmp(&left.created_at_ms)
+            .then_with(|| left.scope.cmp(&right.scope))
+            .then_with(|| left.context_id.cmp(&right.context_id))
+            .then_with(|| left.peer_id.cmp(&right.peer_id))
+    });
+    rows.truncate(100);
+    Ok(rows)
 }
 
 fn read_nodes(database: &Connection) -> Result<Vec<NodeRow>, AslError> {
@@ -787,6 +872,50 @@ mod tests {
         assert!(store.request_host_inbox(other, now + 2_003).is_err());
         store.request_host_inbox(other, now + 600_000).unwrap();
         assert!(store.decide_host_inbox(id, None, now + 600_001).is_err());
+    }
+
+    #[test]
+    fn activity_includes_local_act_previews_for_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asl.sqlite3");
+        let mut store = crate::open_store(&path).unwrap();
+        let now = super::current_time_ms() as u64;
+        for (message, direction, body) in [
+            (
+                [1; 16],
+                crate::act_history::ActDirection::In,
+                "incoming act",
+            ),
+            (
+                [2; 16],
+                crate::act_history::ActDirection::Out,
+                "outgoing act",
+            ),
+        ] {
+            store
+                .record_act_history(crate::act_history::ActHistoryRecord {
+                    conversation_id: "00112233445566778899aabbccddeeff",
+                    message_id: super::Id128(message),
+                    mls_epoch: 1,
+                    direction,
+                    act_kind: 1,
+                    reply_to: None,
+                    causal_root: super::Id128([3; 16]),
+                    body: Some(body),
+                    now_ms: now,
+                    expires_at_ms: now + 60_000,
+                })
+                .unwrap();
+        }
+        let activity = super::Dashboard::load(&path).unwrap().activity;
+        assert_eq!(activity.len(), 2);
+        assert!(activity.iter().any(|row| {
+            row.direction.as_deref() == Some("in") && row.preview.as_deref() == Some("incoming act")
+        }));
+        assert!(activity.iter().any(|row| {
+            row.direction.as_deref() == Some("out")
+                && row.preview.as_deref() == Some("outgoing act")
+        }));
     }
 
     #[test]

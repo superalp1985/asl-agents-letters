@@ -25,7 +25,7 @@ const EVENT_LIMIT: usize = 32;
 const HANDLE_LIMIT: usize = 32;
 const REPLAY_LIMIT: usize = 256;
 const CONTEXT_REQUEST_LIMIT: usize = 32;
-const MAIL_TTL_MS: u64 = 60_000;
+const MAIL_TTL_MS: u64 = 10 * 60_000;
 pub(crate) type InboxDecision = oneshot::Receiver<Result<Id128, AslError>>;
 
 #[derive(Clone, Debug)]

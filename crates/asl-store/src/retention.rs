@@ -44,6 +44,14 @@ impl Store {
             params![now_ms, PRUNE_BATCH],
         )
         .map_err(database_error)?;
+        tx.execute(
+            "DELETE FROM conversation_act_events WHERE rowid IN (
+                SELECT rowid FROM conversation_act_events
+                WHERE expires_at_ms<=?1 LIMIT ?2
+             )",
+            params![now_ms, PRUNE_BATCH],
+        )
+        .map_err(database_error)?;
         tx.commit().map_err(database_error)
     }
 }

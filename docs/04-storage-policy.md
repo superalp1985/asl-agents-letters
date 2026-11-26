@@ -100,7 +100,7 @@ T29 将本机观察按 integrity/availability/evidence/promise 分开保存；�
 | --- | --- | --- |
 | `conversation_rooms` | 私聊/群聊到 MLS group_id、角色、状态和容量等级的唯一映射 | 私聊是两人 MLS 组，和群聊共用 act、预算、历史、邮箱和附件路径 |
 | `conversation_budget_grants` | 主体、会话范围、消息/字节/模型调用/CPU/邮箱额度、期限和续期链 | 原子扣减；重启、换设备、重连不能重置；信任值和贡献值不参与授权 |
-| `conversation_act_events` | act-id、conversation-id、类型、因果根、reply-to、MLS epoch、处理状态和回复关联 | 去重与排序使用结构字段；`nl-body` 单独标记 untrusted data，不作为动作来源 |
+| `conversation_act_events` | act-id、conversation-id、类型、因果根、reply-to、MLS epoch、处理状态和回复关联；本机正文预览按用户 DPAPI 保护 | 去重与排序使用结构字段；`nl-body` 单独标记 untrusted data，不作为动作来源；群浏览关闭时不写入入站正文，保留期 0 会清除历史 |
 | `conversation_attachment_refs` | act 到 blob-ref、offer、下载授权和状态 | 只存引用；字节仍走 `offer/fetch/chunk/hash`，不嵌入 act |
 | `mailbox_slots` | 轮换 topic、密文摘要、大小桶、TTL、签收和本机配额 | 只存 envelope 密文与路由元数据，不存 `nl-body`、身份资料、文件名或明文主题 |
 | `mailbox_shards` | 分片序号、密文摘要、宿主能力和重组状态 | 不得保存明文；容量不足时明确排队/拒绝 |

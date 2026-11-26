@@ -18,6 +18,7 @@ use asl_types::{
 
 use crate::model_endpoint_access::{ModelEndpointAccess, configured_model_gateway};
 
+use super::auto_reply_evidence::AutoReplyEvidenceContext;
 use super::{Supervisor, groups::LocalGroupAction, unix_time_ms};
 
 const MAX_QUEUED_REPLIES: usize = 8;
@@ -37,6 +38,7 @@ pub(super) struct AutoReplyRuntime {
 struct Job {
     room: Hash32,
     request: ActQuestion,
+    evidence: Option<AutoReplyEvidenceContext>,
 }
 
 enum JobResult {
@@ -69,7 +71,13 @@ impl AutoReplyRuntime {
         })
     }
 
-    fn enqueue(&mut self, room: Hash32, request: ActQuestion, now: Instant) -> bool {
+    fn enqueue(
+        &mut self,
+        room: Hash32,
+        request: ActQuestion,
+        evidence: Option<AutoReplyEvidenceContext>,
+        now: Instant,
+    ) -> bool {
         if self.recent_set.contains_key(&request.message_id)
             || self.queued >= MAX_QUEUED_REPLIES
             || self
@@ -79,7 +87,11 @@ impl AutoReplyRuntime {
         {
             return false;
         }
-        match self.jobs.try_send(Job { room, request }) {
+        match self.jobs.try_send(Job {
+            room,
+            request,
+            evidence,
+        }) {
             Ok(()) => {
                 self.queued += 1;
                 true
@@ -103,7 +115,12 @@ impl AutoReplyRuntime {
     }
 }
 
-pub(super) fn queue_auto_reply(runtime: &mut AutoReplyRuntime, room: Hash32, act: &Act) {
+pub(super) fn queue_auto_reply(
+    runtime: &mut AutoReplyRuntime,
+    room: Hash32,
+    act: &Act,
+    evidence: Option<AutoReplyEvidenceContext>,
+) {
     if act.act_type != ActType::Ask || act.nl_body.is_none() {
         return;
     }
@@ -111,7 +128,7 @@ pub(super) fn queue_auto_reply(runtime: &mut AutoReplyRuntime, room: Hash32, act
         return;
     };
     let now = Instant::now();
-    if runtime.enqueue(room, request, now) {
+    if runtime.enqueue(room, request, evidence, now) {
         runtime.remember(act.message_id, act.conversation_id, now);
     }
 }
@@ -166,23 +183,42 @@ fn worker_loop(
     else {
         return;
     };
-    while let Ok(Job { room, request }) = jobs.recv() {
-        let result = access
-            .first_authorized()
-            .ok()
-            .flatten()
-            .ok_or(ActReplyError::ProviderUnavailable)
-            .and_then(|provider| {
-                runtime.block_on(generate_act_reply(
-                    &gateway,
-                    &request,
-                    &provider,
-                    &[],
-                    &DataFreePolicy,
-                    &DataFreePolicy,
-                    || unix_time_ms().unwrap_or(0),
-                ))
-            });
+    while let Ok(Job {
+        room,
+        request,
+        evidence,
+    }) = jobs.recv()
+    {
+        let result = if let Some(context) = evidence {
+            let provider = context.provider.clone();
+            let (read_policy, model_policy) = context.policies();
+            runtime.block_on(generate_act_reply(
+                &gateway,
+                &request,
+                &provider,
+                &context.evidence,
+                &read_policy,
+                &model_policy,
+                || unix_time_ms().unwrap_or(0),
+            ))
+        } else {
+            access
+                .first_authorized()
+                .ok()
+                .flatten()
+                .ok_or(ActReplyError::ProviderUnavailable)
+                .and_then(|provider| {
+                    runtime.block_on(generate_act_reply(
+                        &gateway,
+                        &request,
+                        &provider,
+                        &[],
+                        &DataFreePolicy,
+                        &DataFreePolicy,
+                        || unix_time_ms().unwrap_or(0),
+                    ))
+                })
+        };
         let event = match result {
             Ok(plan) => JobResult::Ready {
                 room,

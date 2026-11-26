@@ -12,6 +12,7 @@ use asl_groups::GroupApplication;
 use asl_policy::PolicyEngine;
 use asl_store::{
     Store,
+    act_history::{ActDirection, ActHistoryRecord},
     group_access::{GroupAccessKind, GroupMemberAccess},
     group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
     mailbox::{
@@ -24,8 +25,9 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
     protocol::{
-        GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT, GroupControl,
-        GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame, encode_frame,
+        Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
+        GroupControl, GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame,
+        encode_frame,
     },
     task::GroupId,
 };
@@ -33,6 +35,7 @@ use serde_json::{Value, json};
 
 use crate::{
     agent_mail::GroupAccessUpdate,
+    model_endpoint_access::ModelEndpointAccess,
     network::{NetworkCommand, NetworkEvent},
     profile::{MlsInviteSend, MlsJoinSend, MlsNetworkOutcome, fresh_id},
     transfer::TransferService,
@@ -307,9 +310,13 @@ impl Supervisor {
             let _ = self.handle_group_gossip(Hash32(*key), payload, now_ms);
             return;
         }
-        let (Some(groups), Some(admission), auto_reply) =
-            (&mut self.groups, &mut self.admission, &mut self.auto_reply)
-        else {
+        let (Some(groups), Some(admission), auto_reply, libraries, home) = (
+            &mut self.groups,
+            &mut self.admission,
+            &mut self.auto_reply,
+            &self.libraries,
+            &self.home,
+        ) else {
             return;
         };
         if groups.cleanup_failed {
@@ -394,11 +401,42 @@ impl Supervisor {
                             .unwrap_or(false),
                         _ => true,
                     });
-            if member_allowed
-                && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
-                && let GroupApplication::Act(act) = application.as_ref()
-            {
-                super::auto_reply::queue_auto_reply(auto_reply, *wire_id, act);
+            if member_allowed && let GroupApplication::Act(act) = application.as_ref() {
+                if let Some(member) = requester.as_ref()
+                    && GroupInboundPolicy::load(&groups.store)
+                        .is_ok_and(|policy| policy.browse_enabled)
+                {
+                    let _ = record_act_history(
+                        &mut groups.store,
+                        &member.group_id,
+                        *epoch,
+                        ActDirection::In,
+                        act,
+                        now_ms,
+                    );
+                }
+                if GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
+                {
+                    let evidence = requester.as_ref().and_then(|member| {
+                        let paths = AppPaths::open_existing(home).ok()?;
+                        let provider = ModelEndpointAccess::new(&paths)
+                            .first_authorized_config()
+                            .ok()
+                            .flatten()?;
+                        let provider_local =
+                            provider.mode == asl_agent::gateway::ProviderMode::Local;
+                        super::auto_reply_evidence::select_auto_reply_evidence(
+                            &groups.store,
+                            libraries,
+                            member,
+                            provider.id,
+                            provider_local,
+                            act.nl_body.as_deref()?,
+                        )
+                        .ok()
+                    });
+                    super::auto_reply::queue_auto_reply(auto_reply, *wire_id, act, evidence);
+                }
             }
             if member_allowed
                 && self.mailbox.interested()
@@ -577,9 +615,21 @@ impl Supervisor {
             return Ok(());
         }
         if let GroupApplication::Act(act) = &application
+            && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
+        {
+            let _ = record_act_history(
+                &mut groups.store,
+                &local_group_id,
+                packet.epoch,
+                ActDirection::In,
+                act,
+                now_ms,
+            );
+        }
+        if let GroupApplication::Act(act) = &application
             && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.answer_enabled)
         {
-            super::auto_reply::queue_auto_reply(auto_reply, key, act);
+            super::auto_reply::queue_auto_reply(auto_reply, key, act, None);
         }
         if let GroupApplication::Act(act) = &application
             && mailbox.interested()
@@ -1374,6 +1424,40 @@ fn select_invite(
 fn peer_text(peer: &PeerId) -> String {
     libp2p_identity::PeerId::from_bytes(peer.as_bytes())
         .map_or_else(|_| hex::encode(peer.as_bytes()), |peer| peer.to_base58())
+}
+
+pub(super) fn record_act_history(
+    store: &mut Store,
+    group_id: &GroupId,
+    epoch: u64,
+    direction: ActDirection,
+    act: &Act,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    let conversation_id = hex::encode(group_id.0.as_bytes());
+    store.record_act_history(ActHistoryRecord {
+        conversation_id: &conversation_id,
+        message_id: act.message_id,
+        mls_epoch: epoch,
+        direction,
+        act_kind: match act.act_type {
+            ActType::Inform => 0,
+            ActType::Ask => 1,
+            ActType::Request => 2,
+            ActType::Propose => 3,
+            ActType::Accept => 4,
+            ActType::Reject => 5,
+            ActType::Commit => 6,
+            ActType::Cancel => 7,
+            ActType::Ack => 8,
+            ActType::Clarify => 9,
+        },
+        reply_to: act.reply_to,
+        causal_root: act.causal_root,
+        body: act.nl_body.as_deref(),
+        now_ms,
+        expires_at_ms: now_ms.saturating_add(asl_store::group_state::MLS_SYNC_RETENTION_MS),
+    })
 }
 
 fn apply_group_policy(

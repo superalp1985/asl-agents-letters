@@ -63,6 +63,7 @@ use asl_store::{
 };
 
 mod auto_reply;
+mod auto_reply_evidence;
 mod avatar_download;
 mod bindings;
 mod contact_invites;

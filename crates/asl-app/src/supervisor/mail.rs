@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use asl_agent::{QueryScope, runner::InboundMode};
 use asl_groups::GroupApplication;
 use asl_store::{
-    Store, group_access::GroupAccessKind, group_state::GroupInboundPolicy,
-    mailbox::ConversationBudgetRenewal,
+    Store, act_history::ActDirection, group_access::GroupAccessKind,
+    group_state::GroupInboundPolicy, mailbox::ConversationBudgetRenewal,
 };
 use asl_types::{
     error::AslError,
@@ -724,6 +724,7 @@ impl Supervisor {
             .store
             .mls_room_snapshot(room)?
             .ok_or(AslError::NotFound)?;
+        let local_group_id = snapshot.local_id.clone();
         let (state, _) = groups
             .store
             .mls_room_progress(room)?
@@ -759,6 +760,7 @@ impl Supervisor {
         }
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
         let message_id = act.message_id;
+        let history_act = act.clone();
         let sent = admission.send_loopback_mls_application_with_gossip(
             &mut groups.store,
             room,
@@ -772,6 +774,14 @@ impl Supervisor {
                 }
             },
         )?;
+        let _ = super::groups::record_act_history(
+            &mut groups.store,
+            &local_group_id,
+            sent.packet.epoch,
+            ActDirection::Out,
+            &history_act,
+            now,
+        );
         let _ = self.mailbox_wire.persist_group_packet(
             &mut groups.store,
             room,
@@ -1001,8 +1011,22 @@ impl Supervisor {
             return Err(AslError::PolicyDenied);
         }
         if let Some((room, epoch, binding)) = &held.room {
+            let connection = if held.connection != [0; 16] {
+                held.connection
+            } else {
+                self.admission
+                    .as_ref()
+                    .ok_or(AslError::NotFound)?
+                    .admitted_connections(now)
+                    .into_iter()
+                    .find(|(agent, _, peer)| {
+                        *agent == held.source.agent_id && *peer == held.source.peer_id
+                    })
+                    .map(|(_, connection, _)| connection)
+                    .ok_or(AslError::NotFound)?
+            };
             let member = self
-                .current_group_requester(held.connection, &held.source.peer_id, *room, *epoch)
+                .current_group_requester(connection, &held.source.peer_id, *room, *epoch)
                 .ok_or(AslError::PolicyDenied)?;
             if !GroupInboundPolicy::load(store)?.browse_enabled
                 || member.direct.agent != held.source.agent_id

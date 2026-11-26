@@ -12,6 +12,7 @@ use asl_app::{
     paths::AppPaths,
 };
 use asl_store::{
+    act_history::{ActDirection, ActHistoryRecord},
     dashboard::Dashboard,
     evidence::{TrustDimension, TrustOutcome},
     open_store,
@@ -83,6 +84,20 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
             now as i64,
         )
         .unwrap();
+    store
+        .record_act_history(ActHistoryRecord {
+            conversation_id: "00112233445566778899aabbccddeeff",
+            message_id: [6; 16].into(),
+            mls_epoch: 2,
+            direction: ActDirection::In,
+            act_kind: 1,
+            reply_to: None,
+            causal_root: [7; 16].into(),
+            body: Some("migrated act preview"),
+            now_ms: now,
+            expires_at_ms: now + 60_000,
+        })
+        .unwrap();
     drop(store);
     let export_path = fixture.path().join("export");
     fs::create_dir(&export_path).unwrap();
@@ -145,5 +160,9 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
     assert_eq!(view.direct_observations.len(), 1);
     assert_eq!(view.direct_observations[0].observed_at_ms, now as i64);
     assert_eq!(view.direct_observations[0].topic_ids, vec![(1, 101)]);
+    assert!(view.activity.iter().any(|row| {
+        row.direction.as_deref() == Some("in")
+            && row.preview.as_deref() == Some("migrated act preview")
+    }));
     assert!(import_new(&bundle, &target, passphrase()).is_err());
 }
