@@ -48,3 +48,9 @@
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，35 个向量中 25 接受、10 拒绝，签名是合成夹具。
 - `scripts/validate-cddl.ps1`：通过；两个 CDDL 文件语法符合，25 接受、10 拒绝符合预期。
 - 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。
+
+## Windows 测试包
+
+- 离线 release 便携包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-124257.zip`
+- 文件大小：48,694,340 字节；SHA-256：`BC507138128E9CDBFE687EE1C22C90D1FAE6E7D6A3385EC8E0523F494C926EEF`
+- 包内 18 个文件，包含 `asl-core.exe`、`asl-ui.exe`、启动/更新脚本、SHA256SUMS、SBOM、第三方许可和 MPL sources。`asl-core.exe` 与 `asl-ui.exe` 的 release 二进制均返回 `0.1.0`。
