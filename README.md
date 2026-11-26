@@ -217,7 +217,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 发起方在群组页刷新后，可以创建群，也可以选择自己管理的群和具体设备并确认邀请。加入/重入请求可明确批准或拒绝；拒绝使用 `asl-core --group-admin reject-request <tag> <room> <device>`，绑定当前快照和精确设备。群主成员区可以设置成员文字/文件/邀请权限、管理员和禁言设备；这些设置通过 MLS 加密的 `group-policy` 下发，不是本地标签。命令行先运行 `asl-core --group-admin refresh`，再用 `--group-admin status` 读取选项；`--group-admin create <tag>` 建群，`--group-admin invite <tag> <room> <connection>` 邀请。每次操作后重新刷新；连接中断、群版本变化或选项过期时不会改邀另一台设备。
 
-身份迁移带出的群线索会显示在群组页，包含完整 Group ID、群主 AgentId 和最后 epoch；它们明确标为重入线索，不是群成员资格。界面提供复制按钮，Agent 再使用 `asl_group_invite_request` 请求群主批准。
+身份迁移带出的群线索会显示在群组页，包含完整 Group ID、群主 AgentId 和最后 epoch；它们明确标为重入线索，不是群成员资格。界面提供复制和“请求重入”按钮，后者与 Agent 的 `asl_group_invite_request` 使用同一结构化请求路径。
 
 刷新还能看到已入群的设备、角色、禁言和发送权限。群主可在名单中确认移出成员（`--group-admin remove <tag> <room> <device>`），也可用 `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>` 提交群权限；三个开关分别填 `on` 或 `off`，后两项是逗号分隔的完整 base58 设备 ID，空串表示清空。这会改变后续消息和 Offer 范围，不能收回已经收到的消息。
 

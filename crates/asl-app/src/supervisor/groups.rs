@@ -23,7 +23,7 @@ use asl_store::{
 };
 use asl_types::{
     error::AslError,
-    ids::{Hash32, Id128, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{
         Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
         GroupControl, GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame,
@@ -76,6 +76,10 @@ pub enum LocalGroupAction {
     RejectJoinRequest {
         room: Hash32,
         device: PeerId,
+    },
+    RequestJoin {
+        room: Hash32,
+        owner: AgentId,
     },
     /// Trusted in-process callers only; not parsed by the local console.
     /// Sending an expression requires an explicit action through this path.
@@ -1273,6 +1277,7 @@ impl Supervisor {
                 }))
             }
             LocalGroupAction::SetAccess { room, update } => self.set_group_access(room, update),
+            LocalGroupAction::RequestJoin { room, owner } => self.request_group_join(room, owner),
             LocalGroupAction::Dial { address, peer } => {
                 enqueue(
                     net,

@@ -855,6 +855,11 @@ fn outcome_text(outcome: &AdminOutcome, language: Language) -> &'static str {
             "上次操作：加入请求已拒绝",
             "Join request rejected",
         ),
+        AdminOutcome::RequestJoinQueued => label(
+            language,
+            "上次操作：重入请求已排队，尚未确认送达",
+            "Rejoin request queued, delivery unconfirmed",
+        ),
         AdminOutcome::AccessUpdated => label(
             language,
             "上次操作：群权限已提交",

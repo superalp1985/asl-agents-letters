@@ -1064,4 +1064,4 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 ### 2026-11-26 迁移群线索 GUI 投影
 
 - Dashboard 新增 `group_rejoin_hints`，只读取 SQLite v39 `migration_group_hints` 最多 100 条；测试确认线索出现时 `groups` 仍为空，不伪造 MLS 房间。
-- 群组页显示迁移后的群名、完整 Group ID、群主 AgentId、最后 epoch 和复制按钮，并明确标注“线索不是成员资格”。`asl-ui` 25 项 UI 测试通过，store 定向投影测试通过。
+- 群组页显示迁移后的群名、完整 Group ID、群主 AgentId、最后 epoch、复制和“请求重入”按钮，并明确标注“线索不是成员资格”。按钮映射到 `group-admin request-join <room> <owner>`，复用 Core 的 5 分钟结构化请求。`asl-ui` 25 项 UI 测试通过，store 定向投影测试和 AgentId 规范解析测试通过。

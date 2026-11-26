@@ -37,6 +37,10 @@ pub enum AdminRequest {
         room: String,
         device: String,
     },
+    RequestJoin {
+        room: String,
+        owner: String,
+    },
     SetAccess {
         tag: String,
         room: String,
@@ -59,6 +63,7 @@ pub enum AdminOutcome {
     InviteQueued,
     MemberRemoved,
     JoinRequestRejected,
+    RequestJoinQueued,
     AccessUpdated,
     Failed,
     Unconfirmed,
@@ -188,6 +193,7 @@ impl AdminSnapshot {
                                 })
                             })
                 }
+                AdminRequest::RequestJoin { .. } => false,
             }
     }
 }
@@ -373,7 +379,8 @@ impl Store {
             return Err(AslError::QuotaExceeded);
         }
         let mut expires_ms = now.saturating_add(REQUEST_WINDOW_MS);
-        if request != AdminRequest::Refresh {
+        if request != AdminRequest::Refresh && !matches!(&request, AdminRequest::RequestJoin { .. })
+        {
             if !old.is_some_and(|t| t.outcome == AdminOutcome::Ready && t.owned_by(agent, device)) {
                 return Err(AslError::PolicyVersionConflict);
             }
@@ -612,5 +619,29 @@ mod tests {
             },
             100,
         ));
+    }
+
+    #[test]
+    fn request_join_queues_without_an_existing_admin_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = crate::open_store(&home.path().join("state.sqlite3")).unwrap();
+        let agent = AgentId([7; 32]);
+        let device = super::super::tests::test_peer(1);
+        store
+            .queue_group_admin(
+                agent,
+                &device,
+                AdminRequest::RequestJoin {
+                    room: "11".repeat(32),
+                    owner: bs58::encode([8; 32]).into_string(),
+                },
+                10,
+            )
+            .unwrap();
+        let ticket = store
+            .claim_group_admin(agent, &device, 11)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(ticket.request, AdminRequest::RequestJoin { .. }));
     }
 }

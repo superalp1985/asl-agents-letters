@@ -62,6 +62,16 @@ impl Supervisor {
                 .into_iter()
                 .map(|(a, c, d)| peer_option(a, c, &d))
         };
+        if let AdminRequest::RequestJoin { room, owner } = request {
+            self.apply_local_group_action(
+                LocalGroupAction::RequestJoin {
+                    room: wire_id(room)?,
+                    owner: agent_from_text(owner)?,
+                },
+                now,
+            )?;
+            return Ok((AdminOutcome::RequestJoinQueued, None));
+        }
         if request == &AdminRequest::Refresh {
             let rooms = groups.store.managed_mls_rooms(&self.device_peer_id)?;
             let peers = peers().take(VIEW_LIMIT).collect::<Vec<_>>();
@@ -184,6 +194,7 @@ impl Supervisor {
                 )
             }
             AdminRequest::Refresh => unreachable!(),
+            AdminRequest::RequestJoin { .. } => unreachable!(),
         };
         self.apply_local_group_action(action, now)?;
         Ok((outcome, None))
@@ -241,6 +252,14 @@ fn wire_id(text: &str) -> Result<Hash32, AslError> {
 fn peer_from_text(text: &str) -> Result<PeerId, AslError> {
     let peer: libp2p_identity::PeerId = text.parse().map_err(|_| AslError::InvalidDatabase)?;
     PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidDatabase)
+}
+
+fn agent_from_text(text: &str) -> Result<AgentId, AslError> {
+    let bytes = bs58::decode(text)
+        .into_vec()
+        .map_err(|_| AslError::InvalidDatabase)?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| AslError::InvalidDatabase)?;
+    Ok(AgentId(bytes))
 }
 
 #[cfg(test)]

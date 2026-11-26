@@ -951,7 +951,11 @@ impl Supervisor {
         }))
     }
 
-    fn request_group_join(&mut self, room: Hash32, owner: AgentId) -> Result<Value, AslError> {
+    pub(super) fn request_group_join(
+        &mut self,
+        room: Hash32,
+        owner: AgentId,
+    ) -> Result<Value, AslError> {
         if room.0 == [0; 32] || owner.0 == [0; 32] {
             return Err(AslError::InvalidMessage);
         }

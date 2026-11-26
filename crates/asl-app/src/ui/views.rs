@@ -13,7 +13,7 @@ use asl_store::dashboard::{Dashboard, GroupRow};
 use eframe::egui::{self, RichText, Ui};
 pub(super) use remote_avatars::RemoteAvatars;
 
-use super::{ACCENT, MUTED, art::Glyph, locale::Language};
+use super::{ACCENT, LocalAction, MUTED, art::Glyph, locale::Language};
 
 pub(super) struct AccessForm {
     pub(super) share_path: String,
@@ -351,7 +351,7 @@ impl Page {
                             ]
                         },
                     );
-                    group_rejoin_hints(ui, data, *language);
+                    group_rejoin_hints(ui, data, *language, *actions_enabled, action);
                     group_invites::show(
                         ui,
                         data,
@@ -441,7 +441,13 @@ impl Page {
     }
 }
 
-fn group_rejoin_hints(ui: &mut egui::Ui, data: &Dashboard, language: Language) {
+fn group_rejoin_hints(
+    ui: &mut egui::Ui,
+    data: &Dashboard,
+    language: Language,
+    actions_enabled: bool,
+    action: &mut Option<LocalAction>,
+) {
     if data.group_rejoin_hints.is_empty() {
         return;
     }
@@ -483,6 +489,22 @@ fn group_rejoin_hints(ui: &mut egui::Ui, data: &Dashboard, language: Language) {
                 .clicked()
             {
                 ui.ctx().copy_text(hint.owner_agent_id.clone());
+            }
+            if ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(ui_text(language, "请求重入", "Request rejoin")),
+                )
+                .clicked()
+            {
+                *action = Some(LocalAction::new(
+                    "group-admin",
+                    [
+                        "request-join".into(),
+                        hint.group_id.as_str().into(),
+                        hint.owner_agent_id.as_str().into(),
+                    ],
+                ));
             }
         });
     }

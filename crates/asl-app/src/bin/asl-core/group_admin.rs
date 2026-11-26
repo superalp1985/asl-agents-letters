@@ -42,6 +42,10 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 device: device_peer(device)?,
             })
         }
+        [op, room, owner] if op == "request-join" => Some(AdminRequest::RequestJoin {
+            room: hex_id(room, 64)?,
+            owner: agent_id(owner)?,
+        }),
         [
             op,
             tag,
@@ -122,6 +126,17 @@ fn device_peer(value: &OsStr) -> Result<String, AslError> {
     Ok(canonical)
 }
 
+fn agent_id(value: &OsStr) -> Result<String, AslError> {
+    let text = text(value)?;
+    let bytes = bs58::decode(text)
+        .into_vec()
+        .map_err(|_| AslError::InvalidMessage)?;
+    if bytes.len() != 32 || bs58::encode(&bytes).into_string() != text {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(text.to_owned())
+}
+
 fn switch(value: &str) -> Result<bool, AslError> {
     match value {
         "on" => Ok(true),
@@ -161,6 +176,19 @@ mod tests {
         assert_eq!(device_peer(OsStr::new(&peer)).unwrap(), peer);
         for invalid in ["not-a-peer", "", &format!(" {peer}"), &format!("1{peer}")] {
             assert!(device_peer(OsStr::new(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn request_join_requires_a_canonical_agent_id() {
+        let agent = bs58::encode([9; 32]).into_string();
+        assert_eq!(agent_id(OsStr::new(&agent)).unwrap(), agent);
+        for invalid in [
+            "not-an-agent".to_owned(),
+            bs58::encode([9; 31]).into_string(),
+            format!(" {agent}"),
+        ] {
+            assert!(agent_id(OsStr::new(&invalid)).is_err());
         }
     }
 }
