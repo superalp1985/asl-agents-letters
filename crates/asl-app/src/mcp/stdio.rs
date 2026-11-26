@@ -27,9 +27,9 @@ use super::{
     contract::{
         ActArgs, ActHistorySearchArgs, AgentTargetArgs, ConfirmContextArgs, ContextExpressionArgs,
         ContextRequestArgs, EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs,
-        GroupInviteRequestArgs, GroupRoomArgs, GroupSetAccessArgs, QueryArgs, ReceiveOfferArgs,
-        RecoveryDownloadArgs, RecoveryDownloadDecisionArgs, RecoveryEventsArgs, RecoveryQueryArgs,
-        RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
+        GroupInviteRequestArgs, GroupRejectJoinRequestArgs, GroupRoomArgs, GroupSetAccessArgs,
+        QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs, RecoveryDownloadDecisionArgs,
+        RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -49,6 +49,7 @@ const GROUP_MEMBERS: &str = "asl_group_members";
 const GROUP_SET_ACCESS: &str = "asl_group_set_access";
 const GROUP_INVITE: &str = "asl_group_invite";
 const GROUP_INVITE_REQUEST: &str = "asl_group_invite_request";
+const GROUP_REJECT_JOIN_REQUEST: &str = "asl_group_reject_join_request";
 const DIRECT_OPEN: &str = "asl_direct_open";
 const RENEW_ACT_BUDGET: &str = "asl_renew_act_budget";
 const REQUEST_CONTEXT: &str = "asl_request_context";
@@ -296,6 +297,12 @@ impl ServerHandler for ToolServer {
                         .map_err(|_| invalid_arguments())?,
                 ));
                 tools.push(Tool::new(
+                    GROUP_REJECT_JOIN_REQUEST,
+                    "Owner-only: reject one pending group join or rejoin request by full room and device ID. The decision is persisted locally.",
+                    schema_for_input::<GroupRejectJoinRequestArgs>()
+                        .map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
                     DIRECT_OPEN,
                     "Create a two-person MLS conversation with one admitted Agent. The recipient still approves the targeted invitation locally.",
                     schema_for_input::<AgentTargetArgs>().map_err(|_| invalid_arguments())?,
@@ -505,6 +512,11 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
             let args: GroupInviteRequestArgs = parse_arguments(arguments)?;
             args.clone().validate().map_err(|_| invalid_arguments())?;
             Ok(Request::GroupInviteRequest(args))
+        }
+        GROUP_REJECT_JOIN_REQUEST => {
+            let args: GroupRejectJoinRequestArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::GroupRejectJoinRequest(args))
         }
         DIRECT_OPEN => Ok(Request::DirectOpen(parse_arguments(arguments)?)),
         RENEW_ACT_BUDGET => Ok(Request::RenewActBudget(parse_arguments(arguments)?)),
@@ -741,7 +753,7 @@ mod tests {
             "allow_member_text": true,
             "allow_member_files": false,
             "allow_member_invite": false,
-            "admins": [peer],
+            "admins": [peer.clone()],
             "muted": []
         })));
         assert!(matches!(
@@ -767,6 +779,16 @@ mod tests {
                 "owner": "peer:00",
             })));
         assert!(parse_request(bad_owner).is_err());
+
+        let reject =
+            CallToolRequestParams::new(GROUP_REJECT_JOIN_REQUEST).with_arguments(object(json!({
+                "room": "77".repeat(32),
+                "device": peer,
+            })));
+        assert!(matches!(
+            parse_request(reject),
+            Ok(Request::GroupRejectJoinRequest(_))
+        ));
     }
 
     #[test]

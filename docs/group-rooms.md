@@ -5,7 +5,7 @@
 本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
-- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_group_invite_request`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
+- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_group_invite_request`、`asl_group_reject_join_request`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
 - 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。

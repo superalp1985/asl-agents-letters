@@ -110,6 +110,11 @@ pub(crate) enum MailCommand {
         owner: AgentId,
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
+    GroupRejectJoinRequest {
+        room: Hash32,
+        device: asl_types::ids::PeerId,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     DirectOpen {
         agent: AgentId,
         reply: oneshot::Sender<Result<Value, AslError>>,
@@ -318,6 +323,20 @@ impl MailPort {
     ) -> Result<Value, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::GroupInviteRequest { room, owner, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn group_reject_join_request(
+        &self,
+        room: Hash32,
+        device: asl_types::ids::PeerId,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::GroupRejectJoinRequest {
+            room,
+            device,
+            reply,
+        })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 

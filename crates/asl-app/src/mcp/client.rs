@@ -105,6 +105,7 @@ impl Client {
             | Request::GroupSetAccess(_)
             | Request::GroupInvite(_)
             | Request::GroupInviteRequest(_)
+            | Request::GroupRejectJoinRequest(_)
             | Request::DirectOpen(_)
             | Request::RenewActBudget(_)
                 if connection.capabilities["groups_admin"] != true =>

@@ -237,6 +237,13 @@ impl Supervisor {
             MailCommand::GroupInviteRequest { room, owner, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.request_group_join(room, owner));
             }
+            MailCommand::GroupRejectJoinRequest {
+                room,
+                device,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.reject_group_join_request(room, &device));
+            }
             MailCommand::DirectOpen { agent, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.open_direct_room(agent));
             }
@@ -1039,6 +1046,33 @@ impl Supervisor {
             "query": query,
             "limit": limit,
             "entries": entries,
+        }))
+    }
+
+    fn reject_group_join_request(
+        &mut self,
+        room: Hash32,
+        device: &PeerId,
+    ) -> Result<Value, AslError> {
+        let now = unix_time_ms()?;
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let room_state = groups
+            .store
+            .mls_room_for_reconciliation(room)?
+            .ok_or(AslError::NotFound)?;
+        if room_state.creator != self.device_peer_id {
+            return Err(AslError::PolicyDenied);
+        }
+        if !groups
+            .store
+            .finish_group_invite_request(room, device, false, now)?
+        {
+            return Err(AslError::NotFound);
+        }
+        Ok(json!({
+            "room": alloy_primitives::hex::encode(room.0),
+            "device": bs58::encode(device.as_bytes()).into_string(),
+            "state": "rejected"
         }))
     }
 

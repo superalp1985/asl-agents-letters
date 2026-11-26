@@ -74,6 +74,7 @@ pub(super) enum Request {
     GroupSetAccess(GroupSetAccessArgs),
     GroupInvite(GroupInviteArgs),
     GroupInviteRequest(GroupInviteRequestArgs),
+    GroupRejectJoinRequest(GroupRejectJoinRequestArgs),
     DirectOpen(AgentTargetArgs),
     RenewActBudget(RenewActBudgetArgs),
     RequestContext(ContextRequestArgs),
@@ -424,6 +425,14 @@ pub(super) struct GroupInviteRequestArgs {
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct GroupRejectJoinRequestArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: String,
+    pub device: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GroupRoomArgs {
     #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
     pub room: String,
@@ -523,6 +532,12 @@ impl GroupInviteRequestArgs {
             return Err(ErrorCode::InvalidMessage);
         }
         Ok((room, owner))
+    }
+}
+
+impl GroupRejectJoinRequestArgs {
+    pub(super) fn validate(self) -> Result<(Hash32, asl_types::ids::PeerId), ErrorCode> {
+        Ok((parse_hash32(&self.room)?, parse_peer(&self.device)?))
     }
 }
 
