@@ -351,6 +351,7 @@ impl Page {
                             ]
                         },
                     );
+                    group_rejoin_hints(ui, data, *language);
                     group_invites::show(
                         ui,
                         data,
@@ -437,6 +438,53 @@ impl Page {
                     access(ui, data, access_form, *language, *actions_enabled, action);
                 }
             });
+    }
+}
+
+fn group_rejoin_hints(ui: &mut egui::Ui, data: &Dashboard, language: Language) {
+    if data.group_rejoin_hints.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "迁移后可重入的群组",
+            "Groups available to rejoin after migration",
+        ))
+        .strong(),
+    );
+    ui.weak(ui_text(
+        language,
+        "这些只是迁移线索，不是群成员资格。Agent 用完整群 ID 和群主请求重入，群主批准后才进入 MLS。",
+        "These are migration hints, not membership. The Agent requests rejoin using the full room and owner; the owner must approve before MLS admission.",
+    ));
+    for hint in &data.group_rejoin_hints {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} · epoch {}", hint.name, hint.last_epoch));
+            ui.add(
+                egui::Label::new(format!("Group ID: {}", hint.group_id))
+                    .wrap()
+                    .selectable(true),
+            );
+            if ui
+                .small_button(ui_text(language, "复制群 ID", "Copy room"))
+                .clicked()
+            {
+                ui.ctx().copy_text(hint.group_id.clone());
+            }
+            ui.add(
+                egui::Label::new(format!("Owner: {}", hint.owner_agent_id))
+                    .wrap()
+                    .selectable(true),
+            );
+            if ui
+                .small_button(ui_text(language, "复制群主", "Copy owner"))
+                .clicked()
+            {
+                ui.ctx().copy_text(hint.owner_agent_id.clone());
+            }
+        });
     }
 }
 

@@ -1060,3 +1060,8 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 
 - `ASL_MCP_HISTORY=read` 是独立本机授权；未设置时 `asl_act_history_search` 不出现在工具列表。工具只调用现有 `Store::search_act_history`，查询上限 256 字节、默认 25 条、最多 100 条，结果只返回有界结构化字段，不发送网络消息。
 - 参数解析测试覆盖合法查询、空/超长查询、0/101 上限和未知字段拒绝；`asl-app --all-targets --features desktop-ui` 编译、严格 Clippy 和当前 `asl-app` 库 304 通过/5 忽略通过。真实 MCP 宿主跨进程搜索尚未单独执行。
+
+### 2026-11-26 迁移群线索 GUI 投影
+
+- Dashboard 新增 `group_rejoin_hints`，只读取 SQLite v39 `migration_group_hints` 最多 100 条；测试确认线索出现时 `groups` 仍为空，不伪造 MLS 房间。
+- 群组页显示迁移后的群名、完整 Group ID、群主 AgentId、最后 epoch 和复制按钮，并明确标注“线索不是成员资格”。`asl-ui` 25 项 UI 测试通过，store 定向投影测试通过。

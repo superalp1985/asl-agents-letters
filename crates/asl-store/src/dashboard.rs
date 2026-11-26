@@ -50,6 +50,7 @@ pub struct Dashboard {
     pub contact_invites: Vec<crate::contact_invites::ContactInvite>,
     pub contact_invite_prompts: Vec<crate::contact_invites::ContactInvitePrompt>,
     pub groups: Vec<GroupRow>,
+    pub group_rejoin_hints: Vec<GroupRejoinHint>,
     pub group_invitations: Vec<crate::group_state::invite_review::ReviewedInvite>,
     pub group_admin_snapshot: Option<crate::group_state::operator::AdminSnapshot>,
     pub group_admin_status: Option<crate::group_state::operator::AdminOutcome>,
@@ -149,6 +150,13 @@ pub struct GroupRow {
     pub mls_epoch: u64,
     pub membership_epoch: u64,
     pub active_members: u64,
+}
+
+pub struct GroupRejoinHint {
+    pub group_id: String,
+    pub name: String,
+    pub owner_agent_id: String,
+    pub last_epoch: u64,
 }
 
 pub struct TransferRow {
@@ -280,6 +288,7 @@ impl Dashboard {
                 database, now_i64,
             )?,
             groups: read_groups(database)?,
+            group_rejoin_hints: read_group_rejoin_hints(database)?,
             group_inbound: group_inbound.unwrap_or_default(),
             group_inbound_unset: group_inbound.is_none(),
             transfers: read_transfers(database)?,
@@ -661,6 +670,27 @@ fn read_groups(database: &Connection) -> Result<Vec<GroupRow>, AslError> {
         .map_err(database_error)
 }
 
+fn read_group_rejoin_hints(database: &Connection) -> Result<Vec<GroupRejoinHint>, AslError> {
+    let mut statement = database
+        .prepare(
+            "SELECT lower(hex(wire_group_id)),local_name,owner_agent_id,last_epoch
+             FROM migration_group_hints ORDER BY imported_at_ms,wire_group_id LIMIT 100",
+        )
+        .map_err(database_error)?;
+    statement
+        .query_map([], |row| {
+            Ok(GroupRejoinHint {
+                group_id: row.get(0)?,
+                name: row.get(1)?,
+                owner_agent_id: row.get(2)?,
+                last_epoch: read_unsigned(row, 3)?,
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
 fn read_transfers(database: &Connection) -> Result<Vec<TransferRow>, AslError> {
     let mut statement = database
         .prepare(
@@ -837,6 +867,34 @@ pub(crate) fn unsigned(column: usize, value: i64) -> rusqlite::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn projects_migration_group_hints_without_creating_mls_rooms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asl.sqlite3");
+        let store = crate::open_store(&path).unwrap();
+        let owner = bs58::encode([1; 32]).into_string();
+        store
+            .connection
+            .execute("INSERT INTO agents(agent_id) VALUES (?1)", [&owner])
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO migration_group_hints(
+                    wire_group_id,local_name,owner_agent_id,last_epoch,imported_at_ms)
+                 VALUES (?1,'Migrated room',?2,9,1)",
+                rusqlite::params![[2u8; 32].as_slice(), owner],
+            )
+            .unwrap();
+        let view = super::Dashboard::load(&path).unwrap();
+        assert!(view.groups.is_empty());
+        assert_eq!(view.group_rejoin_hints.len(), 1);
+        assert_eq!(view.group_rejoin_hints[0].group_id, "02".repeat(32));
+        assert_eq!(view.group_rejoin_hints[0].name, "Migrated room");
+        assert_eq!(view.group_rejoin_hints[0].owner_agent_id, owner);
+        assert_eq!(view.group_rejoin_hints[0].last_epoch, 9);
+    }
+
     #[test]
     fn host_inbox_reminder_coalesces_expires_and_grants_nothing() {
         let dir = tempfile::tempdir().unwrap();
