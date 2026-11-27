@@ -9,6 +9,7 @@ use asl_net::address_policy::AddressPolicy;
 use asl_net::relay::{MAX_RELAY_ENDPOINT_BYTES, relay_endpoint_config};
 use asl_net::transport::parse_bootstrap_multiaddr;
 use asl_types::error::AslError;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 const MAX_NETWORK_SETTINGS_BYTES: u64 = 16_384;
@@ -50,6 +51,10 @@ pub struct NetworkSettingsV1 {
     pub relay_addresses: Vec<String>,
     #[serde(default)]
     pub bootstrap_multiaddrs: Vec<String>,
+    #[serde(default)]
+    pub network_seed_public_key: Option<String>,
+    #[serde(default)]
+    pub network_seed_network_id: Option<String>,
     /// Compatibility key name. This enables group streams for the configured
     /// address scope; it is not restricted to loopback.
     #[serde(default)]
@@ -66,6 +71,8 @@ impl Default for NetworkSettingsV1 {
             quic_port: 0,
             relay_addresses: Vec::new(),
             bootstrap_multiaddrs: Vec::new(),
+            network_seed_public_key: None,
+            network_seed_network_id: None,
             loopback_groups: false,
         }
     }
@@ -134,12 +141,22 @@ impl NetworkSettingsV1 {
             parse_bootstrap_multiaddr(address, self.address_policy())
                 .map_err(|_| AslError::InvalidIdentity)?;
         }
+        if self
+            .network_seed_public_key
+            .as_ref()
+            .is_some_and(|key| parse_hex32(key).is_err())
+            || self
+                .network_seed_network_id
+                .as_ref()
+                .is_some_and(|id| id.is_empty() || id.len() > 128)
+        {
+            return Err(AslError::InvalidIdentity);
+        }
         Ok(())
     }
 
-    /// Explicit settings win over a packaged seed file. The seed file is
-    /// intentionally empty in this repository until real operators publish it.
-    #[allow(dead_code)]
+    /// Explicit settings win over a packaged seed file. A packaged file is
+    /// ignored unless this profile configures the release Ed25519 public key.
     pub(crate) fn apply_packaged_bootstrap(
         &mut self,
         path: &Path,
@@ -153,8 +170,24 @@ impl NetworkSettingsV1 {
         };
         let seeds: NetworkSeedsV1 =
             serde_json::from_slice(&bytes).map_err(|_| AslError::InvalidIdentity)?;
-        seeds.validate(now_ms)?;
-        for node in seeds.nodes {
+        let Some(key) = self.network_seed_public_key.as_deref() else {
+            return Ok(());
+        };
+        let key =
+            VerifyingKey::from_bytes(&parse_hex32(key)?).map_err(|_| AslError::InvalidIdentity)?;
+        let signature = parse_hex64(&seeds.signature)?;
+        let payload = serde_json::to_vec(&seeds.payload).map_err(|_| AslError::InvalidIdentity)?;
+        key.verify_strict(&payload, &Signature::from_bytes(&signature))
+            .map_err(|_| AslError::InvalidIdentity)?;
+        if self
+            .network_seed_network_id
+            .as_deref()
+            .is_some_and(|network_id| network_id != seeds.payload.network_id)
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        seeds.payload.validate(now_ms)?;
+        for node in seeds.payload.nodes {
             for address in node.multiaddrs {
                 let (peer, _, _) = match parse_bootstrap_multiaddr(&address, self.address_policy())
                 {
@@ -179,9 +212,16 @@ impl NetworkSettingsV1 {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NetworkSeedsV1 {
+    payload: NetworkSeedsPayloadV1,
+    signature: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkSeedsPayloadV1 {
     version: u16,
     network_id: String,
     generated_at_ms: u64,
@@ -189,7 +229,7 @@ struct NetworkSeedsV1 {
     nodes: Vec<NetworkSeedNodeV1>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NetworkSeedNodeV1 {
     operator_id: String,
@@ -198,7 +238,7 @@ struct NetworkSeedNodeV1 {
     roles: Vec<String>,
 }
 
-impl NetworkSeedsV1 {
+impl NetworkSeedsPayloadV1 {
     fn validate(&self, now_ms: u64) -> Result<(), AslError> {
         if self.version != 1
             || self.network_id.is_empty()
@@ -222,6 +262,28 @@ impl NetworkSeedsV1 {
         }
         Ok(())
     }
+}
+
+fn parse_hex32(value: &str) -> Result<[u8; 32], AslError> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 64 {
+        return Err(AslError::InvalidIdentity);
+    }
+    let mut bytes = [0; 32];
+    alloy_primitives::hex::decode_to_slice(value, &mut bytes)
+        .map_err(|_| AslError::InvalidIdentity)?;
+    Ok(bytes)
+}
+
+fn parse_hex64(value: &str) -> Result<[u8; 64], AslError> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 128 {
+        return Err(AslError::InvalidIdentity);
+    }
+    let mut bytes = [0; 64];
+    alloy_primitives::hex::decode_to_slice(value, &mut bytes)
+        .map_err(|_| AslError::InvalidIdentity)?;
+    Ok(bytes)
 }
 
 fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, AslError> {
@@ -314,6 +376,8 @@ mod tests {
             quic_port: 40_000,
             relay_addresses: vec![],
             bootstrap_multiaddrs: vec![],
+            network_seed_public_key: None,
+            network_seed_network_id: None,
             loopback_groups: false,
         };
         fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();

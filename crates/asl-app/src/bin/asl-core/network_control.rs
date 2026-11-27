@@ -49,6 +49,10 @@ pub(super) fn configure(args: &[std::ffi::OsString]) -> Result<(), AslError> {
             settings.quic_port = parse_port(quic)?;
         }
         ["groups", mode] => settings.loopback_groups = parse_on_off(mode)?,
+        ["seed-key", key] => settings.network_seed_public_key = Some((*key).to_owned()),
+        ["seed-network", network] => {
+            settings.network_seed_network_id = Some((*network).to_owned());
+        }
         ["bootstrap", operation, address] => {
             let policy = settings.address_policy();
             mutate_address_list(
