@@ -58,7 +58,7 @@
 
 - 网络设置新增 `bootstrap_multiaddrs`，启动/恢复时按地址策略解析并拨号；`asl-core --network scope|listen|groups|bootstrap|relay` 可编辑并校验配置。
 - 显式 public grant 的 content/concept hash 现在可由 Core 发布为 DHT provider；资源名、路径、摘要和文件列表不进入 provider 记录。
-- 首次链注册新增签名设备目录生成、EIP-712 注册/更新请求、ABI calldata 和 raw transaction RPC 广播入口；首次注册必须先运行 `prepare-directory`，不能让 commitment 与链上值不一致。
+- 首次链注册新增签名设备目录生成、EIP-712 注册/更新/撤销请求、ABI calldata 和 raw transaction RPC 广播入口；首次注册必须先运行 `prepare-directory`，不能让 commitment 与链上值不一致。
 - 收到已认证成员的 Act 后会生成去重、带期限的结构化 `Act Ack`，继续复用现有 MLS、预算和 DHT 邮箱路径。
 - 本轮只完成 `cargo +1.100.0 check --workspace --all-targets --locked --offline` 和格式检查；没有运行新增功能的单元/集成测试，也没有真实公网或真实链交易。
 

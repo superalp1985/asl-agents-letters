@@ -172,7 +172,7 @@ impl AgentIdentity {
     }
 
     pub(crate) fn sign_prehash(&self, digest: &[u8]) -> Result<Signature65, AslError> {
-        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(&digest);
+        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(digest);
         if recovery_id.to_byte() > 1 {
             return Err(AslError::InvalidIdentity);
         }

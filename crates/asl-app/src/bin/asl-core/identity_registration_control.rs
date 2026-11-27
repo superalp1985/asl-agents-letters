@@ -97,7 +97,7 @@ fn submit_raw_transaction(rpc_url: &str, raw_transaction: &str) -> Result<(), As
     let raw = raw_transaction
         .strip_prefix("0x")
         .unwrap_or(raw_transaction);
-    if raw.is_empty() || raw.len() % 2 != 0 {
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
         return Err(AslError::InvalidMessage);
     }
     alloy_primitives::hex::decode(raw).map_err(|_| AslError::InvalidMessage)?;

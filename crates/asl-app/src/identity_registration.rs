@@ -45,6 +45,12 @@ pub struct IdentityRegistrationRequest {
     pub calldata: String,
 }
 
+struct RegistrationKind {
+    operation: &'static str,
+    typehash: &'static [u8],
+    selector: &'static [u8],
+}
+
 impl IdentityRegistrationRequest {
     pub fn build(
         identity: &AgentIdentity,
@@ -53,9 +59,11 @@ impl IdentityRegistrationRequest {
         deadline: u64,
     ) -> Result<Self, AslError> {
         Self::build_with(
-            "register",
-            REGISTER_TYPEHASH,
-            REGISTER_SELECTOR,
+            RegistrationKind {
+                operation: "register",
+                typehash: REGISTER_TYPEHASH,
+                selector: REGISTER_SELECTOR,
+            },
             identity,
             deployment,
             state_commitment,
@@ -75,9 +83,11 @@ impl IdentityRegistrationRequest {
             return Err(AslError::InvalidMessage);
         }
         Self::build_with(
-            "update",
-            UPDATE_TYPEHASH,
-            UPDATE_SELECTOR,
+            RegistrationKind {
+                operation: "update",
+                typehash: UPDATE_TYPEHASH,
+                selector: UPDATE_SELECTOR,
+            },
             identity,
             deployment,
             state_commitment,
@@ -120,9 +130,7 @@ impl IdentityRegistrationRequest {
     }
 
     fn build_with(
-        operation: &'static str,
-        typehash: &[u8],
-        selector: &[u8],
+        kind: RegistrationKind,
         identity: &AgentIdentity,
         deployment: RegistryDeploymentV1,
         state_commitment: [u8; 32],
@@ -137,7 +145,7 @@ impl IdentityRegistrationRequest {
             .map_err(|_| AslError::InvalidIdentity)?;
         let domain = domain_separator(deployment);
         let struct_hash = register_struct_hash(
-            typehash,
+            kind.typehash,
             identity.agent_id(),
             state_commitment,
             sequence,
@@ -146,7 +154,7 @@ impl IdentityRegistrationRequest {
         let digest = eip712_digest(domain, struct_hash);
         let signature = identity.sign_prehash(digest.as_slice())?;
         let calldata = registration_calldata(
-            selector,
+            kind.selector,
             identity.agent_id(),
             state_commitment,
             sequence,
@@ -155,7 +163,7 @@ impl IdentityRegistrationRequest {
         );
         Ok(Self {
             schema: "asl-identity-registration-v1",
-            operation,
+            operation: kind.operation,
             chain_id: deployment.chain_id,
             registry: format!("0x{}", hex::encode(deployment.address)),
             agent_id: format!("0x{}", hex::encode(identity.agent_id().as_bytes())),
