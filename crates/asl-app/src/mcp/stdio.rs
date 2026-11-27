@@ -45,6 +45,8 @@ const SEND_ACT: &str = "asl_send_act";
 const SEND_SHARD_ANNOUNCEMENT: &str = "asl_send_shard_announcement";
 const SEND_FILE: &str = "asl_send_file";
 const ACT_HISTORY_SEARCH: &str = "asl_act_history_search";
+const CONTACT_LOOKUP: &str = "asl_contact_lookup";
+const CONTACT_STATUS: &str = "asl_contact_status";
 const GROUP_LIST: &str = "asl_group_list";
 const GROUP_CREATE: &str = "asl_group_create";
 const GROUP_MEMBERS: &str = "asl_group_members";
@@ -337,6 +339,18 @@ impl ServerHandler for ToolServer {
                         .map_err(|_| invalid_arguments())?,
                 ));
             }
+            if caps["contacts_manage"] == true {
+                tools.push(Tool::new(
+                    CONTACT_LOOKUP,
+                    "Start an exact full-AgentId contact lookup through the existing authenticated DHT path. The result is a locally reviewed candidate; this tool never binds a contact or grants contact access.",
+                    schema_for_input::<AgentTargetArgs>().map_err(|_| invalid_arguments())?,
+                ));
+                tools.push(Tool::new(
+                    CONTACT_STATUS,
+                    "Read the local contact request policy, existing bindings and authenticated lookup candidates. This is read-only and grants no contact access.",
+                    schema_for_input::<EmptyArgs>().map_err(|_| invalid_arguments())?,
+                ));
+            }
             if caps["request_context"] == true {
                 tools.push(Tool::new(
                     REQUEST_CONTEXT,
@@ -511,6 +525,13 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
             args.clone().validate().map_err(|_| invalid_arguments())?;
             Ok(Request::ActHistorySearch(args))
         }
+        CONTACT_LOOKUP => {
+            let args: AgentTargetArgs = parse_arguments(arguments)?;
+            args.clone().validate().map_err(|_| invalid_arguments())?;
+            Ok(Request::ContactLookup(args))
+        }
+        CONTACT_STATUS if arguments.is_empty() => Ok(Request::ContactStatus),
+        CONTACT_STATUS => Err(invalid_arguments()),
         GROUP_LIST if arguments.is_empty() => Ok(Request::GroupList),
         GROUP_CREATE if arguments.is_empty() => Ok(Request::GroupCreate),
         GROUP_MEMBERS => {
@@ -747,6 +768,31 @@ mod tests {
         ] {
             let request =
                 CallToolRequestParams::new(ACT_HISTORY_SEARCH).with_arguments(object(invalid));
+            assert!(parse_request(request).is_err());
+        }
+    }
+
+    #[test]
+    fn contact_tools_accept_only_exact_agent_targets_and_empty_status() {
+        let target = format!("agent:{}", "11".repeat(32));
+        let lookup = CallToolRequestParams::new(CONTACT_LOOKUP)
+            .with_arguments(object(json!({ "target": target })));
+        let status = CallToolRequestParams::new(CONTACT_STATUS);
+        assert!(matches!(
+            parse_request(lookup),
+            Ok(Request::ContactLookup(_))
+        ));
+        assert!(matches!(parse_request(status), Ok(Request::ContactStatus)));
+        for request in [
+            CallToolRequestParams::new(CONTACT_LOOKUP)
+                .with_arguments(object(json!({ "target": "agent:11" }))),
+            CallToolRequestParams::new(CONTACT_LOOKUP).with_arguments(object(json!({
+                "target": format!("agent:{}", "11".repeat(32)),
+                "code": "0000000000000001"
+            }))),
+            CallToolRequestParams::new(CONTACT_STATUS)
+                .with_arguments(object(json!({ "target": "unexpected" }))),
+        ] {
             assert!(parse_request(request).is_err());
         }
     }

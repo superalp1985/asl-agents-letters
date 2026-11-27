@@ -1013,7 +1013,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - NAT code now composes AutoNAT, relay reservation, direct-first dialing, DCUtR observation, relay fallback, configured traversal limits, and reachability/route IPC events.
 - Setup now has one guided preflight/resume/status path with signed network seeds and explicit external chain prerequisites. Migration v2, automatic recovery, contact device rebinding and opt-in group rejoin are wired.
 - Packaging now includes deterministic offline archives, detached signature checks, Windows rollback metadata, and Linux systemd install/upgrade/rollback tooling.
-- Unified local/loopback acceptance completed: all workspace/all-target tests passed with 13 environment-gated ignores; desktop-ui passed 321/321 with 5 ignores; strict Clippy, fmt, schema vectors, CDDL, release build and Windows offline test package generation passed.
+- Unified local/loopback acceptance completed: all workspace/all-target tests passed with 13 environment-gated ignores; desktop-ui passed 323/323 with 5 ignores; strict Clippy, fmt, schema vectors, CDDL, release build and Windows offline test package generation passed.
 - This still does not certify real two-machine NAT traversal, multi-hop 10,000-member capacity, live chain deployment or independent security audit.
 
 ### 2026-11-26 Act 自动回复与 DHT 密文邮箱
@@ -1089,3 +1089,12 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 测试数据库文件名增加 128 位随机后缀。精确用例连续运行 3 次通过；该修改只在 `cfg(test)` 中，不进入 Windows 测试包运行时。
 - 修复后的完整工作区验证：`cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0；所有非忽略用例通过，环境门槛和子进程入口用例按标记忽略。随后 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。
 - 本轮验证范围仍是当前 Windows 主机上的构建、单元/集成/契约/本机进程回环测试；没有新增公网双机、真实链 RPC、跨用户 DPAPI、真实托盘/DPI 或独立安全审计证据。
+
+### 2026-11-28 陌生人联系人请求策略
+
+- 联系人页、`asl-core --bindings policy` 和 Core 动作队列现在共享同一持久请求策略：默认逐次确认，可选自动接受或拒绝。策略更新只排队，不把“已排队”显示成网络已生效。
+- 接受邀请后会再次核验当前连接上的 AgentId/PeerId，再写入本机联系人绑定；联系人范围问询授权、文件授权、群成员资格和模型权限均不被隐式创建。已撤销身份不会被自动重新绑定。
+- 定向验证：`asl-store` 联系人策略持久化 1 项、接受后只建绑定不授予访问 1 项、`asl-core` 参数边界 1 项和 MCP 联系人工具参数边界 1 项通过；`cargo +1.100.0 check -p asl-store -p asl-app --all-targets --features asl-app/desktop-ui --locked --offline` 通过。
+- 尚未执行两台真实设备上的自动接受、并发邀请、策略变更竞态和 GUI 人工点击验收。群来源、近期交互来源的独立规则仍需要签名 provenance 字段，当前没有把这两类来源冒充为已实现。
+- 本功能组的统一验证：workspace/all-targets 测试退出码 0、0 失败、13 项环境门槛忽略；`asl-app` desktop-ui 库 323 通过、0 失败、5 忽略；workspace 严格 Clippy、desktop-ui 严格 Clippy、格式、36 个 schema 向量、CDDL 和 `git diff --check` 均通过。
+- 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-contacts.zip`，79,259,397 字节，SHA-256 `072DFD232A470B56DBAFB3BB7359A2D7E8CF37A87E404FD1F12ED4C25F5A60E1`。这是未签名 debug/test 包，不是生产签名发行包。

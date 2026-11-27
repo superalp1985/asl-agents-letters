@@ -14,6 +14,7 @@ const AGENT_PUSH_VAR: &str = "ASL_MCP_AGENT_PUSH";
 const EXPRESSIONS_VAR: &str = "ASL_MCP_EXPRESSIONS";
 const GROUPS_VAR: &str = "ASL_MCP_GROUPS";
 const HISTORY_VAR: &str = "ASL_MCP_HISTORY";
+const CONTACTS_VAR: &str = "ASL_MCP_CONTACTS";
 
 pub(super) type Key = Zeroizing<[u8; 32]>;
 
@@ -27,6 +28,7 @@ pub(crate) struct HostGrant {
     pub(super) expressions: bool,
     pub(super) groups_admin: bool,
     pub(super) act_history: bool,
+    pub(super) contacts_manage: bool,
 }
 
 impl HostGrant {
@@ -50,6 +52,7 @@ impl HostGrant {
         let expressions = optional_var(EXPRESSIONS_VAR)?;
         let groups = optional_var(GROUPS_VAR)?;
         let history = optional_var(HISTORY_VAR)?;
+        let contacts = optional_var(CONTACTS_VAR)?;
         match (
             key,
             scope.as_deref(),
@@ -58,42 +61,50 @@ impl HostGrant {
             expressions.as_deref(),
             groups.as_deref(),
             history.as_deref(),
+            contacts.as_deref(),
         ) {
-            (None, None, None, None, None, None, None) => Ok(None),
-            (Some(key), Some(scope), inbox, push, expressions, groups, history) => Ok(Some(Self {
-                key,
-                recovery_key,
-                recovery_results,
-                scope: match scope {
-                    "contacts_only" => QueryScope::ContactsOnly,
-                    "public" => QueryScope::Public,
-                    _ => return Err(AslError::InvalidPolicyState),
-                },
-                inbox: inbox
-                    .as_deref()
-                    .map(|id| decode(id).map(Id128))
-                    .transpose()?,
-                agent_push: match push {
-                    None | Some("0") => false,
-                    Some("1") => true,
-                    _ => return Err(AslError::InvalidPolicyState),
-                },
-                expressions: match expressions {
-                    None => false,
-                    Some("send") => true,
-                    _ => return Err(AslError::InvalidPolicyState),
-                },
-                groups_admin: match groups {
-                    None | Some("none") => false,
-                    Some("admin") => true,
-                    _ => return Err(AslError::InvalidPolicyState),
-                },
-                act_history: match history {
-                    None | Some("none") => false,
-                    Some("read") => true,
-                    _ => return Err(AslError::InvalidPolicyState),
-                },
-            })),
+            (None, None, None, None, None, None, None, None) => Ok(None),
+            (Some(key), Some(scope), inbox, push, expressions, groups, history, contacts) => {
+                Ok(Some(Self {
+                    key,
+                    recovery_key,
+                    recovery_results,
+                    scope: match scope {
+                        "contacts_only" => QueryScope::ContactsOnly,
+                        "public" => QueryScope::Public,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                    inbox: inbox
+                        .as_deref()
+                        .map(|id| decode(id).map(Id128))
+                        .transpose()?,
+                    agent_push: match push {
+                        None | Some("0") => false,
+                        Some("1") => true,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                    expressions: match expressions {
+                        None => false,
+                        Some("send") => true,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                    groups_admin: match groups {
+                        None | Some("none") => false,
+                        Some("admin") => true,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                    act_history: match history {
+                        None | Some("none") => false,
+                        Some("read") => true,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                    contacts_manage: match contacts {
+                        None | Some("none") => false,
+                        Some("manage") => true,
+                        _ => return Err(AslError::InvalidPolicyState),
+                    },
+                }))
+            }
             _ => Err(AslError::InvalidPolicyState),
         }
     }

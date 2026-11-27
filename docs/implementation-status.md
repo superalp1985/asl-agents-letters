@@ -15,13 +15,13 @@
 ## 2026-11-28 统一验收
 
 - `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0；所有非环境门槛用例通过，13 项按设计忽略。
-- `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：321 通过、0 失败、5 忽略。
+- `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：323 通过、0 失败、5 忽略。
 - `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `cargo +1.100.0 fmt --all -- --check`：通过。
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：36 个向量，26 接受、10 拒绝。
 - `scripts/validate-cddl.ps1`：两个 CDDL 文件语法通过，语料 26 接受、10 拒绝。
 - `cargo +1.100.0 build --workspace --release --locked`：通过。
-- Windows 离线测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28.zip`，79,205,336 字节，SHA-256 `A94F81BA582C34F67296F59BAD72A356657C3E1A078AEE1BBF98B6F17CA0B413`。
+- Windows 离线测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-contacts.zip`，79,259,397 字节，SHA-256 `072DFD232A470B56DBAFB3BB7359A2D7E8CF37A87E404FD1F12ED4C25F5A60E1`。
 - shell `bash -n`、Python `py_compile` 和 PowerShell parser 检查均通过。
 
 ## 已完成并验证
@@ -57,7 +57,7 @@
 | 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file`、Offer 密文邮箱和 ASL/1.4 跨 shard Offer 元数据转发 | 统一验收、公网跨机、真实两设备大文件；跨 shard 文件字节仍要求双方建立直接认证连接，邮箱只保存 Offer/密文 |
 | 预算 | 消息数 + 消息字节/模型调用/CPU/邮箱默认预算、续期、发送/模型/邮箱实际扣减；GUI 显示用量并续期 24h；MCP/CLI 可续期 | 真实跨机配额压力、CPU 外部进程计量精度和用户自定义策略验收 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
-| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
+| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；新请求默认逐次确认，可显式选择自动接受或拒绝；接受后只创建本机绑定，不授予联系人访问；`ASL_MCP_CONTACTS=manage` 下 Agent 可读取绑定/候选并排队精确查询，但不能批准候选或改策略；群列表和管理详情显示完整 Group ID 并可复制 | 群来源和近期交互来源的独立请求规则尚需协议 provenance；多设备策略同步仍需实机验收；旧 16 位码只保留兼容 |
 
 ## 目标对齐
 

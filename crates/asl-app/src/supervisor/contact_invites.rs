@@ -4,12 +4,16 @@ use asl_net::{
     dht::contact_invite_key,
     transport::{DhtLookupStatus, DhtProviderCandidate},
 };
-use asl_store::{contact_invites::ContactInvitePromptState, open_store};
+use asl_store::{
+    contact_bindings::ContactBindingState, contact_invites::ContactInvitePromptState,
+    contact_policy::ContactRequestMode, open_store,
+};
 use asl_types::{
     contact_invite::ContactInviteV1,
     error::AslError,
     ids::{Id128, PeerId},
     protocol::{PairingExchange, PairingInvite},
+    record::short_code,
 };
 
 use crate::{
@@ -315,10 +319,40 @@ impl Supervisor {
                     controller,
                     Some(invite.nonce),
                 )?;
+                let request_mode = store.contact_request_mode()?;
+                if request_mode == ContactRequestMode::Reject {
+                    return Ok(Some(NetworkCommand::CloseConnection {
+                        connection_id: *connection_id,
+                    }));
+                }
                 if !store.allow_pairing_prompt(*agent_id, invite.invite_id, now_ms)? {
                     return Ok(Some(NetworkCommand::CloseConnection {
                         connection_id: *connection_id,
                     }));
+                }
+                if request_mode == ContactRequestMode::AutoAccept {
+                    let (remote_agent, remote_peer) = self
+                        .admission
+                        .as_mut()
+                        .ok_or(AslError::InvalidIdentity)?
+                        .admitted_peer_identity(*connection_id, now_ms)?;
+                    if remote_agent != *agent_id
+                        || store.is_contact_binding_revoked(remote_agent)?
+                    {
+                        return Ok(Some(NetworkCommand::CloseConnection {
+                            connection_id: *connection_id,
+                        }));
+                    }
+                    self.answer_pairing_invite(
+                        *connection_id,
+                        *response_id,
+                        invite.clone(),
+                        PairingAuthorization::Approve,
+                        now_ms,
+                    )?;
+                    store.consume_contact_invite(discovery.invite_id, now_ms, true)?;
+                    bind_verified_contact(&mut store, remote_agent, &remote_peer, now_ms)?;
+                    return Ok(None);
                 }
                 let prompt_id = Id128(fresh_id()?);
                 let tag = alloy_primitives::hex::encode(invite.invite_id.0);
@@ -591,7 +625,7 @@ impl Supervisor {
             let Some(prompt) = store.contact_invite_prompt(prompt_id, now_ms)? else {
                 continue;
             };
-            let (authorization, accepted) = match prompt.state {
+            let (mut authorization, mut accepted) = match prompt.state {
                 ContactInvitePromptState::Pending => continue,
                 ContactInvitePromptState::Approved => (PairingAuthorization::Approve, true),
                 ContactInvitePromptState::Rejected => (PairingAuthorization::Reject, false),
@@ -603,20 +637,54 @@ impl Supervisor {
             let Some(pending) = self.contact_invites.prompts.get(&prompt_id).cloned() else {
                 continue;
             };
-            self.send_admitted_network_command(
-                NetworkCommand::AnswerPairingInvite {
-                    connection_id: pending.connection_id,
-                    response_id: pending.response_id,
-                    invite: pending.pairing,
-                    authorization,
-                },
+            let (remote_agent, remote_peer) = self
+                .admission
+                .as_mut()
+                .ok_or(AslError::InvalidIdentity)?
+                .admitted_peer_identity(pending.connection_id, now_ms)?;
+            if remote_agent != pending.pairing.inviter {
+                return Err(AslError::InvalidIdentity);
+            }
+            if accepted && store.is_contact_binding_revoked(remote_agent)? {
+                authorization = PairingAuthorization::Reject;
+                accepted = false;
+            }
+            self.answer_pairing_invite(
+                pending.connection_id,
+                pending.response_id,
+                pending.pairing.clone(),
+                authorization,
                 now_ms,
             )?;
+            self.pending_pairing_prompts
+                .complete(pending.pairing.invite_id.0);
             self.contact_invites.prompts.remove(&prompt_id);
             store.consume_contact_invite(pending.discovery_invite_id, now_ms, accepted)?;
+            if accepted {
+                bind_verified_contact(store, remote_agent, &remote_peer, now_ms)?;
+            }
         }
         Ok(())
     }
+}
+
+fn bind_verified_contact(
+    store: &mut asl_store::Store,
+    agent_id: asl_types::ids::AgentId,
+    peer_id: &PeerId,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    if store.is_contact_binding_revoked(agent_id)? {
+        return Err(AslError::PolicyDenied);
+    }
+    if store.contact_binding_state(agent_id)? == Some(ContactBindingState::Bound) {
+        return Ok(());
+    }
+    let code = short_code(agent_id);
+    if store.record_contact_binding_candidate(agent_id, peer_id, code, now_ms)? {
+        store.approve_contact_binding(agent_id, peer_id, code, now_ms)?;
+    }
+    Ok(())
 }
 
 fn verify_exchange(
@@ -660,5 +728,37 @@ fn invite_provider_dial(
             peer_id: provider.peer_id,
         }),
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asl_types::ids::AgentId;
+
+    fn peer(seed: u8) -> PeerId {
+        let key = libp2p_identity::Keypair::ed25519_from_bytes([seed; 32]).unwrap();
+        PeerId::from_bytes(key.public().to_peer_id().to_bytes()).unwrap()
+    }
+
+    #[test]
+    fn accepted_request_creates_binding_without_contact_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = open_store(&directory.path().join("asl.sqlite3")).unwrap();
+        let agent = AgentId([41; 32]);
+        let peer = peer(42);
+
+        bind_verified_contact(&mut store, agent, &peer, 100).unwrap();
+
+        assert_eq!(
+            store.contact_binding_state(agent).unwrap(),
+            Some(ContactBindingState::Bound)
+        );
+        assert!(!store.authorized_contacts().unwrap().contains(&agent));
+        store.revoke_contact_binding(agent, 101).unwrap();
+        assert!(matches!(
+            bind_verified_contact(&mut store, agent, &peer, 102),
+            Err(AslError::PolicyDenied)
+        ));
     }
 }

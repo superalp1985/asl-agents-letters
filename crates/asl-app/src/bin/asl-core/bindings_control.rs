@@ -2,7 +2,10 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
-use asl_store::{contact_bindings::ContactBindingActionKind, open_store, open_store_read_only};
+use asl_store::{
+    contact_bindings::ContactBindingActionKind, contact_policy::ContactRequestMode, open_store,
+    open_store_read_only,
+};
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
@@ -20,6 +23,7 @@ enum Command {
     Revoke(AgentId),
     Forget(AgentId),
     Publish(bool),
+    SetRequestPolicy(ContactRequestMode),
 }
 
 impl Command {
@@ -45,6 +49,9 @@ impl Command {
             ["forget", agent] => Ok(Self::Forget(parse_agent(agent)?)),
             ["publish", "on"] => Ok(Self::Publish(true)),
             ["publish", "off"] => Ok(Self::Publish(false)),
+            ["policy", "review"] => Ok(Self::SetRequestPolicy(ContactRequestMode::Review)),
+            ["policy", "auto-accept"] => Ok(Self::SetRequestPolicy(ContactRequestMode::AutoAccept)),
+            ["policy", "reject"] => Ok(Self::SetRequestPolicy(ContactRequestMode::Reject)),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -82,6 +89,18 @@ impl Command {
                 None,
                 None,
             ),
+            Self::SetRequestPolicy(mode) => (
+                match mode {
+                    ContactRequestMode::Review => ContactBindingActionKind::SetRequestReview,
+                    ContactRequestMode::AutoAccept => {
+                        ContactBindingActionKind::SetRequestAutoAccept
+                    }
+                    ContactRequestMode::Reject => ContactBindingActionKind::SetRequestReject,
+                },
+                None,
+                None,
+                None,
+            ),
         };
         store.enqueue_contact_binding_action(kind, code, agent_id, peer_id.as_ref(), now_ms)
     }
@@ -99,6 +118,10 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
         [command] if command == "list" => {
             let rows = open_store_read_only(&database)?.recent_contact_bindings()?;
             println!("{}", json!({"bindings": rows}));
+        }
+        [command] if command == "policy" => {
+            let mode = open_store_read_only(&database)?.contact_request_mode()?;
+            println!("{}", json!({"request_mode": mode.as_str()}));
         }
         [command, mode, agent, peer, at] if command == "access" && mode == "on" => {
             let agent = parse_agent(text(agent)?)?;
@@ -195,11 +218,16 @@ mod tests {
             parse(&["publish", "on"]),
             Ok(Command::Publish(true))
         ));
+        assert!(matches!(
+            parse(&["policy", "auto-accept"]),
+            Ok(Command::SetRequestPolicy(ContactRequestMode::AutoAccept))
+        ));
         for args in [
             &["lookup", "42"][..],
             &["lookup", "10000000000000000"],
             &["lookup-agent", "not-an-agent"],
             &["publish", "true"],
+            &["policy", "accept-everything"],
             &["revoke", "not-an-agent"],
             &["dismiss", &agent, &peer, "0000000000000042", "extra"],
         ] {

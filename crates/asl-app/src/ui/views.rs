@@ -947,6 +947,62 @@ fn contacts(
             ));
         }
     }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(ui_text(
+            language,
+            "陌生人联系人请求",
+            "New contact requests",
+        ));
+        let mut mode = data.contact_request_mode;
+        egui::ComboBox::from_id_salt("contact-request-mode")
+            .selected_text(match mode {
+                asl_store::contact_policy::ContactRequestMode::Review => {
+                    ui_text(language, "逐次确认", "Review each request")
+                }
+                asl_store::contact_policy::ContactRequestMode::AutoAccept => {
+                    ui_text(language, "自动接受", "Accept automatically")
+                }
+                asl_store::contact_policy::ContactRequestMode::Reject => {
+                    ui_text(language, "拒绝", "Reject")
+                }
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::Review,
+                    ui_text(language, "逐次确认", "Review each request"),
+                );
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::AutoAccept,
+                    ui_text(language, "自动接受", "Accept automatically"),
+                );
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::Reject,
+                    ui_text(language, "拒绝", "Reject"),
+                );
+            });
+        if mode != data.contact_request_mode && action.is_none() {
+            let mode = match mode {
+                asl_store::contact_policy::ContactRequestMode::Review => "review",
+                asl_store::contact_policy::ContactRequestMode::AutoAccept => "auto-accept",
+                asl_store::contact_policy::ContactRequestMode::Reject => "reject",
+            };
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy"), OsString::from(mode)],
+            ));
+        }
+    });
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "自动接受只建立本机联系人绑定，不会授予联系人问询、文件、群聊或模型权限。",
+            "Automatic acceptance only creates a local contact binding. It grants no contact query, file, group or model access.",
+        ))
+        .color(MUTED),
+    );
     ui.label(
         RichText::new(ui_text(
             language,

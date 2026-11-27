@@ -104,6 +104,11 @@ impl Client {
             Request::ActHistorySearch(_) if connection.capabilities["act_history"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
+            Request::ContactLookup(_) | Request::ContactStatus
+                if connection.capabilities["contacts_manage"] != true =>
+            {
+                Err(ErrorCode::PolicyDenied)
+            }
             Request::GroupList
             | Request::GroupCreate
             | Request::GroupMembers(_)

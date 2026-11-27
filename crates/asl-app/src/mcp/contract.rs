@@ -65,6 +65,8 @@ pub(super) enum Request {
     LocalCapabilities,
     AgentBootstrap,
     ActHistorySearch(ActHistorySearchArgs),
+    ContactLookup(AgentTargetArgs),
+    ContactStatus,
     SendExpression(ExpressionArgs),
     SendContextExpression(ContextExpressionArgs),
     SendAct(ActArgs),
@@ -600,7 +602,7 @@ impl GroupRejectJoinRequestArgs {
     }
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AgentTargetArgs {
     #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]

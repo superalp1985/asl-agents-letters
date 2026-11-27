@@ -15,6 +15,7 @@ pub mod capacity;
 pub mod chain;
 pub mod contact_bindings;
 pub mod contact_invites;
+pub mod contact_policy;
 pub mod conversation;
 pub mod dashboard;
 pub mod dht_cache;

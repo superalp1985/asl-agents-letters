@@ -10,6 +10,7 @@ use asl_net::{
 use asl_store::{
     Store,
     contact_bindings::{ContactBindingAction, ContactBindingActionKind},
+    contact_policy::ContactRequestMode,
     open_store,
 };
 use asl_types::{
@@ -398,6 +399,18 @@ impl Supervisor {
             ContactBindingActionKind::UnpublishCode => {
                 store.set_binding_code_public(false, now_ms)?;
                 Ok("disabled")
+            }
+            ContactBindingActionKind::SetRequestReview => {
+                store.set_contact_request_mode(ContactRequestMode::Review, now_ms)?;
+                Ok("review")
+            }
+            ContactBindingActionKind::SetRequestAutoAccept => {
+                store.set_contact_request_mode(ContactRequestMode::AutoAccept, now_ms)?;
+                Ok("auto_accept")
+            }
+            ContactBindingActionKind::SetRequestReject => {
+                store.set_contact_request_mode(ContactRequestMode::Reject, now_ms)?;
+                Ok("reject")
             }
         };
 

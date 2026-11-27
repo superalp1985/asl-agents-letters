@@ -6,6 +6,7 @@ use asl_store::{
     Store,
     act_history::ActDirection,
     budgets::BudgetKind,
+    contact_bindings::ContactBindingActionKind,
     group_access::{GroupAccessKind, GroupAdminCapabilityKind, GroupFileAccessKind},
     group_state::{GROUP_INVITE_REQUEST_TTL_MS, GroupInboundPolicy},
     mailbox::ConversationBudgetRenewal,
@@ -161,6 +162,12 @@ impl Supervisor {
             return;
         };
         match command {
+            MailCommand::ContactLookup { agent, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.contact_lookup(agent));
+            }
+            MailCommand::ContactStatus { reply } if !reply.is_closed() => {
+                let _ = reply.send(self.contact_status());
+            }
             MailCommand::ActHistorySearch {
                 query,
                 limit,
@@ -1418,6 +1425,48 @@ impl Supervisor {
             "owner": format!("agent:{}", alloy_primitives::hex::encode(owner.0)),
             "queued": queued,
             "expires_at_ms": expires_at_ms,
+        }))
+    }
+
+    fn contact_lookup(&self, agent: AgentId) -> Result<Value, AslError> {
+        if agent.0 == [0; 32] || agent == self.agent_id() {
+            return Err(AslError::PolicyDenied);
+        }
+        let now = unix_time_ms()?;
+        let store = asl_store::open_store(&self.state_database)?;
+        store.enqueue_contact_binding_action(
+            ContactBindingActionKind::Lookup,
+            Some(asl_types::record::short_code(agent)),
+            Some(agent),
+            None,
+            now,
+        )?;
+        Ok(json!({
+            "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
+            "state": "queued",
+            "network_ready": self.network_admission_status == NetworkAdmissionStatus::Active,
+        }))
+    }
+
+    fn contact_status(&self) -> Result<Value, AslError> {
+        let store = asl_store::open_store_read_only(&self.state_database)?;
+        let candidates = store
+            .contact_binding_candidates()?
+            .into_iter()
+            .map(|candidate| {
+                json!({
+                    "agent": format!("agent:{}", alloy_primitives::hex::encode(candidate.agent_id.0)),
+                    "peer_id": candidate.peer_id,
+                    "code": format!("{:016}", candidate.code),
+                    "first_seen_ms": candidate.first_seen_ms,
+                    "dismissed": candidate.dismissed,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "request_mode": store.contact_request_mode()?.as_str(),
+            "bindings": store.recent_contact_bindings()?,
+            "candidates": candidates,
         }))
     }
 

@@ -57,6 +57,7 @@ pub(super) fn report(
         "send_context_expression",
         "request_context",
         "act_history",
+        "contacts_manage",
         "receive_offer",
         "task_recovery",
         "recovery_query",

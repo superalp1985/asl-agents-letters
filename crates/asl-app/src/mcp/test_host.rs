@@ -40,6 +40,7 @@ impl Host {
                 agent_push: true,
                 groups_admin: false,
                 act_history: false,
+                contacts_manage: false,
             },
             queries,
             downloads,
@@ -298,6 +299,7 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
         agent_push: true,
         groups_admin: false,
         act_history: false,
+        contacts_manage: false,
     };
     let worker = McpWorker::spawn_with_mail(
         home.clone(),
@@ -526,6 +528,7 @@ async fn bootstrap_resource_maps_core_readiness_without_paths_or_secrets() {
             agent_push: false,
             groups_admin: false,
             act_history: false,
+            contacts_manage: false,
         },
         queries,
         downloads,

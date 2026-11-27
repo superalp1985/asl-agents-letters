@@ -47,6 +47,7 @@ pub struct Dashboard {
     pub binding_candidates: Vec<BindingCandidateRow>,
     pub binding_actions: Vec<BindingActionRow>,
     pub binding_code_public: bool,
+    pub contact_request_mode: crate::contact_policy::ContactRequestMode,
     pub contact_invites: Vec<crate::contact_invites::ContactInvite>,
     pub contact_invite_prompts: Vec<crate::contact_invites::ContactInvitePrompt>,
     pub groups: Vec<GroupRow>,
@@ -281,6 +282,7 @@ impl Dashboard {
             binding_candidates: read_binding_candidates(database)?,
             binding_actions: read_binding_actions(database)?,
             binding_code_public: read_binding_code_public(database)?,
+            contact_request_mode: crate::contact_policy::contact_request_mode(database)?,
             contact_invites: crate::contact_invites::active_invites_for_dashboard(
                 database, now_i64,
             )?,

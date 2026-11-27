@@ -227,6 +227,7 @@ async fn serve(
         "send_shard_announcement": !is_recovery && grant.expressions && grant.groups_admin && mail.is_some(),
         "send_file": !is_recovery && grant.groups_admin && mail.is_some(),
         "groups_admin": !is_recovery && grant.groups_admin && mail.is_some(),
+        "contacts_manage": !is_recovery && grant.contacts_manage && mail.is_some(),
         "act_history": !is_recovery && grant.act_history && mail.is_some(),
         "request_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "confirm_context": !is_recovery && grant.expressions && push && mail.is_some(),
@@ -316,6 +317,8 @@ async fn serve(
                     | Request::SendShardAnnouncement(_)
                     | Request::SendFile(_)
                     | Request::ActHistorySearch(_)
+                    | Request::ContactLookup(_)
+                    | Request::ContactStatus
                     | Request::GroupList
                     | Request::GroupCreate
                     | Request::GroupMembers(_)
@@ -335,6 +338,8 @@ async fn serve(
                     Request::ActHistorySearch(args) => {
                         act_history_search(mail, grant, args).await
                     }
+                    Request::ContactLookup(args) => contact_lookup(mail, grant, args).await,
+                    Request::ContactStatus => contact_status(mail, grant).await,
                     Request::SendContextExpression(args) => {
                         send_context_expression(mail, grant, args).await
                     }
@@ -657,6 +662,25 @@ async fn act_history_search(
     mail.act_history_search(query, limit)
         .await
         .map_err(error_code)
+}
+
+async fn contact_lookup(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::AgentTargetArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.contacts_manage)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let agent = args.validate()?;
+    mail.contact_lookup(agent).await.map_err(error_code)
+}
+
+async fn contact_status(mail: Option<&MailPort>, grant: &HostGrant) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.contacts_manage)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    mail.contact_status().await.map_err(error_code)
 }
 
 async fn direct_open(

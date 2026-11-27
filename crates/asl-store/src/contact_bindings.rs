@@ -84,6 +84,9 @@ pub enum ContactBindingActionKind {
     Forget,
     PublishCode,
     UnpublishCode,
+    SetRequestReview,
+    SetRequestAutoAccept,
+    SetRequestReject,
 }
 
 impl ContactBindingActionKind {
@@ -96,6 +99,9 @@ impl ContactBindingActionKind {
             Self::Forget => "forget",
             Self::PublishCode => "publish_code",
             Self::UnpublishCode => "unpublish_code",
+            Self::SetRequestReview => "set_request_review",
+            Self::SetRequestAutoAccept => "set_request_auto_accept",
+            Self::SetRequestReject => "set_request_reject",
         }
     }
 }
@@ -671,6 +677,11 @@ fn valid_action(
         ContactBindingActionKind::PublishCode | ContactBindingActionKind::UnpublishCode => {
             code.is_none() && agent_id.is_none() && !has_peer
         }
+        ContactBindingActionKind::SetRequestReview
+        | ContactBindingActionKind::SetRequestAutoAccept
+        | ContactBindingActionKind::SetRequestReject => {
+            code.is_none() && agent_id.is_none() && !has_peer
+        }
     }
 }
 
@@ -683,6 +694,9 @@ fn parse_action_kind(value: &str) -> Result<ContactBindingActionKind, AslError> 
         "forget" => Ok(ContactBindingActionKind::Forget),
         "publish_code" => Ok(ContactBindingActionKind::PublishCode),
         "unpublish_code" => Ok(ContactBindingActionKind::UnpublishCode),
+        "set_request_review" => Ok(ContactBindingActionKind::SetRequestReview),
+        "set_request_auto_accept" => Ok(ContactBindingActionKind::SetRequestAutoAccept),
+        "set_request_reject" => Ok(ContactBindingActionKind::SetRequestReject),
         _ => Err(AslError::InvalidDatabase),
     }
 }
