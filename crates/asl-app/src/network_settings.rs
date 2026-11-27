@@ -93,6 +93,7 @@ impl NetworkSettingsV1 {
         if enabled {
             self.address_scope = NetworkAddressScopeV1::RelayOnly;
             self.listen_on_interfaces = false;
+            self.bootstrap_multiaddrs.clear();
         }
         self.validate()?;
         Ok(self)
@@ -150,8 +151,12 @@ impl NetworkSettingsV1 {
         seeds.validate(now_ms)?;
         for node in seeds.nodes {
             for address in node.multiaddrs {
-                let (peer, _, _) = parse_bootstrap_multiaddr(&address, self.address_policy())
-                    .map_err(|_| AslError::InvalidIdentity)?;
+                let (peer, _, _) = match parse_bootstrap_multiaddr(&address, self.address_policy())
+                {
+                    Ok(endpoint) => endpoint,
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                    Err(_) => return Err(AslError::InvalidIdentity),
+                };
                 if peer
                     != asl_types::ids::PeerId::from_bytes(
                         bs58::decode(&node.peer_id)
