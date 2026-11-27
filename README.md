@@ -139,7 +139,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **结构化语义（T41）：** ASL/1.2 直连可请求精确版本的签名定义包，通过既有文件授权同步并返回结构化求值结果。缺少定义时标为 `unresolved`，不回退为自然语言。已验证独立 Core 的 TCP 回环；自主制包、群组同步和公网验收仍待完成。[协议与 MCP 用法](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
-**Agent 初始化（T42，部分实现）：** `asl.exe setup` 创建或复用本机身份。连接同一资料并独立获准的 MCP 宿主可读 `asl://agent/bootstrap-v1`，区分本机身份就绪、可信网络配置缺失和链身份准入，不必搜索资料目录。`asl-core --identity-registration request` 现在会生成 EIP-712 签名、注册 calldata 和可交给钱包/赞助者广播的请求；另有独立的 `submit <RPC> <raw-tx>` 入口。合约实际部署、资金策略和首次真实链交易仍需外部环境。
+**Agent 初始化（T42，部分实现）：** `asl.exe setup` 创建或复用本机身份。连接同一资料并独立获准的 MCP 宿主可读 `asl://agent/bootstrap-v1`，区分本机身份就绪、可信网络配置缺失和链身份准入，不必搜索资料目录。首次链注册顺序是 `asl-core --identity-registration prepare-directory` 生成签名设备目录和 commitment，再用 `asl-core --identity-registration request` 生成 EIP-712 签名、注册 calldata 和可交给钱包/赞助者广播的请求；另有独立的 `submit <RPC> <raw-tx>` 入口。合约实际部署、资金策略和首次真实链交易仍需外部环境。
 
 独立授权的恢复宿主可在重连后续查自己的查询状态、按游标补读状态变化。另行开启留存后，也可补读已保存的结构化答复；不会补发请求、恢复下载凭证或继承文件权限。
 用 `asl_recovery_query` 提交时，可在有效期内用同一请求 ID 和原参数重试，找回原任务 ID，不重复派发。
@@ -397,7 +397,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 **Structured semantics (T41):** ASL/1.2 direct peers can request exact signed context packages, transfer them under existing file grants, and return typed evaluation results to the receiving host. Missing definitions stay `unresolved`, with no natural-language fallback. Verified between independent Core processes on TCP loopback. Autonomous package authoring, group synchronization, and public-network acceptance are pending. [Protocol and MCP usage](docs/05-agent-gui.md#7-stdio-mcp-接入)
 
-**Agent Setup (T42, partial):** `asl.exe setup` creates or reuses a local identity. A separately authorized MCP host connected to the same profile can read `asl://agent/bootstrap-v1` to distinguish local identity readiness, missing network trust configuration, and verified chain admission without searching for profile paths. `asl-core --identity-registration request` now produces the EIP-712 signature, registration calldata and a request that a wallet or sponsor can broadcast; `submit <RPC> <raw-tx>` handles an independently verified raw transaction. Contract deployment, funding policy and live-chain registration remain external.
+**Agent Setup (T42, partial):** `asl.exe setup` creates or reuses a local identity. A separately authorized MCP host connected to the same profile can read `asl://agent/bootstrap-v1` to distinguish local identity readiness, missing network trust configuration, and verified chain admission without searching for profile paths. First registration uses `asl-core --identity-registration prepare-directory`, which writes a signed device directory and commitment, then `asl-core --identity-registration request`, which produces the EIP-712 signature, registration calldata and a request that a wallet or sponsor can broadcast; `submit <RPC> <raw-tx>` handles an independently verified raw transaction. Contract deployment, funding policy and live-chain registration remain external.
 
 With a separate recovery grant, a host can reconnect and read its own query status and status events by cursor. With result retention separately enabled, it can also read saved structured answers. Recovery does not resend queries, restore download credentials, or inherit file permissions.
 When submitting through `asl_recovery_query`, retry with the same request ID and arguments before the original deadline to recover the task ID without dispatching again.

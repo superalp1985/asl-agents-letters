@@ -1,9 +1,9 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
 use asl_app::{
-    identity::AgentIdentity,
+    identity::{AgentIdentity, DeviceIdentity},
     identity_registration::{
-        IdentityRegistrationRequest, default_deadline, default_state_commitment,
+        IdentityRegistrationRequest, default_deadline, prepare_device_directory,
     },
     network_identity::NetworkIdentityConfigurationV1,
     paths::AppPaths,
@@ -27,10 +27,21 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             .ok_or(AslError::InvalidIdentity)?;
 
     let request = match args.as_slice() {
+        ["prepare-directory"] => {
+            return prepare_directory(&paths, &identity, 1);
+        }
+        ["prepare-directory", sequence] => {
+            let sequence = sequence
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or(AslError::InvalidMessage)?;
+            return prepare_directory(&paths, &identity, sequence);
+        }
         ["request"] => IdentityRegistrationRequest::build(
             &identity,
             configuration.resolver.deployment,
-            default_commitment(&paths, &identity),
+            directory_commitment(&paths)?,
             default_deadline()?,
         )?,
         ["request", commitment] => IdentityRegistrationRequest::build(
@@ -116,11 +127,48 @@ fn submit_raw_transaction(rpc_url: &str, raw_transaction: &str) -> Result<(), As
     Ok(())
 }
 
-fn default_commitment(paths: &AppPaths, identity: &AgentIdentity) -> [u8; 32] {
-    std::fs::read(paths.signed_device_directory())
-        .ok()
-        .map(|bytes| *blake3::hash(&bytes).as_bytes())
-        .unwrap_or_else(|| default_state_commitment(identity))
+fn directory_commitment(paths: &AppPaths) -> Result<[u8; 32], AslError> {
+    let bytes = std::fs::read(paths.signed_device_directory())?;
+    let record = asl_types::record::decode_record(&bytes)?;
+    let asl_types::record::RecordPayload::DeviceDirectory(directory) = record.record.payload else {
+        return Err(AslError::InvalidIdentity);
+    };
+    Ok(asl_types::record::device_directory_commitment(&directory)?.0)
+}
+
+fn prepare_directory(
+    paths: &AppPaths,
+    identity: &AgentIdentity,
+    registry_sequence: u64,
+) -> Result<(), AslError> {
+    let device = DeviceIdentity::load_protected(&paths.device_key())?;
+    let (bytes, commitment) =
+        prepare_device_directory(identity, &device, registry_sequence, now_millis()?)?;
+    let path = paths.signed_device_directory();
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(AslError::PolicyDenied);
+    }
+    std::fs::write(&path, bytes)?;
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "schema": "asl-device-directory-preparation-v1",
+            "registry_sequence": registry_sequence,
+            "state_commitment": format!("0x{}", alloy_primitives::hex::encode(commitment)),
+            "directory": path.to_string_lossy()
+        }))
+        .map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn now_millis() -> Result<u64, AslError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| AslError::ExpiredMessage)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| AslError::InvalidMessage)
 }
 
 fn parse_hex32(value: &str) -> Result<[u8; 32], AslError> {

@@ -1,4 +1,4 @@
-# ASL 实现状态（2026-11-26）
+# ASL 实现状态（2026-11-27）
 
 本表只记录仓库中可指认的代码和实际运行过的验证。计划项没有被列成完成项。
 
@@ -25,7 +25,7 @@
 | 能力 | 已完成 | 尚缺 |
 | --- | --- | --- |
 | 公网入口与资源 provider 发布 | `bootstrap_multiaddrs` 按地址策略拨号；显式 public grant 的 content/concept hash 进入 provider 发布集合 | 真实签名 `network-seeds.json`、地址部署、冷启动公网、双机和资源索引验收 |
-| 链上首次注册 | EIP-712 签名、注册 calldata、注册请求 JSON 和 raw transaction RPC 提交入口已编译通过 | 合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
+| 链上首次注册 | 签名设备目录生成、commitment 计算、EIP-712 签名、注册 calldata、注册请求 JSON 和 raw transaction RPC 提交入口已编译通过 | 合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
 | 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；群子流可跟随 loopback/LAN/Internet/relay 地址策略，默认关闭 | 真实双机公网/NAT/relay、跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
 | 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员管理动作、群主转移和更细粒度逐文件策略 |
 | 群加入/重入请求 | 经认证连接的结构化 `InviteRequest`、5 分钟期限、群主本机审批队列、设备/Agent 精确绑定、每群 32 条及每 Agent 每小时 5 条上限、在线连接复核后复用定向邀请、GUI/CLI/MCP 持久拒绝 | 真实双机审批和跨设备迁移全链路验收 |
@@ -52,6 +52,14 @@
 - 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。
 - 最终全量回归曾出现一次 `positive_proof_is_reverified_after_restart_without_renewing_expiry` 的 `InvalidLocalState`；定位为测试数据库名在 PID 复用时潜在碰撞，已加入随机后缀。精确测试连续 3 次通过；修复后的 `cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0，所有非忽略用例通过。
 - 同一工作树的 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。上面的测试和 Clippy 覆盖当前工作区；仍未覆盖真实双机公网/NAT/relay、真实链 RPC、真实窗口/DPI 或独立安全审计。
+
+## 2026-11-27 功能接线（新增代码，待集中测试）
+
+- 网络设置新增 `bootstrap_multiaddrs`，启动/恢复时按地址策略解析并拨号；`asl-core --network scope|listen|groups|bootstrap|relay` 可编辑并校验配置。
+- 显式 public grant 的 content/concept hash 现在可由 Core 发布为 DHT provider；资源名、路径、摘要和文件列表不进入 provider 记录。
+- 首次链注册新增签名设备目录生成、EIP-712 注册/更新请求、ABI calldata 和 raw transaction RPC 广播入口；首次注册必须先运行 `prepare-directory`，不能让 commitment 与链上值不一致。
+- 收到已认证成员的 Act 后会生成去重、带期限的结构化 `Act Ack`，继续复用现有 MLS、预算和 DHT 邮箱路径。
+- 本轮只完成 `cargo +1.100.0 check --workspace --all-targets --locked --offline` 和格式检查；没有运行新增功能的单元/集成测试，也没有真实公网或真实链交易。
 
 ## Windows 测试包
 

@@ -4,10 +4,15 @@ use alloy_primitives::{B256, hex, keccak256};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Signature65},
+    record::{DeviceDirectory, RecordPayload, device_directory_commitment},
 };
 use serde::Serialize;
 
-use crate::{chain::RegistryDeploymentV1, identity::AgentIdentity};
+use crate::{
+    chain::RegistryDeploymentV1,
+    identity::{AgentIdentity, DeviceIdentity},
+    profile::sign_record,
+};
 
 const DOMAIN_NAME: &[u8] = b"ASL Identity Registry";
 const DOMAIN_VERSION: &[u8] = b"1";
@@ -19,6 +24,8 @@ const REGISTER_SELECTOR: &[u8] = b"register(bytes32,bytes32,uint64,uint64,bytes)
 const UPDATE_TYPEHASH: &[u8] =
     b"UpdateState(bytes32 agentId,bytes32 stateCommitment,uint64 sequence,uint64 deadline)";
 const UPDATE_SELECTOR: &[u8] = b"updateState(bytes32,bytes32,uint64,uint64,bytes)";
+const DIRECTORY_RECORD_LIFETIME_MS: u64 = 30 * 60 * 1_000;
+const DEVICE_CERTIFICATE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IdentityRegistrationRequest {
@@ -133,6 +140,40 @@ pub fn default_state_commitment(identity: &AgentIdentity) -> [u8; 32] {
     hasher.update(b"ASL-REGISTRATION-STATE-v1\0");
     hasher.update(identity.agent_id().as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+pub fn prepare_device_directory(
+    identity: &AgentIdentity,
+    device: &DeviceIdentity,
+    registry_sequence: u64,
+    now_ms: u64,
+) -> Result<(Vec<u8>, [u8; 32]), AslError> {
+    if registry_sequence == 0 {
+        return Err(AslError::InvalidMessage);
+    }
+    let certificate = identity.issue_device_certificate(
+        device.peer_id(),
+        1,
+        now_ms,
+        now_ms
+            .checked_add(DEVICE_CERTIFICATE_LIFETIME_MS)
+            .ok_or(AslError::InvalidMessage)?,
+    )?;
+    let directory = DeviceDirectory {
+        agent_id: identity.agent_id(),
+        registry_sequence,
+        devices: vec![certificate],
+        revoked_serials: Vec::new(),
+    };
+    let commitment = device_directory_commitment(&directory)?.0;
+    let bytes = sign_record(
+        identity,
+        RecordPayload::DeviceDirectory(directory),
+        1,
+        now_ms,
+        DIRECTORY_RECORD_LIFETIME_MS,
+    )?;
+    Ok((bytes, commitment))
 }
 
 pub fn default_deadline() -> Result<u64, AslError> {
