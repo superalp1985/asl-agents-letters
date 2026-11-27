@@ -223,7 +223,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 授权页可核对已配置的模型端点地址、模型和本机/远端模式，并单独批准或撤销。仅配置不等于授权；更换地址、模型或模式需要重新批准。Core 在发送前读取当前授权，不需要重启。每份本地资源输入仍需独立的资源披露许可；撤销不能追回已发送数据，批准端点本身也不会打开群组自动回答。回答开启时，`Ask` act 会使用注册表顺序中的第一个已批准端点。`asl-core --providers list` 可从命令行查看同一状态。
 
-节点页可为下次启动后台启用「仅中继」。需要预先在 `state/network-settings-v1.json` 配置中继地址；启用后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
+节点页可为下次启动后台启用「仅中继」，也可查看地址范围、bootstrap 和中继数量。需要预先在 `state/network-settings-v1.json` 配置中继地址；也可用 `asl-core --network scope hybrid`、`--network bootstrap add <multiaddr>`、`--network listen on <tcp-port> <quic-port>` 修改同一文件。启用仅中继后缺少有效配置会阻止后台启动，不会回退直连。页面显示后台上次报告的模式及预约数量，不把已保存的设置或旧报告当作实时连接状态。
 
 节点页的「暂停 ASL 对等网络」也可通过 `asl-core --network pause on|off` 设置。暂停关闭节点连接、监听和中继预约，重启后台后仍生效，不会暂停链 RPC 或本机服务。恢复使用当前后台启动时的地址策略和设备身份，对端须重新通过准入；进行中的查询不会自动重发。暂停请求和后台上次报告分开显示。
 
@@ -361,7 +361,7 @@ Refresh to see the committed roster, roles, mute state and send permissions. The
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each local-resource input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approval alone does not turn on group auto-answer. When answering is enabled, `Ask` acts use the first approved provider in registry order. `asl-core --providers list` shows the same status at the command line.
 
-Nodes can enable relay-only mode for the next Core start. Configure relay addresses in `state/network-settings-v1.json` first. With relay-only enabled, missing or invalid relay settings prevent Core from starting rather than falling back to direct connections. Nodes shows the last reported mode and reservation count, not a live connectivity guarantee.
+Nodes can enable relay-only mode for the next Core start and inspect the configured address scope, bootstrap entries and relay count. Configure relay addresses in `state/network-settings-v1.json` first, or use `asl-core --network scope hybrid`, `--network bootstrap add <multiaddr>` and `--network listen on <tcp-port> <quic-port>` to update the same file. With relay-only enabled, missing or invalid relay settings prevent Core from starting rather than falling back to direct connections. Nodes shows the last reported mode and reservation count, not a live connectivity guarantee.
 
 Pause the ASL peer network in Nodes or with `asl-core --network pause on|off`. Pausing closes peer connections, listeners, and relay reservations and persists across Core restarts. It does not pause chain RPC or local services. Resuming uses the address policy and device identity from the current Core session. Peers must pass admission again, and in-flight queries are not replayed. The saved request and the last report are shown separately.
 
