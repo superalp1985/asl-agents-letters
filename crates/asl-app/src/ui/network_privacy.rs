@@ -87,8 +87,12 @@ pub(super) fn show(
         Ok(c) => ui.colored_label(
             MUTED,
             format!(
-                "{}: {}",
-                label(language, "已配置地址", "Configured addresses"),
+                "{}: {} · {}: {} · {}: {}",
+                label(language, "地址范围", "Address scope"),
+                scope_label(language, c.address_scope),
+                label(language, "引导入口", "Bootstrap"),
+                c.bootstrap_multiaddrs.len(),
+                label(language, "中继", "Relays"),
                 c.relay_addresses.len()
             ),
         ),
@@ -182,5 +186,20 @@ fn label(language: Language, zh: &'static str, en: &'static str) -> &'static str
     match language {
         Language::Zh => zh,
         Language::En => en,
+    }
+}
+
+fn scope_label(language: Language, scope: NetworkAddressScopeV1) -> &'static str {
+    match (language, scope) {
+        (Language::Zh, NetworkAddressScopeV1::LoopbackOnly) => "仅回环",
+        (Language::Zh, NetworkAddressScopeV1::LanOnly) => "局域网",
+        (Language::Zh, NetworkAddressScopeV1::InternetOnly) => "互联网",
+        (Language::Zh, NetworkAddressScopeV1::Hybrid) => "混合",
+        (Language::Zh, NetworkAddressScopeV1::RelayOnly) => "仅中继",
+        (Language::En, NetworkAddressScopeV1::LoopbackOnly) => "Loopback only",
+        (Language::En, NetworkAddressScopeV1::LanOnly) => "LAN only",
+        (Language::En, NetworkAddressScopeV1::InternetOnly) => "Internet only",
+        (Language::En, NetworkAddressScopeV1::Hybrid) => "Hybrid",
+        (Language::En, NetworkAddressScopeV1::RelayOnly) => "Relay only",
     }
 }

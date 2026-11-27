@@ -6,6 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     io,
     net::{IpAddr, SocketAddr},
+    str::FromStr,
     sync::{Arc, Weak},
     task::{Context, Poll},
     time::{Duration, Instant},
@@ -111,6 +112,27 @@ pub struct DhtProviderCandidate {
     pub peer_id: PeerId,
     pub endpoint: Option<(TransportKind, SocketAddr)>,
     pub relay_route_available: bool,
+}
+
+/// Parses a direct bootstrap endpoint without inventing a default network.
+///
+/// The multiaddr must contain exactly one IP transport and one canonical
+/// libp2p peer ID. The caller supplies the local address policy so a
+/// loopback-only profile cannot accidentally dial a public seed.
+pub fn parse_bootstrap_multiaddr(
+    value: &str,
+    policy: AddressPolicy,
+) -> io::Result<(PeerId, TransportKind, SocketAddr)> {
+    if value.is_empty() || value.len() > 512 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let address = Multiaddr::from_str(value).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let endpoint = parse_relay_endpoint(&address)?;
+    validate_multiaddr(policy, &endpoint.peer_id, &endpoint.address)
+        .map_err(|_| io::ErrorKind::PermissionDenied)?;
+    let peer_id =
+        PeerId::from_bytes(endpoint.peer_id.to_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    Ok((peer_id, endpoint.transport, endpoint.socket))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

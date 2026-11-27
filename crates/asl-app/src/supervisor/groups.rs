@@ -120,6 +120,8 @@ pub(super) struct LoopbackGroups {
     sync_cursor: Option<(Hash32, PeerId)>,
     pending_transfers: VecDeque<PendingGroupTransfer>,
     gossip_subscriptions: HashSet<Hash32>,
+    pending_acks: VecDeque<(Hash32, Act)>,
+    acked_acts: HashSet<Id128>,
 }
 
 struct ReceivedApplication {
@@ -190,7 +192,38 @@ impl LoopbackGroups {
             sync_cursor: None,
             pending_transfers: VecDeque::new(),
             gossip_subscriptions: HashSet::new(),
+            pending_acks: VecDeque::new(),
+            acked_acts: HashSet::new(),
         })
+    }
+
+    fn queue_ack(&mut self, room: Hash32, act: &Act, now_ms: u64) -> Result<(), AslError> {
+        if act.act_type == ActType::Ack || !self.acked_acts.insert(act.message_id) {
+            return Ok(());
+        }
+        if self.pending_acks.len() >= 128 {
+            self.pending_acks.pop_front();
+        }
+        self.pending_acks.push_back((
+            room,
+            Act {
+                message_id: Id128([0; 16]),
+                conversation_id: act.conversation_id,
+                act_type: ActType::Ack,
+                reply_to: Some(act.message_id),
+                nl_body: None,
+                action: None,
+                attachments: Vec::new(),
+                causal_root: act.causal_root,
+                hop: act.hop.saturating_add(1),
+                expires_at_ms: Some(now_ms.saturating_add(10 * 60 * 1_000)),
+            },
+        ));
+        Ok(())
+    }
+
+    fn take_pending_acks(&mut self) -> Vec<(Hash32, Act)> {
+        self.pending_acks.drain(..).collect()
     }
 }
 
@@ -419,6 +452,11 @@ impl Supervisor {
                         _ => true,
                     });
             if member_allowed && let GroupApplication::Act(act) = application.as_ref() {
+                if GroupInboundPolicy::load(&groups.store)
+                    .is_ok_and(|policy| policy.browse_enabled || policy.answer_enabled)
+                {
+                    let _ = groups.queue_ack(*wire_id, act, now_ms);
+                }
                 if let Some(member) = requester.as_ref()
                     && GroupInboundPolicy::load(&groups.store)
                         .is_ok_and(|policy| policy.browse_enabled)
@@ -619,6 +657,12 @@ impl Supervisor {
         };
         if !member_allowed {
             return Ok(());
+        }
+        if let GroupApplication::Act(act) = &application
+            && GroupInboundPolicy::load(&groups.store)
+                .is_ok_and(|policy| policy.browse_enabled || policy.answer_enabled)
+        {
+            groups.queue_ack(key, act, now_ms)?;
         }
         if let GroupApplication::Act(act) = &application
             && GroupInboundPolicy::load(&groups.store).is_ok_and(|policy| policy.browse_enabled)
@@ -944,6 +988,14 @@ impl Supervisor {
             {
                 groups.poll_sync(admission, &self.net, now, unix_time_ms()?);
             }
+        }
+        let acks = self
+            .groups
+            .as_mut()
+            .map(LoopbackGroups::take_pending_acks)
+            .unwrap_or_default();
+        for (room, act) in acks {
+            let _ = self.send_group_act(room, act);
         }
         self.poll_group_review();
         let Some(controls) = &self.group_controls else {

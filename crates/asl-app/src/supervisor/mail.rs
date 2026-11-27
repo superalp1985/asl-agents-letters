@@ -731,7 +731,7 @@ impl Supervisor {
         Ok((agreement.message_id, status))
     }
 
-    fn send_group_act(&mut self, room: Hash32, mut act: Act) -> Result<Id128, AslError> {
+    pub(super) fn send_group_act(&mut self, room: Hash32, mut act: Act) -> Result<Id128, AslError> {
         let now = unix_time_ms()?;
         if !self.net.is_running()
             || self.network_admission_status != NetworkAdmissionStatus::Active

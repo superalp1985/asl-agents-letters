@@ -12,6 +12,7 @@ mod direct_outbound;
 mod documents;
 pub mod downloads;
 pub mod identity;
+pub mod identity_registration;
 pub mod infrastructure;
 pub mod ipc;
 pub mod libraries;

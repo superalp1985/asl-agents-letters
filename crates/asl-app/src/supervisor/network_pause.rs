@@ -105,6 +105,18 @@ impl NetRuntime {
             policy: settings.address_policy(),
         })?;
 
+        for address in &settings.bootstrap_multiaddrs {
+            let (peer_id, kind, socket) =
+                asl_net::transport::parse_bootstrap_multiaddr(address, settings.address_policy())
+                    .map_err(|_| AslError::InvalidIdentity)?;
+            self.send_startup_operation(|operation_id| NetworkCommand::Dial {
+                operation_id,
+                kind,
+                address: socket,
+                peer_id,
+            })?;
+        }
+
         for address in &settings.relay_addresses {
             let address = asl_net::relay::relay_endpoint_config(address)?;
             self.send_startup_operation(|operation_id| NetworkCommand::ReserveRelay {

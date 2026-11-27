@@ -77,6 +77,7 @@ mod mailbox_wire;
 mod network_pause;
 mod network_report;
 mod profile_signing;
+mod resource_providers;
 #[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
@@ -121,6 +122,7 @@ pub struct Supervisor {
     directory_renewal_retry_at: Instant,
     contact_bindings: bindings::ContactBindingRuntime,
     contact_invites: contact_invites::ContactInviteRuntime,
+    resource_providers: resource_providers::ResourceProviderRuntime,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -221,6 +223,7 @@ impl Supervisor {
             directory_renewal_retry_at: Instant::now(),
             contact_bindings: bindings::ContactBindingRuntime::default(),
             contact_invites: contact_invites::ContactInviteRuntime::default(),
+            resource_providers: resource_providers::ResourceProviderRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -1292,6 +1295,7 @@ impl Supervisor {
                 self.poll_mailbox_wire()?;
                 self.poll_contact_bindings()?;
                 self.poll_contact_invites()?;
+                self.poll_resource_providers()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;

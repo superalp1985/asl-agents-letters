@@ -77,7 +77,7 @@ T27 直连集成（2026-11-20）更新了上面的历史接线状态：常驻命
 
 IPC kind 38 `DiscoveryCandidate` 仅由 Net 发给 Core，正文为 u16 长度加规范 PeerId、传输类型、SocketAddr 和状态枚举（1=Discovered，2=Expired），正文上限 151 字节。它只表示通过本机地址策略筛选的 mDNS 候选元数据，不表示传输连接已建立、Agent 身份已验证或节点在线，也不授予联系人、查询或文件权限。Supervisor 将其转换成不产生网络命令的 `LocalNetworkObservation`，只交给单独的只读观察回调，不进入 Agent 业务 handler；默认事件泵不显示或持久化该观察。
 
-IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup ID 和 32 字节 DHT key。kind 45 `DhtProviders` 仅由 Net 发给 Core，包含 lookup ID、完成/失败状态及最多 20 个去重 provider 候选；每个候选只含规范 PeerId、可选的 TCP/QUIC SocketAddr 和已配置 relay 路由标志。Net 只从本地 provider/routing 地址中选取符合当前地址策略、且 PeerId 绑定一致的直接端点；无可用直接端点时不携带地址。候选及地址均为不可信发现数据，不表示 Agent 身份、资源内容或授权。Supervisor 将结果作为本机只读网络观察交给当前出站查询状态机；只有 CoreAdmission 提供的已准入连接才会收到 ASL Query。新增 IPC kind 不改变 ASL/1 应用帧。当前仍未配置 DHT bootstrap，资源 provider 发布也未接入，不能据此宣称冷启动公网发现可用。
+IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup ID 和 32 字节 DHT key。kind 45 `DhtProviders` 仅由 Net 发给 Core，包含 lookup ID、完成/失败状态及最多 20 个去重 provider 候选；每个候选只含规范 PeerId、可选的 TCP/QUIC SocketAddr 和已配置 relay 路由标志。Net 只从本地 provider/routing 地址中选取符合当前地址策略、且 PeerId 绑定一致的直接端点；无可用直接端点时不携带地址。候选及地址均为不可信发现数据，不表示 Agent 身份、资源内容或授权。Supervisor 将结果作为本机只读网络观察交给当前出站查询状态机；只有 CoreAdmission 提供的已准入连接才会收到 ASL Query。`network-settings-v1.json` 的 `bootstrap_multiaddrs` 现在会在启动/恢复时按当前地址策略逐个拨号；显式 public grant 的 content/concept hash 会进入 provider 发布集合。打包发布仍需提供真实、可达、签名的 `assets/network-seeds.json` 并完成冷启动公网验收。
 
 接收侧 IPC kind 27 `BulkReceived` 携带连接句柄、Net 端记录的原始本机请求 ID，以及通过 `/asl/blob/1.0.0` 响应关联校验的 BulkResponse。Core 再按当前准入的 AgentId、PeerId、连接、请求 ID 和期限匹配一次性待决请求；ASL blob 线上格式不变。匹配成功的普通 Bulk 响应通过 `BulkTransferResponse` 回调；未匹配响应不会交给调用方。
 

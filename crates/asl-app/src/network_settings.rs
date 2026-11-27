@@ -7,10 +7,12 @@ use std::{
 
 use asl_net::address_policy::AddressPolicy;
 use asl_net::relay::{MAX_RELAY_ENDPOINT_BYTES, relay_endpoint_config};
+use asl_net::transport::parse_bootstrap_multiaddr;
 use asl_types::error::AslError;
 use serde::{Deserialize, Serialize};
 
 const MAX_NETWORK_SETTINGS_BYTES: u64 = 16_384;
+const MAX_BOOTSTRAP_ADDRESSES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +46,8 @@ pub struct NetworkSettingsV1 {
     pub quic_port: u16,
     #[serde(default)]
     pub relay_addresses: Vec<String>,
+    #[serde(default)]
+    pub bootstrap_multiaddrs: Vec<String>,
     /// Compatibility key name. This enables group streams for the configured
     /// address scope; it is not restricted to loopback.
     #[serde(default)]
@@ -59,6 +63,7 @@ impl Default for NetworkSettingsV1 {
             tcp_port: 0,
             quic_port: 0,
             relay_addresses: Vec::new(),
+            bootstrap_multiaddrs: Vec::new(),
             loopback_groups: false,
         }
     }
@@ -105,6 +110,7 @@ impl NetworkSettingsV1 {
     pub fn validate(&self) -> Result<(), AslError> {
         const MAX_RELAY_ADDRESSES: usize = 8;
         if self.relay_addresses.len() > MAX_RELAY_ADDRESSES
+            || self.bootstrap_multiaddrs.len() > MAX_BOOTSTRAP_ADDRESSES
             || self
                 .relay_addresses
                 .iter()
@@ -120,6 +126,10 @@ impl NetworkSettingsV1 {
             if !unique.insert(parsed) {
                 return Err(AslError::InvalidIdentity);
             }
+        }
+        for address in &self.bootstrap_multiaddrs {
+            parse_bootstrap_multiaddr(address, self.address_policy())
+                .map_err(|_| AslError::InvalidIdentity)?;
         }
         Ok(())
     }
@@ -214,6 +224,7 @@ mod tests {
             tcp_port: 0,
             quic_port: 40_000,
             relay_addresses: vec![],
+            bootstrap_multiaddrs: vec![],
             loopback_groups: false,
         };
         fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();

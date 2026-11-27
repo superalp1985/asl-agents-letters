@@ -21,7 +21,7 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     manifest::{Manifest, decode_manifest},
-    protocol::SignedSemanticContextBundle,
+    protocol::{ConceptRef, SignedSemanticContextBundle},
     task::{GrantId, ResourceKey},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -282,6 +282,66 @@ impl SnapshotBroker {
         staged.retain_installed();
         Ok(key)
     }
+}
+
+/// Returns DHT provider keys for resources whose source grant was explicitly
+/// published. Only content and topic hashes leave the process; names, paths,
+/// summaries and file lists stay local.
+pub fn public_resource_provider_keys(store: &Store) -> Result<Vec<[u8; 32]>, AslError> {
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT r.content_id,r.tags_json FROM resources r
+             JOIN grants g ON g.grant_id=r.grant_id
+             JOIN snapshots s ON s.content_id=r.content_id
+             WHERE g.audience='public' AND g.status='active'
+               AND g.epoch=r.source_grant_epoch
+               AND r.active=1 AND s.state='ready'
+             ORDER BY r.row_id LIMIT 4096",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(database_error)?;
+    let mut keys = std::collections::BTreeSet::new();
+    for row in rows {
+        let (content, tags) = row.map_err(database_error)?;
+        let content = parse_hash32(&content)?;
+        keys.insert(domain_key(b"ASL-CONTENT-v1\0", content.as_bytes()));
+        let tags: Vec<(u16, u32)> =
+            serde_json::from_str(&tags).map_err(|_| AslError::InvalidDatabase)?;
+        for (vocabulary_id, concept_id) in tags {
+            let concept = ConceptRef {
+                vocabulary_id,
+                concept_id,
+            };
+            if concept.is_topic() {
+                let mut value = [0; 6];
+                value[..2].copy_from_slice(&concept.vocabulary_id.to_be_bytes());
+                value[2..].copy_from_slice(&concept.concept_id.to_be_bytes());
+                keys.insert(domain_key(b"ASL-CONCEPT-v1\0", &value));
+            }
+        }
+    }
+    Ok(keys.into_iter().collect())
+}
+
+fn domain_key(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(value);
+    *hasher.finalize().as_bytes()
+}
+
+fn parse_hash32(value: &str) -> Result<Hash32, AslError> {
+    if value.len() != 64 {
+        return Err(AslError::InvalidDatabase);
+    }
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(value, &mut bytes).map_err(|_| AslError::InvalidDatabase)?;
+    Ok(Hash32(bytes))
 }
 
 fn source_is_context_package(relative: &str) -> bool {

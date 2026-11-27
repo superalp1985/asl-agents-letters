@@ -94,7 +94,7 @@ T14/T16 后续状态（2026-11-19）：Net 子进程默认仍驱动 loopback-onl
 
 T16 mDNS 观察通道：已筛选的发现/过期候选经 IPC kind 38 进入 Core 的独立本地只读观察回调，不进入 `CoreAdmission` 的 Agent 事件 handler，也不产生授权或联系人状态。候选记录和待派发观察均有固定容量；只有先前记录过且仍符合当前地址策略的候选才会报告过期。候选发现不是在线状态；GUI 展示、AppContainer 组播权限和真实 LAN 验收仍待完成。
 
-T18 Public scope 出站查询现在通过 IPC kind 44/45 请求 DHT provider 候选并收集本机地址策略允许的端点；这些结果只用于候选拨号，不构成身份或授权。Core 仅在 provider 连接完成现有链身份准入后发送 Query，同一 PeerId 同时只有一个待完成的出站控制请求。默认 LoopbackOnly 未改变，Net 拨号仍重新校验地址策略。bootstrap 配置、资源 provider 发布及真实公网互通尚未完成，因此此能力在当前默认设置和无 bootstrap 的冷启动环境中不会发现公网节点。
+T18 Public scope 出站查询现在通过 IPC kind 44/45 请求 DHT provider 候选并收集本机地址策略允许的端点；这些结果只用于候选拨号，不构成身份或授权。Core 仅在 provider 连接完成现有链身份准入后发送 Query，同一 PeerId 同时只有一个待完成的出站控制请求。默认 LoopbackOnly 未改变，Net 拨号仍重新校验地址策略。`network-settings-v1.json` 已支持 `bootstrap_multiaddrs`，并在启动/恢复时逐个拨号；显式 public grant 的 content/concept hash 会进入 provider 发布集合。真实打包 seed 部署、冷启动公网、资源索引和双机互通仍需验收。
 
 网络能力包括不同地址类型的适配必须真实验证；AppContainer 的网络权限不等于按域名限制出站。外部模型 HTTP 由 core 的固定网关发起。
 
