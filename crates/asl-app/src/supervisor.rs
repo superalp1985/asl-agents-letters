@@ -196,6 +196,13 @@ impl Supervisor {
                 network_settings.loopback_groups,
             )?
         };
+        if !paused && let Ok(records) = network_store.cached_dht_records(unix_time_ms()?, 512) {
+            for record in records {
+                let _ = net.try_send(&IpcMessage::RestoreDhtRecord {
+                    value: record.record,
+                });
+            }
+        }
         #[cfg(windows)]
         let auto_reply = auto_reply::AutoReplyRuntime::spawn(&paths)?;
         let mut supervisor = Self {

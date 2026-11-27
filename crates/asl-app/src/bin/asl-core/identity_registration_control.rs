@@ -19,6 +19,9 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     if let ["submit", rpc_url, raw_transaction] = args.as_slice() {
         return submit_raw_transaction(rpc_url, raw_transaction);
     }
+    if let ["wait", rpc_url, transaction_hash] = args.as_slice() {
+        return wait_for_transaction(rpc_url, transaction_hash);
+    }
     let root = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
     let paths = AppPaths::open_existing(&root)?;
     let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
@@ -145,6 +148,78 @@ fn submit_raw_transaction(rpc_url: &str, raw_transaction: &str) -> Result<(), As
         serde_json::to_string(&body).map_err(|_| AslError::InvalidMessage)?
     );
     Ok(())
+}
+
+fn wait_for_transaction(rpc_url: &str, transaction_hash: &str) -> Result<(), AslError> {
+    let url = rpc_url_for_cli(rpc_url)?;
+    let hash = transaction_hash
+        .strip_prefix("0x")
+        .unwrap_or(transaction_hash);
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AslError::InvalidMessage);
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| AslError::SandboxUnavailable)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| AslError::SandboxUnavailable)?;
+    runtime.block_on(async {
+        for _ in 0..150 {
+            let response = client
+                .post(url.clone())
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": "asl-identity-registration-wait",
+                    "method": "eth_getTransactionReceipt",
+                    "params": [format!("0x{hash}")]
+                }))
+                .send()
+                .await
+                .map_err(|_| AslError::SandboxUnavailable)?;
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|_| AslError::InvalidMessage)?;
+            if let Some(receipt) = body.get("result").and_then(Value::as_object) {
+                let status = receipt
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or(AslError::InvalidMessage)?;
+                match status {
+                    "0x1" => {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&body).map_err(|_| AslError::InvalidMessage)?
+                        );
+                        return Ok(());
+                    }
+                    "0x0" => return Err(AslError::PolicyDenied),
+                    _ => return Err(AslError::InvalidMessage),
+                }
+            }
+            if body.get("error").is_some() {
+                return Err(AslError::PolicyDenied);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        Err(AslError::ExpiredMessage)
+    })
+}
+
+fn rpc_url_for_cli(rpc_url: &str) -> Result<reqwest::Url, AslError> {
+    let url = reqwest::Url::parse(rpc_url).map_err(|_| AslError::InvalidMessage)?;
+    if url.scheme() != "https"
+        && !(url.scheme() == "http"
+            && url
+                .host_str()
+                .is_some_and(|host| matches!(host, "127.0.0.1" | "::1" | "localhost")))
+    {
+        return Err(AslError::InvalidIdentity);
+    }
+    Ok(url)
 }
 
 fn directory_commitment(paths: &AppPaths) -> Result<[u8; 32], AslError> {

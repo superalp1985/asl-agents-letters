@@ -225,6 +225,10 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
+            IpcMessage::RestoreDhtRecord { value } => {
+                let _ = self.transport.restore_dht_record(value);
+                Ok(false)
+            }
             IpcMessage::PublishMailboxRecord {
                 operation_id,
                 record,

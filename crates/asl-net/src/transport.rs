@@ -34,6 +34,7 @@ use asl_types::protocol::{
     GroupEnvelope, GroupPacket, IdentityProof, IdentityProofRequest, PairingExchange,
     PairingInvite, WireFrame,
 };
+use asl_types::record::decode_record;
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     core::{
@@ -646,6 +647,22 @@ impl LocalTransport {
             .add_address(&peer, address.clone());
         self.network_started = true;
         Ok(())
+    }
+
+    /// Rehydrates a previously verified signed record into the local Kademlia
+    /// store without treating it as a fresh network response.
+    pub fn restore_dht_record(&mut self, value: Vec<u8>) -> io::Result<()> {
+        let signed = decode_record(&value).map_err(|_| io::ErrorKind::InvalidData)?;
+        let key = crate::dht::record_key_for_payload(&signed.record.payload)
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        let mut record = kad::Record::new(key, value);
+        record.expires = Some(Instant::now() + Duration::from_secs(30 * 60));
+        self.swarm
+            .behaviour_mut()
+            .dht
+            .store_mut()
+            .put(record)
+            .map_err(|_| io::Error::other("DHT restore capacity reached"))
     }
 
     pub fn start_providing(

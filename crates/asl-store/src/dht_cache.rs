@@ -98,6 +98,65 @@ impl Store {
             .map_err(database_error)
     }
 
+    pub fn cached_dht_records(
+        &self,
+        now_ms: u64,
+        limit: u16,
+    ) -> Result<Vec<CachedDhtRecord>, AslError> {
+        let limit = i64::from(limit.clamp(1, 512));
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT agent_id,kind,sequence,registry_sequence,record,expires_at_ms
+                 FROM dht_record_cache
+                 WHERE expires_at_ms>?1
+                 ORDER BY updated_at_ms DESC LIMIT ?2",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?,
+                    limit
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .map_err(database_error)?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (agent, kind, sequence, registry_sequence, record, expires_at_ms) =
+                row.map_err(database_error)?;
+            let agent_id = AgentId(
+                bs58::decode(agent)
+                    .into_vec()
+                    .map_err(|_| AslError::InvalidDatabase)?
+                    .try_into()
+                    .map_err(|_| AslError::InvalidDatabase)?,
+            );
+            let kind = kind_from_code(kind)?;
+            records.push(CachedDhtRecord {
+                agent_id,
+                kind,
+                sequence: u64::try_from(sequence).map_err(|_| AslError::InvalidDatabase)?,
+                registry_sequence: u64::try_from(registry_sequence)
+                    .map_err(|_| AslError::InvalidDatabase)?,
+                record,
+                expires_at_ms: u64::try_from(expires_at_ms)
+                    .map_err(|_| AslError::InvalidDatabase)?,
+            });
+        }
+        Ok(records)
+    }
+
     pub fn cache_dht_provider(
         &self,
         key: [u8; 32],
@@ -212,6 +271,15 @@ fn kind_code(kind: RecordKind) -> i64 {
         RecordKind::Profile => 1,
         RecordKind::DeviceDirectory => 2,
         RecordKind::ShortCode => 3,
+    }
+}
+
+fn kind_from_code(value: i64) -> Result<RecordKind, AslError> {
+    match value {
+        1 => Ok(RecordKind::Profile),
+        2 => Ok(RecordKind::DeviceDirectory),
+        3 => Ok(RecordKind::ShortCode),
+        _ => Err(AslError::InvalidDatabase),
     }
 }
 

@@ -305,6 +305,9 @@ pub enum IpcMessage {
         operation_id: [u8; 16],
         key: [u8; 32],
     },
+    RestoreDhtRecord {
+        value: Vec<u8>,
+    },
     PublishMailboxRecord {
         operation_id: [u8; 16],
         record: Vec<u8>,
@@ -1111,6 +1114,18 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             64
         }
+        IpcMessage::RestoreDhtRecord { value } => {
+            if value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(value.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(value);
+            66
+        }
         IpcMessage::PublishMailboxRecord {
             operation_id,
             record,
@@ -1617,6 +1632,15 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
         }),
+        66 if body.len() >= 2 => {
+            let length = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            if length == 0 || length > MAX_DHT_VALUE_BYTES || body.len() != length + 2 {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RestoreDhtRecord {
+                value: body[2..].to_vec(),
+            })
+        }
         65 if (18..=17 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES).contains(&body.len())
             && body[..16] != [0; 16]
             && asl_net::mailbox::MailboxRecord::decode(&body[16..]).is_ok() =>
@@ -2225,6 +2249,7 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         63 => 34 + 128 + 32 + 2 + MAX_GOSSIP_PAYLOAD_BYTES,
         64 => 48,
         65 => 16 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES,
+        66 => 2 + MAX_DHT_VALUE_BYTES,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2820,6 +2845,7 @@ mod tests {
                 | IpcMessage::SetAddressPolicy { .. }
                 | IpcMessage::FindProviders { .. }
                 | IpcMessage::LookupDhtRecord { .. }
+                | IpcMessage::RestoreDhtRecord { .. }
                 | IpcMessage::PublishMailboxRecord { .. }
                 | IpcMessage::StartProviding { .. }
                 | IpcMessage::StopProviding { .. }
