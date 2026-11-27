@@ -7,7 +7,7 @@ use std::{
 
 use asl_net::address_policy::AddressPolicy;
 use asl_net::relay::{MAX_RELAY_ENDPOINT_BYTES, relay_endpoint_config};
-use asl_net::transport::parse_bootstrap_multiaddr;
+use asl_net::transport::{TraversalConfig, parse_bootstrap_multiaddr};
 use asl_types::error::AslError;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,21 @@ const MAX_BOOTSTRAP_ADDRESSES: usize = 32;
 const MAX_BOOTSTRAP_NODES: usize = 32;
 const MAX_BOOTSTRAP_ADDRESSES_PER_NODE: usize = 8;
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SignedNetworkSeedsStatusV1 {
+    pub version: u16,
+    pub network_id: String,
+    pub generated_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub node_count: usize,
+    pub accepted_address_count: usize,
+}
+
+struct VerifiedNetworkSeedsV1 {
+    status: SignedNetworkSeedsStatusV1,
+    addresses: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkAddressScopeV1 {
@@ -25,6 +40,76 @@ pub enum NetworkAddressScopeV1 {
     InternetOnly,
     Hybrid,
     RelayOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkTraversalSettingsV1 {
+    pub connection_timeout_ms: u64,
+    pub idle_connection_timeout_ms: u64,
+    pub hole_punch_timeout_ms: u64,
+    pub identify_interval_ms: u64,
+    pub autonat_boot_delay_ms: u64,
+    pub autonat_retry_interval_ms: u64,
+    pub autonat_refresh_interval_ms: u64,
+    pub autonat_request_timeout_ms: u64,
+    pub relay_retry_base_ms: u64,
+    pub relay_retry_max_ms: u64,
+    pub max_relay_endpoints: u16,
+    pub max_relay_routes_per_dial: u16,
+    pub max_pending_routes: u16,
+    pub max_relay_reservation_retries: u16,
+    pub autonat_max_peer_addresses: u16,
+    pub autonat_confidence_max: u8,
+}
+
+impl NetworkTraversalSettingsV1 {
+    pub(crate) fn transport_config(self) -> Result<TraversalConfig, AslError> {
+        TraversalConfig {
+            connection_timeout_ms: self.connection_timeout_ms,
+            idle_connection_timeout_ms: self.idle_connection_timeout_ms,
+            hole_punch_timeout_ms: self.hole_punch_timeout_ms,
+            identify_interval_ms: self.identify_interval_ms,
+            autonat_boot_delay_ms: self.autonat_boot_delay_ms,
+            autonat_retry_interval_ms: self.autonat_retry_interval_ms,
+            autonat_refresh_interval_ms: self.autonat_refresh_interval_ms,
+            autonat_request_timeout_ms: self.autonat_request_timeout_ms,
+            relay_retry_base_ms: self.relay_retry_base_ms,
+            relay_retry_max_ms: self.relay_retry_max_ms,
+            max_relay_endpoints: self.max_relay_endpoints,
+            max_relay_routes_per_dial: self.max_relay_routes_per_dial,
+            max_pending_routes: self.max_pending_routes,
+            max_relay_reservation_retries: self.max_relay_reservation_retries,
+            autonat_max_peer_addresses: self.autonat_max_peer_addresses,
+            autonat_confidence_max: self.autonat_confidence_max,
+        }
+        .validate()
+        .map_err(|_| AslError::InvalidIdentity)
+    }
+}
+
+impl Default for NetworkTraversalSettingsV1 {
+    fn default() -> Self {
+        let config = TraversalConfig::default();
+        Self {
+            connection_timeout_ms: config.connection_timeout_ms,
+            idle_connection_timeout_ms: config.idle_connection_timeout_ms,
+            hole_punch_timeout_ms: config.hole_punch_timeout_ms,
+            identify_interval_ms: config.identify_interval_ms,
+            autonat_boot_delay_ms: config.autonat_boot_delay_ms,
+            autonat_retry_interval_ms: config.autonat_retry_interval_ms,
+            autonat_refresh_interval_ms: config.autonat_refresh_interval_ms,
+            autonat_request_timeout_ms: config.autonat_request_timeout_ms,
+            relay_retry_base_ms: config.relay_retry_base_ms,
+            relay_retry_max_ms: config.relay_retry_max_ms,
+            max_relay_endpoints: config.max_relay_endpoints,
+            max_relay_routes_per_dial: config.max_relay_routes_per_dial,
+            max_pending_routes: config.max_pending_routes,
+            max_relay_reservation_retries: config.max_relay_reservation_retries,
+            autonat_max_peer_addresses: config.autonat_max_peer_addresses,
+            autonat_confidence_max: config.autonat_confidence_max,
+        }
+    }
 }
 
 impl From<NetworkAddressScopeV1> for AddressPolicy {
@@ -52,6 +137,8 @@ pub struct NetworkSettingsV1 {
     #[serde(default)]
     pub bootstrap_multiaddrs: Vec<String>,
     #[serde(default)]
+    pub traversal: NetworkTraversalSettingsV1,
+    #[serde(default)]
     pub network_seed_public_key: Option<String>,
     #[serde(default)]
     pub network_seed_network_id: Option<String>,
@@ -71,6 +158,7 @@ impl Default for NetworkSettingsV1 {
             quic_port: 0,
             relay_addresses: Vec::new(),
             bootstrap_multiaddrs: Vec::new(),
+            traversal: NetworkTraversalSettingsV1::default(),
             network_seed_public_key: None,
             network_seed_network_id: None,
             loopback_groups: false,
@@ -118,8 +206,8 @@ impl NetworkSettingsV1 {
     }
 
     pub fn validate(&self) -> Result<(), AslError> {
-        const MAX_RELAY_ADDRESSES: usize = 8;
-        if self.relay_addresses.len() > MAX_RELAY_ADDRESSES
+        let traversal = self.traversal.transport_config()?;
+        if self.relay_addresses.len() > usize::from(traversal.max_relay_endpoints)
             || self.bootstrap_multiaddrs.len() > MAX_BOOTSTRAP_ADDRESSES
             || self
                 .relay_addresses
@@ -169,11 +257,54 @@ impl NetworkSettingsV1 {
         let Some(bytes) = read_optional_file(path)? else {
             return Ok(());
         };
-        let seeds: NetworkSeedsV1 =
-            serde_json::from_slice(&bytes).map_err(|_| AslError::InvalidIdentity)?;
-        let Some(key) = self.network_seed_public_key.as_deref() else {
+        if self.network_seed_public_key.is_none() {
             return Ok(());
-        };
+        }
+        self.apply_signed_seeds(&bytes, now_ms)
+    }
+
+    pub(crate) fn signed_seed_file_status(
+        &self,
+        path: &Path,
+        now_ms: u64,
+    ) -> Result<Option<SignedNetworkSeedsStatusV1>, AslError> {
+        read_optional_file(path)?
+            .map(|bytes| {
+                self.verify_signed_seeds(&bytes, now_ms)
+                    .map(|seeds| seeds.status)
+            })
+            .transpose()
+    }
+
+    pub(crate) fn signed_seed_status(
+        &self,
+        bytes: &[u8],
+        now_ms: u64,
+    ) -> Result<SignedNetworkSeedsStatusV1, AslError> {
+        self.verify_signed_seeds(bytes, now_ms)
+            .map(|seeds| seeds.status)
+    }
+
+    pub(crate) fn apply_signed_seeds(&mut self, bytes: &[u8], now_ms: u64) -> Result<(), AslError> {
+        let verified = self.verify_signed_seeds(bytes, now_ms)?;
+        self.bootstrap_multiaddrs.extend(verified.addresses);
+        self.validate()
+    }
+
+    fn verify_signed_seeds(
+        &self,
+        bytes: &[u8],
+        now_ms: u64,
+    ) -> Result<VerifiedNetworkSeedsV1, AslError> {
+        if bytes.len() as u64 > MAX_NETWORK_SETTINGS_BYTES {
+            return Err(AslError::QuotaExceeded);
+        }
+        let seeds: NetworkSeedsV1 =
+            serde_json::from_slice(bytes).map_err(|_| AslError::InvalidIdentity)?;
+        let key = self
+            .network_seed_public_key
+            .as_deref()
+            .ok_or(AslError::InvalidIdentity)?;
         let key =
             VerifyingKey::from_bytes(&parse_hex32(key)?).map_err(|_| AslError::InvalidIdentity)?;
         let signature = parse_hex64(&seeds.signature)?;
@@ -184,7 +315,22 @@ impl NetworkSettingsV1 {
             return Err(AslError::InvalidIdentity);
         }
         seeds.payload.validate(now_ms)?;
+        let status = SignedNetworkSeedsStatusV1 {
+            version: seeds.payload.version,
+            network_id: seeds.payload.network_id.clone(),
+            generated_at_ms: seeds.payload.generated_at_ms,
+            expires_at_ms: seeds.payload.expires_at_ms,
+            node_count: seeds.payload.nodes.len(),
+            accepted_address_count: 0,
+        };
+        let mut addresses = Vec::new();
         for node in seeds.payload.nodes {
+            let expected_peer = asl_types::ids::PeerId::from_bytes(
+                bs58::decode(&node.peer_id)
+                    .into_vec()
+                    .map_err(|_| AslError::InvalidIdentity)?,
+            )
+            .map_err(|_| AslError::InvalidIdentity)?;
             for address in node.multiaddrs {
                 let (peer, _, _) = match parse_bootstrap_multiaddr(&address, self.address_policy())
                 {
@@ -192,20 +338,18 @@ impl NetworkSettingsV1 {
                     Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
                     Err(_) => return Err(AslError::InvalidIdentity),
                 };
-                if peer
-                    != asl_types::ids::PeerId::from_bytes(
-                        bs58::decode(&node.peer_id)
-                            .into_vec()
-                            .map_err(|_| AslError::InvalidIdentity)?,
-                    )
-                    .map_err(|_| AslError::InvalidIdentity)?
-                {
+                if peer != expected_peer {
                     return Err(AslError::InvalidIdentity);
                 }
-                self.bootstrap_multiaddrs.push(address);
+                addresses.push(address);
             }
         }
-        self.validate()
+        if addresses.is_empty() || addresses.len() > MAX_BOOTSTRAP_ADDRESSES {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut status = status;
+        status.accepted_address_count = addresses.len();
+        Ok(VerifiedNetworkSeedsV1 { status, addresses })
     }
 }
 
@@ -373,6 +517,7 @@ mod tests {
             quic_port: 40_000,
             relay_addresses: vec![],
             bootstrap_multiaddrs: vec![],
+            traversal: NetworkTraversalSettingsV1::default(),
             network_seed_public_key: None,
             network_seed_network_id: None,
             loopback_groups: false,

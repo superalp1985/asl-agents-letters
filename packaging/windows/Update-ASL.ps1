@@ -4,16 +4,18 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Pin')][string]$PinReleaseKey,
     [Parameter(Mandatory, ParameterSetName = 'Apply')][string]$Package,
     [Parameter(Mandatory, ParameterSetName = 'Apply')][string]$Manifest,
-    [Parameter(Mandatory, ParameterSetName = 'Apply')][string]$Signature
+    [Parameter(Mandatory, ParameterSetName = 'Apply')][string]$Signature,
+    [string]$InstallRoot
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Portable-Layout.ps1')
-Assert-PortableRoot $PSScriptRoot
-Assert-PortableLayoutVersion $PSScriptRoot
+$root = if ($InstallRoot) { [IO.Path]::GetFullPath($InstallRoot) } else { $PSScriptRoot }
+Assert-PortableRoot $root
+Assert-PortableLayoutVersion $root
 
-$key = Join-Path $PSScriptRoot 'release-key.ed25519'
-$lockPath = Join-Path $PSScriptRoot '.update.lock'
+$key = Join-Path $root 'release-key.ed25519'
+$lockPath = Join-Path $root '.update.lock'
 if (Test-Path -LiteralPath $lockPath) { Assert-PortablePath $lockPath }
 $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
 try {
@@ -33,16 +35,15 @@ try {
     $packagePath = (Get-Item -LiteralPath $Package).FullName
     $manifestPath = (Get-Item -LiteralPath $Manifest).FullName
     $signaturePath = (Get-Item -LiteralPath $Signature).FullName
-    $installed = Get-PortableRelease $PSScriptRoot
-    $verifier = Join-Path $PSScriptRoot 'asl-core.exe'
+    $installed = Get-PortableRelease $root
+    $verifier = Join-Path $root 'asl-core.exe'
     Assert-PortablePath $verifier
     $previousHome = $env:ASL_HOME
     $id = [guid]::NewGuid().ToString('N')
-    $staging = Join-Path $PSScriptRoot ".staging-$id"
-    $pendingPointer = Join-Path $PSScriptRoot ".active-$id"
+    $staging = Join-Path $root ".staging-$id"
+    $pendingPointer = Join-Path $root ".active-$id"
     $releaseName = "release-$id"
-    $release = Join-Path $PSScriptRoot $releaseName
-    $pointer = Join-Path $PSScriptRoot 'active-release.txt'
+    $release = Join-Path $root $releaseName
     $files = Get-PortablePackageMembers
     $unpublished = $staging
     # Keep the signed ZIP open for the entire verify/extract sequence.
@@ -60,29 +61,23 @@ try {
         if ($LASTEXITCODE -ne 0 -or -not $verification) { throw 'Update signature or version verification failed.' }
         $receipt = $verification | ConvertFrom-Json
         $version = $receipt.version
-        $encoded = [Text.Encoding]::ASCII.GetBytes("$releaseName`n$version")
+        $newPointerRecord = "$releaseName`n$version"
+        $encoded = [Text.Encoding]::ASCII.GetBytes($newPointerRecord)
         if ($encoded.Length -gt 256) { throw 'The signed version is too long.' }
-        if ((Get-FileHash -InputStream $archiveFile -Algorithm SHA256).Hash -ne $receipt.sha256) {
+        $packageSha256 = ([string]$receipt.sha256).ToLowerInvariant()
+        if ((Get-FileHash -InputStream $archiveFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $packageSha256) {
             throw 'The held archive differs from the verified package.'
         }
+        $layout = Assert-PortablePackageArchive -InputStream $archiveFile
+        $files = @($layout.Members)
         $archiveFile.Position = 0
         $archive = [IO.Compression.ZipArchive]::new($archiveFile, 'Read', $true)
         try {
-            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-            $total = [long]0
-            foreach ($entry in $archive.Entries) {
-                if ($entry.FullName -cnotin $files -or -not $seen.Add($entry.FullName)) {
-                    throw "Unexpected or repeated package entry: $($entry.FullName)"
-                }
-                if ($entry.Length -le 0 -or $entry.Length -gt 256MB) { throw 'Invalid member size.' }
-                $total += $entry.Length
-                if ($total -gt 1GB) { throw 'The unpacked package is too large.' }
-            }
-            if ($seen.Count -ne $files.Count) { throw 'The package is incomplete.' }
-
             [void][IO.Directory]::CreateDirectory($staging)
             foreach ($entry in $archive.Entries) {
+                if ($entry.FullName.EndsWith('/', [StringComparison]::Ordinal)) { continue }
                 $destination = Join-Path $staging $entry.FullName
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
                 $output = [IO.File]::Open($destination, 'CreateNew', 'Write', 'None')
                 try {
                     $inputStream = $entry.Open()
@@ -122,8 +117,19 @@ try {
         finally { $mapping.Dispose() }
         [IO.Directory]::Move($staging, $release)
         $unpublished = $release
-        # Publish by renaming within the same directory, without moving the old pointer aside.
-        [IO.File]::Move($pendingPointer, $pointer, $true)
+        $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $rollbackJson = New-PortableRollbackMetadata `
+            -Root $root `
+            -PreviousPointer $installed.Record `
+            -ActivePointer $newPointerRecord `
+            -PackageSha256 $packageSha256 `
+            -ManifestSha256 $manifestSha256
+        # Publish rollback metadata first and the active pointer last. The helper restores
+        # the previous metadata if the pointer replacement cannot be completed.
+        Publish-PortableReleaseState `
+            -Root $root `
+            -PendingPointer $pendingPointer `
+            -RollbackMetadata $rollbackJson
         $unpublished = $null
         Write-Output $version
     }
@@ -134,6 +140,10 @@ try {
         if ($unpublished -and [IO.Directory]::Exists($unpublished)) {
             foreach ($name in $files) {
                 [IO.File]::Delete([IO.Path]::Combine($unpublished, $name))
+            }
+            $assets = Join-Path $unpublished 'assets'
+            if ([IO.Directory]::Exists($assets)) {
+                [IO.Directory]::Delete($assets)
             }
             [IO.Directory]::Delete($unpublished)
         }

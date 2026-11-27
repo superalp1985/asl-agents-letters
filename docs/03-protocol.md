@@ -26,11 +26,13 @@ ASL/1.2 增加摘要绑定的语义上下文帧（kind 16-19）。`ContextExpres
 
 ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame`，只能作为 MLS `Application` 解密后的 `group-application` 明文；私聊是两人 MLS 组，与群聊共用同一 act 路径。act 控制字段包括 message/conversation/causal ID、act type、reply-to、结构化 action、blob-ref 附件、hop 和期限；唯一可选任意文本字段是 `act[5] nl-body`，最多 32 KiB。`nl-body` 是不可信远端数据，不能成为系统/开发者指令、工具调用、路径、授权、目标或动作。动作只能来自结构化 `action` 并经 PolicyService；文件字节仍走 `offer/fetch/chunk/hash`，act 只携带 blob-ref。
 
+ASL/1.4 增加 `shard-forward`（Hello feature 6）和根群/子群绑定。每个子群仍是独立 MLS 组；同一密文不能跨子群复用。逻辑群主对 `ShardBinding` 和 `ShardForward` 的规范 CBOR 前映像做根身份签名。转发封装绑定逻辑根、源/目标子群、原发送 Agent/Peer、源 MLS epoch、源成员 epoch、原消息 ID、短期期限、目标绑定、原 `group-application` 字节和桥接证明。接收端验证外层 MLS 发送者、当前目标群主、链上 controller、绑定和转发签名，再以 `(root, source child, target child, source peer, source message)` 做持久去重。桥接节点只可转发经其认证的原应用，不获得原发送者的私钥；策略、成员变更、移除请求和嵌套转发不得进入转发载荷。
+
 当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。回答开启时，`Ask` 可由本机已批准模型生成严格解析的 `Inform/Clarify`，模型不能返回 action、tool、path 或附件控制字段；在线群请求会从当前 audience 快照选择最多 4 个同时具备 `ReadChunk`/`ModelInput` permit 的本地文本证据。DHT 密文邮箱已接 8 KiB 记录、分片批次、3 天轮换键和 7 天 TTL；已知联系人或群成员可拉取并用 MLS 重新验证发送者。Act 元数据和 DPAPI 保护的本机正文预览进入活动历史，选择 `history` 的加密身份迁移包可携带未过期历史。邮箱不携带文件字节，不提供远端送达回执；真实两设备、公网/NAT/relay 和 MLS 密钥迁移仍待验收。
 
-ASL/1.3 群内还定义了 `group-policy` 控制值：正常情况下只在 MLS 解密后由当前群主发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId、禁言 PeerId 和可选的新群主 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。key 6 存在时执行群主转移，新群主必须是当前 MLS 活动成员，不能被禁言；接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是当前群主，再原子替换本机策略。可选 key 7 按 content hash 给出逐文件 `read/send/fetch` 位，entries 按 hash32 严格排序且唯一，最多 512 项；没有对应 entry 时沿用成员默认文件权限。可选 key 8 为匹配管理员的 PeerId 绑定 `manage-members/manage-files/manage-invites` 能力位，entries 按 PeerId 严格排序且唯一，只能引用 key 4 中列出的管理员，最多 512 项；没有对应 entry 时保留旧 v1 的“管理员拥有全部委派能力”语义。拥有 `manage-members` 的活动管理员可发送一个委派禁言快照：其 policy revision、权限、owner、文件策略和能力位必须与当前 owner 快照完全一致，只允许替换 muted 列表；接收端验证 MLS sender 是活动管理员后才应用，不能借此改 owner、权限或能力位。成员端对入站 act 和文件 Offer 都重新检查该策略，文件路径和传输时调用 `group_can_access_file`，管理动作调用管理员能力检查；策略消息本身不进入自然语言数据区，也记录为无文本控制事件。
+ASL/1.3 群内还定义了 `group-policy` 控制值：正常情况下只在 MLS 解密后由当前群主发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId、禁言 PeerId 和可选的新群主 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。key 6 存在时执行群主策略转移，新群主必须是当前 MLS 活动成员且不能被禁言；接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是当前群主，再原子替换本机策略。可选 key 7 按 content hash 给出逐文件 `read/send/fetch` 位，entries 按 hash32 严格排序且唯一，最多 512 项；没有对应 entry 时沿用成员默认文件权限。可选 key 8 为匹配管理员的 PeerId 绑定 `manage-members/manage-files/manage-invites` 能力位，只能引用 key 4 中的管理员。委派控制必须保持 policy revision、权限、owner、管理员名单和能力位不变：`manage-members` 只可改禁言快照，`manage-files` 只可改逐文件策略，`manage-invites` 只放行邀请操作。成员端对入站 act 和文件 Offer 都重新检查该策略，文件路径和传输时调用 `group_can_access_file`。群主策略转移不等于迁移 MLS creator 私钥或历史 ratchet 状态。
 
-- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件和预算均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
+- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件、预算、shard 绑定和 forwarding envelope 均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
 - 规范结构外的字节串只允许出现在用途固定的密码学值、hash、签名、PeerId、文件/MLS 密文载荷中。验证器按具体用途检查长度、格式和状态转移，不把未知 blob 交给模型。
 - 文件载荷与控制消息分流，是由本地 grant 明确授权的不透明对象；接收文件不自动解析成对话、指令、可执行内容或模型上下文。人类选择授权模型处理时，仍按不可信数据进入隔离模型闸门。
 - 本地配置、GUI 标签、日志和数据库可以有文本字段；它们不属于对端可控的 ASL 语义 wire。链上也不得写入自然语言字段。
@@ -93,7 +95,7 @@ PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode �
 
 ### 群子流
 
-`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，其中 ASL/1.3 可包含 `act` 或群主 `group-policy`，其他应用帧仍不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
+`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，可包含既有结构帧、`act`、群主策略、移除请求、语义上下文或 ASL/1.4 shard 控制；除 act `nl-body` 外不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。
 
 | 请求 | 允许的回复 | 回复 epoch |
 | --- | --- | --- |

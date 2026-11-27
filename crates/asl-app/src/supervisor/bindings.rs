@@ -15,7 +15,7 @@ use asl_store::{
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
-    record::short_code,
+    record::{RecordKind, RecordPayload, decode_record, short_code},
 };
 use rand::{TryRng, rngs::SysRng};
 
@@ -197,6 +197,30 @@ impl Supervisor {
         event: &AdmittedNetworkEvent,
     ) -> Result<(), AslError> {
         match event {
+            AdmittedNetworkEvent::DhtRecordAvailable {
+                agent_id,
+                kind: RecordKind::DeviceDirectory,
+                record,
+                ..
+            } => {
+                let signed = decode_record(record)?;
+                let RecordPayload::DeviceDirectory(directory) = signed.record.payload else {
+                    return Err(AslError::InvalidIdentity);
+                };
+                if &directory.agent_id != agent_id {
+                    return Err(AslError::InvalidIdentity);
+                }
+                let store = open_store(&self.state_database)?;
+                if let Some(devices) =
+                    store.rebind_verified_contact_device(&directory, unix_time_ms()?)?
+                {
+                    #[cfg(windows)]
+                    self.mailbox
+                        .observe_contact_device_change(*agent_id, &devices.0, &devices.1);
+                    #[cfg(not(windows))]
+                    let _ = devices;
+                }
+            }
             AdmittedNetworkEvent::OperationAccepted { operation_id } => {
                 if let Some(target_state) = self
                     .contact_bindings

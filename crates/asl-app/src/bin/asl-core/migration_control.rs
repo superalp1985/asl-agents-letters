@@ -65,13 +65,36 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                     "agent_id": bs58::encode(result.agent_id.as_bytes()).into_string(),
                     "peer_id": bs58::encode(result.peer_id.as_bytes()).into_string(),
                     "state": "pending_device_registration",
+                    "migration": result.migration,
                     "next_steps": [
-                        "set ASL_HOME to the imported profile",
-                        "run asl-core --identity-registration prepare-directory <new registry sequence>",
-                        "run asl-core --identity-registration update <sequence> <state commitment> <deadline>",
-                        "submit the update with a verified wallet or sponsor transaction"
+                        "if migration.source_device is present, authorize that exact old PeerId with --migration authorize-old-device-revoke",
+                        "run asl setup with explicit trusted network and onboarding configuration and --onboard",
+                        "check completion with asl setup --status"
                     ]
                 })
+            );
+            Ok(())
+        }
+        [command, destination, peer_id] if command == "authorize-old-device-revoke" => {
+            let peer_id = peer_id.to_str().ok_or(AslError::InvalidMessage)?;
+            let paths = AppPaths::open_existing(Path::new(destination))?;
+            let status = migration::authorize_old_device_revocation(&paths, peer_id)?;
+            println!(
+                "{}",
+                serde_json::to_string(&status).map_err(|_| AslError::InvalidMessage)?
+            );
+            Ok(())
+        }
+        [command, destination] if command == "status" => {
+            let paths = AppPaths::open_existing(Path::new(destination))?;
+            let status = migration::status(&paths)?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "schema": "asl-identity-migration-status-v1",
+                    "migration": status
+                }))
+                .map_err(|_| AslError::InvalidMessage)?
             );
             Ok(())
         }

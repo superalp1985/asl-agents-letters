@@ -110,6 +110,18 @@ impl CoreAdmission {
         local_name: &str,
         now_ms: u64,
     ) -> Result<(Hash32, RoomVersion), AslError> {
+        self.create_local_mls_room_linked(store, root, local_id, local_name, now_ms, None)
+    }
+
+    pub(crate) fn create_local_mls_room_linked(
+        &mut self,
+        store: &mut Store,
+        root: &AgentIdentity,
+        local_id: &GroupId,
+        local_name: &str,
+        now_ms: u64,
+        shard_root: Option<Hash32>,
+    ) -> Result<(Hash32, RoomVersion), AslError> {
         let expected_policy = store.policy_revision()?;
         let local = self.local_hello.device_certificate.clone();
         let provider = RoomProvider::default();
@@ -142,7 +154,7 @@ impl CoreAdmission {
             device: &local.peer_id,
         };
         let sealed = seal(&binding, 1, &group, &provider)?;
-        let version = store.create_mls_room(
+        let version = store.create_mls_room_linked(
             PendingMlsRoom {
                 local_id,
                 wire_id,
@@ -155,6 +167,7 @@ impl CoreAdmission {
             self.resolver.deployment().chain_id,
             expected_policy,
             now_ms,
+            shard_root,
         )?;
         Ok((wire_id, version))
     }
@@ -207,6 +220,7 @@ impl CoreAdmission {
         let roster = self
             .room_evidence(welcome.directories, now_ms)
             .verify_roster(&origin, staged.own_leaf_index(), staged.members())?;
+        require_local_group_capacity(store, roster.members.len(), now_ms)?;
         roster.require_welcome_creator(staged.welcome_sender_index(), invite)?;
         let sender = staged
             .members()
@@ -280,6 +294,27 @@ impl CoreAdmission {
             now_ms,
         }
     }
+}
+
+pub(crate) fn require_local_group_capacity(
+    store: &Store,
+    members: usize,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    use crate::capacity::{CapacityAdmission, admit_group_size, latest_local_capacity};
+
+    if members > MAX_GROUP_MEMBERS {
+        return Err(AslError::QuotaExceeded);
+    }
+    if members > 64
+        && !matches!(
+            admit_group_size(latest_local_capacity(store)?.as_ref(), members, now_ms),
+            CapacityAdmission::Admitted(_),
+        )
+    {
+        return Err(AslError::QuotaExceeded);
+    }
+    Ok(())
 }
 
 struct VerifiedRoster {

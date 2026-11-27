@@ -3,7 +3,9 @@ pub(crate) mod cbor;
 mod expression;
 mod group;
 mod group_control;
+mod group_removal;
 mod semantic_context;
+mod shard;
 
 use serde::Serialize;
 use serde_json::Value as Json;
@@ -33,6 +35,7 @@ pub use group_control::{
     GroupAdminCapability, GroupControl, GroupFilePolicy, MAX_GROUP_CONTROL_BYTES,
     MAX_GROUP_CONTROL_FILE_POLICIES, MAX_GROUP_CONTROL_PEERS,
 };
+pub use group_removal::{GROUP_REMOVAL_REQUEST_TTL_MS, GroupRemovalRequest};
 pub use semantic_context::{
     ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
     MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES, MAX_SEMANTIC_CONTEXT_CONCEPTS,
@@ -40,9 +43,14 @@ pub use semantic_context::{
     SemanticConformanceVector, SemanticContextBundle, SemanticContextRef,
     SignedSemanticContextBundle,
 };
+pub use shard::{
+    MAX_SHARD_BINDING_BYTES, MAX_SHARD_BINDING_LIFETIME_MS, MAX_SHARD_FORWARD_BYTES,
+    MAX_SHARD_FORWARD_HOP, MAX_SHARD_FORWARD_LIFETIME_MS, MAX_SHARD_FORWARD_PAYLOAD_BYTES,
+    SHARD_BINDING_SIGNING_DOMAIN, SHARD_FORWARD_SIGNING_DOMAIN, ShardBinding, ShardForward,
+};
 
 pub const ASL_PROTOCOL_MAJOR: u16 = 1;
-pub const ASL_PROTOCOL_MINOR: u16 = 3;
+pub const ASL_PROTOCOL_MINOR: u16 = 4;
 pub const MAX_PAIRING_NOTE_CHARS: usize = 120;
 pub const MAX_PAIRING_NOTE_BYTES: usize = MAX_PAIRING_NOTE_CHARS * 4;
 
@@ -80,6 +88,7 @@ pub enum Feature {
     Inline,
     Profile,
     ActNl,
+    ShardForward,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

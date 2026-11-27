@@ -290,16 +290,10 @@ mod tests {
             let dialer_peer = device_peer(dialer_identity.public().to_peer_id()).unwrap();
             let mut dialer = LocalTransport::new(dialer_identity).unwrap();
             dialer.dial(kind, endpoint, &listener_peer).unwrap();
-            let (dialer_connected, listener_connected) =
-                tokio::join!(dialer.next_event(), listener.next_event());
-            assert!(matches!(
-                dialer_connected.unwrap(),
-                TransportEvent::Connected { connection } if connection.peer_id() == &listener_peer
-            ));
-            assert!(matches!(
-                listener_connected.unwrap(),
-                TransportEvent::Connected { connection } if connection.peer_id() == &dialer_peer
-            ));
+            tokio::join!(
+                wait_for_connected(&mut dialer, &listener_peer),
+                wait_for_connected(&mut listener, &dialer_peer)
+            );
 
             let topic = GossipTopic::new([0x42; 32]);
             assert!(dialer.subscribe_gossip(topic).unwrap());
@@ -341,5 +335,17 @@ mod tests {
     async fn drive_for(transport: &mut LocalTransport, duration: Duration) {
         let deadline = Instant::now() + duration;
         while timeout_at(deadline, transport.next_event()).await.is_ok() {}
+    }
+
+    async fn wait_for_connected(transport: &mut LocalTransport, expected: &PeerId) {
+        loop {
+            match transport.next_event().await.unwrap() {
+                TransportEvent::Connected { connection } if connection.peer_id() == expected => {
+                    return;
+                }
+                TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+                event => panic!("unexpected transport event: {event:?}"),
+            }
+        }
     }
 }

@@ -9,7 +9,10 @@ use asl_agent::{
     ActQuestion, ActReplyError, ActReplyPlan, gateway::HttpModelGateway, generate_act_reply,
 };
 use asl_policy::{AccessRequest, Permit, PolicyRevision, PolicyService};
-use asl_store::{Store, budgets::BudgetKind};
+use asl_store::{
+    Store,
+    budgets::{BudgetKind, BudgetReservation},
+};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
@@ -20,7 +23,7 @@ use asl_types::{
 use crate::model_endpoint_access::{ModelEndpointAccess, configured_model_gateway};
 
 use super::auto_reply_evidence::AutoReplyEvidenceContext;
-use super::{Supervisor, groups::LocalGroupAction, unix_time_ms};
+use super::{Supervisor, unix_time_ms};
 
 const MAX_QUEUED_REPLIES: usize = 8;
 const MAX_RECENT_REQUESTS: usize = 256;
@@ -42,16 +45,17 @@ struct Job {
     room: Hash32,
     request: ActQuestion,
     evidence: Option<AutoReplyEvidenceContext>,
+    reservation: BudgetReservation,
 }
 
 enum JobResult {
-    Ready {
+    Finished {
         room: Hash32,
         request: ActQuestion,
-        plan: ActReplyPlan,
+        plan: Option<ActReplyPlan>,
         elapsed_ms: u64,
+        reservation: BudgetReservation,
     },
-    Failed,
 }
 
 impl AutoReplyRuntime {
@@ -81,8 +85,9 @@ impl AutoReplyRuntime {
         room: Hash32,
         request: ActQuestion,
         evidence: Option<AutoReplyEvidenceContext>,
+        reservation: BudgetReservation,
         now: Instant,
-    ) -> bool {
+    ) -> Result<(), BudgetReservation> {
         self.model_calls
             .retain(|started| now.saturating_duration_since(*started) < Duration::from_secs(60));
         if self.recent_set.contains_key(&request.message_id)
@@ -93,19 +98,20 @@ impl AutoReplyRuntime {
                 .get(&request.conversation_id)
                 .is_some_and(|until| now < *until)
         {
-            return false;
+            return Err(reservation);
         }
         match self.jobs.try_send(Job {
             room,
             request,
             evidence,
+            reservation,
         }) {
             Ok(()) => {
                 self.queued += 1;
                 self.model_calls.push_back(now);
-                true
+                Ok(())
             }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => Err(job.reservation),
         }
     }
 
@@ -139,19 +145,30 @@ pub(super) fn queue_auto_reply(
         return;
     };
     let conversation = alloy_primitives::hex::encode(act.conversation_id.0);
-    if !store
-        .resource_budget_available(&conversation, BudgetKind::ModelCalls, now_ms)
-        .unwrap_or(false)
-        || !store
-            .resource_budget_available(&conversation, BudgetKind::CpuMs, now_ms)
-            .unwrap_or(false)
-    {
+    let Some(reservation) = store
+        .reserve_budget(
+            &conversation,
+            0,
+            &[
+                (BudgetKind::ModelCalls, 1),
+                (
+                    BudgetKind::CpuMs,
+                    asl_agent::gateway::MAX_PROVIDER_TIMEOUT_MS,
+                ),
+            ],
+            now_ms,
+        )
+        .ok()
+        .flatten()
+    else {
         return;
-    }
+    };
     let now = Instant::now();
-    if runtime.enqueue(room, request, evidence, now) {
-        let _ = store.consume_resource_budget(&conversation, BudgetKind::ModelCalls, 1, now_ms);
-        runtime.remember(act.message_id, act.conversation_id, now);
+    match runtime.enqueue(room, request, evidence, reservation, now) {
+        Ok(()) => runtime.remember(act.message_id, act.conversation_id, now),
+        Err(reservation) => {
+            let _ = store.refund_budget_reservation(reservation, now_ms);
+        }
     }
 }
 
@@ -163,24 +180,23 @@ impl Supervisor {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
             };
             self.auto_reply.queued = self.auto_reply.queued.saturating_sub(1);
-            let JobResult::Ready {
+            let JobResult::Finished {
                 room,
                 request,
                 plan,
                 elapsed_ms,
-            } = result
-            else {
-                continue;
-            };
+                reservation,
+            } = result;
             if let Some(groups) = &self.groups {
-                let conversation = alloy_primitives::hex::encode(request.conversation_id.0);
-                let _ = groups.store.consume_resource_budget(
-                    &conversation,
-                    BudgetKind::CpuMs,
-                    elapsed_ms.max(1),
+                let _ = groups.store.settle_budget_reservation(
+                    reservation,
+                    &[(BudgetKind::CpuMs, elapsed_ms.max(1))],
                     unix_time_ms()?,
                 );
             }
+            let Some(plan) = plan else {
+                continue;
+            };
             if !self.groups.as_ref().is_some_and(|groups| {
                 asl_store::group_state::GroupInboundPolicy::load(&groups.store)
                     .is_ok_and(|policy| policy.answer_enabled)
@@ -191,14 +207,7 @@ impl Supervisor {
             let Ok(act) = asl_agent::build_act_reply(reply_id, &request, &plan) else {
                 continue;
             };
-            let now = unix_time_ms()?;
-            let _ = self.apply_local_group_action(
-                LocalGroupAction::SendApplication {
-                    room,
-                    application: Box::new(asl_groups::GroupApplication::Act(act)),
-                },
-                now,
-            );
+            let _ = self.send_group_act(room, act);
         }
     }
 }
@@ -219,9 +228,11 @@ fn worker_loop(
         room,
         request,
         evidence,
+        reservation,
     }) = jobs.recv()
     {
         let started = Instant::now();
+        let cpu_start = asl_policy::thread_cpu_time().ok();
         let result = if let Some(context) = evidence {
             let provider = context.provider.clone();
             let (read_policy, model_policy) = context.policies();
@@ -252,14 +263,15 @@ fn worker_loop(
                     ))
                 })
         };
-        let event = match result {
-            Ok(plan) => JobResult::Ready {
-                room,
-                request,
-                plan,
-                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            },
-            Err(_) => JobResult::Failed,
+        let cpu_elapsed = cpu_start
+            .and_then(|start| asl_policy::thread_cpu_time().ok()?.checked_sub(start))
+            .unwrap_or_else(|| started.elapsed());
+        let event = JobResult::Finished {
+            room,
+            request,
+            plan: result.ok(),
+            elapsed_ms: u64::try_from(cpu_elapsed.as_millis()).unwrap_or(u64::MAX),
+            reservation,
         };
         if results.send(event).is_err() {
             return;

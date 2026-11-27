@@ -190,9 +190,13 @@ impl CoreAdmission {
                     .verify_group_route_leaf(connection, wire_id, &key, clock.now_ms()?)
                     .is_ok()
                 {
-                    if matches!(application, GroupApplication::Expression(_))
-                        && !self.peer_supports_expression(connection)
-                    {
+                    let unsupported = (matches!(application, GroupApplication::Expression(_))
+                        && !self.peer_supports_expression(connection))
+                        || (matches!(
+                            application,
+                            GroupApplication::ShardBinding(_) | GroupApplication::ShardForward(_)
+                        ) && !self.peer_supports_shard_forward(connection));
+                    if unsupported {
                         incompatible = true;
                     } else {
                         routes.push((peer, connection, key));

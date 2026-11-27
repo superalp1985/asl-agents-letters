@@ -438,9 +438,8 @@ impl Store {
         Ok(permissions & kind.permission_bit() != 0)
     }
 
-    /// Applies an administrator moderation snapshot. The control revision and
-    /// every field except `muted` must exactly match the current owner policy,
-    /// so an administrator cannot mint or roll back owner policy.
+    /// Applies capability-scoped administrator slices without changing the
+    /// owner policy revision or any owner-only field.
     pub fn apply_group_moderation(
         &mut self,
         group_id: &GroupId,
@@ -452,18 +451,29 @@ impl Store {
         let current = self.group_access_policy(group_id)?;
         let owner = current.owner.clone().ok_or(AslError::InvalidDatabase)?;
         if sender == &owner
-            || !self.group_admin_has_capability(
-                group_id,
-                sender,
-                GroupAdminCapabilityKind::ManageMembers,
-            )?
             || control.policy_revision != current.revision
             || control.permissions != current.permissions
             || control.admins != current.admins
             || control.owner.as_ref() != Some(&owner)
-            || control.file_policies != current.file_policies
             || control.admin_capabilities != current.admin_capabilities
             || control.muted.len() > MAX_GROUP_CONTROL_PEERS
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let members_changed = control.muted != current.muted;
+        let files_changed = control.file_policies != current.file_policies;
+        if (members_changed
+            && !self.group_admin_has_capability(
+                group_id,
+                sender,
+                GroupAdminCapabilityKind::ManageMembers,
+            )?)
+            || (files_changed
+                && !self.group_admin_has_capability(
+                    group_id,
+                    sender,
+                    GroupAdminCapabilityKind::ManageFiles,
+                )?)
         {
             return Err(AslError::PolicyDenied);
         }
@@ -481,24 +491,48 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        tx.execute(
-            "UPDATE group_access_members SET muted=0,updated_at_ms=?2 WHERE group_id=?1",
-            params![group, now],
-        )
-        .map_err(database_error)?;
-        for peer in &control.muted {
+        if members_changed {
             tx.execute(
-                "INSERT INTO group_access_members(group_id,peer_id,role,muted,updated_at_ms)
-                 VALUES (?1,?2,'member',1,?3)
-                 ON CONFLICT(group_id,peer_id) DO UPDATE SET
-                   muted=1,updated_at_ms=excluded.updated_at_ms",
-                params![group, peer_text(peer), now],
+                "UPDATE group_access_members SET muted=0,updated_at_ms=?2 WHERE group_id=?1",
+                params![group, now],
             )
             .map_err(database_error)?;
+            for peer in &control.muted {
+                tx.execute(
+                    "INSERT INTO group_access_members(group_id,peer_id,role,muted,updated_at_ms)
+                     VALUES (?1,?2,'member',1,?3)
+                     ON CONFLICT(group_id,peer_id) DO UPDATE SET
+                       muted=1,updated_at_ms=excluded.updated_at_ms",
+                    params![group, peer_text(peer), now],
+                )
+                .map_err(database_error)?;
+            }
+        }
+        if files_changed {
+            tx.execute(
+                "DELETE FROM group_file_policies WHERE group_id=?1",
+                [&group],
+            )
+            .map_err(database_error)?;
+            for policy in &control.file_policies {
+                tx.execute(
+                    "INSERT INTO group_file_policies(
+                        group_id,content_id,permissions,updated_at_ms)
+                     VALUES (?1,?2,?3,?4)",
+                    params![
+                        group,
+                        policy.content_id.as_bytes().as_slice(),
+                        i64::from(policy.permissions),
+                        now,
+                    ],
+                )
+                .map_err(database_error)?;
+            }
         }
         tx.commit().map_err(database_error)?;
         Ok(GroupAccessPolicy {
             muted: control.muted.clone(),
+            file_policies: control.file_policies.clone(),
             ..current
         })
     }
@@ -1107,8 +1141,12 @@ mod tests {
             .execute_batch(
                 "DROP TABLE group_admin_capabilities;
                  DROP TABLE group_file_policies;
+                 DROP TABLE mls_shard_forward_receipts;
+                 DROP TABLE mls_shard_bindings;
+                 DROP TABLE mls_room_shards;
+                 DROP TABLE group_removal_requests;
                  DROP TABLE conversation_act_semantic_index;
-                 DELETE FROM schema_migrations WHERE version IN (42,43);",
+                 DELETE FROM schema_migrations WHERE version>=42;",
             )
             .unwrap();
         drop(connection);

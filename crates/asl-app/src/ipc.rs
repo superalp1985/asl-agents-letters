@@ -8,7 +8,8 @@ use asl_net::{
     relay::MAX_RELAY_ENDPOINT_BYTES,
     transport::{
         DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, MAX_GOSSIP_PAYLOAD_BYTES,
-        TransportKind,
+        MAX_REACHABILITY_ADDRESS_BYTES, ReachabilityState, ReachabilityStatus, RouteFailure,
+        RouteState, RouteStatus, TransportKind, TraversalConfig,
     },
 };
 use asl_types::{
@@ -33,9 +34,11 @@ pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 const TASK_BODY_HEADER_BYTES: usize = 21;
 const NET_STARTUP_PRELUDE_MAGIC: [u8; 4] = *b"ASLK";
-const NET_STARTUP_PRELUDE_VERSION: u16 = 2;
+const NET_STARTUP_PRELUDE_VERSION: u16 = 3;
 const NET_STARTUP_PRELUDE_FLAG_OFFSET: usize = 10;
-const NET_STARTUP_PRELUDE_HEADER_BYTES: usize = NET_STARTUP_PRELUDE_FLAG_OFFSET + 1;
+const NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET: usize = NET_STARTUP_PRELUDE_FLAG_OFFSET + 1;
+const NET_STARTUP_PRELUDE_HEADER_BYTES: usize = NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET + 2;
+const NET_STARTUP_TRAVERSAL_BYTES: usize = 91;
 const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
@@ -82,7 +85,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Net, Self::Core, 36..=39 | 45..=47)
-                | (Self::Net, Self::Core, 52..=53 | 63 | 68)
+                | (Self::Net, Self::Core, 52..=53 | 63 | 68 | 72..=73)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -286,6 +289,12 @@ pub enum IpcMessage {
     },
     RelayUnavailable {
         relay_peer_id: PeerId,
+    },
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
     },
     DiscoveryCandidate {
         peer_id: PeerId,
@@ -911,6 +920,54 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             );
             body.extend_from_slice(peer_bytes);
             37
+        }
+        IpcMessage::ReachabilityChanged { status } => {
+            let address = status.public_address.as_deref().unwrap_or_default();
+            if address.len() > MAX_REACHABILITY_ADDRESS_BYTES
+                || (status.state != ReachabilityState::Public && !address.is_empty())
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.push(status.state as u8);
+            body.push(status.confidence);
+            body.extend_from_slice(
+                &u16::try_from(address.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(address);
+            72
+        }
+        IpcMessage::RouteChanged { status } => {
+            let peer = status.peer_id.as_bytes();
+            if peer.is_empty() || peer.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(peer.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer);
+            body.push(status.state as u8);
+            let relay = status
+                .relay_peer_id
+                .as_ref()
+                .map(PeerId::as_bytes)
+                .unwrap_or_default();
+            if relay.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(relay.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(relay);
+            body.push(status.direct_attempts);
+            body.push(status.relay_attempts);
+            body.push(status.failure.map_or(0, |failure| failure as u8));
+            73
         }
         IpcMessage::DiscoveryCandidate {
             peer_id,
@@ -1657,6 +1714,76 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             Ok(IpcMessage::RelayUnavailable {
                 relay_peer_id: PeerId::from_bytes(body[2..].to_vec())
                     .map_err(|_| AslError::InvalidMessage)?,
+            })
+        }
+        72 if body.len() >= 4 => {
+            let state = match body[0] {
+                1 => ReachabilityState::Unknown,
+                2 => ReachabilityState::Private,
+                3 => ReachabilityState::Public,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let address_len = u16::from_be_bytes(body[2..4].try_into().unwrap()) as usize;
+            if address_len > MAX_REACHABILITY_ADDRESS_BYTES
+                || body.len() != 4 + address_len
+                || (state != ReachabilityState::Public && address_len != 0)
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::ReachabilityChanged {
+                status: ReachabilityStatus {
+                    state,
+                    confidence: body[1],
+                    public_address: (address_len != 0).then(|| body[4..].to_vec()),
+                },
+            })
+        }
+        73 if body.len() >= 9 => {
+            let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            let peer_end = 2 + peer_len;
+            if peer_len == 0 || peer_len > 128 || body.len() < peer_end + 6 {
+                return Err(AslError::InvalidMessage);
+            }
+            let state = match body[peer_end] {
+                1 => RouteState::DirectDialing,
+                2 => RouteState::RelayDialing,
+                3 => RouteState::HolePunching,
+                4 => RouteState::Direct,
+                5 => RouteState::HolePunched,
+                6 => RouteState::Relayed,
+                7 => RouteState::Failed,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let relay_len =
+                u16::from_be_bytes(body[peer_end + 1..peer_end + 3].try_into().unwrap()) as usize;
+            let relay_end = peer_end + 3 + relay_len;
+            if relay_len > 128 || body.len() != relay_end + 3 {
+                return Err(AslError::InvalidMessage);
+            }
+            let relay_peer_id = (relay_len != 0)
+                .then(|| PeerId::from_bytes(body[peer_end + 3..relay_end].to_vec()))
+                .transpose()
+                .map_err(|_| AslError::InvalidMessage)?;
+            let failure = match body[relay_end + 2] {
+                0 => None,
+                1 => Some(RouteFailure::DirectUnavailable),
+                2 => Some(RouteFailure::RelayUnavailable),
+                3 => Some(RouteFailure::HolePunchFailed),
+                4 => Some(RouteFailure::TimedOut),
+                5 => Some(RouteFailure::PeerIdentityMismatch),
+                6 => Some(RouteFailure::Disconnected),
+                _ => return Err(AslError::InvalidMessage),
+            };
+            Ok(IpcMessage::RouteChanged {
+                status: RouteStatus {
+                    peer_id: PeerId::from_bytes(body[2..peer_end].to_vec())
+                        .map_err(|_| AslError::InvalidMessage)?,
+                    state,
+                    relay_peer_id,
+                    direct_attempts: body[relay_end],
+                    relay_attempts: body[relay_end + 1],
+                    failure,
+                },
             })
         }
         38 if body.len() >= 11 => {
@@ -2472,6 +2599,8 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         69 => 48,
         70 => 16 + MAX_DHT_VALUE_BYTES,
         71 => 32,
+        72 => 4 + MAX_REACHABILITY_ADDRESS_BYTES,
+        73 => 2 + 128 + 1 + 2 + 128 + 3,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2582,8 +2711,8 @@ pub(crate) fn run_net_pipe_fixture(
     mut input: std::io::PipeReader,
     output: std::io::PipeWriter,
 ) -> Result<(), AslError> {
-    let (identity, loopback_groups) = read_net_startup_prelude(&mut input)?;
-    net_runtime::run(identity, loopback_groups, input, output)
+    let (identity, loopback_groups, traversal) = read_net_startup_prelude(&mut input)?;
+    net_runtime::run(identity, loopback_groups, traversal, input, output)
 }
 
 pub fn run_worker_child() -> Result<(), AslError> {
@@ -2608,8 +2737,14 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
 
     let stdin = std::io::stdin();
     if role == IpcRole::Net {
-        let (identity, loopback_groups) = read_net_startup_prelude(&mut stdin.lock())?;
-        return net_runtime::run(identity, loopback_groups, stdin, std::io::stdout());
+        let (identity, loopback_groups, traversal) = read_net_startup_prelude(&mut stdin.lock())?;
+        return net_runtime::run(
+            identity,
+            loopback_groups,
+            traversal,
+            stdin,
+            std::io::stdout(),
+        );
     }
     let stdout = std::io::stdout();
     let mut reader = FrameReader::new(stdin.lock(), IpcRole::Core, role);
@@ -2671,7 +2806,11 @@ pub(crate) fn write_net_startup_prelude<W: Write>(
     writer: &mut W,
     identity: &DeviceIdentity,
     loopback_groups: bool,
+    traversal: TraversalConfig,
 ) -> Result<(), AslError> {
+    let traversal = traversal
+        .validate()
+        .map_err(|_| AslError::InvalidIdentity)?;
     let secret = identity.to_ipc_secret()?;
     let length = u32::try_from(secret.len()).map_err(|_| AslError::InvalidIdentity)?;
     let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
@@ -2679,16 +2818,20 @@ pub(crate) fn write_net_startup_prelude<W: Write>(
     header[4..6].copy_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
     header[6..NET_STARTUP_PRELUDE_FLAG_OFFSET].copy_from_slice(&length.to_be_bytes());
     header[NET_STARTUP_PRELUDE_FLAG_OFFSET] = u8::from(loopback_groups);
+    header[NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET..]
+        .copy_from_slice(&(NET_STARTUP_TRAVERSAL_BYTES as u16).to_be_bytes());
     writer.write_all(&header)?;
+    writer.write_all(&encode_traversal_config(traversal))?;
     writer.write_all(&secret)?;
     writer.flush()?;
     Ok(())
 }
 
-fn read_net_startup_prelude<R: Read>(reader: &mut R) -> Result<(DeviceIdentity, bool), AslError> {
-    let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
-    let (prefix, flag) = header.split_at_mut(NET_STARTUP_PRELUDE_FLAG_OFFSET);
-    reader.read_exact(prefix)?;
+fn read_net_startup_prelude<R: Read>(
+    reader: &mut R,
+) -> Result<(DeviceIdentity, bool, TraversalConfig), AslError> {
+    let mut prefix = [0u8; NET_STARTUP_PRELUDE_FLAG_OFFSET];
+    reader.read_exact(&mut prefix)?;
     if prefix[..4] != NET_STARTUP_PRELUDE_MAGIC {
         return Err(AslError::InvalidMessage);
     }
@@ -2699,15 +2842,112 @@ fn read_net_startup_prelude<R: Read>(reader: &mut R) -> Result<(DeviceIdentity, 
     if length == 0 || length > MAX_DEVICE_IDENTITY_PRELUDE_BYTES {
         return Err(AslError::InvalidMessage);
     }
-    reader.read_exact(flag)?;
-    let loopback_groups = match flag[0] {
+    let mut suffix = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES - NET_STARTUP_PRELUDE_FLAG_OFFSET];
+    reader.read_exact(&mut suffix)?;
+    let loopback_groups = match suffix[0] {
         0 => false,
         1 => true,
         _ => return Err(AslError::InvalidMessage),
     };
+    let config_length = u16::from_be_bytes(suffix[1..].try_into().unwrap()) as usize;
+    if config_length != NET_STARTUP_TRAVERSAL_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut traversal = [0u8; NET_STARTUP_TRAVERSAL_BYTES];
+    reader.read_exact(&mut traversal)?;
+    let traversal = decode_traversal_config(&traversal)?;
     let mut secret = Zeroizing::new(vec![0u8; length]);
     reader.read_exact(&mut secret)?;
-    Ok((DeviceIdentity::from_ipc_secret(&secret)?, loopback_groups))
+    Ok((
+        DeviceIdentity::from_ipc_secret(&secret)?,
+        loopback_groups,
+        traversal,
+    ))
+}
+
+fn encode_traversal_config(config: TraversalConfig) -> [u8; NET_STARTUP_TRAVERSAL_BYTES] {
+    let mut bytes = [0u8; NET_STARTUP_TRAVERSAL_BYTES];
+    let mut offset = 0;
+    for value in [
+        config.connection_timeout_ms,
+        config.idle_connection_timeout_ms,
+        config.hole_punch_timeout_ms,
+        config.identify_interval_ms,
+        config.autonat_boot_delay_ms,
+        config.autonat_retry_interval_ms,
+        config.autonat_refresh_interval_ms,
+        config.autonat_request_timeout_ms,
+        config.relay_retry_base_ms,
+        config.relay_retry_max_ms,
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        offset += 8;
+    }
+    for value in [
+        config.max_relay_endpoints,
+        config.max_relay_routes_per_dial,
+        config.max_pending_routes,
+        config.max_relay_reservation_retries,
+        config.autonat_max_peer_addresses,
+    ] {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        offset += 2;
+    }
+    bytes[offset] = config.autonat_confidence_max;
+    bytes
+}
+
+fn decode_traversal_config(
+    bytes: &[u8; NET_STARTUP_TRAVERSAL_BYTES],
+) -> Result<TraversalConfig, AslError> {
+    let mut offset = 0;
+    let mut next_u64 = || {
+        let value = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        value
+    };
+    let connection_timeout_ms = next_u64();
+    let idle_connection_timeout_ms = next_u64();
+    let hole_punch_timeout_ms = next_u64();
+    let identify_interval_ms = next_u64();
+    let autonat_boot_delay_ms = next_u64();
+    let autonat_retry_interval_ms = next_u64();
+    let autonat_refresh_interval_ms = next_u64();
+    let autonat_request_timeout_ms = next_u64();
+    let relay_retry_base_ms = next_u64();
+    let relay_retry_max_ms = next_u64();
+    drop(next_u64);
+    let mut next_u16 = || {
+        let value = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        value
+    };
+    let max_relay_endpoints = next_u16();
+    let max_relay_routes_per_dial = next_u16();
+    let max_pending_routes = next_u16();
+    let max_relay_reservation_retries = next_u16();
+    let autonat_max_peer_addresses = next_u16();
+    drop(next_u16);
+    TraversalConfig {
+        connection_timeout_ms,
+        idle_connection_timeout_ms,
+        hole_punch_timeout_ms,
+        identify_interval_ms,
+        autonat_boot_delay_ms,
+        autonat_retry_interval_ms,
+        autonat_refresh_interval_ms,
+        autonat_request_timeout_ms,
+        relay_retry_base_ms,
+        relay_retry_max_ms,
+        max_relay_endpoints,
+        max_relay_routes_per_dial,
+        max_pending_routes,
+        max_relay_reservation_retries,
+        autonat_max_peer_addresses,
+        autonat_confidence_max: bytes[offset],
+    }
+    .validate()
+    .map_err(|_| AslError::InvalidMessage)
 }
 
 #[cfg(test)]
@@ -2822,6 +3062,23 @@ mod tests {
             },
             IpcMessage::RelayUnavailable {
                 relay_peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+            },
+            IpcMessage::ReachabilityChanged {
+                status: ReachabilityStatus {
+                    state: ReachabilityState::Private,
+                    confidence: 2,
+                    public_address: None,
+                },
+            },
+            IpcMessage::RouteChanged {
+                status: RouteStatus {
+                    peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                    state: RouteState::Relayed,
+                    relay_peer_id: Some(DeviceIdentity::generate().unwrap().peer_id()),
+                    direct_attempts: 1,
+                    relay_attempts: 1,
+                    failure: Some(RouteFailure::HolePunchFailed),
+                },
             },
             IpcMessage::DiscoveryCandidate {
                 peer_id: DeviceIdentity::generate().unwrap().peer_id(),
@@ -3069,6 +3326,8 @@ mod tests {
                 | IpcMessage::Listening { .. }
                 | IpcMessage::RelayReserved { .. }
                 | IpcMessage::RelayUnavailable { .. }
+                | IpcMessage::ReachabilityChanged { .. }
+                | IpcMessage::RouteChanged { .. }
                 | IpcMessage::DiscoveryCandidate { .. }
                 | IpcMessage::DhtRecordCandidate { .. }
                 | IpcMessage::DhtProviders { .. }
@@ -3342,13 +3601,16 @@ mod tests {
         let frame = encode_frame(IpcRole::Core, IpcRole::Net, 1, &first_command).unwrap();
         for enabled in [false, true] {
             let mut bytes = Vec::new();
-            write_net_startup_prelude(&mut bytes, &identity, enabled).unwrap();
+            let traversal = TraversalConfig::default();
+            write_net_startup_prelude(&mut bytes, &identity, enabled, traversal).unwrap();
             bytes.extend_from_slice(&frame);
             let mut stream = Cursor::new(bytes);
 
-            let (received, loopback_groups) = read_net_startup_prelude(&mut stream).unwrap();
+            let (received, loopback_groups, received_traversal) =
+                read_net_startup_prelude(&mut stream).unwrap();
             assert_eq!(received.peer_id(), identity.peer_id());
             assert_eq!(loopback_groups, enabled);
+            assert_eq!(received_traversal, traversal);
             let mut reader = FrameReader::new(stream, IpcRole::Core, IpcRole::Net);
             assert_eq!(reader.receive().unwrap().message, first_command);
         }
@@ -3370,21 +3632,42 @@ mod tests {
             }
         }
 
-        for (magic, version, length, flag) in [
-            (*b"NOPE", NET_STARTUP_PRELUDE_VERSION, 32_u32, 0),
-            (NET_STARTUP_PRELUDE_MAGIC, 1_u16, 32, 0),
-            (NET_STARTUP_PRELUDE_MAGIC, NET_STARTUP_PRELUDE_VERSION, 0, 0),
+        for (magic, version, length, flag, config_length) in [
+            (
+                *b"NOPE",
+                NET_STARTUP_PRELUDE_VERSION,
+                32_u32,
+                0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
+            (NET_STARTUP_PRELUDE_MAGIC, 1_u16, 32, 0, 0),
+            (
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                0,
+                0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
             (
                 NET_STARTUP_PRELUDE_MAGIC,
                 NET_STARTUP_PRELUDE_VERSION,
                 (MAX_DEVICE_IDENTITY_PRELUDE_BYTES + 1) as u32,
                 0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
             ),
             (
                 NET_STARTUP_PRELUDE_MAGIC,
                 NET_STARTUP_PRELUDE_VERSION,
                 32,
                 2,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
+            (
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                32,
+                0,
+                0,
             ),
         ] {
             let mut header = Vec::new();
@@ -3393,6 +3676,7 @@ mod tests {
             header.extend_from_slice(&length.to_be_bytes());
             if version == NET_STARTUP_PRELUDE_VERSION {
                 header.push(flag);
+                header.extend_from_slice(&config_length.to_be_bytes());
             }
             let mut reader = HeaderOnly {
                 bytes: Cursor::new(header),
@@ -3417,6 +3701,8 @@ mod tests {
             bytes.extend_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
             bytes.extend_from_slice(&length.to_be_bytes());
             bytes.push(0);
+            bytes.extend_from_slice(&(NET_STARTUP_TRAVERSAL_BYTES as u16).to_be_bytes());
+            bytes.extend_from_slice(&encode_traversal_config(TraversalConfig::default()));
             bytes.extend_from_slice(payload);
             assert!(read_net_startup_prelude(&mut Cursor::new(bytes)).is_err());
         }

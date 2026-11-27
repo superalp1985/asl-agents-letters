@@ -2,12 +2,13 @@ use super::{LocalGroupAction, NetworkAdmissionStatus, Supervisor, fresh_id};
 use crate::agent_mail::GroupAccessUpdate;
 use alloy_primitives::hex;
 use asl_store::group_state::operator::{
-    AdminJoinRequest, AdminOutcome, AdminPeer, AdminRequest, AdminRoom, AdminSnapshot,
-    SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
+    AdminCapacity, AdminJoinRequest, AdminOutcome, AdminPeer, AdminRequest, AdminRoom,
+    AdminSnapshot, SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
 };
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Hash32, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId},
+    protocol::{GroupAdminCapability, GroupFilePolicy},
 };
 
 const JOIN_REQUEST_VIEW_LIMIT: u32 = 100;
@@ -75,6 +76,30 @@ impl Supervisor {
         if request == &AdminRequest::Refresh {
             let rooms = groups.store.managed_mls_rooms(&self.device_peer_id)?;
             let peers = peers().take(VIEW_LIMIT).collect::<Vec<_>>();
+            let profile = crate::capacity::latest_local_capacity(&groups.store)?;
+            let report = crate::capacity::report_capacity_observations(profile.as_ref(), now);
+            let resources = asl_policy::local_resource_sample(&self.home).ok();
+            let capacity =
+                report
+                    .measured_at_ms
+                    .zip(report.member_range)
+                    .map(|(measured_at_ms, range)| {
+                        let direct = range.direct_budget.map_or(0, |range| range.max);
+                        AdminCapacity {
+                            measured_at_ms,
+                            planner_direct_members: direct,
+                            planner_extended_members: range
+                                .extended_budget
+                                .map_or(direct, |range| range.max),
+                            fresh: report.readiness == crate::capacity::ProfileReadiness::Ready,
+                            process_working_set_bytes: resources
+                                .map(|sample| sample.working_set_bytes),
+                            available_memory_bytes: resources
+                                .map(|sample| sample.available_memory_bytes),
+                            available_disk_bytes: resources
+                                .map(|sample| sample.available_disk_bytes),
+                        }
+                    });
             let join_requests = groups
                 .store
                 .list_group_invite_requests(&self.device_peer_id, now, JOIN_REQUEST_VIEW_LIMIT)?
@@ -102,6 +127,7 @@ impl Supervisor {
                     rooms,
                     peers,
                     join_requests,
+                    capacity,
                     expires_ms: now.saturating_add(SNAPSHOT_WINDOW_MS),
                 }),
             ));
@@ -132,13 +158,44 @@ impl Supervisor {
                     .device
                     .parse()
                     .map_err(|_| AslError::InvalidDatabase)?;
+                let room = wire_id(&selected.room)?;
+                let peer =
+                    PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidDatabase)?;
+                let saved = groups
+                    .store
+                    .mls_room_for_reconciliation(room)?
+                    .ok_or(AslError::NotFound)?;
+                if saved.creator == self.device_peer_id {
+                    (
+                        LocalGroupAction::Remove { room, peer },
+                        AdminOutcome::MemberRemoved,
+                    )
+                } else {
+                    (
+                        LocalGroupAction::ProposeRemove { room, peer },
+                        AdminOutcome::RemovalRequested,
+                    )
+                }
+            }
+            AdminRequest::ReviewRemoval {
+                room,
+                request,
+                approve,
+                ..
+            } => {
+                let mut id = [0; 16];
+                hex::decode_to_slice(request, &mut id).map_err(|_| AslError::InvalidMessage)?;
                 (
-                    LocalGroupAction::Remove {
-                        room: wire_id(&selected.room)?,
-                        peer: PeerId::from_bytes(peer.to_bytes())
-                            .map_err(|_| AslError::InvalidDatabase)?,
+                    LocalGroupAction::ReviewRemoval {
+                        room: wire_id(room)?,
+                        request: Id128(id),
+                        approve: *approve,
                     },
-                    AdminOutcome::MemberRemoved,
+                    if *approve {
+                        AdminOutcome::MemberRemoved
+                    } else {
+                        AdminOutcome::RemovalRejected
+                    },
                 )
             }
             AdminRequest::RejectJoinRequest { room, device, .. } => {
@@ -160,6 +217,7 @@ impl Supervisor {
                 allow_member_invite,
                 admins,
                 muted,
+                details,
                 ..
             } => {
                 let live = groups.store.managed_mls_rooms(&self.device_peer_id)?;
@@ -179,6 +237,41 @@ impl Supervisor {
                     .collect::<Result<Vec<_>, _>>()?;
                 muted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
                 muted.dedup();
+                let owner = details
+                    .as_ref()
+                    .and_then(|details| details.owner.as_deref())
+                    .map(peer_from_text)
+                    .transpose()?;
+                let file_policies = details
+                    .as_ref()
+                    .map(|details| {
+                        details
+                            .file_policies
+                            .iter()
+                            .map(|policy| {
+                                Ok(GroupFilePolicy {
+                                    content_id: wire_id(&policy.content_id)?,
+                                    permissions: policy.permissions,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, AslError>>()
+                    })
+                    .transpose()?;
+                let admin_capabilities = details
+                    .as_ref()
+                    .map(|details| {
+                        details
+                            .admin_capabilities
+                            .iter()
+                            .map(|capability| {
+                                Ok(GroupAdminCapability {
+                                    peer: peer_from_text(&capability.peer)?,
+                                    capabilities: capability.capabilities,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, AslError>>()
+                    })
+                    .transpose()?;
                 (
                     LocalGroupAction::SetAccess {
                         room: wire_id(&selected.room)?,
@@ -188,9 +281,9 @@ impl Supervisor {
                             allow_member_invite: *allow_member_invite,
                             admins,
                             muted,
-                            owner: None,
-                            file_policies: None,
-                            admin_capabilities: None,
+                            owner,
+                            file_policies,
+                            admin_capabilities,
                         },
                     },
                     AdminOutcome::AccessUpdated,
@@ -218,7 +311,21 @@ impl Supervisor {
             AdminRequest::Refresh => unreachable!(),
             AdminRequest::RequestJoin { .. } => unreachable!(),
         };
-        self.apply_local_group_action(action, now)?;
+        let applied = self.apply_local_group_action(action, now)?;
+        let outcome = if outcome == AdminOutcome::AccessUpdated {
+            match applied.get("state").and_then(serde_json::Value::as_str) {
+                Some("partial") => AdminOutcome::AccessPartiallyUpdated,
+                Some("blocked_owner_transfer") => AdminOutcome::OwnerTransferBlocked,
+                _ => outcome,
+            }
+        } else if outcome == AdminOutcome::InviteQueued
+            && applied.get("state").and_then(serde_json::Value::as_str)
+                == Some("owner_action_required")
+        {
+            AdminOutcome::InviteOwnerRequired
+        } else {
+            outcome
+        };
         Ok((outcome, None))
     }
 }
@@ -261,7 +368,18 @@ fn current_room<'a>(
     issued
         .rooms
         .iter()
-        .find(|r| r.room == room && live.contains(r))
+        .find(|r| {
+            r.room == room
+                && live.iter().any(|current| {
+                    current.room == r.room
+                        && current.epoch == r.epoch
+                        && current.membership_epoch == r.membership_epoch
+                        && current.policy_revision == r.policy_revision
+                        && current.members == r.members
+                        && current.file_policies == r.file_policies
+                        && current.admin_capabilities == r.admin_capabilities
+                })
+        })
         .ok_or(AslError::PolicyVersionConflict)
 }
 
@@ -301,6 +419,9 @@ mod tests {
             allow_member_invite: false,
             members: vec![],
             budgets: vec![],
+            file_policies: vec![],
+            admin_capabilities: vec![],
+            removal_requests: vec![],
         };
         let peer = AdminPeer {
             agent: "agent".into(),
@@ -312,6 +433,7 @@ mod tests {
             rooms: vec![room.clone()],
             peers: vec![peer.clone()],
             join_requests: vec![],
+            capacity: None,
             expires_ms: 30,
         };
         let resolve = |r: &AdminRoom, p: Option<AdminPeer>| {

@@ -51,6 +51,7 @@ impl Store {
         if days == 0 {
             tx.execute("DELETE FROM conversation_act_events", [])
                 .map_err(database_error)?;
+            crate::act_history::discard_archive_index_on(&tx)?;
         } else {
             tx.execute(
                 "DELETE FROM conversation_act_events
@@ -65,6 +66,7 @@ impl Store {
             )
             .map_err(database_error)?;
         }
-        tx.commit().map_err(database_error)
+        tx.commit().map_err(database_error)?;
+        crate::act_history::finish_archive_index_scrub_on(&self.connection)
     }
 }

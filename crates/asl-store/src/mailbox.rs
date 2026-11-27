@@ -997,7 +997,11 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE conversation_act_semantic_index;
+                "DROP TABLE mls_shard_forward_receipts;
+                 DROP TABLE mls_shard_bindings;
+                 DROP TABLE mls_room_shards;
+                 DROP TABLE group_removal_requests;
+                 DROP TABLE conversation_act_semantic_index;
                  DROP TABLE conversation_attachment_refs;
                  DROP TABLE conversation_act_events;
                  DROP TABLE conversation_budget_grants;
@@ -1015,7 +1019,7 @@ mod tests {
                  DROP TABLE IF EXISTS dht_provider_cache_v42;
                  DROP TABLE dht_provider_cache;
                  DROP TABLE dht_record_cache;
-                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39,40,41,42,43);",
+                 DELETE FROM schema_migrations WHERE version>=35;",
             )
             .unwrap();
         drop(connection);

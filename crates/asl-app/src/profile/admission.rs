@@ -304,7 +304,7 @@ impl CoreAdmission {
             device_certificate,
             major: ASL_PROTOCOL_MAJOR,
             minor: ASL_PROTOCOL_MINOR,
-            features: vec![Feature::ActNl],
+            features: vec![Feature::ActNl, Feature::ShardForward],
         };
         let mut admission = Self::new(
             local_peer_id,
@@ -734,6 +734,8 @@ impl CoreAdmission {
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
             NetworkEvent::DiscoveryCandidate { .. }
+            | NetworkEvent::ReachabilityChanged { .. }
+            | NetworkEvent::RouteChanged { .. }
             | NetworkEvent::DhtProviders { .. }
             | NetworkEvent::DhtProviderObserved { .. }
             | NetworkEvent::GossipReceived { .. } => {}
@@ -1622,6 +1624,20 @@ impl CoreAdmission {
                 .and_then(|peer| peer.remote_hello.as_ref())
                 .is_some_and(|hello| {
                     hello.major == 1 && hello.minor >= 3 && hello.features.contains(&Feature::ActNl)
+                })
+    }
+
+    pub(crate) fn peer_supports_shard_forward(&self, connection_id: [u8; 16]) -> bool {
+        self.local_hello.minor >= 4
+            && self.local_hello.features.contains(&Feature::ShardForward)
+            && self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.remote_hello.as_ref())
+                .is_some_and(|hello| {
+                    hello.major == 1
+                        && hello.minor >= 4
+                        && hello.features.contains(&Feature::ShardForward)
                 })
     }
 

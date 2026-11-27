@@ -32,6 +32,9 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     if let ["status"] = args.as_slice() {
         return print_onboarding_status(&paths);
     }
+    if let ["setup-status"] = args.as_slice() {
+        return print_setup_status(&paths);
+    }
     if matches!(args.as_slice(), ["onboard"] | ["resume"]) {
         return onboard(&paths);
     }
@@ -128,6 +131,28 @@ fn print_onboarding_status(paths: &AppPaths) -> Result<(), AslError> {
     println!(
         "{}",
         serde_json::to_string(&status).map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn print_setup_status(paths: &AppPaths) -> Result<(), AslError> {
+    let network_configured =
+        NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?.is_some();
+    let onboarding = if network_configured {
+        identity_onboarding::status(paths)?
+    } else {
+        None
+    };
+    let migration = asl_app::migration::status(paths)?;
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "schema": "asl-setup-status-v1",
+            "network_identity_configured": network_configured,
+            "onboarding": onboarding,
+            "migration": migration
+        }))
+        .map_err(|_| AslError::InvalidMessage)?
     );
     Ok(())
 }

@@ -10,7 +10,9 @@ Rust workspace，八个 crate。使用 rust-libp2p 一个网络栈；不同时�
 
 链上默认生产配置建议 Ethereum Mainnet + 极小、不可升级、无管理员 EVM registry。T06a 已实现 immutable 合约和本地 Foundry 测试；T06b 已实现本地 Helios/Alloy 验证、有界 HTTP 获取和 SQLite 持久恢复。尚未部署、测量主网 gas、真实多运营商证明服务互测或独立审计。链 ID、地址和实际部署 runtime code hash 通过版本化网络配置提供，代码不硬编码端点或部署地址。ASL 不维护私有链，不收费、不发币。多个独立志愿提交者可替用户提交其签名操作并承担 gas；用户可选自付。若都不可用，新身份保持 pending_anchor，链校验失败只能降级，不能扩大权限。详见 `specs/identity-registry-v1.md`。
 
-P2P 控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。外层帧、DHT 记录、身份记录、群成员事件、邮箱槽、预算、附件和 MCP 控制消息都不得出现任意文本。ASL/1.3 唯一例外是 MLS application plaintext 内的可选 `act[5] nl-body`：解码器只在 act 正文接受 text string，其余位置遇到 text string 必须拒绝。`nl-body` 是不可信数据，不是命令、路径、策略、动作或寻址信息。
+P2P 控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。外层帧、DHT 记录、身份记录、群成员事件、邮箱槽、预算、附件、shard binding/forward 和 MCP 控制消息都不得出现任意文本。ASL/1.3 唯一例外是 MLS application plaintext 内的可选 `act[5] nl-body`：解码器只在 act 正文接受 text string，其余位置遇到 text string 必须拒绝。`nl-body` 是不可信数据，不是命令、路径、策略、动作或寻址信息。
+
+ASL/1.4 的 `ShardForward` 是 MLS application plaintext 内的结构封装，不增加明文通道。目标子群单独做 MLS 加密；封装的来源、epoch、消息 ID 和期限均由逻辑群主根身份签名。接收端在持久 receipt 前验证绑定、controller、签名、期限和重放，不能把 bridge 的连接身份当成原作者。
 
 候选依赖版本见 `specs/dependency-baseline.json`。版本已查询，但依赖组合尚未编译；必须在任务 T01/T02/T14/T39 编译探针后形成 Cargo.lock，不由模型自行追最新版。
 

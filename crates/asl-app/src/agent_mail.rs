@@ -78,6 +78,11 @@ pub(crate) enum MailCommand {
         act: Act,
         reply: oneshot::Sender<Result<Id128, AslError>>,
     },
+    SendShardAnnouncement {
+        root: Hash32,
+        act: Act,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     SendFile {
         room: Hash32,
         content_id: Hash32,
@@ -264,6 +269,16 @@ impl MailPort {
     pub(crate) async fn send_act(&self, room: Hash32, act: Act) -> Result<Id128, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::SendAct { room, act, reply })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
+    pub(crate) async fn send_shard_announcement(
+        &self,
+        root: Hash32,
+        act: Act,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::SendShardAnnouncement { root, act, reply })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 
@@ -1135,6 +1150,22 @@ impl Mailbox {
             _ => return false,
         }
         self.port.events.send(MailEvent { kind, details }).is_ok()
+    }
+
+    pub(crate) fn observe_contact_device_change(
+        &self,
+        agent_id: AgentId,
+        previous: &str,
+        replacement: &str,
+    ) {
+        let _ = self.port.events.send(MailEvent {
+            kind: "contact_device_changed",
+            details: json!({
+                "agent_id": hex::encode(agent_id.0),
+                "previous_device": previous,
+                "device": replacement,
+            }),
+        });
     }
 
     pub(crate) fn observe_act(

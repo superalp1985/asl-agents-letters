@@ -4,7 +4,8 @@ use asl_types::{
     protocol::{
         Act, Answer, ContextAgreement, ContextExpression, ContextOffer, ContextRequest,
         ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupControl,
-        GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
+        GroupPacket, GroupRemovalRequest, Offer, ProtocolError, Query, ShardBinding, ShardForward,
+        WireFrame, decode_control, encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -25,10 +26,13 @@ pub enum GroupApplication {
     Expression(ExpressionLetter),
     Act(Act),
     Policy(GroupControl),
+    RemovalRequest(GroupRemovalRequest),
     ContextRequest(ContextRequest),
     ContextOffer(ContextOffer),
     ContextAgreement(ContextAgreement),
     ContextExpression(ContextExpression),
+    ShardBinding(ShardBinding),
+    ShardForward(Box<ShardForward>),
 }
 
 impl GroupApplication {
@@ -44,10 +48,13 @@ impl GroupApplication {
             Self::Expression(_) => "expression",
             Self::Act(_) => "act",
             Self::Policy(_) => "policy",
+            Self::RemovalRequest(_) => "removal_request",
             Self::ContextRequest(_) => "context_request",
             Self::ContextOffer(_) => "context_offer",
             Self::ContextAgreement(_) => "context_agreement",
             Self::ContextExpression(_) => "context_expression",
+            Self::ShardBinding(_) => "shard_binding",
+            Self::ShardForward(_) => "shard_forward",
         }
     }
 
@@ -63,10 +70,37 @@ impl GroupApplication {
             Self::Expression(letter) => letter.message_id,
             Self::Act(act) => act.message_id,
             Self::Policy(control) => control.message_id,
+            Self::RemovalRequest(request) => request.message_id,
             Self::ContextRequest(request) => request.message_id,
             Self::ContextOffer(offer) => offer.message_id,
             Self::ContextAgreement(agreement) => agreement.message_id,
             Self::ContextExpression(expression) => expression.message_id,
+            Self::ShardBinding(binding) => binding.message_id,
+            Self::ShardForward(forward) => forward.message_id,
+        }
+    }
+
+    pub fn time_bounds(&self) -> (Option<u64>, u64) {
+        match self {
+            Self::Query(query) => (Some(query.created_at_ms), query.expires_at_ms),
+            Self::Answer(answer) => (Some(answer.created_at_ms), answer.expires_at_ms),
+            Self::Offer(offer) => (None, offer.expires_at_ms),
+            Self::FetchRequest(_) => (None, u64::MAX),
+            Self::FetchGrant(grant) => (None, grant.expires_at_ms),
+            Self::FetchPending(pending) => (None, pending.expires_at_ms),
+            Self::Error(_) => (None, u64::MAX),
+            Self::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
+            Self::Act(act) => (None, act.expires_at_ms.unwrap_or(u64::MAX)),
+            Self::Policy(_) => (None, u64::MAX),
+            Self::RemovalRequest(request) => (None, request.expires_at_ms),
+            Self::ContextRequest(request) => (None, request.expires_at_ms),
+            Self::ContextOffer(offer) => (None, offer.expires_at_ms),
+            Self::ContextAgreement(_) => (None, u64::MAX),
+            Self::ContextExpression(expression) => {
+                (Some(expression.created_at_ms), expression.expires_at_ms)
+            }
+            Self::ShardBinding(binding) => (Some(binding.issued_at_ms), binding.expires_at_ms),
+            Self::ShardForward(forward) => (Some(forward.observed_at_ms), forward.expires_at_ms),
         }
     }
 
@@ -91,6 +125,15 @@ impl GroupApplication {
         if let Ok(act) = Act::decode(plaintext) {
             return Ok(Self::Act(act));
         }
+        if let Ok(request) = GroupRemovalRequest::decode(plaintext) {
+            return Ok(Self::RemovalRequest(request));
+        }
+        if let Ok(binding) = ShardBinding::decode(plaintext) {
+            return Ok(Self::ShardBinding(binding));
+        }
+        if let Ok(forward) = ShardForward::decode(plaintext) {
+            return Ok(Self::ShardForward(Box::new(forward)));
+        }
         GroupControl::decode(plaintext).map(Self::Policy)
     }
 
@@ -98,6 +141,9 @@ impl GroupApplication {
         match self {
             Self::Act(act) => act.encode(),
             Self::Policy(control) => control.encode(),
+            Self::RemovalRequest(request) => request.encode(),
+            Self::ShardBinding(binding) => binding.encode(),
+            Self::ShardForward(forward) => forward.encode(),
             Self::ContextRequest(request) => encode_control(&WireFrame::ContextRequest(request)),
             Self::ContextOffer(offer) => encode_control(&WireFrame::ContextOffer(offer)),
             Self::ContextAgreement(agreement) => {
@@ -117,10 +163,13 @@ impl GroupApplication {
                 Self::Expression(letter) => WireFrame::Expression(letter),
                 Self::Act(_)
                 | Self::Policy(_)
+                | Self::RemovalRequest(_)
                 | Self::ContextRequest(_)
                 | Self::ContextOffer(_)
                 | Self::ContextAgreement(_)
-                | Self::ContextExpression(_) => unreachable!(),
+                | Self::ContextExpression(_)
+                | Self::ShardBinding(_)
+                | Self::ShardForward(_) => unreachable!(),
             }),
         }
     }

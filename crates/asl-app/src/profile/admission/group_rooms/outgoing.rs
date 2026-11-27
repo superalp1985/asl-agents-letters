@@ -18,7 +18,7 @@ use asl_types::{
 };
 use openmls::prelude::{CredentialWithKey, OpenMlsProvider};
 
-use super::{CoreAdmission, LocalRoomCandidate};
+use super::{CoreAdmission, LocalRoomCandidate, require_local_group_capacity};
 use crate::profile::admission::fresh_id;
 
 impl CoreAdmission {
@@ -36,6 +36,7 @@ impl CoreAdmission {
         let target = self.mls_target(connection_id, directories, now_ms)?;
         let mut candidate = self.mls_creator_candidate(store, wire_id, directories, now_ms)?;
         candidate.require_room_for_add(&target)?;
+        require_local_group_capacity(store, candidate.roster.members.len() + 1, now_ms)?;
         let cert = &target.certificate;
         let packet = GroupPacket {
             group_id: wire_id,
@@ -112,7 +113,10 @@ impl CoreAdmission {
                     now_ms,
                 );
             }
-            Some(MlsInviteResponse::Pending) => candidate.require_room_for_add(&target)?,
+            Some(MlsInviteResponse::Pending) => {
+                candidate.require_room_for_add(&target)?;
+                require_local_group_capacity(store, candidate.roster.members.len() + 1, now_ms)?;
+            }
             None => return Err(AslError::PolicyDenied),
         }
         let base = sync_epoch_binding(&candidate.group, candidate.provider.crypto())?;

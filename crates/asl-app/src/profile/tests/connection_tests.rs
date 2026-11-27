@@ -103,25 +103,48 @@ async fn connect(
 ) -> (DeviceSession, asl_net::transport::AuthenticatedPeer) {
     dialer.dial(TransportKind::Tcp, endpoint, peer).unwrap();
     let (dialer_event, listener_event) = timeout(Duration::from_secs(5), async {
-        tokio::join!(dialer.next_event(), listener.next_event())
+        tokio::join!(
+            next_connected(dialer, Some(peer)),
+            next_connected(listener, None)
+        )
     })
     .await
     .unwrap();
-    let TransportEvent::Connected { connection } = dialer_event.unwrap() else {
-        panic!("dialer did not produce an authenticated connection");
-    };
+    let connection = dialer_event;
     assert_eq!(connection.peer_id(), peer);
-    let TransportEvent::Connected {
-        connection: listener_connection,
-    } = listener_event.unwrap()
-    else {
-        panic!("listener did not produce an authenticated connection");
-    };
+    let listener_connection = listener_event;
 
     (
         DeviceSession::from_transport(connection),
         listener_connection,
     )
+}
+
+async fn next_connected(
+    transport: &mut LocalTransport,
+    expected: Option<&PeerId>,
+) -> asl_net::transport::AuthenticatedPeer {
+    loop {
+        match transport.next_event().await.unwrap() {
+            TransportEvent::Connected { connection }
+                if expected.is_none_or(|expected| connection.peer_id() == expected) =>
+            {
+                return connection;
+            }
+            TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+            event => panic!("unexpected connection event: {event:?}"),
+        }
+    }
+}
+
+async fn next_disconnected(transport: &mut LocalTransport) {
+    loop {
+        match transport.next_event().await.unwrap() {
+            TransportEvent::Disconnected { .. } => return,
+            TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+            event => panic!("unexpected disconnect event: {event:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -148,13 +171,9 @@ async fn authenticated_connection_admits_its_bound_device_certificate() {
     );
 
     drop(listener);
-    assert!(matches!(
-        timeout(Duration::from_secs(5), dialer.next_event())
-            .await
-            .unwrap()
-            .unwrap(),
-        TransportEvent::Disconnected { .. }
-    ));
+    timeout(Duration::from_secs(5), next_disconnected(&mut dialer))
+        .await
+        .unwrap();
     assert!(session.current_agent(&history, &mut resolver, NOW).is_err());
 
     let (mut listener, endpoint) = listen(device_key).await;

@@ -11,7 +11,12 @@ use super::{
 impl Supervisor {
     pub(super) fn sync_network_pause(
         &mut self,
-        start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
+        start_net: impl FnOnce(
+            &SandboxLauncher,
+            &DeviceIdentity,
+            bool,
+            asl_net::transport::TraversalConfig,
+        ) -> Result<NetRuntime, AslError>,
         handler: &mut impl FnMut(&mut Self, AdmittedNetworkEvent) -> Result<(), AslError>,
     ) -> Result<bool, AslError> {
         let paused = self.network_report.pause_requested()?;
@@ -71,7 +76,12 @@ impl Supervisor {
 
     fn restart_net(
         &self,
-        start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
+        start_net: impl FnOnce(
+            &SandboxLauncher,
+            &DeviceIdentity,
+            bool,
+            asl_net::transport::TraversalConfig,
+        ) -> Result<NetRuntime, AslError>,
     ) -> Result<NetRuntime, AslError> {
         let device = DeviceIdentity::load_protected(&self.device_key_path)?;
         if device.peer_id() != self.device_peer_id {
@@ -81,6 +91,7 @@ impl Supervisor {
             &self.launcher,
             &device,
             self.network_settings.loopback_groups,
+            self.network_settings.traversal.transport_config()?,
         )?;
         net.apply_settings(&self.network_settings)?;
         Ok(net)
@@ -176,10 +187,11 @@ mod tests {
         _: &SandboxLauncher,
         device: &DeviceIdentity,
         groups: bool,
+        traversal: asl_net::transport::TraversalConfig,
     ) -> Result<NetRuntime, AslError> {
         let (net_input, mut core_output) = io::pipe()?;
         let (core_input, net_output) = io::pipe()?;
-        write_net_startup_prelude(&mut core_output, device, groups)?;
+        write_net_startup_prelude(&mut core_output, device, groups, traversal)?;
         thread::spawn(move || {
             let _ = run_net_pipe_fixture(net_input, net_output);
         });
@@ -218,7 +230,7 @@ mod tests {
         let launcher = SandboxLauncher::new(exe.clone(), exe.clone(), exe).unwrap();
 
         store.set_network_pause_requested(true).unwrap();
-        let mut supervisor = Supervisor::start_with_net(paths, launcher, |_, _, _| {
+        let mut supervisor = Supervisor::start_with_net(paths, launcher, |_, _, _, _| {
             panic!("saved pause started Net")
         })
         .unwrap();
@@ -226,7 +238,7 @@ mod tests {
         let exe = env::current_exe().unwrap();
         let second_launcher = SandboxLauncher::new(exe.clone(), exe.clone(), exe).unwrap();
         assert!(matches!(
-            Supervisor::start_with_net(second_paths, second_launcher, |_, _, _| {
+            Supervisor::start_with_net(second_paths, second_launcher, |_, _, _, _| {
                 panic!("duplicate Core reached Net startup")
             }),
             Err(AslError::InvalidPolicyState)
@@ -240,14 +252,14 @@ mod tests {
         store.set_network_pause_requested(false).unwrap();
         assert!(
             !supervisor
-                .sync_network_pause(|_, _, _| Err(AslError::SandboxUnavailable), &mut handler)
+                .sync_network_pause(|_, _, _, _| Err(AslError::SandboxUnavailable), &mut handler)
                 .unwrap()
         );
         assert!(report().runtime == NetworkRuntimeState::ResumeFailed);
         assert!(
             !supervisor
                 .sync_network_pause(
-                    |_, _, _| panic!("resume must not retry itself"),
+                    |_, _, _, _| panic!("resume must not retry itself"),
                     &mut handler
                 )
                 .unwrap()

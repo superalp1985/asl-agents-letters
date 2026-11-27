@@ -1,7 +1,7 @@
 //! Single-use local group administration. Only Core issues a selectable view.
 use asl_types::{
     error::AslError,
-    ids::{AgentId, Id128, PeerId},
+    ids::{AgentId, Hash32, Id128, PeerId},
 };
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,12 @@ pub enum AdminRequest {
         room: String,
         device: String,
     },
+    ReviewRemoval {
+        tag: String,
+        room: String,
+        request: String,
+        approve: bool,
+    },
     RejectJoinRequest {
         tag: String,
         room: String,
@@ -50,6 +56,8 @@ pub enum AdminRequest {
         allow_member_invite: bool,
         admins: Vec<String>,
         muted: Vec<String>,
+        #[serde(default)]
+        details: Option<AdminAccessDetails>,
     },
     RenewResourceBudget {
         tag: String,
@@ -68,10 +76,15 @@ pub enum AdminOutcome {
     Ready,
     Created,
     InviteQueued,
+    InviteOwnerRequired,
     MemberRemoved,
+    RemovalRequested,
+    RemovalRejected,
     JoinRequestRejected,
     RequestJoinQueued,
     AccessUpdated,
+    AccessPartiallyUpdated,
+    OwnerTransferBlocked,
     BudgetUpdated,
     Failed,
     Unconfirmed,
@@ -94,6 +107,19 @@ pub struct AdminRoom {
     pub members: Vec<AdminMember>,
     #[serde(default)]
     pub budgets: Vec<AdminBudget>,
+    #[serde(default)]
+    pub file_policies: Vec<AdminFilePolicy>,
+    #[serde(default)]
+    pub admin_capabilities: Vec<AdminCapability>,
+    #[serde(default)]
+    pub removal_requests: Vec<AdminRemovalRequest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminRemovalRequest {
+    pub request: String,
+    pub requester: String,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +128,26 @@ pub struct AdminBudget {
     pub granted: u64,
     pub consumed: u64,
     pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminFilePolicy {
+    pub content_id: String,
+    pub permissions: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminCapability {
+    pub peer: String,
+    pub capabilities: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdminAccessDetails {
+    pub owner: Option<String>,
+    pub file_policies: Vec<AdminFilePolicy>,
+    pub admin_capabilities: Vec<AdminCapability>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,7 +190,23 @@ pub struct AdminSnapshot {
     pub peers: Vec<AdminPeer>,
     #[serde(default)]
     pub join_requests: Vec<AdminJoinRequest>,
+    #[serde(default)]
+    pub capacity: Option<AdminCapacity>,
     pub expires_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdminCapacity {
+    pub measured_at_ms: u64,
+    pub planner_direct_members: usize,
+    pub planner_extended_members: usize,
+    pub fresh: bool,
+    #[serde(default)]
+    pub process_working_set_bytes: Option<u64>,
+    #[serde(default)]
+    pub available_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub available_disk_bytes: Option<u64>,
 }
 
 impl AdminSnapshot {
@@ -177,8 +239,22 @@ impl AdminSnapshot {
                             .iter()
                             .find(|r| &r.room == room)
                             .is_some_and(|r| {
-                                r.members.iter().any(|m| !m.creator && &m.device == device)
+                                r.members
+                                    .iter()
+                                    .any(|m| !m.creator && m.role != "owner" && &m.device == device)
                             })
+                }
+                AdminRequest::ReviewRemoval {
+                    tag, room, request, ..
+                } => {
+                    tag == &self.tag
+                        && self.rooms.iter().any(|entry| {
+                            &entry.room == room
+                                && entry
+                                    .removal_requests
+                                    .iter()
+                                    .any(|entry| &entry.request == request)
+                        })
                 }
                 AdminRequest::RejectJoinRequest { tag, room, device } => {
                     tag == &self.tag
@@ -193,6 +269,7 @@ impl AdminSnapshot {
                     policy_revision,
                     admins,
                     muted,
+                    details,
                     ..
                 } => {
                     tag == &self.tag
@@ -205,9 +282,28 @@ impl AdminSnapshot {
                                 peers.sort_unstable();
                                 peers.dedup();
                                 peers.into_iter().all(|peer| {
-                                    r.members
-                                        .iter()
-                                        .any(|member| !member.creator && &member.device == peer)
+                                    r.members.iter().any(|member| {
+                                        member.role != "owner" && &member.device == peer
+                                    })
+                                }) && details.as_ref().is_none_or(|details| {
+                                    details.owner.as_ref().is_none_or(|owner| {
+                                        r.members.iter().any(|member| &member.device == owner)
+                                    }) && details.file_policies.len()
+                                        <= asl_types::protocol::MAX_GROUP_CONTROL_FILE_POLICIES
+                                        && details.admin_capabilities.len()
+                                            <= asl_types::protocol::MAX_GROUP_CONTROL_PEERS
+                                        && details.file_policies.iter().all(|policy| {
+                                            policy.content_id.len() == 64
+                                                && policy
+                                                    .content_id
+                                                    .bytes()
+                                                    .all(|b| b.is_ascii_hexdigit())
+                                                && policy.permissions & !7 == 0
+                                        })
+                                        && details.admin_capabilities.iter().all(|capability| {
+                                            admins.contains(&capability.peer)
+                                                && capability.capabilities & !7 == 0
+                                        })
                                 })
                             })
                 }
@@ -319,17 +415,24 @@ impl Store {
                 "WITH owned AS (
                SELECT g.group_id,g.local_name,g.mls_epoch,g.membership_epoch,g.created_at_ms,
                       coalesce(gp.permissions,3) AS permissions,
-                      coalesce(gp.revision,0) AS revision,s.wire_group_id
+                      coalesce(gp.revision,0) AS revision,s.wire_group_id,
+                      coalesce(gp.owner_peer_id,g.creator_peer_id) AS owner
                FROM asl_groups g JOIN mls_room_states s ON s.local_group_id=g.group_id
                LEFT JOIN group_access_policies gp ON gp.group_id=g.group_id
-               WHERE g.creator_peer_id=?1 AND g.state='active'
+               WHERE g.state='active' AND (coalesce(gp.owner_peer_id,g.creator_peer_id)=?1
+                 OR g.creator_peer_id=?1
+                 OR EXISTS(SELECT 1 FROM group_access_members a
+                    JOIN group_members m ON m.group_id=a.group_id AND m.peer_id=a.peer_id
+                    LEFT JOIN group_admin_capabilities c ON c.group_id=a.group_id AND c.peer_id=a.peer_id
+                    WHERE a.group_id=g.group_id AND a.peer_id=?1 AND a.role='admin'
+                      AND a.muted=0 AND m.state='active' AND (coalesce(c.capabilities,7) & 7)<>0))
                ORDER BY g.created_at_ms DESC,g.group_id LIMIT ?2
              )
              SELECT lower(hex(o.wire_group_id)),o.local_name,o.mls_epoch,o.membership_epoch,
                     o.permissions,o.revision,
                     p.agent_id,m.peer_id,m.role='creator',
                     coalesce(r.role,'member'),coalesce(r.muted,0),
-                    coalesce(gp.permissions,3)
+                    coalesce(gp.permissions,3),m.peer_id=o.owner
              FROM owned o JOIN group_members m ON m.group_id=o.group_id AND m.state='active'
              JOIN peers p ON p.peer_id=m.peer_id
              LEFT JOIN group_access_members r
@@ -359,6 +462,9 @@ impl Store {
                     allow_member_invite: row.get::<_, i64>(4).map_err(database_error)? & 4 != 0,
                     members: vec![],
                     budgets: vec![],
+                    file_policies: vec![],
+                    admin_capabilities: vec![],
+                    removal_requests: vec![],
                 });
             }
             let members = &mut rooms.last_mut().ok_or(AslError::InvalidDatabase)?.members;
@@ -366,7 +472,7 @@ impl Store {
                 return Err(AslError::InvalidDatabase);
             }
             let creator: bool = row.get(8).map_err(database_error)?;
-            let role: String = if creator {
+            let role: String = if row.get::<_, bool>(12).map_err(database_error)? {
                 "owner".into()
             } else {
                 row.get(9).map_err(database_error)?
@@ -396,6 +502,37 @@ impl Store {
         for room in &mut rooms {
             let mut wire = [0; 32];
             hex::decode_to_slice(&room.room, &mut wire).map_err(|_| AslError::InvalidDatabase)?;
+            let snapshot = self
+                .mls_room_snapshot(Hash32(wire))?
+                .ok_or(AslError::InvalidDatabase)?;
+            let policy = self.group_access_policy(&snapshot.local_id)?;
+            room.file_policies = policy
+                .file_policies
+                .into_iter()
+                .map(|policy| AdminFilePolicy {
+                    content_id: hex::encode(policy.content_id.0),
+                    permissions: policy.permissions,
+                })
+                .collect();
+            room.admin_capabilities = policy
+                .admin_capabilities
+                .into_iter()
+                .map(|capability| AdminCapability {
+                    peer: bs58::encode(capability.peer.as_bytes()).into_string(),
+                    capabilities: capability.capabilities,
+                })
+                .collect();
+            let now =
+                u64::try_from(crate::current_time_ms()).map_err(|_| AslError::InvalidDatabase)?;
+            room.removal_requests = self
+                .group_removal_requests(Hash32(wire), device, now)?
+                .into_iter()
+                .map(|entry| AdminRemovalRequest {
+                    request: hex::encode(entry.id.0),
+                    requester: bs58::encode(entry.requester.as_bytes()).into_string(),
+                    target: bs58::encode(entry.target.as_bytes()).into_string(),
+                })
+                .collect();
             let mut statement = self
                 .connection
                 .prepare(
@@ -554,6 +691,7 @@ mod tests {
                 rooms: vec![],
                 peers: vec![],
                 join_requests: vec![],
+                capacity: None,
                 expires_ms: now + 10,
             };
             store
@@ -649,6 +787,7 @@ mod tests {
                 connection: None,
                 expires_ms: 50,
             }],
+            capacity: None,
             expires_ms: 100,
         };
         assert!(snapshot.permits_selection(

@@ -34,6 +34,7 @@ const RESPONSE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) fn run(
     identity: DeviceIdentity,
     loopback_groups: bool,
+    traversal: asl_net::transport::TraversalConfig,
     input: impl Read + Send + 'static,
     output: impl Write,
 ) -> Result<(), AslError> {
@@ -41,21 +42,28 @@ pub(super) fn run(
         .enable_all()
         .build()
         .map_err(AslError::Io)?;
-    runtime.block_on(run_async(identity, loopback_groups, input, output))
+    runtime.block_on(run_async(
+        identity,
+        loopback_groups,
+        traversal,
+        input,
+        output,
+    ))
 }
 
 async fn run_async(
     identity: DeviceIdentity,
     loopback_groups: bool,
+    traversal: asl_net::transport::TraversalConfig,
     input: impl Read + Send + 'static,
     output: impl Write,
 ) -> Result<(), AslError> {
     let peer_id = identity.peer_id();
     let keypair = identity.into_keypair();
     let transport = if loopback_groups {
-        LocalTransport::new_with_groups(keypair)?
+        LocalTransport::new_with_groups_config(keypair, traversal)?
     } else {
-        LocalTransport::new(keypair)?
+        LocalTransport::new_with_config(keypair, traversal)?
     };
     let mut bridge = NetworkBridge::new(transport);
     let mut writer = FrameWriter::new(output, IpcRole::Net, IpcRole::Core);
@@ -1030,6 +1038,12 @@ impl NetworkBridge {
             TransportEvent::Listening(kind, address) => {
                 writer.send(&IpcMessage::Listening { kind, address })?;
             }
+            TransportEvent::ReachabilityChanged(status) => {
+                writer.send(&IpcMessage::ReachabilityChanged { status })?;
+            }
+            TransportEvent::RouteChanged(status) => {
+                writer.send(&IpcMessage::RouteChanged { status })?;
+            }
             TransportEvent::RelayReserved {
                 relay_peer_id,
                 address,
@@ -1645,8 +1659,8 @@ mod tests {
             .unwrap();
         let (listener_event, dialer_event) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
-                listener.transport.next_event(),
-                dialer.transport.next_event()
+                next_connected_event(&mut listener.transport, &dialer_peer),
+                next_connected_event(&mut dialer.transport, &listener_peer)
             )
         })
         .await
@@ -1663,9 +1677,25 @@ mod tests {
                 }
                 event => panic!("unexpected connection event: {event:?}"),
             };
-        let listener_id = connection_handle(&mut listener, listener_event.unwrap(), dialer_peer);
-        let dialer_id = connection_handle(&mut dialer, dialer_event.unwrap(), listener_peer);
+        let listener_id = connection_handle(&mut listener, listener_event, dialer_peer);
+        let dialer_id = connection_handle(&mut dialer, dialer_event, listener_peer);
         ((listener, listener_id), (dialer, dialer_id))
+    }
+
+    async fn next_connected_event(
+        transport: &mut LocalTransport,
+        expected: &PeerId,
+    ) -> TransportEvent {
+        loop {
+            let event = transport.next_event().await.unwrap();
+            match &event {
+                TransportEvent::Connected { connection } if connection.peer_id() == expected => {
+                    return event;
+                }
+                TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+                _ => panic!("unexpected connection event: {event:?}"),
+            }
+        }
     }
 
     #[tokio::test]

@@ -416,6 +416,7 @@ fn feature(value: Value) -> Result<Feature, AslError> {
         3 => Ok(Feature::Inline),
         4 => Ok(Feature::Profile),
         5 => Ok(Feature::ActNl),
+        6 => Ok(Feature::ShardForward),
         _ => invalid(),
     }
 }
@@ -427,6 +428,7 @@ fn feature_code(value: Feature) -> u64 {
         Feature::Inline => 3,
         Feature::Profile => 4,
         Feature::ActNl => 5,
+        Feature::ShardForward => 6,
     }
 }
 

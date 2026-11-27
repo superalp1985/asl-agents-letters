@@ -68,6 +68,7 @@ pub(super) enum Request {
     SendExpression(ExpressionArgs),
     SendContextExpression(ContextExpressionArgs),
     SendAct(ActArgs),
+    SendShardAnnouncement(ActArgs),
     SendFile(SendFileArgs),
     GroupList,
     GroupCreate,

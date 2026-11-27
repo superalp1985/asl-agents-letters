@@ -15,6 +15,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        crate::act_history::initialize_archive_index_on(&tx, now_ms)?;
         inbound_observations::delete_expired(&tx, now_ms)?;
         crate::mcp_recovery::prune(&tx, now_ms)?;
 
@@ -52,6 +53,8 @@ impl Store {
             params![now_ms, PRUNE_BATCH],
         )
         .map_err(database_error)?;
-        tx.commit().map_err(database_error)
+        crate::act_history::prune_expired_archive_index_on(&tx, now_ms, PRUNE_BATCH)?;
+        tx.commit().map_err(database_error)?;
+        crate::act_history::finish_archive_index_scrub_on(&self.connection)
     }
 }

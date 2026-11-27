@@ -1007,6 +1007,15 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 安全修复后的全工作区回归：首次运行唯一失败为既有 `model_endpoint_settings::cli_approval_controls_an_existing_gateway_without_restarting` 在本机 mock socket 上遇到 `Os { code: 10035, kind: WouldBlock }` 后返回 `ProviderUnavailable`。该 fixture 接受连接后继承 Windows 非阻塞状态，已改为显式 `set_nonblocking(false)`；精确用例随后 0.19 秒通过，并再次执行同命令全工作区测试，退出码 0。邀请修复相关的 `asl-store` 精确 lookup、`asl-app` 邀请类型、Core CLI 绑定/邀请参数测试和桌面目标编译均通过。
 - 最终统一运行（含精确 AgentId DHT 键、设备绑定短码、Pairing 上限统一和 endpoint fixture 修复）：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；本轮 `--list` 枚举 929 项，忽略项仍为显式环境门槛/子进程入口。先前一次失败来自 `agent_setup` 仍断言 schema v36，修正为 v37 后重跑通过。跨两台真实设备、公网 DHT 可达性、二维码被真实摄像头扫描和跨机邀请确认仍未验收。
 
+### 2026-11-28 ASL/1.4 shard forwarding and feature closure
+
+- Code now includes ASL/1.4 `ShardBinding` and `ShardForward`, automatic root/child MLS invitation, per-child policy propagation, owner-root signatures, persistent forward receipts, and source-preserving Act/context/Offer delivery.
+- NAT code now composes AutoNAT, relay reservation, direct-first dialing, DCUtR observation, relay fallback, configured traversal limits, and reachability/route IPC events.
+- Setup now has one guided preflight/resume/status path with signed network seeds and explicit external chain prerequisites. Migration v2, automatic recovery, contact device rebinding and opt-in group rejoin are wired.
+- Packaging now includes deterministic offline archives, detached signature checks, Windows rollback metadata, and Linux systemd install/upgrade/rollback tooling.
+- Unified local/loopback acceptance completed: all workspace/all-target tests passed with 13 environment-gated ignores; desktop-ui passed 321/321 with 5 ignores; strict Clippy, fmt, schema vectors, CDDL, release build and Windows offline test package generation passed.
+- This still does not certify real two-machine NAT traversal, multi-hop 10,000-member capacity, live chain deployment or independent security audit.
+
 ### 2026-11-26 Act 自动回复与 DHT 密文邮箱
 
 - `asl-agent::act_reply` 只把 `Ask` act 转为严格结构的 `Inform` 或 `Clarify`。远端 `nl_body` 和本地证据 excerpt 都放在 untrusted JSON 数据区；回复解析拒绝 action、tool、path、附件和未知字段，正文上限 8 KiB。`AuthorizedPrompt::data_free` 允许已批准模型端点在没有本地私有证据时调用，带本地证据的路径仍要求 ReadChunk + ModelInput permit。

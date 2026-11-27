@@ -3,7 +3,7 @@
 解压到本地 NTFS 目录。安装目录及其上级路径必须防止不受信任的账户修改或替换安装文件；不要在其他账户可写的共享目录运行。脚本不会替你配置或审核 ACL。保留包内的 `active-release.txt`。打开 PowerShell，在解压目录下执行：
 
 ```powershell
-.\Start-ASL.ps1 -DataDirectory 'E:\Your-Asl-Data'
+.\Start-ASL.ps1 -DataDirectory '<absolute-local-data-directory>'
 ```
 
 请把示例路径替换为实际数据目录。现有资料和迁移后的资料都从指定目录加载。
@@ -11,7 +11,7 @@
 如果同一资料的后台已运行，只打开当前版本的界面：
 
 ```powershell
-.\Start-ASL.ps1 -ViewerOnly -DataDirectory 'E:\Your-Asl-Data'
+.\Start-ASL.ps1 -ViewerOnly -DataDirectory '<absolute-local-data-directory>'
 ```
 
 此模式不启动或重启后台。
@@ -19,7 +19,7 @@
 需要登录后后台运行时，在解压后的目录执行：
 
 ```powershell
-.\Set-ASLLogin.ps1 -Enable -DataDirectory 'E:\Your-Asl-Data'
+.\Set-ASLLogin.ps1 -Enable -DataDirectory '<absolute-local-data-directory>'
 .\Set-ASLLogin.ps1
 ```
 
@@ -38,9 +38,19 @@
 .\Update-ASL.ps1 -Package '<更新 ZIP>' -Manifest '<签名清单 JSON>' -Signature '<签名文件>'
 ```
 
-验证成功后，下次运行 `Start-ASL.ps1` 使用新版本。此前版本保留在本地。预检失败不会启用新版；如果新版已启动并迁移数据库，不要直接用旧版打开它。
+从另一份受信任脚本管理安装目录时可加 `-InstallRoot '<受保护的安装根>'`。验证成功后，下次运行 `Start-ASL.ps1` 使用新版本。此前版本保留在本地，`rollback-release.json` 记录一层前后指针和已签名包/清单散列。预检失败不会启用新版。
 
-根目录的启动脚本、验签器、Agent 入口及固定公钥属于引导层，普通更新不替换它们。当前 ZIP 布局为 v2，签名清单仍为 v1。此前的 v1 布局开发包没有 Agent 入口，不能原地更新到 v2；请在核验全包后解压到新的受保护安装目录，复用数据目录，并重新配置宿主与登录启动。不要覆盖旧的安装目录。
+只有确认当前资料与旧版兼容并完全退出 ASL 后，才可回切二进制：
+
+```powershell
+.\Rollback-ASL.ps1 -ConfirmDataCompatibility
+```
+
+回切不会恢复数据库、配置或任何用户资料；若新版已迁移资料且旧版不兼容，不得执行。回切后元数据会交换前后指针，可在相同兼容性前提下再次切回。
+
+独立发布验收脚本 `scripts/verify-windows-release.ps1` 可通过 `-TrustedInstallRoot` 使用受保护安装中的固定公钥和旧版 Core，并严格复核相对路径清单、SBOM 与包内散列。正式包加 `-RequireAuthenticode`；证书链和吊销状态来自验收机，仍需单独留存证据。
+
+根目录的启动脚本、验签器、Agent 入口、回切器及固定公钥属于引导层，普通更新不替换它们。当前 ZIP 布局为 v3，签名清单仍为 v1。此前的 v1/v2 布局缺少当前引导和回切契约，不能原地更新到 v3；请在核验全包后解压到新的受保护安装目录，复用数据目录，并重新配置宿主与登录启动。不要覆盖旧的安装目录。
 
 # ASL for Windows
 
@@ -77,12 +87,15 @@ Pin an independently verified release key once with
 `.\Update-ASL.ps1 -PinReleaseKey '<32-byte public key file>'`.
 Apply an update with `.\Update-ASL.ps1 -Package '<ZIP>' -Manifest '<manifest JSON>' -Signature '<signature file>'`.
 The next `Start-ASL.ps1` uses the new release. The previous release stays on
-disk, and a failed preflight leaves it active. Do not reopen migrated data with
-an older binary after the new release has started.
+disk, and a failed preflight leaves it active. `rollback-release.json` records
+one reversible pointer step. Use `.\Rollback-ASL.ps1 -ConfirmDataCompatibility`
+only after closing ASL and confirming that the existing data is compatible;
+rollback never restores data. Do not reopen migrated data with an incompatible
+older binary after the new release has started.
 
-The root launchers, verifier and pinned key are not replaced by ordinary updates.
-The ZIP uses layout v2; the signed manifest remains v1. Older v1-layout
-development packages have no agent entry and cannot update in place to v2.
+The root launchers, verifier, rollback tool, and pinned key are not replaced by ordinary updates.
+The ZIP uses layout v3; the signed manifest remains v1. Older v1/v2-layout
+packages do not have the current bootstrap and rollback contract and cannot update in place to v3.
 Independently authenticate the new distribution, extract it into a new protected
 directory, keep your separate data directory, and update the host and login
 startup configuration. Do not overwrite the existing installation directory.

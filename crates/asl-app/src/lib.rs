@@ -2,6 +2,7 @@ pub mod act_history_export;
 #[cfg(windows)]
 mod agent_mail;
 pub mod avatar;
+pub mod capacity;
 pub mod chain;
 mod chain_refresh;
 pub mod checkpoint_access;

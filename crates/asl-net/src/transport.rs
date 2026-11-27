@@ -38,7 +38,7 @@ use asl_types::record::decode_record;
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     core::{
-        Endpoint,
+        ConnectedPoint, Endpoint,
         transport::{ListenerId, PortUse},
     },
     futures::StreamExt,
@@ -78,17 +78,139 @@ const DHT_CANDIDATE_LIFETIME: Duration = Duration::from_secs(10);
 const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DHT_RECORD_RESTORE_TTL: Duration = Duration::from_secs(30 * 60);
 const DHT_PROVIDER_RESTORE_TTL: Duration = Duration::from_secs(60 * 60);
-const MAX_RELAY_ENDPOINTS: usize = 8;
+const ABSOLUTE_MAX_RELAY_ENDPOINTS: u16 = 32;
+const ABSOLUTE_MAX_RELAY_ROUTES_PER_DIAL: u16 = 16;
+const ABSOLUTE_MAX_PENDING_ROUTES: u16 = 64;
+const ABSOLUTE_MAX_RELAY_RESERVATION_RETRIES: u16 = 1_024;
+const ABSOLUTE_MAX_AUTONAT_PEER_ADDRESSES: u16 = 64;
+const ABSOLUTE_MAX_AUTONAT_CONFIDENCE: u8 = 10;
+const MAX_TRAVERSAL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const MAX_REACHABILITY_ADDRESS_BYTES: usize = 512;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 4 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
 const MAX_PROTOCOL_STREAMS_PER_PEER: usize = 2;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIRING_REQUEST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-const RELAY_RETRY_BASE: Duration = Duration::from_secs(1);
-const RELAY_RETRY_MAX: Duration = Duration::from_secs(60);
 const RELAY_RETRY_MAX_SHIFT: u32 = 6;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TraversalConfig {
+    pub connection_timeout_ms: u64,
+    pub idle_connection_timeout_ms: u64,
+    pub hole_punch_timeout_ms: u64,
+    pub identify_interval_ms: u64,
+    pub autonat_boot_delay_ms: u64,
+    pub autonat_retry_interval_ms: u64,
+    pub autonat_refresh_interval_ms: u64,
+    pub autonat_request_timeout_ms: u64,
+    pub relay_retry_base_ms: u64,
+    pub relay_retry_max_ms: u64,
+    pub max_relay_endpoints: u16,
+    pub max_relay_routes_per_dial: u16,
+    pub max_pending_routes: u16,
+    pub max_relay_reservation_retries: u16,
+    pub autonat_max_peer_addresses: u16,
+    pub autonat_confidence_max: u8,
+}
+
+impl TraversalConfig {
+    pub fn validate(self) -> io::Result<Self> {
+        let durations = [
+            self.connection_timeout_ms,
+            self.idle_connection_timeout_ms,
+            self.hole_punch_timeout_ms,
+            self.identify_interval_ms,
+            self.autonat_boot_delay_ms,
+            self.autonat_retry_interval_ms,
+            self.autonat_refresh_interval_ms,
+            self.autonat_request_timeout_ms,
+            self.relay_retry_base_ms,
+            self.relay_retry_max_ms,
+        ];
+        if durations
+            .into_iter()
+            .any(|value| value == 0 || value > MAX_TRAVERSAL_TIMEOUT_MS)
+            || self.idle_connection_timeout_ms < self.connection_timeout_ms
+            || self.hole_punch_timeout_ms < self.connection_timeout_ms
+            || self.autonat_refresh_interval_ms < self.autonat_retry_interval_ms
+            || self.relay_retry_max_ms < self.relay_retry_base_ms
+            || !(1..=ABSOLUTE_MAX_RELAY_ENDPOINTS).contains(&self.max_relay_endpoints)
+            || !(1..=ABSOLUTE_MAX_RELAY_ROUTES_PER_DIAL).contains(&self.max_relay_routes_per_dial)
+            || self.max_relay_routes_per_dial > self.max_relay_endpoints
+            || !(1..=ABSOLUTE_MAX_PENDING_ROUTES).contains(&self.max_pending_routes)
+            || !(1..=ABSOLUTE_MAX_RELAY_RESERVATION_RETRIES)
+                .contains(&self.max_relay_reservation_retries)
+            || !(1..=ABSOLUTE_MAX_AUTONAT_PEER_ADDRESSES).contains(&self.autonat_max_peer_addresses)
+            || !(1..=ABSOLUTE_MAX_AUTONAT_CONFIDENCE).contains(&self.autonat_confidence_max)
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(self)
+    }
+
+    fn connection_timeout(self) -> Duration {
+        Duration::from_millis(self.connection_timeout_ms)
+    }
+
+    fn idle_connection_timeout(self) -> Duration {
+        Duration::from_millis(self.idle_connection_timeout_ms)
+    }
+
+    fn hole_punch_timeout(self) -> Duration {
+        Duration::from_millis(self.hole_punch_timeout_ms)
+    }
+
+    fn identify_interval(self) -> Duration {
+        Duration::from_millis(self.identify_interval_ms)
+    }
+
+    fn autonat_boot_delay(self) -> Duration {
+        Duration::from_millis(self.autonat_boot_delay_ms)
+    }
+
+    fn autonat_retry_interval(self) -> Duration {
+        Duration::from_millis(self.autonat_retry_interval_ms)
+    }
+
+    fn autonat_refresh_interval(self) -> Duration {
+        Duration::from_millis(self.autonat_refresh_interval_ms)
+    }
+
+    fn autonat_request_timeout(self) -> Duration {
+        Duration::from_millis(self.autonat_request_timeout_ms)
+    }
+
+    fn relay_retry_base(self) -> Duration {
+        Duration::from_millis(self.relay_retry_base_ms)
+    }
+
+    fn relay_retry_max(self) -> Duration {
+        Duration::from_millis(self.relay_retry_max_ms)
+    }
+}
+
+impl Default for TraversalConfig {
+    fn default() -> Self {
+        Self {
+            connection_timeout_ms: 5_000,
+            idle_connection_timeout_ms: 30_000,
+            hole_punch_timeout_ms: 20_000,
+            identify_interval_ms: 5 * 60 * 1_000,
+            autonat_boot_delay_ms: 15_000,
+            autonat_retry_interval_ms: 90_000,
+            autonat_refresh_interval_ms: 15 * 60 * 1_000,
+            autonat_request_timeout_ms: 30_000,
+            relay_retry_base_ms: 1_000,
+            relay_retry_max_ms: 60_000,
+            max_relay_endpoints: 8,
+            max_relay_routes_per_dial: 3,
+            max_pending_routes: 8,
+            max_relay_reservation_retries: 32,
+            autonat_max_peer_addresses: 20,
+            autonat_confidence_max: 3,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportKind {
@@ -108,6 +230,54 @@ pub enum DiscoveryCandidateState {
 pub enum DhtLookupStatus {
     Completed = 1,
     Failed = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ReachabilityState {
+    Unknown = 1,
+    Private = 2,
+    Public = 3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReachabilityStatus {
+    pub state: ReachabilityState,
+    pub confidence: u8,
+    pub public_address: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RouteState {
+    DirectDialing = 1,
+    RelayDialing = 2,
+    HolePunching = 3,
+    Direct = 4,
+    HolePunched = 5,
+    Relayed = 6,
+    Failed = 7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RouteFailure {
+    DirectUnavailable = 1,
+    RelayUnavailable = 2,
+    HolePunchFailed = 3,
+    TimedOut = 4,
+    PeerIdentityMismatch = 5,
+    Disconnected = 6,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteStatus {
+    pub peer_id: PeerId,
+    pub state: RouteState,
+    pub relay_peer_id: Option<PeerId>,
+    pub direct_attempts: u8,
+    pub relay_attempts: u8,
+    pub failure: Option<RouteFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -243,6 +413,8 @@ impl ResponseToken {
 #[derive(Debug)]
 pub enum TransportEvent {
     Listening(TransportKind, SocketAddr),
+    ReachabilityChanged(ReachabilityStatus),
+    RouteChanged(RouteStatus),
     RelayReserved {
         relay_peer_id: libp2p::PeerId,
         address: Multiaddr,
@@ -363,6 +535,11 @@ pub struct LocalTransport {
     pending_discovery_dials: HashSet<libp2p::PeerId>,
     discovery_candidates: HashSet<(libp2p::PeerId, TransportKind, SocketAddr)>,
     pending_discovery_observations: VecDeque<DiscoveryCandidate>,
+    pending_transport_events: VecDeque<TransportEvent>,
+    traversal: TraversalConfig,
+    reachability: ReachabilityStatus,
+    routes: HashMap<libp2p::PeerId, RouteAttempt>,
+    connection_routes: HashMap<ConnectionId, EstablishedRoute>,
     relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
     relay_listeners: HashMap<ListenerId, libp2p::PeerId>,
     relay_retries: HashMap<libp2p::PeerId, RelayRetry>,
@@ -385,15 +562,48 @@ struct RelayRetry {
     retry_at: Option<tokio::time::Instant>,
 }
 
+struct RouteAttempt {
+    state: RouteState,
+    relay_peer_id: Option<libp2p::PeerId>,
+    direct_attempts: u8,
+    relay_attempts: u8,
+    direct_dial: Option<ConnectionId>,
+    relay_dial: Option<ConnectionId>,
+    deadline: Option<tokio::time::Instant>,
+    pending_failure: DialFailure,
+}
+
+#[derive(Clone, Copy)]
+enum EstablishedRoute {
+    Direct {
+        peer: libp2p::PeerId,
+    },
+    Relayed {
+        peer: libp2p::PeerId,
+        relay_peer_id: Option<libp2p::PeerId>,
+    },
+}
+
 impl LocalTransport {
     pub fn new(identity: Keypair) -> io::Result<Self> {
-        Self::build(identity, false)
+        Self::new_with_config(identity, TraversalConfig::default())
+    }
+
+    pub fn new_with_config(identity: Keypair, traversal: TraversalConfig) -> io::Result<Self> {
+        Self::build(identity, false, traversal)
     }
 
     /// Enables the MLS group adapter. The caller still needs to
     /// authorize each group operation against an admitted ASL session.
     pub fn new_with_groups(identity: Keypair) -> io::Result<Self> {
-        Self::build(identity, true)
+        Self::new_with_groups_config(identity, TraversalConfig::default())
+    }
+
+    pub fn new_with_groups_config(
+        identity: Keypair,
+        traversal: TraversalConfig,
+    ) -> io::Result<Self> {
+        Self::build(identity, true, traversal)
     }
 
     /// Backward-compatible name for the group-enabled constructor.
@@ -401,8 +611,14 @@ impl LocalTransport {
         Self::new_with_groups(identity)
     }
 
-    fn build(identity: Keypair, loopback_groups: bool) -> io::Result<Self> {
+    fn build(
+        identity: Keypair,
+        loopback_groups: bool,
+        traversal: TraversalConfig,
+    ) -> io::Result<Self> {
+        let traversal = traversal.validate()?;
         let local_peer_id = identity.public().to_peer_id();
+        let behaviour_traversal = traversal;
         let swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_tcp(tcp::Config::default(), noise::Config::new, || {
@@ -410,7 +626,7 @@ impl LocalTransport {
             })
             .map_err(|_| io::Error::other("cannot configure authenticated TCP"))?
             .with_quic_config(|mut config| {
-                config.handshake_timeout = HANDSHAKE_TIMEOUT;
+                config.handshake_timeout = traversal.connection_timeout();
                 config.max_concurrent_stream_limit = 8;
                 config.max_stream_data = 16 * 1024;
                 config.max_connection_data = 16 * 1024;
@@ -418,15 +634,28 @@ impl LocalTransport {
             })
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|_| io::Error::other("cannot configure relay client"))?
-            .with_behaviour(|_, relay| AslBehaviour::new(local_peer_id, relay, loopback_groups))
+            .with_behaviour(move |key, relay| {
+                AslBehaviour::new(
+                    local_peer_id,
+                    key.public(),
+                    relay,
+                    loopback_groups,
+                    behaviour_traversal,
+                )
+            })
             .expect("infallible behaviour constructor")
             .with_swarm_config(|config| {
                 config
                     .with_max_negotiating_inbound_streams(4)
-                    .with_idle_connection_timeout(IDLE_TIMEOUT)
+                    .with_idle_connection_timeout(traversal.idle_connection_timeout())
             })
-            .with_connection_timeout(HANDSHAKE_TIMEOUT)
+            .with_connection_timeout(traversal.connection_timeout())
             .build();
+        let reachability = ReachabilityStatus {
+            state: ReachabilityState::Unknown,
+            confidence: 0,
+            public_address: None,
+        };
         Ok(Self {
             live: HashMap::new(),
             swarm,
@@ -438,6 +667,11 @@ impl LocalTransport {
             pending_discovery_dials: HashSet::new(),
             discovery_candidates: HashSet::new(),
             pending_discovery_observations: VecDeque::new(),
+            pending_transport_events: VecDeque::new(),
+            traversal,
+            reachability,
+            routes: HashMap::new(),
+            connection_routes: HashMap::new(),
             relay_endpoints: HashMap::new(),
             relay_listeners: HashMap::new(),
             relay_retries: HashMap::new(),
@@ -553,16 +787,7 @@ impl LocalTransport {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         require_runtime()?;
-        self.swarm
-            .dial(
-                DialOpts::peer_id(peer)
-                    .condition(PeerCondition::DisconnectedAndNotDialing)
-                    .addresses(vec![endpoint])
-                    .build(),
-            )
-            .map_err(dial_error)?;
-        self.network_started = true;
-        Ok(())
+        self.start_direct_route(peer, endpoint)
     }
 
     pub fn reserve_relay(&mut self, address: &Multiaddr) -> io::Result<libp2p::PeerId> {
@@ -586,7 +811,7 @@ impl LocalTransport {
             }
         }
         if !self.relay_endpoints.contains_key(&endpoint.peer_id)
-            && self.relay_endpoints.len() >= MAX_RELAY_ENDPOINTS
+            && self.relay_endpoints.len() >= usize::from(self.traversal.max_relay_endpoints)
         {
             return Err(io::Error::other("relay endpoint limit reached"));
         }
@@ -612,7 +837,10 @@ impl LocalTransport {
             .insert(endpoint.peer_id, endpoint.clone());
         self.relay_retries
             .entry(endpoint.peer_id)
-            .and_modify(|retry| retry.retry_at = None);
+            .and_modify(|retry| {
+                retry.attempts = 0;
+                retry.retry_at = None;
+            });
         self.network_started = true;
         Ok(endpoint.peer_id)
     }
@@ -621,27 +849,30 @@ impl LocalTransport {
         self.reserved_relays.contains(relay_peer_id)
     }
 
+    pub fn reachability_status(&self) -> &ReachabilityStatus {
+        &self.reachability
+    }
+
+    pub fn route_status(&self, peer: &PeerId) -> io::Result<Option<RouteStatus>> {
+        let peer =
+            libp2p::PeerId::from_bytes(peer.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        if !self.routes.contains_key(&peer) {
+            return Ok(None);
+        }
+        let TransportEvent::RouteChanged(status) = self.route_event(peer, None)? else {
+            unreachable!("route_event only creates route status events");
+        };
+        Ok(Some(status))
+    }
+
     pub fn dial_via_relays(&mut self, expected: &PeerId) -> io::Result<()> {
         let peer = libp2p::PeerId::from_bytes(expected.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         if peer == *self.swarm.local_peer_id() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let addresses = self.relay_route_addresses(&peer)?;
-        if addresses.is_empty() {
-            return Err(io::ErrorKind::NotConnected.into());
-        }
         require_runtime()?;
-        self.swarm
-            .dial(
-                DialOpts::peer_id(peer)
-                    .condition(PeerCondition::DisconnectedAndNotDialing)
-                    .addresses(addresses)
-                    .build(),
-            )
-            .map_err(dial_error)?;
-        self.network_started = true;
-        Ok(())
+        self.start_relay_route(peer, DialFailure::Transport, false)
     }
 
     pub fn add_dht_peer(&mut self, peer: &PeerId, address: &Multiaddr) -> io::Result<()> {
@@ -829,10 +1060,17 @@ impl LocalTransport {
         if let Some(event) = self.requests.pop_event() {
             return Ok(event);
         }
+        if let Some(event) = self.pending_transport_events.pop_front() {
+            return Ok(event);
+        }
         loop {
             let now = tokio::time::Instant::now();
             self.pending_dht_records
                 .retain(|_, (_, expires)| *expires > now);
+            self.advance_due_routes(now)?;
+            if let Some(event) = self.pending_transport_events.pop_front() {
+                return Ok(event);
+            }
             if let Some(candidate) = self.pending_discovery_observations.pop_front() {
                 return Ok(TransportEvent::DiscoveryCandidate(candidate));
             }
@@ -840,6 +1078,7 @@ impl LocalTransport {
             let deadline = [
                 self.next_relay_retry_deadline(),
                 self.next_pending_dht_deadline(),
+                self.next_route_deadline(),
             ]
             .into_iter()
             .flatten()
@@ -867,12 +1106,14 @@ impl LocalTransport {
                 SwarmEvent::ConnectionEstablished {
                     peer_id,
                     connection_id,
+                    endpoint,
                     ..
                 } => {
                     if self.relay_endpoints.contains_key(&peer_id) {
                         continue;
                     }
                     self.pending_discovery_dials.remove(&peer_id);
+                    self.observe_established_route(peer_id, connection_id, &endpoint)?;
                     let peer = device_peer(peer_id)?;
                     let connection_id = LocalConnectionId(connection_id);
                     let owner = Arc::new(());
@@ -900,6 +1141,7 @@ impl LocalTransport {
                         }
                         continue;
                     }
+                    self.observe_closed_route(peer_id, connection_id, num_established)?;
                     let connection_id = LocalConnectionId(connection_id);
                     self.live.remove(&connection_id);
                     self.requests.close_connection(connection_id);
@@ -939,11 +1181,14 @@ impl LocalTransport {
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Autonat(event)) => {
-                    let _ = event;
+                    if let Some(event) = self.handle_autonat(event)? {
+                        return Ok(event);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
-                    let _ = event;
+                    return self.handle_dcutr(event);
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Identify) => {}
                 SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
                     self.handle_discovery(event)?;
                 }
@@ -1006,7 +1251,11 @@ impl LocalTransport {
                 SwarmEvent::IncomingConnectionError { .. } => {
                     return Ok(TransportEvent::InboundRejected);
                 }
-                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                SwarmEvent::OutgoingConnectionError {
+                    peer_id,
+                    connection_id,
+                    error,
+                } => {
                     if let Some(relay_peer_id) = peer_id
                         && self.relay_endpoints.contains_key(&relay_peer_id)
                         && !self.swarm.is_connected(&relay_peer_id)
@@ -1017,6 +1266,14 @@ impl LocalTransport {
                         if self.relay_retries.contains_key(&relay_peer_id) {
                             continue;
                         }
+                    }
+                    if let Some(peer_id) = peer_id
+                        && self.handle_route_dial_failure(peer_id, connection_id, &error)?
+                    {
+                        if let Some(event) = self.pending_transport_events.pop_front() {
+                            return Ok(event);
+                        }
+                        continue;
                     }
                     let was_discovery = match peer_id {
                         Some(peer_id) => self.pending_discovery_dials.remove(&peer_id),
@@ -1032,13 +1289,7 @@ impl LocalTransport {
                     if let Some(peer_id) = peer_id {
                         return Ok(TransportEvent::DialFailed {
                             peer_id: device_peer(peer_id)?,
-                            failure: match &error {
-                                DialError::WrongPeerId { .. } => DialFailure::PeerIdentityMismatch,
-                                DialError::DialPeerConditionFalse(_) | DialError::Denied { .. } => {
-                                    DialFailure::Busy
-                                }
-                                _ => DialFailure::Transport,
-                            },
+                            failure: classify_dial_failure(&error),
                         });
                     }
                     return Err(dial_error(error));
@@ -1048,10 +1299,496 @@ impl LocalTransport {
         }
     }
 
-    fn relay_route_addresses(&self, target: &libp2p::PeerId) -> io::Result<Vec<Multiaddr>> {
-        self.relay_endpoints
+    fn start_direct_route(&mut self, peer: libp2p::PeerId, address: Multiaddr) -> io::Result<()> {
+        self.reserve_route_capacity(&peer)?;
+        if self.swarm.is_connected(&peer) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let opts = DialOpts::peer_id(peer)
+            .condition(PeerCondition::DisconnectedAndNotDialing)
+            .addresses(vec![address])
+            .build();
+        let connection_id = opts.connection_id();
+        let direct_attempts = self
+            .routes
+            .get(&peer)
+            .map_or(1, |route| route.direct_attempts.saturating_add(1));
+        self.routes.insert(
+            peer,
+            RouteAttempt {
+                state: RouteState::DirectDialing,
+                relay_peer_id: None,
+                direct_attempts,
+                relay_attempts: 0,
+                direct_dial: Some(connection_id),
+                relay_dial: None,
+                deadline: Some(tokio::time::Instant::now() + self.traversal.connection_timeout()),
+                pending_failure: DialFailure::Transport,
+            },
+        );
+        match self.swarm.dial(opts) {
+            Ok(()) => {
+                self.network_started = true;
+                self.queue_route_status(peer)?;
+                Ok(())
+            }
+            Err(error) => {
+                let failure = classify_dial_failure(&error);
+                if self.start_relay_route(peer, failure, true).is_ok() {
+                    return Ok(());
+                }
+                self.mark_route_failed(peer, route_failure_for_dial(failure))?;
+                Err(dial_error(error))
+            }
+        }
+    }
+
+    fn start_relay_route(
+        &mut self,
+        peer: libp2p::PeerId,
+        pending_failure: DialFailure,
+        override_pending: bool,
+    ) -> io::Result<()> {
+        match self.routes.get(&peer).map(|route| route.state) {
+            Some(RouteState::DirectDialing | RouteState::Failed) => {}
+            Some(
+                RouteState::RelayDialing
+                | RouteState::HolePunching
+                | RouteState::Direct
+                | RouteState::HolePunched
+                | RouteState::Relayed,
+            ) => return Err(io::ErrorKind::WouldBlock.into()),
+            None => self.reserve_route_capacity(&peer)?,
+        }
+        if self.swarm.is_connected(&peer) && !override_pending {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let addresses = self.relay_route_addresses(&peer)?;
+        if addresses.is_empty() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        let relay_peer_id = (addresses.len() == 1)
+            .then(|| {
+                parse_relay_route(&addresses[0])
+                    .ok()
+                    .map(|route| route.endpoint.peer_id)
+            })
+            .flatten();
+        let opts = if override_pending {
+            DialOpts::peer_id(peer)
+                .condition(PeerCondition::Always)
+                .addresses(addresses)
+                .build()
+        } else {
+            DialOpts::peer_id(peer)
+                .condition(PeerCondition::DisconnectedAndNotDialing)
+                .addresses(addresses)
+                .build()
+        };
+        let connection_id = opts.connection_id();
+        let previous = self.routes.remove(&peer);
+        let route = RouteAttempt {
+            state: RouteState::RelayDialing,
+            relay_peer_id,
+            direct_attempts: previous.as_ref().map_or(0, |route| route.direct_attempts),
+            relay_attempts: previous
+                .as_ref()
+                .map_or(1, |route| route.relay_attempts.saturating_add(1)),
+            direct_dial: previous.and_then(|route| route.direct_dial),
+            relay_dial: Some(connection_id),
+            deadline: Some(tokio::time::Instant::now() + self.traversal.connection_timeout()),
+            pending_failure,
+        };
+        self.routes.insert(peer, route);
+        if let Err(error) = self.swarm.dial(opts) {
+            self.mark_route_failed(peer, RouteFailure::RelayUnavailable)?;
+            return Err(dial_error(error));
+        }
+        self.network_started = true;
+        Ok(())
+    }
+
+    fn reserve_route_capacity(&self, peer: &libp2p::PeerId) -> io::Result<()> {
+        let already_pending = self.routes.get(peer).is_some_and(|route| {
+            matches!(
+                route.state,
+                RouteState::DirectDialing | RouteState::RelayDialing | RouteState::HolePunching
+            )
+        });
+        if already_pending {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let pending = self
+            .routes
+            .values()
+            .filter(|route| {
+                matches!(
+                    route.state,
+                    RouteState::DirectDialing | RouteState::RelayDialing | RouteState::HolePunching
+                )
+            })
+            .count();
+        if pending >= usize::from(self.traversal.max_pending_routes) {
+            return Err(io::Error::other("route attempt limit reached"));
+        }
+        Ok(())
+    }
+
+    fn handle_route_dial_failure(
+        &mut self,
+        peer: libp2p::PeerId,
+        connection_id: ConnectionId,
+        error: &DialError,
+    ) -> io::Result<bool> {
+        let Some(route) = self.routes.get(&peer) else {
+            return Ok(false);
+        };
+        let state = route.state;
+        let direct_dial = route.direct_dial;
+        let relay_dial = route.relay_dial;
+        let pending_failure = route.pending_failure;
+
+        if state == RouteState::DirectDialing && direct_dial == Some(connection_id) {
+            let failure = classify_dial_failure(error);
+            if let Some(route) = self.routes.get_mut(&peer) {
+                route.direct_dial = None;
+                route.pending_failure = failure;
+            }
+            if self.start_relay_route(peer, failure, true).is_err() {
+                self.mark_route_failed(peer, route_failure_for_dial(failure))?;
+                self.queue_dial_failure(peer, failure)?;
+            }
+            return Ok(true);
+        }
+        if state == RouteState::RelayDialing && relay_dial == Some(connection_id) {
+            let relay_failure = classify_dial_failure(error);
+            let final_failure = if pending_failure == DialFailure::PeerIdentityMismatch {
+                pending_failure
+            } else {
+                relay_failure
+            };
+            self.mark_route_failed(peer, RouteFailure::RelayUnavailable)?;
+            self.queue_dial_failure(peer, final_failure)?;
+            return Ok(true);
+        }
+        if state == RouteState::RelayDialing && direct_dial == Some(connection_id) {
+            if let Some(route) = self.routes.get_mut(&peer) {
+                route.direct_dial = None;
+            }
+            return Ok(true);
+        }
+        if matches!(state, RouteState::Direct | RouteState::HolePunched)
+            && (direct_dial == Some(connection_id) || relay_dial == Some(connection_id))
+        {
+            if let Some(route) = self.routes.get_mut(&peer) {
+                if direct_dial == Some(connection_id) {
+                    route.direct_dial = None;
+                }
+                if relay_dial == Some(connection_id) {
+                    route.relay_dial = None;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(matches!(
+            state,
+            RouteState::HolePunching
+                | RouteState::HolePunched
+                | RouteState::Direct
+                | RouteState::Relayed
+                | RouteState::Failed
+        ))
+    }
+
+    fn observe_established_route(
+        &mut self,
+        peer: libp2p::PeerId,
+        connection_id: ConnectionId,
+        endpoint: &ConnectedPoint,
+    ) -> io::Result<()> {
+        let relay_peer_id = relay_peer_from_endpoint(endpoint);
+        let established = if endpoint.is_relayed() {
+            EstablishedRoute::Relayed {
+                peer,
+                relay_peer_id,
+            }
+        } else {
+            EstablishedRoute::Direct { peer }
+        };
+        self.connection_routes.insert(connection_id, established);
+
+        let has_direct = self.peer_has_direct_connection(peer);
+        let has_relay = self.peer_has_relay_connection(peer);
+        let route = self.routes.entry(peer).or_insert(RouteAttempt {
+            state: RouteState::Direct,
+            relay_peer_id: None,
+            direct_attempts: 0,
+            relay_attempts: 0,
+            direct_dial: None,
+            relay_dial: None,
+            deadline: None,
+            pending_failure: DialFailure::Transport,
+        });
+        route.direct_dial = None;
+        if endpoint.is_relayed() {
+            route.relay_dial = None;
+            route.relay_peer_id = relay_peer_id;
+            route.state = if has_direct {
+                RouteState::Direct
+            } else {
+                RouteState::HolePunching
+            };
+            route.deadline = (!has_direct)
+                .then_some(tokio::time::Instant::now() + self.traversal.hole_punch_timeout());
+        } else if matches!(route.state, RouteState::HolePunching) && has_relay {
+            route.deadline =
+                Some(tokio::time::Instant::now() + self.traversal.hole_punch_timeout());
+        } else {
+            route.state = if matches!(route.state, RouteState::Relayed) {
+                RouteState::HolePunched
+            } else {
+                RouteState::Direct
+            };
+            route.deadline = None;
+        }
+        Ok(())
+    }
+
+    fn observe_closed_route(
+        &mut self,
+        peer: libp2p::PeerId,
+        connection_id: ConnectionId,
+        _num_established: u32,
+    ) -> io::Result<()> {
+        self.connection_routes.remove(&connection_id);
+        let has_direct = self.peer_has_direct_connection(peer);
+        let relay_connection = self.peer_relay_connection(peer);
+        let has_relay = relay_connection.is_some();
+        let relay_peer_id = relay_connection.flatten();
+        let Some(route) = self.routes.get_mut(&peer) else {
+            return Ok(());
+        };
+        if has_direct {
+            if route.state != RouteState::HolePunching {
+                route.state = RouteState::Direct;
+                route.deadline = None;
+            }
+        } else if has_relay {
+            route.state = RouteState::Relayed;
+            route.relay_peer_id = relay_peer_id;
+            route.deadline = None;
+        } else {
+            route.state = RouteState::Failed;
+            route.deadline = None;
+        }
+        Ok(())
+    }
+
+    fn handle_autonat(
+        &mut self,
+        event: libp2p::autonat::Event,
+    ) -> io::Result<Option<TransportEvent>> {
+        let libp2p::autonat::Event::StatusChanged { new, .. } = event else {
+            return Ok(None);
+        };
+        let (state, public_address) = match new {
+            libp2p::autonat::NatStatus::Unknown => (ReachabilityState::Unknown, None),
+            libp2p::autonat::NatStatus::Private => (ReachabilityState::Private, None),
+            libp2p::autonat::NatStatus::Public(address) => {
+                let bytes = address.to_vec();
+                (
+                    ReachabilityState::Public,
+                    (bytes.len() <= MAX_REACHABILITY_ADDRESS_BYTES).then_some(bytes),
+                )
+            }
+        };
+        let status = ReachabilityStatus {
+            state,
+            confidence: u8::try_from(self.swarm.behaviour().autonat.confidence())
+                .unwrap_or(u8::MAX),
+            public_address,
+        };
+        if status == self.reachability {
+            return Ok(None);
+        }
+        self.reachability = status.clone();
+        Ok(Some(TransportEvent::ReachabilityChanged(status)))
+    }
+
+    fn handle_dcutr(&mut self, event: libp2p::dcutr::Event) -> io::Result<TransportEvent> {
+        let peer = event.remote_peer_id;
+        let has_direct = self.peer_has_direct_connection(peer);
+        let has_relay = self.peer_has_relay_connection(peer);
+        let route = self.routes.entry(peer).or_insert(RouteAttempt {
+            state: RouteState::HolePunching,
+            relay_peer_id: None,
+            direct_attempts: 0,
+            relay_attempts: 0,
+            direct_dial: None,
+            relay_dial: None,
+            deadline: None,
+            pending_failure: DialFailure::Transport,
+        });
+        let failure = if event.result.is_ok() || has_direct {
+            route.state = RouteState::HolePunched;
+            None
+        } else if has_relay {
+            route.state = RouteState::Relayed;
+            Some(RouteFailure::HolePunchFailed)
+        } else {
+            route.state = RouteState::Failed;
+            Some(RouteFailure::HolePunchFailed)
+        };
+        route.deadline = None;
+        self.route_event(peer, failure)
+    }
+
+    fn next_route_deadline(&self) -> Option<tokio::time::Instant> {
+        self.routes
+            .values()
+            .filter_map(|route| route.deadline)
+            .min()
+    }
+
+    fn advance_due_routes(&mut self, now: tokio::time::Instant) -> io::Result<()> {
+        let due = self
+            .routes
             .iter()
-            .filter(|(relay_peer_id, _)| !self.relay_retries.contains_key(relay_peer_id))
+            .filter_map(|(peer, route)| route.deadline.is_some_and(|at| at <= now).then_some(*peer))
+            .collect::<Vec<_>>();
+        for peer in due {
+            let Some(state) = self.routes.get(&peer).map(|route| route.state) else {
+                continue;
+            };
+            match state {
+                RouteState::DirectDialing => {
+                    if let Some(route) = self.routes.get_mut(&peer) {
+                        route.pending_failure = DialFailure::Transport;
+                    }
+                    if self
+                        .start_relay_route(peer, DialFailure::Transport, true)
+                        .is_err()
+                    {
+                        self.mark_route_failed(peer, RouteFailure::TimedOut)?;
+                        self.queue_dial_failure(peer, DialFailure::Transport)?;
+                    }
+                }
+                RouteState::RelayDialing => {
+                    self.mark_route_failed(peer, RouteFailure::TimedOut)?;
+                    self.queue_dial_failure(peer, DialFailure::Transport)?;
+                }
+                RouteState::HolePunching => {
+                    if self.peer_has_direct_connection(peer) {
+                        if let Some(route) = self.routes.get_mut(&peer) {
+                            route.state = RouteState::HolePunched;
+                            route.deadline = None;
+                        }
+                        self.queue_route_status(peer)?;
+                    } else if self.peer_has_relay_connection(peer) {
+                        if let Some(route) = self.routes.get_mut(&peer) {
+                            route.state = RouteState::Relayed;
+                            route.deadline = None;
+                        }
+                        self.queue_route_status_with_failure(peer, Some(RouteFailure::TimedOut))?;
+                    } else {
+                        self.mark_route_failed(peer, RouteFailure::TimedOut)?;
+                        self.queue_dial_failure(peer, DialFailure::Transport)?;
+                    }
+                }
+                _ => {
+                    if let Some(route) = self.routes.get_mut(&peer) {
+                        route.deadline = None;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn peer_has_direct_connection(&self, peer: libp2p::PeerId) -> bool {
+        self.connection_routes.values().any(|route| {
+            matches!(route, EstablishedRoute::Direct { peer: route_peer } if *route_peer == peer)
+        })
+    }
+
+    fn peer_has_relay_connection(&self, peer: libp2p::PeerId) -> bool {
+        self.peer_relay_connection(peer).is_some()
+    }
+
+    fn peer_relay_connection(&self, peer: libp2p::PeerId) -> Option<Option<libp2p::PeerId>> {
+        self.connection_routes
+            .values()
+            .find_map(|route| match route {
+                EstablishedRoute::Relayed {
+                    peer: route_peer,
+                    relay_peer_id,
+                } if *route_peer == peer => Some(*relay_peer_id),
+                _ => None,
+            })
+    }
+
+    fn mark_route_failed(&mut self, peer: libp2p::PeerId, failure: RouteFailure) -> io::Result<()> {
+        if let Some(route) = self.routes.get_mut(&peer) {
+            route.state = RouteState::Failed;
+            route.deadline = None;
+            route.direct_dial = None;
+            route.relay_dial = None;
+        }
+        self.queue_route_status_with_failure(peer, Some(failure))
+    }
+
+    fn queue_dial_failure(&mut self, peer: libp2p::PeerId, failure: DialFailure) -> io::Result<()> {
+        self.pending_transport_events
+            .push_back(TransportEvent::DialFailed {
+                peer_id: device_peer(peer)?,
+                failure,
+            });
+        Ok(())
+    }
+
+    fn queue_route_status(&mut self, peer: libp2p::PeerId) -> io::Result<()> {
+        self.queue_route_status_with_failure(peer, None)
+    }
+
+    fn queue_route_status_with_failure(
+        &mut self,
+        peer: libp2p::PeerId,
+        failure: Option<RouteFailure>,
+    ) -> io::Result<()> {
+        let event = self.route_event(peer, failure)?;
+        self.pending_transport_events.push_back(event);
+        Ok(())
+    }
+
+    fn route_event(
+        &self,
+        peer: libp2p::PeerId,
+        failure: Option<RouteFailure>,
+    ) -> io::Result<TransportEvent> {
+        let route = self.routes.get(&peer).ok_or(io::ErrorKind::NotFound)?;
+        Ok(TransportEvent::RouteChanged(RouteStatus {
+            peer_id: device_peer(peer)?,
+            state: route.state,
+            relay_peer_id: route.relay_peer_id.map(device_peer).transpose()?,
+            direct_attempts: route.direct_attempts,
+            relay_attempts: route.relay_attempts,
+            failure,
+        }))
+    }
+
+    fn relay_route_addresses(&self, target: &libp2p::PeerId) -> io::Result<Vec<Multiaddr>> {
+        let mut relays = self
+            .relay_endpoints
+            .iter()
+            .filter(|(relay_peer_id, _)| {
+                self.reserved_relays.contains(relay_peer_id)
+                    && !self.relay_retries.contains_key(relay_peer_id)
+            })
+            .collect::<Vec<_>>();
+        relays.sort_by_key(|(peer, _)| peer.to_bytes());
+        relays
+            .into_iter()
+            .take(usize::from(self.traversal.max_relay_routes_per_dial))
             .map(|(_, relay)| relay_route_address(&relay.address, target))
             .collect()
     }
@@ -1141,7 +1878,16 @@ impl LocalTransport {
                 retry_at: None,
             });
         retry.attempts = retry.attempts.saturating_add(1);
-        retry.retry_at = Some(tokio::time::Instant::now() + relay_retry_delay(retry.attempts));
+        retry.retry_at = (retry.attempts
+            <= u32::from(self.traversal.max_relay_reservation_retries))
+        .then(|| {
+            tokio::time::Instant::now()
+                + relay_retry_delay(
+                    retry.attempts,
+                    self.traversal.relay_retry_base(),
+                    self.traversal.relay_retry_max(),
+                )
+        });
     }
 
     fn validate_socket_scope(&self, address: SocketAddr) -> io::Result<()> {
@@ -1524,11 +2270,34 @@ fn dial_error(error: DialError) -> io::Error {
     .into()
 }
 
-fn relay_retry_delay(attempts: u32) -> Duration {
+fn classify_dial_failure(error: &DialError) -> DialFailure {
+    match error {
+        DialError::WrongPeerId { .. } => DialFailure::PeerIdentityMismatch,
+        DialError::DialPeerConditionFalse(_) | DialError::Denied { .. } => DialFailure::Busy,
+        _ => DialFailure::Transport,
+    }
+}
+
+fn route_failure_for_dial(failure: DialFailure) -> RouteFailure {
+    match failure {
+        DialFailure::PeerIdentityMismatch => RouteFailure::PeerIdentityMismatch,
+        DialFailure::Busy | DialFailure::Transport => RouteFailure::DirectUnavailable,
+    }
+}
+
+fn relay_peer_from_endpoint(endpoint: &ConnectedPoint) -> Option<libp2p::PeerId> {
+    let address = match endpoint {
+        ConnectedPoint::Dialer { address, .. } => address,
+        ConnectedPoint::Listener { local_addr, .. } => local_addr,
+    };
+    parse_relay_route(address)
+        .ok()
+        .map(|route| route.endpoint.peer_id)
+}
+
+fn relay_retry_delay(attempts: u32, base: Duration, maximum: Duration) -> Duration {
     let shift = attempts.saturating_sub(1).min(RELAY_RETRY_MAX_SHIFT);
-    RELAY_RETRY_BASE
-        .saturating_mul(1u32 << shift)
-        .min(RELAY_RETRY_MAX)
+    base.saturating_mul(1u32 << shift).min(maximum)
 }
 
 pub(crate) fn socket_endpoint(kind: TransportKind, addr: SocketAddr) -> io::Result<Multiaddr> {
@@ -1583,17 +2352,23 @@ struct Admission {
     pending_outgoing: HashSet<ConnectionId>,
     pending_incoming: HashSet<ConnectionId>,
     policy: AddressPolicy,
+    max_outbound_addresses: usize,
     relay_endpoints: HashMap<libp2p::PeerId, RelayEndpoint>,
 }
 
 impl Admission {
-    fn new(local_peer_id: libp2p::PeerId, policy: AddressPolicy) -> Self {
+    fn new(
+        local_peer_id: libp2p::PeerId,
+        policy: AddressPolicy,
+        max_outbound_addresses: usize,
+    ) -> Self {
         Self {
             local_peer_id,
             established: HashSet::new(),
             pending_outgoing: HashSet::new(),
             pending_incoming: HashSet::new(),
             policy,
+            max_outbound_addresses,
             relay_endpoints: HashMap::new(),
         }
     }
@@ -1741,7 +2516,7 @@ impl NetworkBehaviour for Admission {
             ));
         };
         if addresses.is_empty()
-            || addresses.len() > MAX_RELAY_ENDPOINTS
+            || addresses.len() > self.max_outbound_addresses
             || !addresses
                 .iter()
                 .all(|address| self.allows_outbound_address(peer, address))
@@ -1861,10 +2636,18 @@ mod tests {
 
     #[test]
     fn relay_retry_delay_grows_exponentially_and_is_bounded() {
-        assert_eq!(relay_retry_delay(1), Duration::from_secs(1));
-        assert_eq!(relay_retry_delay(2), Duration::from_secs(2));
-        assert_eq!(relay_retry_delay(7), Duration::from_secs(60));
-        assert_eq!(relay_retry_delay(u32::MAX), RELAY_RETRY_MAX);
+        let config = TraversalConfig::default();
+        let delay = |attempts| {
+            relay_retry_delay(
+                attempts,
+                config.relay_retry_base(),
+                config.relay_retry_max(),
+            )
+        };
+        assert_eq!(delay(1), Duration::from_secs(1));
+        assert_eq!(delay(2), Duration::from_secs(2));
+        assert_eq!(delay(7), Duration::from_secs(60));
+        assert_eq!(delay(u32::MAX), config.relay_retry_max());
     }
 
     #[test]
@@ -1883,6 +2666,7 @@ mod tests {
         transport
             .relay_endpoints
             .insert(available_peer, available_endpoint.clone());
+        transport.reserved_relays.insert(available_peer);
         transport.relay_retries.insert(
             failed_peer,
             RelayRetry {
@@ -1901,7 +2685,11 @@ mod tests {
     fn relay_only_policy_rejects_direct_endpoints() {
         let local_peer = peer();
         let direct = endpoint().with(Protocol::P2p(peer()));
-        let mut admission = Admission::new(local_peer, AddressPolicy::RelayOnly);
+        let mut admission = Admission::new(
+            local_peer,
+            AddressPolicy::RelayOnly,
+            usize::from(TraversalConfig::default().autonat_max_peer_addresses),
+        );
         assert!(
             admission
                 .handle_pending_outbound_connection(
@@ -2267,7 +3055,11 @@ mod tests {
 
     #[test]
     fn inbound_connection_does_not_release_a_pending_dial_for_the_same_peer() {
-        let mut admission = Admission::new(peer(), AddressPolicy::LoopbackOnly);
+        let mut admission = Admission::new(
+            peer(),
+            AddressPolicy::LoopbackOnly,
+            usize::from(TraversalConfig::default().autonat_max_peer_addresses),
+        );
         let peer = peer();
         let addr = endpoint();
         let inbound = ConnectionId::new_unchecked(1);
@@ -2312,7 +3104,11 @@ mod tests {
 
     #[test]
     fn inbound_outbound_and_established_share_one_connection_budget() {
-        let mut admission = Admission::new(peer(), AddressPolicy::LoopbackOnly);
+        let mut admission = Admission::new(
+            peer(),
+            AddressPolicy::LoopbackOnly,
+            usize::from(TraversalConfig::default().autonat_max_peer_addresses),
+        );
         let addr = endpoint();
         let mut incoming = 1..;
         let mut outgoing = MAX_CONNECTIONS + 1..;

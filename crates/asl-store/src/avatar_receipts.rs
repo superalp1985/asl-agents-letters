@@ -288,6 +288,10 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TRIGGER avatar_receipts_local_update;
          DROP TRIGGER avatar_receipts_local_delete;
          DROP TABLE avatar_receipts;
+         DROP TABLE mls_shard_forward_receipts;
+         DROP TABLE mls_shard_bindings;
+         DROP TABLE mls_room_shards;
+         DROP TABLE group_removal_requests;
          DROP TABLE conversation_act_semantic_index;
          DROP TABLE conversation_attachment_refs;
          DROP TABLE conversation_act_events;
@@ -308,7 +312,7 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TABLE IF EXISTS dht_provider_cache_v42;
          DROP TABLE dht_provider_cache;
          DROP TABLE dht_record_cache;
-         DELETE FROM schema_migrations WHERE version IN (33,34,35,36,37,38,39,40,41,42,43);",
+         DELETE FROM schema_migrations WHERE version>=33;",
         )
         .unwrap();
 }

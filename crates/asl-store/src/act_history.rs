@@ -7,12 +7,13 @@ use crate::{
     Store, database_error, group_observations::group_observation_days, inbound_observations::DAY_MS,
 };
 
+mod archive;
+
 const MAX_BODY_BYTES: usize = 32 * 1024;
 pub const MAX_ACT_HISTORY_ROWS: u32 = 1_000;
 const MAX_SEARCH_RESULTS: u32 = 100;
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_ARCHIVE_TOKENS: usize = 64;
-const ARCHIVE_RETENTION_MS: i64 = 365 * DAY_MS;
 const DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
 const UTF8_PREFIX: &[u8] = b"ASL-ACT-BODY-UTF8-v1\0";
 
@@ -86,12 +87,9 @@ pub struct ActHistoryArchiveRow {
 impl Store {
     pub fn record_act_history(&mut self, record: ActHistoryRecord<'_>) -> Result<(), AslError> {
         validate_record(record)?;
-        let days = group_observation_days(&self.connection)?;
-        if days == 0 {
+        if group_observation_days(&self.connection)? == 0 {
             return Ok(());
         }
-        let body = protect_body(record.body.unwrap_or_default().as_bytes())?;
-        let padded_size = padded_size(body.len())?;
         let act_id = digest(
             b"ASL-CONVERSATION-ACT-v1\0",
             record.conversation_id.as_bytes(),
@@ -119,6 +117,14 @@ impl Store {
             })
             .transpose()?;
         let now = i64::try_from(record.now_ms).map_err(|_| AslError::InvalidMessage)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let days = group_observation_days(&tx)?;
+        if days == 0 {
+            return tx.commit().map_err(database_error);
+        }
         let retention = i64::from(days).saturating_mul(DAY_MS);
         let expires = i64::try_from(record.expires_at_ms)
             .map_err(|_| AslError::InvalidMessage)?
@@ -126,34 +132,37 @@ impl Store {
         if expires <= now {
             return Err(AslError::ExpiredMessage);
         }
-        self.connection
-            .execute(
-                "INSERT INTO conversation_act_events(
-                    conversation_id,act_id,mls_epoch,direction,act_kind,causal_root,reply_to,
-                    ciphertext,padded_size,state,received_at_ms,expires_at_ms
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'processed',?10,?11)
-                 ON CONFLICT(conversation_id,act_id) DO UPDATE SET
-                    mls_epoch=excluded.mls_epoch,act_kind=excluded.act_kind,
-                    reply_to=excluded.reply_to,ciphertext=excluded.ciphertext,
-                    padded_size=excluded.padded_size,state='processed',
-                    received_at_ms=excluded.received_at_ms,expires_at_ms=excluded.expires_at_ms",
-                params![
-                    record.conversation_id,
-                    act_id.as_slice(),
-                    i64::try_from(record.mls_epoch).map_err(|_| AslError::InvalidMessage)?,
-                    record.direction.as_str(),
-                    i64::from(record.act_kind),
-                    causal_root.as_slice(),
-                    reply_to.as_ref().map(|value| value.as_slice()),
-                    body,
-                    i64::from(padded_size),
-                    now,
-                    expires,
-                ],
-            )
-            .map_err(database_error)?;
+        let archive_key = archive::initialize_index(&tx, now)?;
+        let body = protect_body(record.body.unwrap_or_default().as_bytes())?;
+        let padded_size = padded_size(body.len())?;
+        tx.execute(
+            "INSERT INTO conversation_act_events(
+                conversation_id,act_id,mls_epoch,direction,act_kind,causal_root,reply_to,
+                ciphertext,padded_size,state,received_at_ms,expires_at_ms
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'processed',?10,?11)
+             ON CONFLICT(conversation_id,act_id) DO UPDATE SET
+                mls_epoch=excluded.mls_epoch,act_kind=excluded.act_kind,
+                reply_to=excluded.reply_to,ciphertext=excluded.ciphertext,
+                padded_size=excluded.padded_size,state='processed',
+                received_at_ms=excluded.received_at_ms,expires_at_ms=excluded.expires_at_ms",
+            params![
+                record.conversation_id,
+                act_id.as_slice(),
+                i64::try_from(record.mls_epoch).map_err(|_| AslError::InvalidMessage)?,
+                record.direction.as_str(),
+                i64::from(record.act_kind),
+                causal_root.as_slice(),
+                reply_to.as_ref().map(|value| value.as_slice()),
+                body,
+                i64::from(padded_size),
+                now,
+                expires,
+            ],
+        )
+        .map_err(database_error)?;
         index_act_body(
-            &self.connection,
+            &tx,
+            archive_key.as_ref(),
             record.conversation_id,
             act_id,
             record.direction,
@@ -161,7 +170,8 @@ impl Store {
             now,
             record.body.unwrap_or_default(),
         )?;
-        Ok(())
+        tx.commit().map_err(database_error)?;
+        archive::finish_pending_scrub(&self.connection)
     }
 
     pub fn recent_act_history(
@@ -261,19 +271,20 @@ impl Store {
         if now_ms < 0 {
             return Err(AslError::InvalidMessage);
         }
-        let removed = self
+        let tx = self
             .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let _ = archive::initialize_index(&tx, now_ms)?;
+        let removed = tx
             .execute(
                 "DELETE FROM conversation_act_events WHERE expires_at_ms<=?1",
                 [now_ms],
             )
             .map_err(database_error)?;
-        self.connection
-            .execute(
-                "DELETE FROM conversation_act_semantic_index WHERE expires_at_ms<=?1",
-                [now_ms],
-            )
-            .map_err(database_error)?;
+        archive::prune_expired_index(&tx, now_ms, None)?;
+        tx.commit().map_err(database_error)?;
+        archive::finish_pending_scrub(&self.connection)?;
         Ok(removed)
     }
 
@@ -286,13 +297,19 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<ActHistoryArchiveRow>, AslError> {
         validate_search_query(query, limit)?;
+        if now_ms < 0 {
+            return Err(AslError::InvalidMessage);
+        }
+        let Some(key) = archive::read_key(&self.connection)? else {
+            return Ok(Vec::new());
+        };
         let tokens = semantic_tokens(query);
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
         let mut matches: BTreeMap<(String, [u8; 32]), ActHistoryArchiveRow> = BTreeMap::new();
         for token in tokens {
-            let rows = archive_rows_for_token(&self.connection, now_ms, &token)?;
+            let rows = archive_rows_for_token(&self.connection, &key, now_ms, &token)?;
             for row in rows {
                 let key = (row.conversation_id.clone(), row.act_id);
                 matches
@@ -315,12 +332,39 @@ impl Store {
     }
 
     pub fn restore_act_history(&mut self, record: StoredActHistory<'_>) -> Result<(), AslError> {
-        let days = group_observation_days(&self.connection)?;
-        if days == 0 {
-            return Ok(());
-        }
-        restore_act_history_on(&self.connection, days, record)
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let days = group_observation_days(&tx)?;
+        restore_act_history_on(&tx, days, record)?;
+        tx.commit().map_err(database_error)?;
+        archive::finish_pending_scrub(&self.connection)
     }
+}
+
+pub(crate) fn initialize_archive_index_on(
+    db: &rusqlite::Connection,
+    now_ms: i64,
+) -> Result<(), AslError> {
+    let _ = archive::initialize_index(db, now_ms)?;
+    Ok(())
+}
+
+pub(crate) fn discard_archive_index_on(db: &rusqlite::Connection) -> Result<(), AslError> {
+    archive::discard_index(db)
+}
+
+pub(crate) fn finish_archive_index_scrub_on(db: &rusqlite::Connection) -> Result<(), AslError> {
+    archive::finish_pending_scrub(db)
+}
+
+pub(crate) fn prune_expired_archive_index_on(
+    db: &rusqlite::Connection,
+    now_ms: i64,
+    limit: i64,
+) -> Result<usize, AslError> {
+    archive::prune_expired_index(db, now_ms, Some(limit))
 }
 
 pub(crate) fn restore_act_history_on(
@@ -329,6 +373,7 @@ pub(crate) fn restore_act_history_on(
     record: StoredActHistory<'_>,
 ) -> Result<(), AslError> {
     if days == 0 {
+        archive::discard_index(db)?;
         return Ok(());
     }
     let now = i64::try_from(record.received_at_ms).map_err(|_| AslError::InvalidMessage)?;
@@ -350,6 +395,7 @@ pub(crate) fn restore_act_history_on(
     {
         return Err(AslError::InvalidMessage);
     }
+    let archive_key = archive::initialize_index(db, crate::current_time_ms())?;
     let body = protect_body(record.body.unwrap_or_default().as_bytes())?;
     let padded_size = padded_size(body.len())?;
     db.execute(
@@ -374,6 +420,7 @@ pub(crate) fn restore_act_history_on(
     .map_err(database_error)?;
     index_act_body(
         db,
+        archive_key.as_ref(),
         record.conversation_id,
         record.act_id,
         record.direction,
@@ -384,8 +431,10 @@ pub(crate) fn restore_act_history_on(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_act_body(
     connection: &rusqlite::Connection,
+    archive_key: Option<&archive::ArchiveKey>,
     conversation_id: &str,
     act_id: [u8; 32],
     direction: ActDirection,
@@ -393,38 +442,21 @@ fn index_act_body(
     now: i64,
     body: &str,
 ) -> Result<(), AslError> {
-    connection
-        .execute(
-            "DELETE FROM conversation_act_semantic_index WHERE conversation_id=?1 AND act_id=?2",
-            params![conversation_id, act_id.as_slice()],
-        )
-        .map_err(database_error)?;
-    let expires = now.saturating_add(ARCHIVE_RETENTION_MS);
-    for token in semantic_tokens(body) {
-        let token_hash = semantic_token_hash(&token);
-        connection
-            .execute(
-                "INSERT OR REPLACE INTO conversation_act_semantic_index(
-                    conversation_id,act_id,token_hash,direction,act_kind,
-                    received_at_ms,expires_at_ms
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![
-                    conversation_id,
-                    act_id.as_slice(),
-                    token_hash.as_slice(),
-                    direction.as_str(),
-                    i64::from(act_kind),
-                    now,
-                    expires,
-                ],
-            )
-            .map_err(database_error)?;
-    }
-    Ok(())
+    archive::index_body(
+        connection,
+        archive_key,
+        conversation_id,
+        act_id,
+        direction,
+        act_kind,
+        now,
+        body,
+    )
 }
 
 fn archive_rows_for_token(
     connection: &rusqlite::Connection,
+    key: &archive::ArchiveKey,
     now_ms: i64,
     token: &str,
 ) -> Result<Vec<ActHistoryArchiveRow>, AslError> {
@@ -438,7 +470,7 @@ fn archive_rows_for_token(
         .map_err(database_error)?;
     let rows = statement
         .query_map(
-            params![semantic_token_hash(token).as_slice(), now_ms],
+            params![archive::token_hash(key, token).as_slice(), now_ms],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -517,13 +549,6 @@ fn add_semantic_token(tokens: &mut BTreeSet<String>, token: &str) {
     if characters.len() <= 8 {
         tokens.insert(token.to_owned());
     }
-}
-
-fn semantic_token_hash(token: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ASL-ACT-SEMANTIC-TOKEN-v1\0");
-    hasher.update(token.as_bytes());
-    *hasher.finalize().as_bytes()
 }
 
 fn validate_record(record: ActHistoryRecord<'_>) -> Result<(), AslError> {
@@ -611,10 +636,11 @@ fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::OptionalExtension;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{current_time_ms, open_store};
+    use crate::{current_time_ms, open_store, open_store_read_only};
     use asl_types::ids::Id128;
 
     fn fixture() -> (TempDir, Store) {
@@ -679,6 +705,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let archive_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_act_semantic_index",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archive_rows, 0);
+        let archive_key: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT value_json FROM settings
+                 WHERE key='activity.act_archive_key.v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(archive_key.is_none());
     }
 
     #[test]
@@ -723,6 +769,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn semantic_index_survives_body_expiry_without_retaining_plaintext() {
         let (_directory, mut store) = fixture();
@@ -750,5 +797,192 @@ mod tests {
         assert_eq!(archive.len(), 1);
         assert_eq!(archive[0].act_kind, 1);
         assert_eq!(archive[0].score, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_rekeys_legacy_archive_without_deleting_live_bodies() {
+        const ARCHIVE_KEY_SETTING: &str = "activity.act_archive_key.v1";
+        const LEGACY_TOKEN: &str = "legacy";
+
+        let (directory, mut store) = fixture();
+        let now = current_time_ms();
+        let expires = now + 7 * DAY_MS;
+        store
+            .record_act_history(ActHistoryRecord {
+                conversation_id: "00112233445566778899aabbccddeeff",
+                message_id: Id128([11; 16]),
+                mls_epoch: 2,
+                direction: ActDirection::In,
+                act_kind: 1,
+                reply_to: None,
+                causal_root: Id128([12; 16]),
+                body: Some("legacy archive marker"),
+                now_ms: now as u64,
+                expires_at_ms: expires as u64,
+            })
+            .unwrap();
+
+        let (act_id, ciphertext): (Vec<u8>, Vec<u8>) = store
+            .connection
+            .query_row(
+                "SELECT act_id,ciphertext FROM conversation_act_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let unreadable_act_id = [15_u8; 32];
+        let unreadable_causal_root = [16_u8; 32];
+        store
+            .connection
+            .execute(
+                "INSERT INTO conversation_act_events(
+                    conversation_id,act_id,mls_epoch,direction,act_kind,causal_root,reply_to,
+                    ciphertext,padded_size,state,received_at_ms,expires_at_ms
+                 ) VALUES (?1,?2,0,'in',1,?3,NULL,X'01',256,'processed',?4,?5)",
+                rusqlite::params![
+                    "00112233445566778899aabbccddeeff",
+                    unreadable_act_id.as_slice(),
+                    unreadable_causal_root.as_slice(),
+                    now,
+                    expires,
+                ],
+            )
+            .unwrap();
+        let mut legacy_hasher = blake3::Hasher::new();
+        legacy_hasher.update(b"ASL-ACT-SEMANTIC-TOKEN-v1\0");
+        legacy_hasher.update(LEGACY_TOKEN.as_bytes());
+        let legacy_hash = legacy_hasher.finalize();
+        store
+            .connection
+            .execute("DELETE FROM settings WHERE key=?1", [ARCHIVE_KEY_SETTING])
+            .unwrap();
+        store
+            .connection
+            .execute("DELETE FROM conversation_act_semantic_index", [])
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO conversation_act_semantic_index(
+                    conversation_id,act_id,token_hash,direction,act_kind,
+                    received_at_ms,expires_at_ms
+                 ) VALUES (?1,?2,?3,'in',1,?4,?5)",
+                rusqlite::params![
+                    "00112233445566778899aabbccddeeff",
+                    act_id,
+                    legacy_hash.as_bytes().as_slice(),
+                    now,
+                    now + 365 * DAY_MS,
+                ],
+            )
+            .unwrap();
+
+        let read_only =
+            open_store_read_only(&directory.path().join("act-history.sqlite3")).unwrap();
+        assert!(
+            read_only
+                .search_act_history_archive(now, LEGACY_TOKEN, 10)
+                .unwrap()
+                .is_empty()
+        );
+        drop(read_only);
+
+        store.prune_expired_activity(now).unwrap();
+
+        let key_setting: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [ARCHIVE_KEY_SETTING],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(key_setting.is_some());
+        let scrub_pending: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT value_json FROM settings
+                 WHERE key='activity.act_archive_scrub_pending.v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(scrub_pending.is_none());
+        let legacy_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_act_semantic_index WHERE token_hash=?1",
+                [legacy_hash.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_rows, 0);
+        assert_eq!(
+            store
+                .search_act_history_archive(now, LEGACY_TOKEN, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let remaining_bodies: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM conversation_act_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining_bodies, 2);
+        let remaining_ciphertext: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT ciphertext FROM conversation_act_events WHERE act_id=?1",
+                [act_id.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_ciphertext, ciphertext);
+        let unreadable_body: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT ciphertext FROM conversation_act_events WHERE act_id=?1",
+                [unreadable_act_id.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unreadable_body, vec![1_u8]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restored_act_history_is_indexed_with_the_local_archive_key() {
+        let (_directory, store) = fixture();
+        let now = current_time_ms() as u64;
+        restore_act_history_on(
+            &store.connection,
+            7,
+            StoredActHistory {
+                conversation_id: "00112233445566778899aabbccddeeff",
+                act_id: [13; 32],
+                mls_epoch: 4,
+                direction: ActDirection::Out,
+                act_kind: 2,
+                causal_root: [14; 32],
+                reply_to: None,
+                body: Some("imported archive marker"),
+                received_at_ms: now,
+                expires_at_ms: now + 7 * DAY_MS as u64,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .search_act_history_archive(current_time_ms(), "imported", 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

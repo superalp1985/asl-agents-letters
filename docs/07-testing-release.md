@@ -28,7 +28,7 @@
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
 | ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复、双许可本地证据、CLI/MCP Act 历史搜索、CLI 导出和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无缓存证据过期恢复、真实两设备重启补收、跨机多跳/规模验收 |
 | 两人 MLS 私聊（G00） | 已走两人 MLS 房间工具，真实双机验收未完成 | 与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v43、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主转移、逐文件权限、委派管理员禁言、加入/重入请求、DHT record/provider 持久回灌、10,000 shard plan 和 shard/backbone 路由已实现 | 真正多子 MLS 群、真实多设备策略同步、真实双机邮箱/群请求、公网/NAT/relay 和容量矩阵待验收；不设固定 64 人业务上限 |
+| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v45、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主策略转移、能力分层、逐文件权限、加入/重入请求、DHT 持久回灌、自动多子 MLS 邀请、ASL/1.4 根/子群绑定与持久去重转发已实现 | 统一验收、真实多设备策略同步、真实双机邮箱/群请求、公网 NAT/relay、512/2,000/10,000 容量矩阵待执行；不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
 
 2026-11-27 高级闭环集中验证（Windows x64，Rust 1.100.0，Cargo/target/临时目录位于 E 盘，离线）：

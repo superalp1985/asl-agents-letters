@@ -602,10 +602,10 @@ fn group_core_child() {
         Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher)
             .expect("starting the Core and its isolated Net process"),
         Verification::Protocol => {
-            Supervisor::start_with_net(paths, launcher, |_, device, groups| {
+            Supervisor::start_with_net(paths, launcher, |_, device, groups, traversal| {
                 let (net_input, mut core_output) = io::pipe()?;
                 let (core_input, net_output) = io::pipe()?;
-                write_net_startup_prelude(&mut core_output, device, groups)?;
+                write_net_startup_prelude(&mut core_output, device, groups, traversal)?;
                 net_thread = Some(
                     thread::Builder::new()
                         .name("asl-net-protocol-fixture".into())

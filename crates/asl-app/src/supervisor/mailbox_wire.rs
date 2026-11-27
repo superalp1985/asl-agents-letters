@@ -7,12 +7,13 @@ use asl_net::mailbox::MailboxRecord;
 use asl_store::{
     Store,
     budgets::BudgetKind,
-    mailbox::{MailboxEnvelope, MailboxQuota},
+    mailbox::{MailboxEnvelope, MailboxPut, MailboxQuota},
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32},
     protocol::{GroupPacket, WireFrame, decode_frame, encode_frame},
+    task::GroupId,
 };
 
 use super::{NetworkCommand, Supervisor, unix_time_ms};
@@ -96,20 +97,12 @@ impl MailboxWireRuntime {
         if frame.is_empty() || frame.len() > 1024 * 1024 {
             return Err(AslError::InvalidMessage);
         }
-        let conversation = alloy_primitives::hex::encode(room.0);
-        let recipients = group_recipient_agents(store, room, local_agent)?;
-        let frame_bytes = u64::try_from(frame.len()).map_err(|_| AslError::InvalidMessage)?;
-        let total_bytes = frame_bytes
-            .checked_mul(u64::try_from(recipients.len()).map_err(|_| AslError::InvalidMessage)?)
-            .ok_or(AslError::QuotaExceeded)?;
-        if total_bytes == 0
-            || !store.consume_resource_budget(
-                &conversation,
-                BudgetKind::MailboxBytes,
-                total_bytes,
-                now_ms,
-            )?
-        {
+        let snapshot = store.mls_room_snapshot(room)?.ok_or(AslError::NotFound)?;
+        let conversation = alloy_primitives::hex::encode(snapshot.local_id.0.0);
+        let recipients = group_recipient_agents(store, &snapshot.local_id, local_agent)?;
+        let padded_size = padded_size(frame.len())?;
+        let total_bytes = mailbox_budget_bytes(padded_size, recipients.len())?;
+        if total_bytes == 0 {
             return Err(AslError::QuotaExceeded);
         }
         let epoch = now_ms / MAILBOX_EPOCH_MS;
@@ -118,25 +111,43 @@ impl MailboxWireRuntime {
             .checked_add(MAILBOX_RETENTION_MS)
             .ok_or(AslError::InvalidMessage)?
             .min(i64::MAX as u64);
-        let padded_size = padded_size(frame.len())?;
+        let now_i64 = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
+        let reservation = store
+            .reserve_budget(
+                &conversation,
+                0,
+                &[(BudgetKind::MailboxBytes, total_bytes)],
+                now_ms,
+            )?
+            .ok_or(AslError::QuotaExceeded)?;
+        self.next_publish = Some(Instant::now());
+        let mut inserted_slots = 0_usize;
         for recipient_id in recipients {
             let topic_id = mailbox_topic(recipient_id, local_agent, epoch);
-            store.put_mailbox_envelope(MailboxEnvelope {
+            match store.put_mailbox_envelope(MailboxEnvelope {
                 topic_id,
                 mailbox_id,
                 envelope_hash: mailbox_id,
                 ciphertext: &frame,
                 padded_size,
-                now_ms: i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?,
+                now_ms: now_i64,
                 expires_at_ms: i64::try_from(expires_at_ms)
                     .map_err(|_| AslError::InvalidMessage)?,
                 quota: MailboxQuota {
                     max_entries: 512,
                     max_bytes: 64 * 1024 * 1024,
                 },
-            })?;
+            })? {
+                MailboxPut::Inserted => inserted_slots += 1,
+                MailboxPut::Duplicate => {}
+            }
         }
-        self.next_publish = Some(Instant::now());
+        let inserted_bytes = mailbox_budget_bytes(padded_size, inserted_slots)?;
+        store.settle_budget_reservation(
+            reservation,
+            &[(BudgetKind::MailboxBytes, inserted_bytes)],
+            now_ms,
+        )?;
         Ok(())
     }
 }
@@ -557,12 +568,11 @@ fn expire_lookup_state(runtime: &mut MailboxWireRuntime, now: Instant) {
 
 fn group_recipient_agents(
     store: &Store,
-    room: Hash32,
+    local_group_id: &GroupId,
     local_agent: AgentId,
 ) -> Result<Vec<AgentId>, AslError> {
-    let snapshot = store.mls_room_snapshot(room)?.ok_or(AslError::NotFound)?;
     let mut agents = Vec::new();
-    for member in store.group_members(&snapshot.local_id)? {
+    for member in store.group_members(local_group_id)? {
         if let Some(agent) = store.mls_peer_agent(&member.peer)?
             && agent != local_agent
             && !agents.contains(&agent)
@@ -571,6 +581,12 @@ fn group_recipient_agents(
         }
     }
     Ok(agents)
+}
+
+fn mailbox_budget_bytes(padded_size: u32, recipient_count: usize) -> Result<u64, AslError> {
+    u64::from(padded_size)
+        .checked_mul(u64::try_from(recipient_count).map_err(|_| AslError::QuotaExceeded)?)
+        .ok_or(AslError::QuotaExceeded)
 }
 
 fn mailbox_topic(recipient: AgentId, sender: AgentId, epoch: u64) -> [u8; 32] {
@@ -681,5 +697,12 @@ mod tests {
         trailing.push(0);
         assert!(decode_batch(&trailing).is_err());
         assert!(decode_batch(b"arbitrary text").is_err());
+    }
+
+    #[test]
+    fn mailbox_budget_uses_padded_size_for_each_recipient() {
+        assert_eq!(padded_size(257).unwrap(), 512);
+        assert_eq!(mailbox_budget_bytes(512, 3).unwrap(), 1_536);
+        assert!(mailbox_budget_bytes(u32::MAX, usize::MAX).is_err());
     }
 }

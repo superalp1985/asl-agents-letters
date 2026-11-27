@@ -23,6 +23,8 @@ repository.
 ## Command
 
 ```text
+asl setup --network-identity-config <trusted-network.json> --identity-onboarding-config <submission.json> --onboard
+asl setup --status
 asl-core --identity-registration onboard
 asl-core --identity-registration resume
 asl-core --identity-registration status
@@ -31,6 +33,39 @@ asl-core --identity-registration revoke-onchain <sequence> <deadline>
 
 `onboard` is resumable. It persists the signed request, signed directory, phase,
 transaction hash, route, and last bounded error before advancing.
+
+`asl setup` validates explicitly supplied configuration using the existing
+network and submission validators. It writes only into missing profile config
+files; it does not fetch or invent trust anchors. `--status` returns local
+onboarding and migration status. This JSON is an orchestration view, not a
+signed proof and not group membership.
+
+## Encrypted Migration
+
+Migration export writes ASLMIG01 format v2 inside the age-encrypted payload.
+Alongside selected portable records, it captures the source signed device
+directory, the current unexpired device PeerId and certificate serial, the next
+serial, and previous revoked serials. Import creates a new device key and a
+durable local migration record while preserving AgentId. Format v1 imports
+remain supported, but lack source-device data and cannot authorize revocation
+of an unknown old PeerId. Such imports can onboard an unregistered identity,
+but do not perform an active-identity device migration.
+
+If an active source device was captured, onboarding is blocked until the user
+confirms its exact PeerId:
+
+```text
+asl-core --migration authorize-old-device-revoke <new-profile> <old-PeerId>
+```
+
+The confirmation is root-signed and bound to AgentId, old PeerId/serial, and
+new PeerId. Onboarding then retains other valid source device certificates,
+adds the new certificate with a higher serial, and places only the explicitly
+authorized old serial in the revoked set. Finalized registry state must match
+the resulting directory commitment before installation. Migration becomes
+`ready_to_join` only after the existing directory publication acknowledgement.
+That local status does not grant group membership; a group owner must still
+approve a valid MLS join.
 
 ## State Machine
 

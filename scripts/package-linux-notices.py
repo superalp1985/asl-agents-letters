@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--target", required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--source-date-epoch", required=True, type=int)
     parser.add_argument("--offline", action="store_true")
     return parser.parse_args()
 
@@ -71,7 +74,14 @@ def runtime_packages(details: dict, repo: Path) -> tuple[dict, list[dict]]:
             if any(kind.get("kind") is None for kind in dependency.get("dep_kinds", [])):
                 pending.append(dependency["pkg"])
 
-    ordered = sorted(selected.values(), key=lambda package: (package["name"], package["version"]))
+    ordered = sorted(
+        selected.values(),
+        key=lambda package: (
+            package["name"],
+            package["version"],
+            package.get("source") or "",
+        ),
+    )
     return application, ordered
 
 
@@ -94,6 +104,15 @@ def find_mpl_source(package: dict) -> Path:
     matches = sorted(cache.glob(f"*/{filename}")) if cache.is_dir() else []
     if not matches:
         raise RuntimeError(f'MPL source archive not found in Cargo cache: {filename}')
+    expected = package.get("checksum")
+    if expected:
+        matches = [
+            path
+            for path in matches
+            if hashlib.sha256(path.read_bytes()).hexdigest() == expected
+        ]
+    if not matches:
+        raise RuntimeError(f'MPL source archive checksum mismatch: {filename}')
     return matches[0]
 
 
@@ -118,6 +137,18 @@ def main() -> int:
     application, packages = runtime_packages(details, repo)
     if application["version"] != args.version:
         raise RuntimeError("Cargo metadata version does not match the requested package version.")
+    if not 315532800 <= args.source_date_epoch <= 4354819198:
+        raise RuntimeError("source date must fit the deterministic ZIP timestamp range")
+    source_date = datetime.fromtimestamp(args.source_date_epoch, timezone.utc)
+    zip_second = source_date.second - (source_date.second % 2)
+    zip_timestamp = (
+        source_date.year,
+        source_date.month,
+        source_date.day,
+        source_date.hour,
+        source_date.minute,
+        zip_second,
+    )
 
     lines = [
         "ASL Linux infrastructure runtime dependencies",
@@ -167,9 +198,13 @@ def main() -> int:
 
     (output / "THIRD-PARTY.txt").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    with zipfile.ZipFile(output / "MPL-SOURCES.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(output / "MPL-SOURCES.zip", "w") as archive:
         for source in sorted(mpl_sources, key=lambda path: path.name):
-            archive.write(source, source.name)
+            entry = zipfile.ZipInfo(source.name, date_time=zip_timestamp)
+            entry.compress_type = zipfile.ZIP_STORED
+            entry.create_system = 3
+            entry.external_attr = 0o100644 << 16
+            archive.writestr(entry, source.read_bytes())
 
     sbom = {
         "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",

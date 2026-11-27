@@ -180,6 +180,13 @@ impl CoreAdmission {
         {
             return Err(AslError::IncompatibleVersion);
         }
+        if matches!(
+            application,
+            GroupApplication::ShardBinding(_) | GroupApplication::ShardForward(_)
+        ) && !self.peer_supports_shard_forward(receive.connection_id)
+        {
+            return Err(AslError::IncompatibleVersion);
+        }
         let (created, expires) = application_times(&application);
         check_application_creation(created, clock.now_ms()?)?;
         let (_, browse_enabled) = self.persist_mls_application(
@@ -428,24 +435,7 @@ impl CoreAdmission {
 }
 
 pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>, u64) {
-    match application {
-        GroupApplication::Query(query) => (Some(query.created_at_ms), query.expires_at_ms),
-        GroupApplication::Answer(answer) => (Some(answer.created_at_ms), answer.expires_at_ms),
-        GroupApplication::Offer(offer) => (None, offer.expires_at_ms),
-        GroupApplication::FetchRequest(_) => (None, u64::MAX),
-        GroupApplication::FetchGrant(grant) => (None, grant.expires_at_ms),
-        GroupApplication::FetchPending(pending) => (None, pending.expires_at_ms),
-        GroupApplication::Error(_) => (None, u64::MAX),
-        GroupApplication::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
-        GroupApplication::Act(act) => (None, act.expires_at_ms.unwrap_or(u64::MAX)),
-        GroupApplication::Policy(_) => (None, u64::MAX),
-        GroupApplication::ContextRequest(request) => (None, request.expires_at_ms),
-        GroupApplication::ContextOffer(offer) => (None, offer.expires_at_ms),
-        GroupApplication::ContextAgreement(_) => (None, u64::MAX),
-        GroupApplication::ContextExpression(expression) => {
-            (Some(expression.created_at_ms), expression.expires_at_ms)
-        }
-    }
+    application.time_bounds()
 }
 
 fn check_application_creation(created: Option<u64>, now: u64) -> Result<(), AslError> {

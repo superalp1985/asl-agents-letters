@@ -83,6 +83,10 @@ impl AppPaths {
         &self.state
     }
 
+    pub fn network_seeds(&self) -> PathBuf {
+        self.state.join("network-seeds.json")
+    }
+
     pub fn existing_state_database(&self) -> Result<PathBuf, AslError> {
         let database = self.state.join("asl.sqlite3");
         validate_existing_components(&database)?;
@@ -174,6 +178,18 @@ fn existing_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
         return Err(AslError::InvalidStorageRoot);
     }
     Ok(path)
+}
+
+pub(crate) fn validate_local_absolute_path(path: &Path) -> Result<(), AslError> {
+    if !path.is_absolute()
+        || (cfg!(windows) && !is_local_drive(path))
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(AslError::InvalidStorageRoot);
+    }
+    validate_existing_components(path)
 }
 
 pub(crate) fn validate_existing_components(path: &Path) -> Result<(), AslError> {

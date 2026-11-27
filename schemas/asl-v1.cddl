@@ -12,7 +12,47 @@ pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
 ; Authenticated plaintext inside an MLS application message, not an outer frame.
 group-application = query / answer / offer / fetch-request /
-                    fetch-grant / fetch-pending / error / expression-letter / act / group-policy
+                    fetch-grant / fetch-pending / error / expression-letter / act / group-policy /
+                    context-request / context-offer / context-agreement / context-expression /
+                    group-removal-request / shard-binding / shard-forward
+group-removal-request = [1, 1, id128, peer-id, positive-time-ms]
+shard-binding = {
+  0: bstr .size 4, ; ASLS magic
+  1: 1,
+  2: 1,
+  3: id128,
+  4: hash32,
+  5: hash32,
+  6: 1..19,
+  7: agent-id,
+  8: peer-id,
+  9: 1..9223372036854775806,
+  10: time-ms,
+  11: positive-time-ms,
+  12: signature65
+}
+shard-forward = {
+  0: bstr .size 4, ; ASLS magic
+  1: 1,
+  2: 2,
+  3: id128,
+  4: hash32,
+  5: hash32,
+  6: hash32,
+  7: agent-id,
+  8: peer-id,
+  9: time-ms,
+  10: 1..9223372036854775807,
+  11: id128,
+  12: 1,
+  13: time-ms,
+  14: positive-time-ms,
+  15: shard-binding / null,
+  16: bstr .size (1..57344),
+  17: agent-id,
+  18: peer-id,
+  19: signature65
+}
 
 id128 = bstr .size 16
 hash32 = bstr .size 32
@@ -38,7 +78,7 @@ constraint = {
   2: typed-value
 }
 intent-id = 1..6
-feature-id = 1 / 2 / 3 / 4 / 5
+feature-id = 1 / 2 / 3 / 4 / 5 / 6
 constraint-operator = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7
 result-shape = 0 / 1 / 2
 answer-status = 0 / 1 / 2 / 3

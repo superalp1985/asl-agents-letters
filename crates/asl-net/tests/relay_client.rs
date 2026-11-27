@@ -87,6 +87,8 @@ async fn next_reservation_after_recovery(
             | TransportEvent::MailboxRecordPut { .. }
             | TransportEvent::PairingInviteRequest { .. }
             | TransportEvent::PairingExchangeResponse { .. }
+            | TransportEvent::ReachabilityChanged(_)
+            | TransportEvent::RouteChanged(_)
             | TransportEvent::DialFailed { .. } => {}
             event => panic!("unexpected relay event during recovery: {event:?}"),
         }
@@ -168,6 +170,8 @@ async fn next_connected(
             | TransportEvent::MailboxRecordPut { .. }
             | TransportEvent::PairingInviteRequest { .. }
             | TransportEvent::PairingExchangeResponse { .. }
+            | TransportEvent::ReachabilityChanged(_)
+            | TransportEvent::RouteChanged(_)
             | TransportEvent::DialFailed { .. } => {}
             TransportEvent::Connected { .. }
             | TransportEvent::Disconnected { .. }

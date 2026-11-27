@@ -7,6 +7,7 @@ mod job;
 pub(crate) mod local_ipc;
 pub(crate) mod notification;
 pub(crate) mod reconcile_watch;
+pub(crate) mod resources;
 pub(crate) mod tray;
 mod volume;
 

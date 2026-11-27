@@ -4,7 +4,10 @@ use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
     relay::relay_endpoint_config,
-    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
+    transport::{
+        DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, ReachabilityStatus,
+        RouteStatus, TransportKind,
+    },
 };
 use asl_types::{
     error::AslError,
@@ -366,6 +369,12 @@ pub enum NetworkEvent {
     RelayUnavailable {
         relay_peer_id: PeerId,
     },
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
+    },
     DiscoveryCandidate {
         peer_id: PeerId,
         kind: TransportKind,
@@ -467,6 +476,12 @@ pub enum NetworkEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalNetworkObservation {
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
+    },
     DiscoveryCandidate {
         peer_id: PeerId,
         kind: TransportKind,
@@ -489,6 +504,14 @@ pub enum LocalNetworkObservation {
 impl NetworkEvent {
     pub fn as_local_observation(&self) -> Option<LocalNetworkObservation> {
         match self {
+            Self::ReachabilityChanged { status } => {
+                Some(LocalNetworkObservation::ReachabilityChanged {
+                    status: status.clone(),
+                })
+            }
+            Self::RouteChanged { status } => Some(LocalNetworkObservation::RouteChanged {
+                status: status.clone(),
+            }),
             Self::DiscoveryCandidate {
                 peer_id,
                 kind,
@@ -547,6 +570,8 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             IpcMessage::RelayUnavailable { relay_peer_id } => {
                 Ok(Self::RelayUnavailable { relay_peer_id })
             }
+            IpcMessage::ReachabilityChanged { status } => Ok(Self::ReachabilityChanged { status }),
+            IpcMessage::RouteChanged { status } => Ok(Self::RouteChanged { status }),
             IpcMessage::DiscoveryCandidate {
                 peer_id,
                 kind,

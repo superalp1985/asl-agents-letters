@@ -6,6 +6,10 @@ use std::{
 };
 
 use asl_app::{
+    capacity::{
+        latest_local_capacity, measure_local_capacity, persist_local_capacity,
+        report_capacity_observations,
+    },
     identity::{AgentIdentity, DeviceIdentity},
     network_settings::NetworkSettingsV1,
     paths::AppPaths,
@@ -19,6 +23,74 @@ use asl_types::error::AslError;
 use serde_json::json;
 
 pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
+    if matches!(args, [op] if op == "measure-capacity" || op == "capacity") {
+        let profile_dir =
+            PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
+        let paths = AppPaths::open_existing(&profile_dir)?;
+        let database = paths.existing_state_database()?;
+        let profile = if args[0] == "measure-capacity" {
+            let _pin = PinnedHome::open(&profile_dir)?;
+            let profile = measure_local_capacity()?;
+            persist_local_capacity(&mut open_mls_runtime_store(&database)?, &profile)?;
+            Some(profile)
+        } else {
+            latest_local_capacity(&open_store_read_only(&database)?)?
+        };
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| AslError::InvalidMessage)?
+                .as_millis(),
+        )
+        .map_err(|_| AslError::InvalidMessage)?;
+        let report = report_capacity_observations(profile.as_ref(), now);
+        let resources = asl_policy::local_resource_sample(paths.root()).ok();
+        let direct_limit = report
+            .member_range
+            .and_then(|range| range.direct_budget)
+            .map(|range| range.max);
+        println!(
+            "{}",
+            json!({
+                "measured_at_ms": report.measured_at_ms,
+                "planner_direct_limit": direct_limit,
+                "planner_extended_limit": report.member_range.and_then(|range| range.extended_budget)
+                    .map(|range| range.max).or(direct_limit),
+                "available_parallelism": report.available_parallelism,
+                "process_working_set_bytes": resources.map(|sample| sample.working_set_bytes),
+                "available_memory_bytes": resources.map(|sample| sample.available_memory_bytes),
+                "available_disk_bytes": resources.map(|sample| sample.available_disk_bytes),
+                "network_bps": report.network_bps,
+            })
+        );
+        return Ok(());
+    }
+    if let [op, switch_value] = args
+        && op == "resume-migration"
+    {
+        let enabled = switch(text(switch_value)?)?;
+        let profile_dir =
+            PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
+        let paths = AppPaths::open_existing(&profile_dir)?;
+        let _pin = PinnedHome::open(&profile_dir)?;
+        if asl_app::migration::status(&paths)?.is_none() {
+            return Err(AslError::NotFound);
+        }
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| AslError::InvalidMessage)?
+                .as_millis(),
+        )
+        .map_err(|_| AslError::InvalidMessage)?;
+        open_mls_runtime_store(&paths.existing_state_database()?)?.set_setting(
+            "mls.migration_rejoin.v1",
+            if enabled { "true" } else { "false" },
+            now,
+        )?;
+        println!("{}", json!({"migration_rejoin": enabled}));
+        return Ok(());
+    }
     let request = match args {
         [op] if op == "status" => None,
         [op] if op == "refresh" => Some(AdminRequest::Refresh),
@@ -35,6 +107,14 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             room: hex_id(room, 64)?,
             device: device_peer(device)?,
         }),
+        [op, tag, room, request] if op == "approve-remove" || op == "reject-remove" => {
+            Some(AdminRequest::ReviewRemoval {
+                tag: text(tag)?.into(),
+                room: hex_id(room, 64)?,
+                request: hex_id(request, 32)?,
+                approve: op == "approve-remove",
+            })
+        }
         [op, tag, room, device] if op == "reject-request" => {
             Some(AdminRequest::RejectJoinRequest {
                 tag: text(tag)?.into(),
@@ -56,6 +136,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             invite_flag,
             admins,
             muted,
+            details @ ..,
         ] if op == "access" => Some(AdminRequest::SetAccess {
             tag: text(tag)?.into(),
             room: hex_id(room, 64)?,
@@ -65,8 +146,15 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             allow_member_text: switch(text(text_flag)?)?,
             allow_member_files: switch(text(file_flag)?)?,
             allow_member_invite: switch(text(invite_flag)?)?,
-            admins: peer_list(text(admins)?)?,
-            muted: peer_list(text(muted)?)?,
+            admins: peer_list(admins.to_str().ok_or(AslError::InvalidMessage)?)?,
+            muted: peer_list(muted.to_str().ok_or(AslError::InvalidMessage)?)?,
+            details: match details {
+                [] => None,
+                [value] if text(value)?.len() <= 24_000 => {
+                    Some(serde_json::from_str(text(value)?).map_err(|_| AslError::InvalidMessage)?)
+                }
+                _ => return Err(AslError::InvalidMessage),
+            },
         }),
         [op, tag, room, kind, additional, hours] if op == "budget" => {
             Some(AdminRequest::RenewResourceBudget {

@@ -5,13 +5,14 @@
 本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
+- ASL/1.4 增加 `ShardBinding` 和 `ShardForward`。普通邀请按容量选择根群/子群，满时自动创建独立 MLS 子群；根群策略更新逐子群提交并返回部分结果。跨 shard 内容由逻辑群主根签名证明来源，每个目标子群重新加密，持久 receipt 阻止重放。桥接节点不会把原消息冒充成自己发送。
 - `ASL_MCP_GROUPS=admin` 时，MCP 暴露群列表/创建/成员/访问策略/邀请/加入请求、两人会话、消息预算和复合资源预算续期工具；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成消息数、消息字节、模型调用、CPU 和邮箱预算。群管理页显示用量并允许按 24 小时续期；MCP 和 `asl-core --group-admin budget` 也提供精确续期入口。预算耗尽后 fail closed。
-- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。拥有 `manage-members` 的管理员可提交只修改 muted 的委派快照；其他 owner 字段必须完全一致。MLS 的 Remove Commit 仍只能由 creator 提交。
+- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。`manage-members` 只可提交 muted 切片，`manage-files` 只可提交逐文件策略切片；policy revision、permissions、owner、管理员名单和能力位保持 owner-only。MLS 的 Remove Commit 仍只能由 creator 提交。
 - 群语义 `ContextExpression/ContextRequest/ContextOffer/ContextAgreement` 已进入 MLS application 路径，确认时绑定 request ID、room 和 sender。
-- 单 MLS 群编译硬上限为 512。成员投影超过 512 时，Core 可生成最多 10,000 成员的确定性 shard plan，并使用 shard topic、backbone topic 和 bridge 转发 MLS 密文；真正创建多个子 MLS 群和跨机 2,000/10,000 验收仍未完成。
-- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引。真实两设备重启补收、送达回执和公网/NAT/relay 仍未验收。
+- 单 MLS 群编译硬上限为 512。Core 可自动创建最多 19 个独立子 MLS 群，并连同根群覆盖约 10,000 成员；每个子群单独加密，ASL/1.4 转发封装保留来源、epoch、消息 ID 和期限。跨机 512/2,000/10,000 容量矩阵仍需验收。
+- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引，v44 增加移除请求/子群链接，v45 增加签名 shard 绑定和转发 receipt。真实两设备重启补收和公网 NAT/relay 仍未验收。
 
 ## 已实现：群消息编解码
 

@@ -202,6 +202,9 @@ impl Supervisor {
             MailCommand::SendAct { room, act, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.send_group_act(room, act));
             }
+            MailCommand::SendShardAnnouncement { root, act, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.send_shard_announcement(root, act));
+            }
             MailCommand::SendFile {
                 room,
                 content_id,
@@ -940,6 +943,7 @@ impl Supervisor {
             return Err(AslError::PolicyDenied);
         }
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let forwarded_application = application.clone();
         let sent = admission.send_loopback_mls_application_with_gossip(
             &mut groups.store,
             room,
@@ -966,6 +970,19 @@ impl Supervisor {
             room,
             &self.device_peer_id,
             &sent.packet,
+        );
+        let _ = super::groups::forward_application_to_logical_shards(
+            &mut groups.store,
+            admission,
+            &self.net,
+            &self.agent_identity,
+            &self.device_peer_id,
+            room,
+            &forwarded_application,
+            self.agent_identity.agent_id(),
+            &self.device_peer_id,
+            sent.packet.epoch,
+            now,
         );
         Ok(())
     }
@@ -1031,7 +1048,16 @@ impl Supervisor {
         Ok(())
     }
 
-    pub(super) fn send_group_act(&mut self, room: Hash32, mut act: Act) -> Result<Id128, AslError> {
+    pub(super) fn send_group_act(&mut self, room: Hash32, act: Act) -> Result<Id128, AslError> {
+        self.send_group_act_inner(room, act, true)
+    }
+
+    pub(super) fn send_group_act_inner(
+        &mut self,
+        room: Hash32,
+        mut act: Act,
+        forward_to_shards: bool,
+    ) -> Result<Id128, AslError> {
         let now = unix_time_ms()?;
         if !self.net.is_running()
             || self.network_admission_status != NetworkAdmissionStatus::Active
@@ -1071,40 +1097,45 @@ impl Supervisor {
         if act.causal_root.0 == [0; 16] {
             act.causal_root = act.message_id;
         }
-        let conversation_id = alloy_primitives::hex::encode(act.conversation_id.0);
-        let now_i64 = i64::try_from(now).map_err(|_| AslError::InvalidMessage)?;
-        let message_bytes = u64::try_from(act.encode()?.len())
-            .map_err(|_| AslError::InvalidMessage)?
-            .saturating_add(1024);
-        if !groups.store.resource_budget_available(
-            &conversation_id,
-            BudgetKind::MessageBytes,
-            now,
-        )? {
-            return Err(AslError::QuotaExceeded);
-        }
-        if !groups
-            .store
-            .conversation_budget_available(&conversation_id, 1, now_i64)?
-        {
-            return Err(AslError::QuotaExceeded);
-        }
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let conversation_id = alloy_primitives::hex::encode(snapshot.local_id.0.0);
+        let message_bytes =
+            u64::try_from(act.encode()?.len()).map_err(|_| AslError::InvalidMessage)?;
+        let reservation = groups
+            .store
+            .reserve_budget(
+                &conversation_id,
+                1,
+                &[(BudgetKind::MessageBytes, message_bytes)],
+                now,
+            )?
+            .ok_or(AslError::QuotaExceeded)?;
         let message_id = act.message_id;
         let history_act = act.clone();
-        let sent = admission.send_loopback_mls_application_with_gossip(
+        let mut dispatched = false;
+        let dispatch_result = admission.send_loopback_mls_application_with_gossip(
             &mut groups.store,
             room,
             GroupApplication::Act(act),
             now,
             |command| {
                 if self.net.try_send(&command.into_ipc()?)? {
+                    dispatched = true;
                     Ok(())
                 } else {
                     Err(AslError::SandboxUnavailable)
                 }
             },
-        )?;
+        );
+        let sent = match dispatch_result {
+            Ok(sent) => sent,
+            Err(error) => {
+                if !dispatched {
+                    groups.store.refund_budget_reservation(reservation, now)?;
+                }
+                return Err(error);
+            }
+        };
         let _ = super::groups::record_act_history(
             &mut groups.store,
             &local_group_id,
@@ -1120,15 +1151,6 @@ impl Supervisor {
             &sent.packet,
             now,
         );
-        groups
-            .store
-            .consume_conversation_budget(&conversation_id, 1, now_i64)?;
-        let _ = groups.store.consume_resource_budget(
-            &conversation_id,
-            BudgetKind::MessageBytes,
-            message_bytes,
-            now,
-        );
         let _ = super::group_routing::publish_packet(
             &self.net,
             &groups.store,
@@ -1136,6 +1158,22 @@ impl Supervisor {
             &self.device_peer_id,
             &sent.packet,
         );
+        if forward_to_shards {
+            let forwarded_application = GroupApplication::Act(history_act.clone());
+            let _ = super::groups::forward_application_to_logical_shards(
+                &mut groups.store,
+                admission,
+                &self.net,
+                &self.agent_identity,
+                &self.device_peer_id,
+                room,
+                &forwarded_application,
+                self.agent_identity.agent_id(),
+                &self.device_peer_id,
+                sent.packet.epoch,
+                now,
+            );
+        }
         Ok(message_id)
     }
 
@@ -1168,26 +1206,12 @@ impl Supervisor {
             .mls_room_snapshot(room)?
             .ok_or(AslError::NotFound)?
             .local_id;
-        if !groups.store.group_can_send(
-            &local_group_id,
-            &self.device_peer_id,
-            GroupAccessKind::Files,
-        )? || !groups.store.group_can_access_file(
+        if !groups.store.group_can_access_file(
             &local_group_id,
             &self.device_peer_id,
             &content_id,
             GroupFileAccessKind::Send,
         )? {
-            return Err(AslError::PolicyDenied);
-        }
-        let policy = groups.store.group_access_policy(&local_group_id)?;
-        if policy.admins.contains(&self.device_peer_id)
-            && !groups.store.group_admin_has_capability(
-                &local_group_id,
-                &self.device_peer_id,
-                GroupAdminCapabilityKind::ManageFiles,
-            )?
-        {
             return Err(AslError::PolicyDenied);
         }
         let expires_at_ms = now.saturating_add(10 * 60 * 1_000);
@@ -1228,6 +1252,20 @@ impl Supervisor {
             &self.device_peer_id,
             &sent.packet,
         );
+        let forwarded_application = GroupApplication::Offer(offer.clone());
+        let _ = super::groups::forward_application_to_logical_shards(
+            &mut groups.store,
+            admission,
+            &self.net,
+            &self.agent_identity,
+            &self.device_peer_id,
+            room,
+            &forwarded_application,
+            self.agent_identity.agent_id(),
+            &self.device_peer_id,
+            sent.packet.epoch,
+            now,
+        );
         Ok(json!({
             "room": alloy_primitives::hex::encode(room.0),
             "offer_id": alloy_primitives::hex::encode(offer.message_id.0),
@@ -1242,6 +1280,7 @@ impl Supervisor {
     fn invite_group_agent(&mut self, room: Hash32, agent: AgentId) -> Result<Value, AslError> {
         let now = unix_time_ms()?;
         let groups = self.groups.as_ref().ok_or(AslError::NotFound)?;
+        let room = groups.store.mls_logical_root(room)?;
         let snapshot = groups
             .store
             .mls_room_snapshot(room)?
@@ -1263,6 +1302,23 @@ impl Supervisor {
         {
             return Err(AslError::PolicyDenied);
         }
+        let owner = groups
+            .store
+            .group_access_owner(room)?
+            .ok_or(AslError::NotFound)?;
+        if owner != self.device_peer_id {
+            return Ok(json!({
+                "room": alloy_primitives::hex::encode(room.0),
+                "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
+                "state": "owner_action_required",
+                "error_code": "delegated_invite_requires_logical_owner",
+                "owner_peer": bs58::encode(owner.as_bytes()).into_string(),
+                "owner_agent": groups.store.mls_peer_agent(&owner)?.map(|agent| {
+                    format!("agent:{}", alloy_primitives::hex::encode(agent.0))
+                }),
+                "queued": 0,
+            }));
+        }
         let connections = self
             .admission
             .as_ref()
@@ -1276,6 +1332,7 @@ impl Supervisor {
             return Err(AslError::NotFound);
         }
         let mut queued = 0_u64;
+        let mut invitations = Vec::with_capacity(connections.len());
         for connection_id in connections {
             let result = self.apply_local_group_action(
                 LocalGroupAction::Invite {
@@ -1284,12 +1341,20 @@ impl Supervisor {
                 },
                 now,
             )?;
-            queued += result.get("queued").and_then(Value::as_u64).unwrap_or(0);
+            if result
+                .get("queued")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                queued += 1;
+            }
+            invitations.push(result);
         }
         Ok(json!({
             "room": alloy_primitives::hex::encode(room.0),
             "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
             "queued": queued,
+            "invitations": invitations,
         }))
     }
 

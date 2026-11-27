@@ -11,7 +11,10 @@ use alloy_primitives::hex;
 use asl_store::open_store;
 use asl_types::{
     error::AslError,
-    record::{RecordPayload, decode_record, device_directory_commitment},
+    record::{
+        DeviceDirectory, MAX_RECORD_LIFETIME_MS, RecordPayload, decode_record,
+        device_directory_commitment,
+    },
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -23,12 +26,15 @@ use crate::{
         RegistryDeploymentV1, RegistryStatus,
     },
     checkpoint_access,
-    identity::{AgentIdentity, DeviceIdentity},
+    identity::{AgentIdentity, DeviceIdentity, verify_device_certificate},
     identity_registration::{
         IdentityRegistrationRequest, default_deadline, prepare_device_directory,
     },
+    migration::{self, IdentityMigrationStatusV1},
     network_identity::NetworkIdentityConfigurationV1,
-    paths::AppPaths,
+    network_settings::{NetworkSettingsV1, SignedNetworkSeedsStatusV1},
+    paths::{AppPaths, validate_local_absolute_path},
+    profile::sign_record,
 };
 
 const CONFIG_MAX_BYTES: u64 = 64 * 1024;
@@ -123,6 +129,122 @@ pub struct IdentityOnboardingStatusV1 {
     pub updated_at_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SetupConfigurationStateV1 {
+    Missing,
+    Defaulted,
+    Configured,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SetupNetworkSeedsStateV1 {
+    NotConfigured,
+    ExplicitBootstrapConfigured,
+    SignedSeedsRequired,
+    SignedSeedsVerified,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetupNetworkSeedsStatusV1 {
+    pub state: SetupNetworkSeedsStateV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<SignedNetworkSeedsStatusV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SetupStageV1 {
+    ConfigurationRequired,
+    MigrationAuthorizationRequired,
+    ReadyToOnboard,
+    RegistrationPrepared,
+    WaitingForFinality,
+    DirectoryPublicationPending,
+    ReadyToJoin,
+    Revoked,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SetupNextActionV1 {
+    ProvideNetworkIdentityConfiguration,
+    ProvideIdentityOnboardingConfiguration,
+    ImportSignedNetworkSeeds,
+    InstallSelfPaySigner,
+    AuthorizeOldDeviceRevocation,
+    RunIdentityOnboarding,
+    ResumeIdentityOnboarding,
+    StartAgent,
+    RepairNetworkSettings,
+    RepairSignedNetworkSeeds,
+    RepairNetworkIdentityConfiguration,
+    RepairIdentityOnboardingConfiguration,
+    RepairIdentityOnboardingStatus,
+    RepairIdentityMigrationStatus,
+    ReplaceOrRestoreActiveIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalPrerequisiteStateV1 {
+    Required,
+    ConfiguredNotChecked,
+    ConfirmedByFinalizedChainProof,
+    ConfirmedByLocalAcknowledgement,
+    NotRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalPrerequisiteV1 {
+    pub name: String,
+    pub state: ExternalPrerequisiteStateV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuidedOnboardingProgressV1 {
+    pub phase: OnboardingPhaseV1,
+    pub operation: Option<String>,
+    pub registry_sequence: u64,
+    pub transaction_submitted: bool,
+    pub directory_published: bool,
+    pub last_error: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuidedMigrationProgressV1 {
+    pub phase: migration::IdentityMigrationPhaseV1,
+    pub old_device_authorization_required: bool,
+    pub source_directory_verified: bool,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuidedSetupStatusV1 {
+    pub schema: String,
+    pub stage: SetupStageV1,
+    pub next_action: SetupNextActionV1,
+    pub ready_to_start: bool,
+    pub can_resume_onboarding: bool,
+    pub network_settings: SetupConfigurationStateV1,
+    pub network_seeds: SetupNetworkSeedsStatusV1,
+    pub network_identity: SetupConfigurationStateV1,
+    pub identity_onboarding: SetupConfigurationStateV1,
+    pub onboarding: Option<GuidedOnboardingProgressV1>,
+    pub migration: Option<GuidedMigrationProgressV1>,
+    pub external_prerequisites: Vec<ExternalPrerequisiteV1>,
+}
+
 impl IdentityOnboardingConfigV1 {
     pub fn load(path: &Path) -> Result<Self, AslError> {
         let bytes = read_bounded(path, CONFIG_MAX_BYTES)?;
@@ -157,10 +279,8 @@ impl IdentityOnboardingConfigV1 {
             }
             _ => {}
         }
-        if let Some(signer) = &self.submission.self_pay
-            && !signer.executable.is_absolute()
-        {
-            return Err(AslError::InvalidIdentity);
+        if let Some(signer) = &self.submission.self_pay {
+            validate_local_absolute_path(&signer.executable)?;
         }
         Ok(())
     }
@@ -177,6 +297,339 @@ pub fn status(paths: &AppPaths) -> Result<Option<IdentityOnboardingStatusV1>, As
     )
 }
 
+pub(crate) fn guided_setup_status(paths: &AppPaths) -> Result<GuidedSetupStatusV1, AslError> {
+    AgentIdentity::load_protected(&paths.agent_root_key())?;
+    DeviceIdentity::load_protected(&paths.device_key())?;
+
+    let network_settings_path = paths.network_settings_configuration();
+    let network_settings_present = network_settings_path.try_exists()?;
+    let (network_settings_state, network_settings) =
+        match NetworkSettingsV1::load(&network_settings_path) {
+            Ok(settings) => (
+                if network_settings_present {
+                    SetupConfigurationStateV1::Configured
+                } else {
+                    SetupConfigurationStateV1::Defaulted
+                },
+                Some(settings),
+            ),
+            Err(_) => (SetupConfigurationStateV1::Invalid, None),
+        };
+
+    let seeds_path = paths.network_seeds();
+    let seeds_present = seeds_path.try_exists()?;
+    let network_seeds = match network_settings.as_ref() {
+        None => SetupNetworkSeedsStatusV1 {
+            state: SetupNetworkSeedsStateV1::Invalid,
+            verified: None,
+        },
+        Some(settings) if !settings.bootstrap_multiaddrs.is_empty() => SetupNetworkSeedsStatusV1 {
+            state: if seeds_present {
+                SetupNetworkSeedsStateV1::Invalid
+            } else {
+                SetupNetworkSeedsStateV1::ExplicitBootstrapConfigured
+            },
+            verified: None,
+        },
+        Some(settings) if seeds_present => {
+            match settings.signed_seed_file_status(&seeds_path, unix_time_ms()?) {
+                Ok(Some(verified)) => SetupNetworkSeedsStatusV1 {
+                    state: SetupNetworkSeedsStateV1::SignedSeedsVerified,
+                    verified: Some(verified),
+                },
+                _ => SetupNetworkSeedsStatusV1 {
+                    state: SetupNetworkSeedsStateV1::Invalid,
+                    verified: None,
+                },
+            }
+        }
+        Some(settings) if settings.network_seed_public_key.is_some() => SetupNetworkSeedsStatusV1 {
+            state: SetupNetworkSeedsStateV1::SignedSeedsRequired,
+            verified: None,
+        },
+        Some(_) => SetupNetworkSeedsStatusV1 {
+            state: SetupNetworkSeedsStateV1::NotConfigured,
+            verified: None,
+        },
+    };
+
+    let (network_identity_state, network_identity) =
+        match NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration()) {
+            Ok(Some(configuration)) => (SetupConfigurationStateV1::Configured, Some(configuration)),
+            Ok(None) => (SetupConfigurationStateV1::Missing, None),
+            Err(_) => (SetupConfigurationStateV1::Invalid, None),
+        };
+
+    let onboarding_path = paths.identity_onboarding_configuration();
+    let (onboarding_configuration_state, onboarding_configuration) =
+        if onboarding_path.try_exists()? {
+            match IdentityOnboardingConfigV1::load(&onboarding_path) {
+                Ok(configuration) => (SetupConfigurationStateV1::Configured, Some(configuration)),
+                Err(_) => (SetupConfigurationStateV1::Invalid, None),
+            }
+        } else {
+            (SetupConfigurationStateV1::Missing, None)
+        };
+
+    let (migration, migration_invalid) = match migration::status(paths) {
+        Ok(status) => (status, false),
+        Err(_) => (None, true),
+    };
+    let (onboarding, onboarding_status_invalid) = if network_identity.is_some() {
+        match status(paths) {
+            Ok(status) => (status, false),
+            Err(_) => (None, true),
+        }
+    } else {
+        (None, false)
+    };
+    let self_pay_signer_missing = onboarding_configuration
+        .as_ref()
+        .is_some_and(|configuration| {
+            configuration.submission.mode == SubmissionModeV1::SelfPay
+                && !self_pay_signer_ready(configuration)
+        });
+
+    let seed_state = network_seeds.state;
+    let (stage, next_action) = if network_settings_state == SetupConfigurationStateV1::Invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairNetworkSettings,
+        )
+    } else if seed_state == SetupNetworkSeedsStateV1::Invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairSignedNetworkSeeds,
+        )
+    } else if network_identity_state == SetupConfigurationStateV1::Invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairNetworkIdentityConfiguration,
+        )
+    } else if onboarding_configuration_state == SetupConfigurationStateV1::Invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairIdentityOnboardingConfiguration,
+        )
+    } else if migration_invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairIdentityMigrationStatus,
+        )
+    } else if onboarding_status_invalid {
+        (
+            SetupStageV1::Blocked,
+            SetupNextActionV1::RepairIdentityOnboardingStatus,
+        )
+    } else if network_identity_state == SetupConfigurationStateV1::Missing {
+        (
+            SetupStageV1::ConfigurationRequired,
+            SetupNextActionV1::ProvideNetworkIdentityConfiguration,
+        )
+    } else if onboarding_configuration_state == SetupConfigurationStateV1::Missing {
+        (
+            SetupStageV1::ConfigurationRequired,
+            SetupNextActionV1::ProvideIdentityOnboardingConfiguration,
+        )
+    } else if self_pay_signer_missing {
+        (
+            SetupStageV1::ConfigurationRequired,
+            SetupNextActionV1::InstallSelfPaySigner,
+        )
+    } else if migration.as_ref().is_some_and(|status| {
+        status.phase
+            == migration::IdentityMigrationPhaseV1::AwaitingOldDeviceRevocationAuthorization
+    }) {
+        (
+            SetupStageV1::MigrationAuthorizationRequired,
+            SetupNextActionV1::AuthorizeOldDeviceRevocation,
+        )
+    } else if seed_state == SetupNetworkSeedsStateV1::SignedSeedsRequired {
+        (
+            SetupStageV1::ConfigurationRequired,
+            SetupNextActionV1::ImportSignedNetworkSeeds,
+        )
+    } else {
+        match onboarding.as_ref().map(|status| status.phase) {
+            None => (
+                SetupStageV1::ReadyToOnboard,
+                SetupNextActionV1::RunIdentityOnboarding,
+            ),
+            Some(OnboardingPhaseV1::Prepared) => (
+                SetupStageV1::RegistrationPrepared,
+                SetupNextActionV1::ResumeIdentityOnboarding,
+            ),
+            Some(OnboardingPhaseV1::Submitted) => (
+                SetupStageV1::WaitingForFinality,
+                SetupNextActionV1::ResumeIdentityOnboarding,
+            ),
+            Some(OnboardingPhaseV1::DirectoryInstalled) => (
+                SetupStageV1::DirectoryPublicationPending,
+                SetupNextActionV1::ResumeIdentityOnboarding,
+            ),
+            Some(OnboardingPhaseV1::ReadyToJoin) => {
+                (SetupStageV1::ReadyToJoin, SetupNextActionV1::StartAgent)
+            }
+            Some(OnboardingPhaseV1::Revoked) => (
+                SetupStageV1::Revoked,
+                SetupNextActionV1::ReplaceOrRestoreActiveIdentity,
+            ),
+        }
+    };
+
+    let finalized_registry_proof = onboarding.as_ref().is_some_and(|status| {
+        matches!(
+            status.phase,
+            OnboardingPhaseV1::DirectoryInstalled
+                | OnboardingPhaseV1::ReadyToJoin
+                | OnboardingPhaseV1::Revoked
+        )
+    });
+    let mut external_prerequisites = vec![ExternalPrerequisiteV1 {
+        name: "identity_registry_deployment".into(),
+        state: if network_identity.is_none() {
+            ExternalPrerequisiteStateV1::Required
+        } else if finalized_registry_proof {
+            ExternalPrerequisiteStateV1::ConfirmedByFinalizedChainProof
+        } else {
+            ExternalPrerequisiteStateV1::ConfiguredNotChecked
+        },
+    }];
+    external_prerequisites.push(ExternalPrerequisiteV1 {
+        name: "chain_rpc_availability".into(),
+        state: if network_identity.is_some() {
+            ExternalPrerequisiteStateV1::ConfiguredNotChecked
+        } else {
+            ExternalPrerequisiteStateV1::Required
+        },
+    });
+    append_submission_prerequisites(
+        &mut external_prerequisites,
+        onboarding_configuration.as_ref(),
+    );
+    external_prerequisites.push(ExternalPrerequisiteV1 {
+        name: "peer_discovery".into(),
+        state: match seed_state {
+            SetupNetworkSeedsStateV1::SignedSeedsVerified
+            | SetupNetworkSeedsStateV1::ExplicitBootstrapConfigured => {
+                ExternalPrerequisiteStateV1::ConfiguredNotChecked
+            }
+            SetupNetworkSeedsStateV1::NotConfigured
+                if network_settings
+                    .as_ref()
+                    .is_some_and(|settings| !settings.relay_addresses.is_empty()) =>
+            {
+                ExternalPrerequisiteStateV1::ConfiguredNotChecked
+            }
+            SetupNetworkSeedsStateV1::NotConfigured
+                if network_settings.as_ref().is_some_and(|settings| {
+                    settings.address_scope
+                        == crate::network_settings::NetworkAddressScopeV1::LoopbackOnly
+                }) =>
+            {
+                ExternalPrerequisiteStateV1::NotRequired
+            }
+            _ => ExternalPrerequisiteStateV1::Required,
+        },
+    });
+    external_prerequisites.push(ExternalPrerequisiteV1 {
+        name: "device_directory_publication".into(),
+        state: if onboarding
+            .as_ref()
+            .is_some_and(|status| status.directory_published)
+        {
+            ExternalPrerequisiteStateV1::ConfirmedByLocalAcknowledgement
+        } else if finalized_registry_proof || network_identity.is_none() {
+            ExternalPrerequisiteStateV1::Required
+        } else {
+            ExternalPrerequisiteStateV1::ConfiguredNotChecked
+        },
+    });
+    let onboarding_progress = onboarding
+        .as_ref()
+        .map(|status| GuidedOnboardingProgressV1 {
+            phase: status.phase,
+            operation: status.operation.clone(),
+            registry_sequence: status.registry_sequence,
+            transaction_submitted: status.transaction_hash.is_some(),
+            directory_published: status.directory_published,
+            last_error: status.last_error.clone(),
+            updated_at_ms: status.updated_at_ms,
+        });
+    let migration_progress = migration.as_ref().map(|status| GuidedMigrationProgressV1 {
+        phase: status.phase.clone(),
+        old_device_authorization_required: status.phase
+            == migration::IdentityMigrationPhaseV1::AwaitingOldDeviceRevocationAuthorization,
+        source_directory_verified: status.source_directory_verified,
+        updated_at_ms: status.updated_at_ms,
+    });
+
+    Ok(GuidedSetupStatusV1 {
+        schema: "asl-guided-setup-status-v1".into(),
+        stage,
+        next_action,
+        ready_to_start: stage == SetupStageV1::ReadyToJoin,
+        can_resume_onboarding: matches!(
+            next_action,
+            SetupNextActionV1::RunIdentityOnboarding | SetupNextActionV1::ResumeIdentityOnboarding
+        ),
+        network_settings: network_settings_state,
+        network_seeds,
+        network_identity: network_identity_state,
+        identity_onboarding: onboarding_configuration_state,
+        onboarding: onboarding_progress,
+        migration: migration_progress,
+        external_prerequisites,
+    })
+}
+
+fn append_submission_prerequisites(
+    prerequisites: &mut Vec<ExternalPrerequisiteV1>,
+    configuration: Option<&IdentityOnboardingConfigV1>,
+) {
+    let Some(configuration) = configuration else {
+        prerequisites.push(ExternalPrerequisiteV1 {
+            name: "identity_submission_route".into(),
+            state: ExternalPrerequisiteStateV1::Required,
+        });
+        return;
+    };
+    if matches!(
+        configuration.submission.mode,
+        SubmissionModeV1::Sponsor | SubmissionModeV1::Fallback
+    ) {
+        prerequisites.push(ExternalPrerequisiteV1 {
+            name: "sponsor_service_availability".into(),
+            state: ExternalPrerequisiteStateV1::ConfiguredNotChecked,
+        });
+    }
+    if matches!(
+        configuration.submission.mode,
+        SubmissionModeV1::SelfPay | SubmissionModeV1::Fallback
+    ) {
+        prerequisites.push(ExternalPrerequisiteV1 {
+            name: "self_pay_signer_and_funding".into(),
+            state: if self_pay_signer_ready(configuration) {
+                ExternalPrerequisiteStateV1::ConfiguredNotChecked
+            } else {
+                ExternalPrerequisiteStateV1::Required
+            },
+        });
+    }
+}
+
+fn self_pay_signer_ready(configuration: &IdentityOnboardingConfigV1) -> bool {
+    configuration
+        .submission
+        .self_pay
+        .as_ref()
+        .is_some_and(|signer| {
+            validate_local_absolute_path(&signer.executable).is_ok()
+                && fs::symlink_metadata(&signer.executable)
+                    .is_ok_and(|metadata| metadata.file_type().is_file())
+        })
+}
+
 /// Runs the durable chain-registration state machine and installs the signed
 /// device directory after an independently finalized registry proof matches the
 /// registered commitment. DHT publication is a separate typed step.
@@ -185,6 +638,8 @@ pub fn onboard(paths: &AppPaths) -> Result<IdentityOnboardingStatusV1, AslError>
     config.validate()?;
     let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
     let device = DeviceIdentity::load_protected(&paths.device_key())?;
+    let migration_status = migration::status(paths)?;
+    validate_migration_onboarding(&migration_status, &identity, &device)?;
     let network = NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?
         .ok_or(AslError::InvalidIdentity)?;
     let deployment = network.resolver.deployment;
@@ -231,6 +686,11 @@ pub fn onboard(paths: &AppPaths) -> Result<IdentityOnboardingStatusV1, AslError>
             {
                 return Err(AslError::InvalidIdentity);
             }
+            if migration_status.as_ref().is_some_and(|migration| {
+                !migration.source_directory_verified && !is_unverified_legacy_migration(migration)
+            }) {
+                return Err(AslError::PolicyDenied);
+            }
             if state.draft.as_ref().is_some_and(|draft| {
                 draft.registry_sequence == verified.state().sequence
                     && draft.state_commitment == hex32(verified.state().state_commitment)
@@ -243,6 +703,7 @@ pub fn onboard(paths: &AppPaths) -> Result<IdentityOnboardingStatusV1, AslError>
                 state.phase = OnboardingPhaseV1::DirectoryInstalled;
                 state.last_error = None;
                 persist_status(paths, &mut state, now_ms)?;
+                migration::mark_directory_registered(paths)?;
                 return Ok(state);
             }
             let next = verified
@@ -286,6 +747,7 @@ pub fn onboard(paths: &AppPaths) -> Result<IdentityOnboardingStatusV1, AslError>
     state.directory_published = false;
     state.last_error = None;
     persist_status(paths, &mut state, unix_time_ms()?)?;
+    migration::mark_directory_registered(paths)?;
     Ok(state)
 }
 
@@ -408,6 +870,7 @@ pub fn mark_directory_published(
     status.directory_published = true;
     status.last_error = None;
     persist_status(paths, &mut status, unix_time_ms()?)?;
+    migration::mark_ready_to_join(paths)?;
     Ok(status)
 }
 
@@ -435,6 +898,140 @@ pub fn note_publication_failure(
     Ok(status)
 }
 
+fn validate_migration_onboarding(
+    status: &Option<IdentityMigrationStatusV1>,
+    identity: &AgentIdentity,
+    device: &DeviceIdentity,
+) -> Result<(), AslError> {
+    let Some(status) = status else {
+        return Ok(());
+    };
+    let peer = libp2p_identity::PeerId::from_bytes(device.peer_id().as_bytes())
+        .map_err(|_| AslError::InvalidIdentity)?;
+    if status.agent_id != bs58::encode(identity.agent_id().as_bytes()).into_string()
+        || status.new_device_peer_id != peer.to_string()
+    {
+        return Err(AslError::InvalidIdentity);
+    }
+    if status.source_device.is_some() && !status.old_device_revocation_authorized {
+        return Err(AslError::PolicyDenied);
+    }
+    let unverified_legacy = is_unverified_legacy_migration(status);
+    if !status.source_directory_verified && !unverified_legacy {
+        return Err(AslError::PolicyDenied);
+    }
+    if unverified_legacy
+        && !matches!(
+            status.phase,
+            migration::IdentityMigrationPhaseV1::ReadyForOnboarding
+                | migration::IdentityMigrationPhaseV1::DirectoryRegistered
+                | migration::IdentityMigrationPhaseV1::ReadyToJoin
+        )
+    {
+        return Err(AslError::PolicyDenied);
+    }
+    Ok(())
+}
+
+fn is_unverified_legacy_migration(status: &IdentityMigrationStatusV1) -> bool {
+    status.source_device.is_none()
+        && status.source_directory.is_none()
+        && !status.source_directory_verified
+        && status.next_device_serial == 1
+        && status.previous_revoked_serials.is_empty()
+}
+
+fn prepare_onboarding_directory(
+    paths: &AppPaths,
+    identity: &AgentIdentity,
+    device: &DeviceIdentity,
+    registry_sequence: u64,
+    now_ms: u64,
+) -> Result<(Vec<u8>, [u8; 32]), AslError> {
+    let Some(status) = migration::status(paths)? else {
+        return prepare_device_directory(identity, device, registry_sequence, now_ms);
+    };
+    validate_migration_onboarding(&Some(status.clone()), identity, device)?;
+
+    let mut revoked_serials = status.previous_revoked_serials;
+    let mut devices = Vec::new();
+    if let Some(encoded_directory) = status.source_directory {
+        let bytes = hex::decode(encoded_directory).map_err(|_| AslError::InvalidMessage)?;
+        let record = decode_record(&bytes)?;
+        let RecordPayload::DeviceDirectory(source_directory) = record.record.payload else {
+            return Err(AslError::InvalidIdentity);
+        };
+        if source_directory.agent_id != identity.agent_id()
+            || source_directory.revoked_serials != revoked_serials
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        for certificate in source_directory.devices {
+            let is_revoked_source = status.source_device.as_ref().is_some_and(|source| {
+                certificate.serial == source.certificate_serial
+                    && libp2p_identity::PeerId::from_bytes(certificate.peer_id.as_bytes())
+                        .is_ok_and(|peer| peer.to_string() == source.peer_id)
+            });
+            if is_revoked_source {
+                if !status.old_device_revocation_authorized {
+                    return Err(AslError::PolicyDenied);
+                }
+                revoked_serials.push(certificate.serial);
+                continue;
+            }
+            if now_ms >= certificate.expires_at_ms {
+                continue;
+            }
+            if now_ms < certificate.issued_at_ms || certificate.peer_id == device.peer_id() {
+                return Err(AslError::InvalidIdentity);
+            }
+            verify_device_certificate(
+                &certificate,
+                identity.agent_id(),
+                &certificate.peer_id,
+                identity.controller_address(),
+                1,
+                now_ms,
+            )?;
+            devices.push(certificate);
+        }
+    } else if status.source_device.is_some() || status.source_directory_verified {
+        return Err(AslError::InvalidIdentity);
+    }
+    revoked_serials.sort_unstable();
+    revoked_serials.dedup();
+    if revoked_serials.len() > 64 || devices.len() >= 64 {
+        return Err(AslError::QuotaExceeded);
+    }
+
+    const DEVICE_CERTIFICATE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    let certificate = identity.issue_device_certificate(
+        device.peer_id(),
+        status.next_device_serial,
+        now_ms,
+        now_ms
+            .checked_add(DEVICE_CERTIFICATE_LIFETIME_MS)
+            .ok_or(AslError::InvalidMessage)?,
+    )?;
+    devices.push(certificate);
+    devices.sort_by(|left, right| left.peer_id.as_bytes().cmp(right.peer_id.as_bytes()));
+    let directory = DeviceDirectory {
+        agent_id: identity.agent_id(),
+        registry_sequence,
+        devices,
+        revoked_serials,
+    };
+    let commitment = device_directory_commitment(&directory)?.0;
+    let bytes = sign_record(
+        identity,
+        RecordPayload::DeviceDirectory(directory),
+        1,
+        now_ms,
+        MAX_RECORD_LIFETIME_MS,
+    )?;
+    Ok((bytes, commitment))
+}
+
 fn prepare_register(
     paths: &AppPaths,
     status: &mut IdentityOnboardingStatusV1,
@@ -446,7 +1043,7 @@ fn prepare_register(
     if status.operation.as_deref() == Some("register") && resumable_draft(status, now_ms) {
         return Ok(());
     }
-    let (bytes, commitment) = prepare_device_directory(identity, device, 1, now_ms)?;
+    let (bytes, commitment) = prepare_onboarding_directory(paths, identity, device, 1, now_ms)?;
     let request =
         IdentityRegistrationRequest::build(identity, deployment, commitment, default_deadline()?)?;
     set_draft(status, "register", 1, commitment, &bytes, &request);
@@ -523,7 +1120,8 @@ fn prepare_update(
     {
         return Ok(());
     }
-    let (bytes, commitment) = prepare_device_directory(identity, device, sequence, now_ms)?;
+    let (bytes, commitment) =
+        prepare_onboarding_directory(paths, identity, device, sequence, now_ms)?;
     let request = IdentityRegistrationRequest::build_update(
         identity,
         deployment,

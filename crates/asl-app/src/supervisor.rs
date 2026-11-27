@@ -156,7 +156,12 @@ impl Supervisor {
     fn start_with_net(
         paths: AppPaths,
         launcher: SandboxLauncher,
-        start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
+        start_net: impl FnOnce(
+            &SandboxLauncher,
+            &DeviceIdentity,
+            bool,
+            asl_net::transport::TraversalConfig,
+        ) -> Result<NetRuntime, AslError>,
     ) -> Result<Self, AslError> {
         let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
@@ -164,7 +169,14 @@ impl Supervisor {
         let packaged_seeds = sibling_binary_directory()?
             .join("assets")
             .join("network-seeds.json");
-        settings.apply_packaged_bootstrap(&packaged_seeds, unix_time_ms()?)?;
+        let profile_seeds = paths.network_seeds();
+        let seeds = if profile_seeds.try_exists()? {
+            crate::paths::validate_existing_components(&profile_seeds)?;
+            &profile_seeds
+        } else {
+            &packaged_seeds
+        };
+        settings.apply_packaged_bootstrap(seeds, unix_time_ms()?)?;
         let network_store = open_store(&state_database)?;
         let _ = network_store.prune_dht_cache(unix_time_ms()?);
         let network_settings =
@@ -200,6 +212,7 @@ impl Supervisor {
                 &launcher,
                 &device_identity,
                 network_settings.loopback_groups,
+                network_settings.traversal.transport_config()?,
             )?
         };
         #[cfg(windows)]
@@ -1969,6 +1982,7 @@ impl NetRuntime {
         launcher: &SandboxLauncher,
         device_identity: &DeviceIdentity,
         loopback_groups: bool,
+        traversal: asl_net::transport::TraversalConfig,
     ) -> Result<Self, AslError> {
         let (mut pipes, inherited) = InheritedPipes::new()?;
         let child = launcher.spawn_sandbox(
@@ -1976,7 +1990,12 @@ impl NetRuntime {
             inherited,
             SandboxLimits::for_role(SandboxRole::Net),
         )?;
-        write_net_startup_prelude(&mut pipes.input, device_identity, loopback_groups)?;
+        write_net_startup_prelude(
+            &mut pipes.input,
+            device_identity,
+            loopback_groups,
+            traversal,
+        )?;
         Self::from_child(pipes, child, &device_identity.peer_id())
     }
 
@@ -2220,6 +2239,8 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::Listening { .. }
             | IpcMessage::RelayReserved { .. }
             | IpcMessage::RelayUnavailable { .. }
+            | IpcMessage::ReachabilityChanged { .. }
+            | IpcMessage::RouteChanged { .. }
             | IpcMessage::DiscoveryCandidate { .. }
             | IpcMessage::DhtRecordCandidate { .. }
             | IpcMessage::DhtProviders { .. }
@@ -2318,6 +2339,8 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::Listening { .. }
         | NetworkEvent::RelayReserved { .. }
         | NetworkEvent::RelayUnavailable { .. }
+        | NetworkEvent::ReachabilityChanged { .. }
+        | NetworkEvent::RouteChanged { .. }
         | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::DhtRecordCandidate { .. }
         | NetworkEvent::DhtProviders { .. }

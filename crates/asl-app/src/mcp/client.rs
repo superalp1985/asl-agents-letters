@@ -93,6 +93,11 @@ impl Client {
             Request::SendAct(_) if connection.capabilities["send_act"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
+            Request::SendShardAnnouncement(_)
+                if connection.capabilities["send_shard_announcement"] != true =>
+            {
+                Err(ErrorCode::IncompatibleVersion)
+            }
             Request::SendFile(_) if connection.capabilities["send_file"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }

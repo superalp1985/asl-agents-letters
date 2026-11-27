@@ -174,6 +174,10 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
         .execute_batch(
             "DROP TABLE semantic_context_candidates;
              DROP TABLE semantic_context_resources;
+             DROP TABLE mls_shard_forward_receipts;
+             DROP TABLE mls_shard_bindings;
+             DROP TABLE mls_room_shards;
+             DROP TABLE group_removal_requests;
              DROP TABLE conversation_act_semantic_index;
              DROP TABLE conversation_attachment_refs;
              DROP TABLE conversation_act_events;
@@ -198,7 +202,7 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
     drop(connection);
 
     let store = open_store(&path).unwrap();
-    assert_eq!(store.schema_version(), 43);
+    assert_eq!(store.schema_version(), 45);
     assert_eq!(
         store.get_setting("test.preserved").unwrap().as_deref(),
         Some("\"yes\"")
