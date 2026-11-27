@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 const MAX_NETWORK_SETTINGS_BYTES: u64 = 16_384;
 const MAX_BOOTSTRAP_ADDRESSES: usize = 32;
+const MAX_BOOTSTRAP_NODES: usize = 32;
+const MAX_BOOTSTRAP_ADDRESSES_PER_NODE: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +132,83 @@ impl NetworkSettingsV1 {
         for address in &self.bootstrap_multiaddrs {
             parse_bootstrap_multiaddr(address, self.address_policy())
                 .map_err(|_| AslError::InvalidIdentity)?;
+        }
+        Ok(())
+    }
+
+    /// Explicit settings win over a packaged seed file. The seed file is
+    /// intentionally empty in this repository until real operators publish it.
+    pub fn apply_packaged_bootstrap(&mut self, path: &Path, now_ms: u64) -> Result<(), AslError> {
+        if !self.bootstrap_multiaddrs.is_empty() {
+            return Ok(());
+        }
+        let Some(bytes) = read_optional_file(path)? else {
+            return Ok(());
+        };
+        let seeds: NetworkSeedsV1 =
+            serde_json::from_slice(&bytes).map_err(|_| AslError::InvalidIdentity)?;
+        seeds.validate(now_ms)?;
+        for node in seeds.nodes {
+            for address in node.multiaddrs {
+                let (peer, _, _) = parse_bootstrap_multiaddr(&address, self.address_policy())
+                    .map_err(|_| AslError::InvalidIdentity)?;
+                if peer
+                    != asl_types::ids::PeerId::from_bytes(
+                        bs58::decode(&node.peer_id)
+                            .into_vec()
+                            .map_err(|_| AslError::InvalidIdentity)?,
+                    )
+                    .map_err(|_| AslError::InvalidIdentity)?
+                {
+                    return Err(AslError::InvalidIdentity);
+                }
+                self.bootstrap_multiaddrs.push(address);
+            }
+        }
+        self.validate()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkSeedsV1 {
+    version: u16,
+    network_id: String,
+    generated_at_ms: u64,
+    expires_at_ms: u64,
+    nodes: Vec<NetworkSeedNodeV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkSeedNodeV1 {
+    operator_id: String,
+    peer_id: String,
+    multiaddrs: Vec<String>,
+    roles: Vec<String>,
+}
+
+impl NetworkSeedsV1 {
+    fn validate(&self, now_ms: u64) -> Result<(), AslError> {
+        if self.version != 1
+            || self.network_id.is_empty()
+            || self.network_id.len() > 128
+            || self.generated_at_ms > now_ms
+            || self.expires_at_ms <= now_ms
+            || self.nodes.is_empty()
+            || self.nodes.len() > MAX_BOOTSTRAP_NODES
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        for node in &self.nodes {
+            if node.operator_id.is_empty()
+                || node.operator_id.len() > 128
+                || node.multiaddrs.is_empty()
+                || node.multiaddrs.len() > MAX_BOOTSTRAP_ADDRESSES_PER_NODE
+                || !node.roles.iter().any(|role| role == "bootstrap")
+            {
+                return Err(AslError::InvalidIdentity);
+            }
         }
         Ok(())
     }

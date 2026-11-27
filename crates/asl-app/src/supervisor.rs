@@ -154,7 +154,11 @@ impl Supervisor {
     ) -> Result<Self, AslError> {
         let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
-        let settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let mut settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let packaged_seeds = sibling_binary_directory()?
+            .join("assets")
+            .join("network-seeds.json");
+        settings.apply_packaged_bootstrap(&packaged_seeds, unix_time_ms()?)?;
         let network_store = open_store(&state_database)?;
         let network_settings =
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
