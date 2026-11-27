@@ -35,6 +35,18 @@
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
 | 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
 
+## 目标对齐
+
+| 目标 | 已有代码 | 仍缺代码 | 仍需部署/验收 |
+| --- | --- | --- | --- |
+| libp2p 去中心化传输 | TCP/QUIC + Noise、mDNS、DHT provider、relay v2、bootstrap 配置和签名 seed 解析 | AutoNAT、DCUtR 打洞、多 bootstrap 故障切换和真实 NAT/relay 自适应；DHT store/记录历史持久化 | 至少两个独立运营的 bootstrap/relay、真实双机公网、断线重连和 72 小时运行 |
+| 区块链身份与迁移 | 根身份、AgentId、设备证书、Helios/MPT 验证、注册/更新/撤销 EIP-712、calldata、部署脚本、迁移线索 | 注册后自动发布目录、注册/迁移/撤销的完整编排和真实交易状态机 | 合约正式部署、真实 RPC/最终性、资金/赞助策略、跨设备迁移和撤销传播 |
+| 去中心化资源发现 | Kademlia provider、公开 content/concept hash、public/contacts/groups audience、密文邮箱 | 资源 provider 的持久化索引、分层/分片群拓扑、更多离线补收路径 | 真实公网 DHT、NAT 后节点、资源索引和冷启动发现 |
+| 所有语义高效表达 | 确定性 CBOR、ASL/1.1 表达式、ASL/1.2 上下文、ASL/1.3 act/action/attachment、MCP 结构化工具 | 语义历史排序/跨保留期索引、群组上下文同步和更完整的模型输出约束测试 | 真实模型、跨机语义包、提示注入红队和跨 audience 测试 |
+| 文件传输 | 分块 hash、断点、多来源、双端审批、群文件 Offer/Fetch/Bulk、inline 和收件目录 | 生产公网传输编排、更多复合预算和故障恢复策略 | 两台真实设备大文件、NAT/relay、重启续传和恶意分块压力测试 |
+| Agent 安装与可用性 | `asl.exe setup`、MCP bootstrap、首次语言选择、托盘、头像、网络/群/传输 GUI 基础控制 | 一条命令完成可信网络配置、链注册状态跟踪和安装后引导闭环 | 真实签名种子/发布包、正式链交易、Windows 实机 DPI/托盘和 Linux infra 包 |
+| 用户授权 | 目录白名单、硬路径边界、设备/群/受众授权、逐次传输审批、信任与授权解耦 | 群主转移、管理员代管成员、逐文件群策略、复合预算和授权策略迁移 | 真实多设备管理员操作、跨 audience 外泄测试和独立安全审计 |
+
 ## 尚未实现
 
 - 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取，离线 Offer 需来源设备在 Offer 有效期内重新上线后才可进入在线分块传输。
