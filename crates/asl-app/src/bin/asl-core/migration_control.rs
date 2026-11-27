@@ -83,6 +83,19 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 .ok_or(AslError::InvalidMessage)?;
             prepare_registration_request(Path::new(destination), sequence)
         }
+        [command, destination, sequence, deadline] if command == "revoke-request" => {
+            let sequence = sequence
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 1)
+                .ok_or(AslError::InvalidMessage)?;
+            let deadline = deadline
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .ok_or(AslError::InvalidMessage)?;
+            prepare_revoke_request(Path::new(destination), sequence, deadline)
+        }
         _ => Err(AslError::InvalidMessage),
     }
 }
@@ -105,6 +118,29 @@ fn prepare_registration_request(destination: &Path, sequence: u64) -> Result<(),
         commitment,
         sequence,
         default_deadline()?,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string(&request).map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn prepare_revoke_request(
+    destination: &Path,
+    sequence: u64,
+    deadline: u64,
+) -> Result<(), AslError> {
+    let paths = AppPaths::open_existing(destination)?;
+    let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+    let configuration =
+        NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?
+            .ok_or(AslError::InvalidIdentity)?;
+    let request = IdentityRegistrationRequest::build_revoke(
+        &identity,
+        configuration.resolver.deployment,
+        sequence,
+        deadline,
     )?;
     println!(
         "{}",

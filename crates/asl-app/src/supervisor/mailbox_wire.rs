@@ -6,6 +6,7 @@ use std::{
 use asl_net::mailbox::MailboxRecord;
 use asl_store::{
     Store,
+    budgets::BudgetKind,
     mailbox::{MailboxEnvelope, MailboxQuota},
 };
 use asl_types::{
@@ -95,6 +96,11 @@ impl MailboxWireRuntime {
         if frame.is_empty() || frame.len() > 1024 * 1024 {
             return Err(AslError::InvalidMessage);
         }
+        let conversation = alloy_primitives::hex::encode(room.0);
+        let frame_bytes = u64::try_from(frame.len()).map_err(|_| AslError::InvalidMessage)?;
+        if !store.resource_budget_available(&conversation, BudgetKind::MailboxBytes, now_ms)? {
+            return Err(AslError::QuotaExceeded);
+        }
         let epoch = now_ms / MAILBOX_EPOCH_MS;
         let mailbox_id = digest(b"ASL-MAILBOX-PACKET-v1\0", &frame);
         let expires_at_ms = now_ms
@@ -119,6 +125,12 @@ impl MailboxWireRuntime {
                 },
             })?;
         }
+        let _ = store.consume_resource_budget(
+            &conversation,
+            BudgetKind::MailboxBytes,
+            frame_bytes,
+            now_ms,
+        );
         self.next_publish = Some(Instant::now());
         Ok(())
     }

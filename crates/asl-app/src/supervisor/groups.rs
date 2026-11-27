@@ -521,7 +521,14 @@ impl Supervisor {
                     let evidence = requester.as_ref().and_then(|member| {
                         select_auto_reply_evidence(&groups.store, libraries, home, member, act)
                     });
-                    super::auto_reply::queue_auto_reply(auto_reply, *wire_id, act, evidence);
+                    super::auto_reply::queue_auto_reply(
+                        auto_reply,
+                        *wire_id,
+                        act,
+                        evidence,
+                        &groups.store,
+                        now_ms,
+                    );
                 }
             }
             if member_allowed
@@ -733,7 +740,14 @@ impl Supervisor {
                 .and_then(|member| {
                     select_auto_reply_evidence(&groups.store, libraries, home, &member, act)
                 });
-            super::auto_reply::queue_auto_reply(auto_reply, key, act, evidence);
+            super::auto_reply::queue_auto_reply(
+                auto_reply,
+                key,
+                act,
+                evidence,
+                &groups.store,
+                now_ms,
+            );
         }
         if let GroupApplication::Act(act) = &application
             && mailbox.interested()

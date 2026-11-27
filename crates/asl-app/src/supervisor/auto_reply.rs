@@ -9,6 +9,7 @@ use asl_agent::{
     ActQuestion, ActReplyError, ActReplyPlan, gateway::HttpModelGateway, generate_act_reply,
 };
 use asl_policy::{AccessRequest, Permit, PolicyRevision, PolicyService};
+use asl_store::{Store, budgets::BudgetKind};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
@@ -127,6 +128,8 @@ pub(super) fn queue_auto_reply(
     room: Hash32,
     act: &Act,
     evidence: Option<AutoReplyEvidenceContext>,
+    store: &Store,
+    now_ms: u64,
 ) {
     if act.act_type != ActType::Ask || act.nl_body.is_none() {
         return;
@@ -134,8 +137,16 @@ pub(super) fn queue_auto_reply(
     let Ok(request) = ActQuestion::from_act(act) else {
         return;
     };
+    let conversation = alloy_primitives::hex::encode(act.conversation_id.0);
+    if !store
+        .resource_budget_available(&conversation, BudgetKind::ModelCalls, now_ms)
+        .unwrap_or(false)
+    {
+        return;
+    }
     let now = Instant::now();
     if runtime.enqueue(room, request, evidence, now) {
+        let _ = store.consume_resource_budget(&conversation, BudgetKind::ModelCalls, 1, now_ms);
         runtime.remember(act.message_id, act.conversation_id, now);
     }
 }
