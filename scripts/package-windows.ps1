@@ -3,7 +3,10 @@
 param(
     [Parameter(Mandatory)][string]$OutputZip,
     [switch]$Offline,
-    [switch]$DebugBuild
+    [switch]$DebugBuild,
+    [string]$AuthenticodeThumbprint,
+    [string]$SignToolPath,
+    [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +20,15 @@ if (Test-Path -LiteralPath $archive) {
 }
 
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $DebugBuild) {
+    $changes = git -C $repo status --porcelain --untracked-files=normal
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Git status failed; official packages require a source-controlled clean tree.'
+    }
+    if ($changes) {
+        throw 'Official packages require a clean worktree. Use -DebugBuild for a development package.'
+    }
+}
 . (Join-Path $repo 'packaging\windows\Portable-Layout.ps1')
 $parent = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($archive))
 $candidate = [guid]::NewGuid().ToString('N')
@@ -32,6 +44,30 @@ try {
     [IO.File]::Copy((Join-Path $repo 'packaging\windows\README.md'), (Join-Path $package 'README.md'))
     [IO.File]::WriteAllText((Join-Path $package 'active-release.txt'), 'base', [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText((Join-Path $package 'package-layout.txt'), (Get-PortableLayoutVersion), [Text.Encoding]::ASCII)
+
+    if ($AuthenticodeThumbprint) {
+        if (-not $SignToolPath) {
+            $command = Get-Command 'signtool.exe' -ErrorAction SilentlyContinue
+            if ($command) { $SignToolPath = $command.Source }
+        }
+        if (-not $SignToolPath -or -not (Test-Path -LiteralPath $SignToolPath -PathType Leaf)) {
+            throw 'Pass -SignToolPath or make signtool.exe available on PATH for an Authenticode release.'
+        }
+        $SignToolPath = (Resolve-Path -LiteralPath $SignToolPath).Path
+        $thumbprint = $AuthenticodeThumbprint.Replace(' ', '').ToUpperInvariant()
+        foreach ($executable in @('asl.exe', 'asl-core.exe', 'asl-net.exe', 'asl-worker.exe', 'asl-extractor.exe', 'asl-ui.exe')) {
+            $path = Join-Path $package $executable
+            & $SignToolPath sign /sha1 $thumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $path
+            if ($LASTEXITCODE -ne 0) {
+                throw "Authenticode signing failed for $executable."
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne 'Valid') {
+                throw "Authenticode verification failed for $executable`: $($signature.StatusMessage)"
+            }
+        }
+    }
+
     & (Join-Path $PSScriptRoot 'windows-package-notices.ps1') -OutputDirectory $package -Offline:$Offline
     $hashes = foreach ($name in $files) {
         if ($name -ne 'SHA256SUMS.txt') {

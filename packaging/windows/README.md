@@ -27,6 +27,8 @@
 
 `SHA256SUMS.txt` 记录包内文件的散列。发布身份由独立签名清单及可信发布公钥核验。
 
+正式发行包还必须在 ZIP 封包前完成全部 EXE 的 Authenticode 签名，并提供独立的 Ed25519 更新清单、64 字节签名和 32 字节公钥。构建、旧版复验和密钥保管步骤见 `RELEASE.md`；不要使用 PFX 密码参数或把发布私钥放进解压目录。
+
 把安装根目录的 `asl.exe` 设为 MCP 宿主命令，参数为 `mcp --home <本机数据目录>`。同一安装目录内更新后保持这个路径；请重连宿主以启用新版。打包不会默认打开 MCP，也不授予查询或文件权限。授权与配置见源码仓库的 `docs/05-agent-gui.md`。
 
 离线更新使用 PowerShell 7。先正常退出 ASL。在独立核实发布公钥后，只需固定一次：
@@ -59,6 +61,11 @@ shows the current status. `.\Set-ASLLogin.ps1 -Disable` removes the startup entr
 
 `SHA256SUMS.txt` lists the file digests. Verify the separate release manifest
 signature against your trusted release key to authenticate the package.
+
+An official distribution also requires Authenticode on every EXE before ZIP
+creation plus an independent Ed25519 manifest, 64-byte signature, and 32-byte
+public key. See `RELEASE.md`. Do not place a release private key in the
+extracted directory.
 
 Configure the root `asl.exe` as the MCP host command with arguments
 `mcp --home <absolute data directory>`. The command path stays the same across

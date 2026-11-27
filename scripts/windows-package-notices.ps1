@@ -22,6 +22,17 @@ $application = $details.packages | Where-Object {
     $_.manifest_path -eq (Join-Path $repo 'crates\asl-app\Cargo.toml')
 } | Select-Object -First 1
 if (-not $application) { throw 'The application is missing from Cargo metadata.' }
+$applicationLicense = if ($application.license) { $application.license } else { 'MIT' }
+$gitCommit = 'unknown'
+try {
+    $candidateCommit = & git -C $repo rev-parse --verify HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $candidateCommit) {
+        $gitCommit = $candidateCommit.Trim()
+    }
+}
+catch {
+    $gitCommit = 'unknown'
+}
 
 $seen = @{}
 $pending = [Collections.Generic.Queue[string]]::new()
@@ -44,6 +55,9 @@ $sourceArchives = [Collections.Generic.List[string]]::new()
 $file = [IO.StreamWriter]::new($document, $false, $utf8)
 try {
     $file.WriteLine('ASL Windows runtime dependencies')
+    $file.WriteLine("ASL application version: $($application.version)")
+    $file.WriteLine("ASL source commit: $gitCommit")
+    $file.WriteLine('ASL project code is licensed under the repository MIT license.')
     $file.WriteLine('MPL-SOURCES.zip contains the original .crate archives for the MPL-2.0 runtime components.')
     foreach ($package in ($seen.Keys | ForEach-Object { $packages[$_] } | Sort-Object name, version)) {
         if ($package.id -eq $application.id) { continue }
@@ -98,7 +112,18 @@ $sbom = [ordered]@{
     bomFormat = 'CycloneDX'
     specVersion = '1.6'
     version = 1
-    metadata = @{ component = @{ type = 'application'; name = 'ASL'; version = $application.version } }
+    metadata = @{
+        component = @{
+            type = 'application'
+            name = 'ASL'
+            version = $application.version
+            licenses = @(@{ expression = $applicationLicense })
+        }
+        properties = @(
+            @{ name = 'asl:git_commit'; value = $gitCommit }
+            @{ name = 'asl:package_layout'; value = 'asl-windows-layout-v2' }
+        )
+    }
     components = $components.ToArray()
 }
 [IO.File]::WriteAllText(

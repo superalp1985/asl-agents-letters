@@ -180,11 +180,26 @@ fuzz 工具、SBOM 工具及其版本在 T02 锁定；记录实际工具版本�
 
 完整公开发布必须提供并验证打包种子里的真实地址，不能交付空列表却宣传开箱公网自动发现。用户另选自建网络属于网络授权，不依赖官方账户。方案阶段不编造尚未部署的公网地址。
 
+Linux 发布脚本为 `scripts/package-linux-infra.sh`，包说明见 `packaging/linux/README.md`。包结构固定为二进制、systemd 模板 `asl-infra.service.in`、示例配置、安装器、README、LICENSE、`THIRD-PARTY.txt`、`sbom.cdx.json`、`MPL-SOURCES.zip`、`BUILD-INFO.json` 和 `SHA256SUMS`。安装器默认使用 `/usr/local/bin/asl-infra`、`/etc/asl-infra/infra.toml`、`/var/lib/asl-infra` 和 `/etc/systemd/system/asl-infra.service`，并把实际路径渲染进 unit；已有配置不被覆盖。包外另发 `.sha256`、Ed25519 `.sig` 和可独立核验的公钥。
+
+Linux 正式签名域为 `ASL-LINUX-INFRA-RELEASE-v1`。使用 `scripts/sign-release-artifact.sh` 时，签名原文为该 ASCII 域名、一个 NUL 字节和 tar.gz 原始字节；下载方用 `packaging/linux/verify-release.sh` 验签。发布脚本默认拒绝脏工作树，只有本地测试才可显式设置 `ASL_RELEASE_ALLOW_DIRTY=1`。
+
 ## 8. 发布与更新
 
 必须交付 Windows 便携包/安装包、Linux infra 包、hash 清单、独立发布密钥的 Ed25519 签名、SBOM、第三方 notices 和构建版本信息。发布密钥不复用节点身份。
 
 Windows Authenticode 可在维护者持有合适证书时附加；产品更新的签名验证不依赖购买证书或付费账号。更新镜像可替换，离线导入仍验证签名，关闭更新服务不影响已安装节点运行。
+
+Windows 正式流程见 `packaging/windows/RELEASE.md`：
+
+1. `scripts/package-windows.ps1` 构建 ZIP，并在封包前对六个 EXE 执行 Authenticode 和 `Get-AuthenticodeSignature` 验证。只有证书存储中的 thumbprint 被接受，不把 PFX、密码或私钥写入脚本参数记录。
+2. `scripts/sign-windows-package.ps1` 生成严格 v1 manifest、64 字节 Ed25519 detached signature、PEM 公钥和原始 32 字节公钥。清单签名原文为 ASCII `ASL-WINDOWS-UPDATE-v1`、一个 NUL 字节和清单原始字节。
+3. 正式发布前必须用上一版受信任的 `asl-core.exe` 执行 `--verify-update`；同版本 Core 不能把同版本包当成升级包。
+4. 发布 ZIP、manifest、signature 和独立公布的公钥。用户固定公钥后，`Update-ASL.ps1` 验证签名、版本、长度、SHA-256 和候选 `asl-core.exe --version`。
+
+发布私钥只能在仓库外使用；脚本拒绝仓库内私钥路径。当前固定公钥是引导层，不随普通更新替换；密钥轮换和丢失恢复必须带外完成，不得用未签名自动更新掩盖。
+
+Linux 与 Windows 的发布脚本只生成物料和验证结果，不是公网、第二台机器、证书链或真实链交易的验收证据。正式发布日志必须记录实际命令、工具版本、产物摘要、签名公钥指纹、SBOM 摘要和未执行项。
 
 数据库迁移有备份和向前兼容说明；更新不能自动恢复更宽松的历史授权。所有严重安全问题修复后才打完整 1.0 标签。
 
