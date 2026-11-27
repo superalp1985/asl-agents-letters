@@ -701,6 +701,52 @@ impl Form {
             &mut access.allow_member_invite,
             label(language, "成员可邀请", "Members may invite"),
         );
+        ui.separator();
+        ui.label(RichText::new(label(language, "资源预算", "Resource budgets")).strong());
+        for budget in &room.budgets {
+            let (name, additional) = match budget.kind.as_str() {
+                "message_bytes" => (
+                    label(language, "消息字节", "Message bytes"),
+                    64 * 1024 * 1024_u64,
+                ),
+                "model_calls" => (label(language, "模型调用", "Model calls"), 1_000_u64),
+                "cpu_ms" => (label(language, "CPU 毫秒", "CPU milliseconds"), 600_000_u64),
+                "mailbox_bytes" => (
+                    label(language, "邮箱字节", "Mailbox bytes"),
+                    16 * 1024 * 1024_u64,
+                ),
+                _ => continue,
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{name}: {}/{}", budget.consumed, budget.granted));
+                if ui
+                    .add_enabled(
+                        ready && action.is_none(),
+                        egui::Button::new(label(language, "续期 24h", "Renew 24h")),
+                    )
+                    .clicked()
+                {
+                    *action = Some(LocalAction::new(
+                        "group-admin",
+                        [
+                            "budget".into(),
+                            snapshot.tag.as_str().into(),
+                            room.room.as_str().into(),
+                            budget.kind.as_str().into(),
+                            additional.to_string().into(),
+                            "24".into(),
+                        ],
+                    ));
+                }
+            });
+        }
+        if room.budgets.is_empty() {
+            ui.weak(label(
+                language,
+                "尚未配置资源预算",
+                "No resource budget configured",
+            ));
+        }
         for member in room.members.iter().filter(|member| !member.creator) {
             ui.push_id(format!("access-{}", member.device), |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -865,6 +911,11 @@ fn outcome_text(outcome: &AdminOutcome, language: Language) -> &'static str {
             "上次操作：群权限已提交",
             "Group permissions submitted",
         ),
+        AdminOutcome::BudgetUpdated => label(
+            language,
+            "上次操作：资源预算已续期",
+            "Resource budget renewed",
+        ),
         AdminOutcome::Failed => label(language, "上次操作：失败", "Failed"),
         AdminOutcome::Unconfirmed => label(
             language,
@@ -899,6 +950,7 @@ mod tests {
                 allow_member_text: true,
                 allow_member_files: true,
                 allow_member_invite: false,
+                budgets: Vec::new(),
                 members: vec![
                     AdminMember {
                         agent: "owner-agent".into(),

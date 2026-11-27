@@ -309,6 +309,7 @@ async fn serve(
                     | Request::GroupRejectJoinRequest(_)
                     | Request::DirectOpen(_)
                     | Request::RenewActBudget(_)
+                    | Request::RenewResourceBudget(_)
                     | Request::RequestContext(_)
                     | Request::ConfirmContext(_)
                     | Request::Fetch(_)
@@ -337,6 +338,9 @@ async fn serve(
                     Request::DirectOpen(args) => direct_open(mail, grant, args).await,
                     Request::RenewActBudget(args) => {
                         renew_act_budget(mail, grant, args).await
+                    }
+                    Request::RenewResourceBudget(args) => {
+                        renew_resource_budget(mail, grant, args).await
                     }
                     Request::RequestContext(args) if subscribed => {
                         request_context(mail, grant, args).await
@@ -629,6 +633,20 @@ async fn renew_act_budget(
         .map_err(error_code)
 }
 
+async fn renew_resource_budget(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::RenewResourceBudgetArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (conversation_id, kind, additional, window_ms) = args.validate()?;
+    mail.renew_resource_budget(conversation_id, kind, additional, window_ms)
+        .await
+        .map_err(error_code)
+}
+
 async fn request_context(
     mail: Option<&MailPort>,
     grant: &HostGrant,
@@ -650,8 +668,11 @@ async fn confirm_context(
     args: super::contract::ConfirmContextArgs,
 ) -> Result<Value, ErrorCode> {
     let mail = mail.ok_or(ErrorCode::PolicyDenied)?;
-    let request_id = parse_id(&args.request_id)?;
-    let (message_id, status) = mail.confirm_context(request_id).await.map_err(error_code)?;
+    let (request_id, group) = args.validate()?;
+    let (message_id, status) = mail
+        .confirm_context(request_id, group)
+        .await
+        .map_err(error_code)?;
     Ok(json!({
         "message_id": alloy_primitives::hex::encode(message_id.0),
         "status": match status {
@@ -659,5 +680,7 @@ async fn confirm_context(
             asl_types::protocol::ContextAgreementStatus::Unresolved => "unresolved",
             asl_types::protocol::ContextAgreementStatus::Rejected => "rejected",
         },
+        "room": group.map(|(room, _)| format!("group:{}", alloy_primitives::hex::encode(room.0))),
+        "sender": group.map(|(_, sender)| format!("agent:{}", alloy_primitives::hex::encode(sender.0))),
     }))
 }

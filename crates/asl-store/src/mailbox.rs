@@ -952,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn v35_through_v41_migrations_create_all_new_tables() {
+    fn v35_through_v43_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
         assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         for table in [
@@ -963,8 +963,11 @@ mod tests {
             "conversation_attachment_refs",
             "gossip_topic_state",
             "local_capacity_measurements",
+            "conversation_act_semantic_index",
             "group_access_policies",
             "group_access_members",
+            "group_file_policies",
+            "group_admin_capabilities",
             "contact_invites",
             "contact_invite_receipts",
             "contact_invite_prompts",
@@ -994,18 +997,25 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE conversation_attachment_refs;
+                "DROP TABLE conversation_act_semantic_index;
+                 DROP TABLE conversation_attachment_refs;
                  DROP TABLE conversation_act_events;
                  DROP TABLE conversation_budget_grants;
                  DROP TABLE mailbox_shards;
                  DROP TABLE mailbox_slots;
                  DROP TABLE gossip_topic_state;
                  DROP TABLE local_capacity_measurements;
+                 DROP TABLE group_admin_capabilities;
+                 DROP TABLE group_file_policies;
                  DROP TABLE group_access_members;
                  DROP TABLE group_access_policies;
                  DROP TABLE group_invite_requests;
                  DROP TABLE migration_group_hints;
-                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39,40,41);",
+                 DROP TABLE resource_budget_grants;
+                 DROP TABLE IF EXISTS dht_provider_cache_v42;
+                 DROP TABLE dht_provider_cache;
+                 DROP TABLE dht_record_cache;
+                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39,40,41,42,43);",
             )
             .unwrap();
         drop(connection);

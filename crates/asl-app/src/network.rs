@@ -8,7 +8,7 @@ use asl_net::{
 };
 use asl_types::{
     error::AslError,
-    ids::PeerId,
+    ids::{AgentId, PeerId},
     protocol::{
         GroupPacket, IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame,
     },
@@ -129,6 +129,14 @@ pub enum NetworkCommand {
     StopProviding {
         operation_id: [u8; 16],
         key: [u8; 32],
+    },
+    PrepareDirectory {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishDirectory {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
     },
     GossipSubscribe {
         operation_id: [u8; 16],
@@ -305,6 +313,20 @@ impl NetworkCommand {
             Self::StopProviding { operation_id, key } => {
                 IpcMessage::StopProviding { operation_id, key }
             }
+            Self::PrepareDirectory {
+                operation_id,
+                agent,
+            } => IpcMessage::PrepareDirectory {
+                operation_id,
+                agent,
+            },
+            Self::PublishDirectory {
+                operation_id,
+                value,
+            } => IpcMessage::PublishDirectory {
+                operation_id,
+                value,
+            },
             Self::GossipSubscribe { operation_id, key } => {
                 IpcMessage::GossipSubscribe { operation_id, key }
             }
@@ -359,6 +381,12 @@ pub enum NetworkEvent {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
     },
     GossipReceived {
         key: [u8; 32],
@@ -450,6 +478,12 @@ pub enum LocalNetworkObservation {
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
     },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
+    },
 }
 
 impl NetworkEvent {
@@ -474,6 +508,17 @@ impl NetworkEvent {
                 lookup_id: *lookup_id,
                 status: *status,
                 providers: providers.clone(),
+            }),
+            Self::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            } => Some(LocalNetworkObservation::DhtProviderObserved {
+                key: *key,
+                peer_id: peer_id.clone(),
+                addresses: addresses.clone(),
+                expires_at_ms: *expires_at_ms,
             }),
             _ => None,
         }
@@ -530,6 +575,17 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 lookup_id,
                 status,
                 providers,
+            }),
+            IpcMessage::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            } => Ok(Self::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
             }),
             IpcMessage::GossipReceived {
                 key,
@@ -747,6 +803,12 @@ impl Supervisor {
     ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
         self.flush_disconnects()?;
         let event = self.receive_network_event(timeout)?;
+        if let Some(observation @ LocalNetworkObservation::DhtProviderObserved { .. }) =
+            event.as_local_observation()
+        {
+            self.observe_dht_provider_observation(&observation)?;
+            return Ok(Vec::new());
+        }
         let batch = self.handle_admitted_event(event, now_ms)?;
         for command in batch.commands {
             self.send_network_command(command)?;

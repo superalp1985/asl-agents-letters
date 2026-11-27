@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
-    dht::MAX_DHT_VALUE_BYTES,
+    dht::{MAX_DHT_PROVIDER_ADDRESSES, MAX_DHT_VALUE_BYTES},
     relay::MAX_RELAY_ENDPOINT_BYTES,
     transport::{
         DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, MAX_GOSSIP_PAYLOAD_BYTES,
@@ -47,6 +47,7 @@ pub const MAX_IPC_PAIRING_FRAME_BYTES: usize = MAX_PAIRING_FRAME_BYTES;
 pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
 const MAX_IPC_GROUP_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 const MAX_IPC_DHT_PROVIDER_CANDIDATES: usize = 20;
+const MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES: usize = 512;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
 
@@ -67,7 +68,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=65)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=71)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -81,7 +82,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Net, Self::Core, 36..=39 | 45..=47)
-                | (Self::Net, Self::Core, 52..=53 | 63)
+                | (Self::Net, Self::Core, 52..=53 | 63 | 68)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -306,7 +307,14 @@ pub enum IpcMessage {
         key: [u8; 32],
     },
     RestoreDhtRecord {
+        expires_at_ms: u64,
         value: Vec<u8>,
+    },
+    RestoreDhtProvider {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
     },
     PublishMailboxRecord {
         operation_id: [u8; 16],
@@ -332,6 +340,18 @@ pub enum IpcMessage {
         operation_id: [u8; 16],
         receipt_id: [u8; 16],
     },
+    PrepareDirectory {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishDirectory {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
+    },
+    CancelDirectory {
+        operation_id: [u8; 16],
+        receipt_id: [u8; 16],
+    },
     LookupProfile {
         operation_id: [u8; 16],
         agent: AgentId,
@@ -340,6 +360,12 @@ pub enum IpcMessage {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
     },
     ControlRequested {
         connection_id: [u8; 16],
@@ -1114,10 +1140,14 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             64
         }
-        IpcMessage::RestoreDhtRecord { value } => {
-            if value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+        IpcMessage::RestoreDhtRecord {
+            expires_at_ms,
+            value,
+        } => {
+            if *expires_at_ms == 0 || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
                 return Err(AslError::InvalidMessage);
             }
+            body.extend_from_slice(&expires_at_ms.to_be_bytes());
             body.extend_from_slice(
                 &u16::try_from(value.len())
                     .map_err(|_| AslError::InvalidMessage)?
@@ -1125,6 +1155,15 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             );
             body.extend_from_slice(value);
             66
+        }
+        IpcMessage::RestoreDhtProvider {
+            key,
+            peer_id,
+            addresses,
+            expires_at_ms,
+        } => {
+            append_dht_provider_observation(&mut body, key, peer_id, addresses, *expires_at_ms)?;
+            67
         }
         IpcMessage::PublishMailboxRecord {
             operation_id,
@@ -1198,6 +1237,39 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(receipt_id);
             58
         }
+        IpcMessage::PrepareDirectory {
+            operation_id,
+            agent,
+        } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(agent.as_bytes());
+            69
+        }
+        IpcMessage::PublishDirectory {
+            operation_id,
+            value,
+        } => {
+            if *operation_id == [0; 16] || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(value);
+            70
+        }
+        IpcMessage::CancelDirectory {
+            operation_id,
+            receipt_id,
+        } => {
+            if *operation_id == [0; 16] || *receipt_id == [0; 16] || operation_id == receipt_id {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(receipt_id);
+            71
+        }
         IpcMessage::DhtProviders {
             lookup_id,
             status,
@@ -1236,6 +1308,15 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
                 body.push(u8::from(provider.relay_route_available));
             }
             45
+        }
+        IpcMessage::DhtProviderObserved {
+            key,
+            peer_id,
+            addresses,
+            expires_at_ms,
+        } => {
+            append_dht_provider_observation(&mut body, key, peer_id, addresses, *expires_at_ms)?;
+            68
         }
         IpcMessage::DecideDhtRecord {
             candidate_id,
@@ -1632,13 +1713,28 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
         }),
-        66 if body.len() >= 2 => {
-            let length = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
-            if length == 0 || length > MAX_DHT_VALUE_BYTES || body.len() != length + 2 {
+        66 if body.len() >= 10 => {
+            let expires_at_ms = u64::from_be_bytes(body[..8].try_into().unwrap());
+            let length = u16::from_be_bytes(body[8..10].try_into().unwrap()) as usize;
+            if expires_at_ms == 0
+                || length == 0
+                || length > MAX_DHT_VALUE_BYTES
+                || body.len() != length + 10
+            {
                 return Err(AslError::InvalidMessage);
             }
             Ok(IpcMessage::RestoreDhtRecord {
-                value: body[2..].to_vec(),
+                expires_at_ms,
+                value: body[10..].to_vec(),
+            })
+        }
+        67 => {
+            let (key, peer_id, addresses, expires_at_ms) = decode_dht_provider_observation(body)?;
+            Ok(IpcMessage::RestoreDhtProvider {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
             })
         }
         65 if (18..=17 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES).contains(&body.len())
@@ -1666,6 +1762,26 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             Ok(IpcMessage::PublishProfile {
                 operation_id: body[..16].try_into().unwrap(),
                 value: body[16..].to_vec(),
+            })
+        }
+        69 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::PrepareDirectory {
+            operation_id: body[..16].try_into().unwrap(),
+            agent: AgentId(body[16..].try_into().unwrap()),
+        }),
+        70 if (17..=16 + MAX_DHT_VALUE_BYTES).contains(&body.len()) && body[..16] != [0; 16] => {
+            Ok(IpcMessage::PublishDirectory {
+                operation_id: body[..16].try_into().unwrap(),
+                value: body[16..].to_vec(),
+            })
+        }
+        71 if body.len() == 32
+            && body[..16] != [0; 16]
+            && body[16..] != [0; 16]
+            && body[..16] != body[16..] =>
+        {
+            Ok(IpcMessage::CancelDirectory {
+                operation_id: body[..16].try_into().unwrap(),
+                receipt_id: body[16..].try_into().unwrap(),
             })
         }
         59 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::LookupProfile {
@@ -1749,6 +1865,15 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 lookup_id: body[..16].try_into().unwrap(),
                 status,
                 providers,
+            })
+        }
+        68 => {
+            let (key, peer_id, addresses, expires_at_ms) = decode_dht_provider_observation(body)?;
+            Ok(IpcMessage::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
             })
         }
         60 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::GossipSubscribe {
@@ -2203,6 +2328,93 @@ fn decode_socket_addr(bytes: &[u8]) -> Result<(SocketAddr, usize), AslError> {
     Ok((SocketAddr::new(ip, port), length))
 }
 
+fn append_dht_provider_observation(
+    body: &mut Vec<u8>,
+    key: &[u8; 32],
+    peer_id: &PeerId,
+    addresses: &[String],
+    expires_at_ms: u64,
+) -> Result<(), AslError> {
+    let peer_bytes = peer_id.as_bytes();
+    if expires_at_ms == 0
+        || peer_bytes.is_empty()
+        || peer_bytes.len() > 128
+        || addresses.len() > MAX_DHT_PROVIDER_ADDRESSES
+        || addresses
+            .iter()
+            .any(|address| address.is_empty() || address.len() > MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES)
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    body.extend_from_slice(key);
+    body.extend_from_slice(
+        &u16::try_from(peer_bytes.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(peer_bytes);
+    body.extend_from_slice(&expires_at_ms.to_be_bytes());
+    body.push(addresses.len() as u8);
+    for address in addresses {
+        body.extend_from_slice(
+            &u16::try_from(address.len())
+                .map_err(|_| AslError::InvalidMessage)?
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(address.as_bytes());
+    }
+    Ok(())
+}
+
+fn decode_dht_provider_observation(
+    body: &[u8],
+) -> Result<([u8; 32], PeerId, Vec<String>, u64), AslError> {
+    if body.len() < 32 + 2 + 8 + 1 {
+        return Err(AslError::InvalidMessage);
+    }
+    let key = body[..32].try_into().unwrap();
+    let peer_len = u16::from_be_bytes(body[32..34].try_into().unwrap()) as usize;
+    if peer_len == 0 || peer_len > 128 || body.len() < 34 + peer_len + 8 + 1 {
+        return Err(AslError::InvalidMessage);
+    }
+    let peer_id = PeerId::from_bytes(body[34..34 + peer_len].to_vec())
+        .map_err(|_| AslError::InvalidMessage)?;
+    let mut offset = 34 + peer_len;
+    let expires_at_ms = u64::from_be_bytes(body[offset..offset + 8].try_into().unwrap());
+    offset += 8;
+    if expires_at_ms == 0 {
+        return Err(AslError::InvalidMessage);
+    }
+    let count = body[offset] as usize;
+    offset += 1;
+    if count > MAX_DHT_PROVIDER_ADDRESSES {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut addresses = Vec::with_capacity(count);
+    for _ in 0..count {
+        if body.len() < offset + 2 {
+            return Err(AslError::InvalidMessage);
+        }
+        let length = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        if length == 0
+            || length > MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES
+            || body.len() < offset + length
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        addresses.push(
+            String::from_utf8(body[offset..offset + length].to_vec())
+                .map_err(|_| AslError::InvalidMessage)?,
+        );
+        offset += length;
+    }
+    if offset != body.len() {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok((key, peer_id, addresses, expires_at_ms))
+}
+
 fn max_body_bytes(kind: u8) -> Option<usize> {
     Some(match kind {
         1..=3 => 0,
@@ -2249,7 +2461,17 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         63 => 34 + 128 + 32 + 2 + MAX_GOSSIP_PAYLOAD_BYTES,
         64 => 48,
         65 => 16 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES,
-        66 => 2 + MAX_DHT_VALUE_BYTES,
+        66 => 8 + 2 + MAX_DHT_VALUE_BYTES,
+        67 | 68 => {
+            32 + 2
+                + 128
+                + 8
+                + 1
+                + MAX_DHT_PROVIDER_ADDRESSES * (2 + MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES)
+        }
+        69 => 48,
+        70 => 16 + MAX_DHT_VALUE_BYTES,
+        71 => 32,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2640,6 +2862,18 @@ mod tests {
                 operation_id: [41; 16],
                 agent: AgentId([42; 32]),
             },
+            IpcMessage::PrepareDirectory {
+                operation_id: [70; 16],
+                agent: AgentId([71; 32]),
+            },
+            IpcMessage::PublishDirectory {
+                operation_id: [70; 16],
+                value: vec![0x82, 0x01, 0x02],
+            },
+            IpcMessage::CancelDirectory {
+                operation_id: [70; 16],
+                receipt_id: [72; 16],
+            },
             IpcMessage::DhtProviders {
                 lookup_id: [34; 16],
                 status: DhtLookupStatus::Completed,
@@ -2768,6 +3002,25 @@ mod tests {
                 operation_id: [61; 16],
                 key: [62; 32],
             },
+            IpcMessage::RestoreDhtRecord {
+                expires_at_ms: u64::MAX - 1,
+                value: vec![0x81, 0x01],
+            },
+            IpcMessage::RestoreDhtProvider {
+                key: [70; 32],
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                addresses: vec![
+                    "/ip4/127.0.0.1/tcp/4001".into(),
+                    "/ip4/127.0.0.1/udp/4001/quic-v1".into(),
+                ],
+                expires_at_ms: u64::MAX - 1,
+            },
+            IpcMessage::DhtProviderObserved {
+                key: [71; 32],
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                addresses: vec!["/ip4/192.168.1.4/tcp/4001".into()],
+                expires_at_ms: u64::MAX - 1,
+            },
             IpcMessage::PublishMailboxRecord {
                 operation_id: [63; 16],
                 record: asl_net::mailbox::MailboxRecord {
@@ -2819,6 +3072,7 @@ mod tests {
                 | IpcMessage::DiscoveryCandidate { .. }
                 | IpcMessage::DhtRecordCandidate { .. }
                 | IpcMessage::DhtProviders { .. }
+                | IpcMessage::DhtProviderObserved { .. }
                 | IpcMessage::PairingInviteRequested { .. }
                 | IpcMessage::PairingExchangeReceived { .. }
                 | IpcMessage::ControlRequested { .. }
@@ -2846,6 +3100,7 @@ mod tests {
                 | IpcMessage::FindProviders { .. }
                 | IpcMessage::LookupDhtRecord { .. }
                 | IpcMessage::RestoreDhtRecord { .. }
+                | IpcMessage::RestoreDhtProvider { .. }
                 | IpcMessage::PublishMailboxRecord { .. }
                 | IpcMessage::StartProviding { .. }
                 | IpcMessage::StopProviding { .. }
@@ -2874,7 +3129,10 @@ mod tests {
                 IpcMessage::RequestIdentityProof { .. }
                 | IpcMessage::ReplyIdentityProof { .. }
                 | IpcMessage::RequestPairing { .. }
-                | IpcMessage::ReplyPairing { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::ReplyPairing { .. }
+                | IpcMessage::PrepareDirectory { .. }
+                | IpcMessage::PublishDirectory { .. }
+                | IpcMessage::CancelDirectory { .. } => (IpcRole::Core, IpcRole::Net),
             };
             let bytes = encode_frame(sender, receiver, 7, &message)
                 .unwrap_or_else(|error| panic!("failed to encode {message:?}: {error:?}"));

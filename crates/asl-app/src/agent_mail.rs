@@ -8,8 +8,8 @@ use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128},
     protocol::{
-        Act, ContextAgreementStatus, ContextExpression, Expression, Offer, SemanticContextRef,
-        WireFrame,
+        Act, ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, Expression,
+        Offer, SemanticContextRef, WireFrame,
     },
 };
 use serde_json::{Value, json};
@@ -34,7 +34,7 @@ pub(crate) struct MailEvent {
     pub(crate) details: Value,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Target {
     Agent(AgentId),
     Group(Hash32),
@@ -125,14 +125,22 @@ pub(crate) enum MailCommand {
         window_ms: u64,
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
+    RenewResourceBudget {
+        conversation_id: String,
+        kind: asl_store::budgets::BudgetKind,
+        additional: u64,
+        window_ms: u64,
+        reply: oneshot::Sender<Result<Value, AslError>>,
+    },
     RequestContext {
-        target: AgentId,
+        target: Target,
         scope: QueryScope,
         reference: SemanticContextRef,
         reply: oneshot::Sender<Result<Id128, AslError>>,
     },
     ConfirmContext {
         request_id: Id128,
+        group: Option<(Hash32, AgentId)>,
         reply: oneshot::Sender<Result<(Id128, ContextAgreementStatus), AslError>>,
     },
     Claim {
@@ -159,6 +167,8 @@ pub struct GroupAccessUpdate {
     pub admins: Vec<asl_types::ids::PeerId>,
     pub muted: Vec<asl_types::ids::PeerId>,
     pub owner: Option<asl_types::ids::PeerId>,
+    pub file_policies: Option<Vec<asl_types::protocol::GroupFilePolicy>>,
+    pub admin_capabilities: Option<Vec<asl_types::protocol::GroupAdminCapability>>,
 }
 
 #[derive(Clone)]
@@ -363,15 +373,31 @@ impl MailPort {
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 
+    pub(crate) async fn renew_resource_budget(
+        &self,
+        conversation_id: String,
+        kind: asl_store::budgets::BudgetKind,
+        additional: u64,
+        window_ms: u64,
+    ) -> Result<Value, AslError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(MailCommand::RenewResourceBudget {
+            conversation_id,
+            kind,
+            additional,
+            window_ms,
+            reply,
+        })?;
+        result.await.map_err(|_| AslError::SandboxUnavailable)?
+    }
+
     pub(crate) async fn request_context(
         &self,
         scope: QueryScope,
         target: String,
         reference: SemanticContextRef,
     ) -> Result<Id128, AslError> {
-        let Target::Agent(target) = Target::parse(&target)? else {
-            return Err(AslError::InvalidMessage);
-        };
+        let target = Target::parse(&target)?;
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::RequestContext {
             target,
@@ -385,9 +411,14 @@ impl MailPort {
     pub(crate) async fn confirm_context(
         &self,
         request_id: Id128,
+        group: Option<(Hash32, AgentId)>,
     ) -> Result<(Id128, ContextAgreementStatus), AslError> {
         let (reply, result) = oneshot::channel();
-        self.submit(MailCommand::ConfirmContext { request_id, reply })?;
+        self.submit(MailCommand::ConfirmContext {
+            request_id,
+            group,
+            reply,
+        })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?
     }
 
@@ -440,6 +471,7 @@ pub(crate) struct Mailbox {
     pub(crate) commands: mpsc::Receiver<MailCommand>,
     offers: HashMap<Id128, HeldOffer>,
     context_requests: HashMap<([u8; 16], [u8; 16]), PendingContextRequest>,
+    group_context_requests: HashMap<(Hash32, [u8; 16]), PendingGroupContextRequest>,
     seen: VecDeque<(AgentId, Id128, u64)>,
     recent: VecDeque<u64>,
     permission: Option<InboxWaiter>,
@@ -452,6 +484,20 @@ pub(crate) struct PendingContextRequest {
     pub(crate) reference: SemanticContextRef,
     expires: u64,
     offer: Option<Id128>,
+}
+
+struct PendingGroupContextRequest {
+    reference: SemanticContextRef,
+    expires: u64,
+    offers: HashMap<AgentId, PendingGroupContextOffer>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingGroupContextOffer {
+    pub(crate) source: DownloadSource,
+    pub(crate) connection: [u8; 16],
+    pub(crate) reference: SemanticContextRef,
+    expires: u64,
 }
 
 struct InboxWaiter {
@@ -471,6 +517,7 @@ impl Default for Mailbox {
             commands: receiver,
             offers: HashMap::new(),
             context_requests: HashMap::new(),
+            group_context_requests: HashMap::new(),
             seen: VecDeque::new(),
             recent: VecDeque::new(),
             permission: None,
@@ -535,8 +582,74 @@ impl Mailbox {
         self.context_requests.remove(&(connection, request.0));
     }
 
+    pub(crate) fn remember_group_context_request(
+        &mut self,
+        room: Hash32,
+        request: Id128,
+        reference: SemanticContextRef,
+        expires: u64,
+        now: u64,
+    ) -> Result<(), AslError> {
+        self.group_context_requests
+            .retain(|_, pending| pending.expires > now);
+        let key = (room, request.0);
+        if room.0 == [0; 32]
+            || request.0 == [0; 16]
+            || expires <= now
+            || self.group_context_requests.len() >= CONTEXT_REQUEST_LIMIT
+            || self.group_context_requests.contains_key(&key)
+        {
+            return Err(AslError::QuotaExceeded);
+        }
+        self.group_context_requests.insert(
+            key,
+            PendingGroupContextRequest {
+                reference,
+                expires,
+                offers: HashMap::new(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn cancel_group_context_request(&mut self, room: Hash32, request: Id128) {
+        self.group_context_requests.remove(&(room, request.0));
+    }
+
+    pub(crate) fn group_context_offer_for_confirmation(
+        &self,
+        request_id: Id128,
+        room: Hash32,
+        sender: AgentId,
+        now: u64,
+    ) -> Result<PendingGroupContextOffer, AslError> {
+        let pending = self
+            .group_context_requests
+            .get(&(room, request_id.0))
+            .filter(|pending| pending.expires > now)
+            .ok_or(AslError::NotFound)?;
+        let offer = pending.offers.get(&sender).ok_or(AslError::NotFound)?;
+        if offer.reference != pending.reference || offer.expires <= now {
+            return Err(AslError::NotFound);
+        }
+        Ok(offer.clone())
+    }
+
+    pub(crate) fn complete_group_context_offer(
+        &mut self,
+        request_id: Id128,
+        room: Hash32,
+        sender: AgentId,
+    ) {
+        if let Some(pending) = self.group_context_requests.get_mut(&(room, request_id.0)) {
+            pending.offers.remove(&sender);
+        }
+    }
+
     pub(crate) fn prune_context_requests(&mut self, now: u64) {
         self.context_requests
+            .retain(|_, pending| pending.expires > now);
+        self.group_context_requests
             .retain(|_, pending| pending.expires > now);
     }
 
@@ -660,6 +773,139 @@ impl Mailbox {
             .is_ok()
     }
 
+    fn observe_group_context_offer(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        room: (Hash32, u64, GroupTransferBinding),
+        offer: ContextOffer,
+        now: u64,
+    ) -> bool {
+        let key = (room.0, offer.request_id.0);
+        let Some(pending) = self.group_context_requests.get(&key) else {
+            return false;
+        };
+        if pending.expires <= now
+            || offer.expires_at_ms <= now
+            || offer.expires_at_ms > pending.expires
+            || offer.reference != pending.reference
+            || pending.offers.contains_key(&source.agent_id)
+            || !self.admit(source.agent_id, offer.message_id, offer.expires_at_ms, now)
+        {
+            return false;
+        }
+        self.offers.retain(|_, existing| existing.expires > now);
+        if self.offers.len() >= HANDLE_LIMIT {
+            return false;
+        }
+        let Ok(handle) = fresh_id().map(Id128) else {
+            return false;
+        };
+        self.offers.insert(
+            handle,
+            HeldOffer {
+                source: source.clone(),
+                connection,
+                room: Some(room.clone()),
+                content: offer.content_id,
+                expires: offer.expires_at_ms.min(now.saturating_add(MAIL_TTL_MS)),
+                context_ref: Some(offer.reference),
+            },
+        );
+        let Some(pending) = self.group_context_requests.get_mut(&key) else {
+            self.offers.remove(&handle);
+            return false;
+        };
+        pending.offers.insert(
+            source.agent_id,
+            PendingGroupContextOffer {
+                source: source.clone(),
+                connection,
+                reference: offer.reference,
+                expires: offer.expires_at_ms,
+            },
+        );
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "context_file_offer",
+                details: json!({
+                    "room": format!("group:{}", hex::encode(room.0.0)),
+                    "mls_epoch": room.1,
+                    "connection_id": hex::encode(connection),
+                    "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+                    "sender": format!("agent:{}", hex::encode(source.agent_id.0)),
+                    "peer_id": bs58::encode(source.peer_id.as_bytes()).into_string(),
+                    "message_id": hex::encode(offer.message_id.0),
+                    "request_id": hex::encode(offer.request_id.0),
+                    "offer_id": hex::encode(handle.0),
+                    "context_ref": {
+                        "authority": hex::encode(offer.reference.authority.0),
+                        "namespace": offer.reference.namespace,
+                        "revision": offer.reference.revision,
+                        "digest": hex::encode(offer.reference.digest.0),
+                    },
+                    "content_id": hex::encode(offer.content_id.0),
+                    "file_size": offer.file_size,
+                    "expires_at_ms": offer.expires_at_ms,
+                    "state": "offer_received",
+                }),
+            })
+            .is_ok()
+    }
+
+    fn observe_group_context_agreement(
+        &mut self,
+        source: DownloadSource,
+        connection: [u8; 16],
+        room: (Hash32, u64, GroupTransferBinding),
+        agreement: ContextAgreement,
+        now: u64,
+    ) -> bool {
+        let pending = self
+            .group_context_requests
+            .get(&(room.0, agreement.request_id.0));
+        if pending.is_some_and(|pending| {
+            pending.expires <= now || pending.reference != agreement.reference
+        }) {
+            return false;
+        }
+        let expires = pending
+            .map(|pending| pending.expires)
+            .unwrap_or_else(|| now.saturating_add(MAIL_TTL_MS));
+        if !self.admit(source.agent_id, agreement.message_id, expires, now) {
+            return false;
+        }
+        let status = match agreement.status {
+            ContextAgreementStatus::Conformant => "conformant",
+            ContextAgreementStatus::Unresolved => "unresolved",
+            ContextAgreementStatus::Rejected => "rejected",
+        };
+        self.port
+            .events
+            .send(MailEvent {
+                kind: "context_agreement",
+                details: json!({
+                    "room": format!("group:{}", hex::encode(room.0.0)),
+                    "mls_epoch": room.1,
+                    "connection_id": hex::encode(connection),
+                    "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+                    "sender": format!("agent:{}", hex::encode(source.agent_id.0)),
+                    "peer_id": bs58::encode(source.peer_id.as_bytes()).into_string(),
+                    "message_id": hex::encode(agreement.message_id.0),
+                    "request_id": hex::encode(agreement.request_id.0),
+                    "context_ref": {
+                        "authority": hex::encode(agreement.reference.authority.0),
+                        "namespace": agreement.reference.namespace,
+                        "revision": agreement.reference.revision,
+                        "digest": hex::encode(agreement.reference.digest.0),
+                    },
+                    "status": status,
+                }),
+            })
+            .is_ok()
+    }
+
     pub(crate) fn request_inbox_binding(
         &mut self,
         store: &asl_store::Store,
@@ -750,6 +996,19 @@ impl Mailbox {
         now: u64,
         evaluation: Option<&crate::semantic_context::SemanticEvaluation>,
     ) -> bool {
+        if let Some(room) = room.clone() {
+            match frame {
+                WireFrame::ContextOffer(offer) => {
+                    return self.observe_group_context_offer(source, connection, room, *offer, now);
+                }
+                WireFrame::ContextAgreement(agreement) => {
+                    return self.observe_group_context_agreement(
+                        source, connection, room, *agreement, now,
+                    );
+                }
+                _ => {}
+            }
+        }
         let (kind, id, root, created, expiry) = match frame {
             WireFrame::Expression(e) => (
                 "expression",
@@ -800,7 +1059,10 @@ impl Mailbox {
         }
         let mut details = json!({
             "agent": format!("agent:{}", hex::encode(source.agent_id.0)),
+            "sender": format!("agent:{}", hex::encode(source.agent_id.0)),
+            "peer_id": bs58::encode(source.peer_id.as_bytes()).into_string(),
             "room": room.as_ref().map(|(id,_,_)| format!("group:{}", hex::encode(id.0))),
+            "connection_id": hex::encode(connection),
             "message_id": hex::encode(id.0), "root_task_id": hex::encode(root.0), "expires_at_ms": expiry,
         });
         match frame {
@@ -821,6 +1083,16 @@ impl Mailbox {
                 let Ok(bytes) = asl_types::protocol::encode_control(frame) else {
                     return false;
                 };
+                details["request_id"] = json!(hex::encode(id.0));
+                details["state"] = json!("request_received");
+                if let WireFrame::ContextRequest(request) = frame {
+                    details["context_ref"] = json!({
+                        "authority": hex::encode(request.reference.authority.0),
+                        "namespace": request.reference.namespace,
+                        "revision": request.reference.revision,
+                        "digest": hex::encode(request.reference.digest.0),
+                    });
+                }
                 details["control_cbor_hex"] = json!(hex::encode(bytes));
             }
             WireFrame::Offer(Offer {
@@ -967,7 +1239,10 @@ impl Mailbox {
 mod context_offer_tests {
     use super::*;
     use crate::identity::DeviceIdentity;
-    use asl_types::protocol::{ContextAgreement, ContextAgreementStatus, ContextOffer};
+    use asl_types::{
+        protocol::{ContextAgreement, ContextAgreementStatus, ContextOffer, ContextRequest},
+        task::GroupId,
+    };
 
     #[test]
     fn only_a_correlated_context_offer_becomes_a_downloadable_inbox_event() {
@@ -1043,5 +1318,159 @@ mod context_offer_tests {
             status: ContextAgreementStatus::Unresolved,
         });
         assert!(mailbox.observe_context_agreement(source, [4; 16], request_id.0, &unavailable, 4,));
+    }
+
+    #[test]
+    fn group_context_offer_binds_request_room_and_sender_for_confirmation() {
+        let mut mailbox = Mailbox::default();
+        let mut events = mailbox.port.subscribe();
+        let source = DownloadSource {
+            agent_id: AgentId([3; 32]),
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+        };
+        let room = Hash32([5; 32]);
+        let request_id = Id128([1; 16]);
+        let reference = SemanticContextRef {
+            authority: AgentId([7; 32]),
+            namespace: 12,
+            revision: 2,
+            digest: Hash32([9; 32]),
+        };
+        mailbox
+            .remember_group_context_request(room, request_id, reference, 100, 3)
+            .unwrap();
+        let group = GroupTransferBinding {
+            group_id: GroupId(Id128([6; 16])),
+            membership_epoch: 8,
+        };
+        let offer = WireFrame::ContextOffer(ContextOffer {
+            message_id: Id128([2; 16]),
+            request_id,
+            reference,
+            content_id: Hash32([11; 32]),
+            file_size: 321,
+            expires_at_ms: 90,
+        });
+        assert!(mailbox.observe(source.clone(), [4; 16], Some((room, 9, group)), &offer, 3,));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.kind, "context_file_offer");
+        assert_eq!(
+            event.details["request_id"],
+            json!(hex::encode(request_id.0))
+        );
+        assert_eq!(
+            event.details["room"],
+            json!(format!("group:{}", hex::encode(room.0)))
+        );
+        assert_eq!(
+            event.details["agent"],
+            json!(format!("agent:{}", hex::encode(source.agent_id.0)))
+        );
+        let pending = mailbox
+            .group_context_offer_for_confirmation(request_id, room, source.agent_id, 3)
+            .unwrap();
+        assert_eq!(pending.connection, [4; 16]);
+        assert_eq!(pending.reference, reference);
+        mailbox.complete_group_context_offer(request_id, room, source.agent_id);
+        assert!(
+            mailbox
+                .group_context_offer_for_confirmation(request_id, room, source.agent_id, 3)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn incoming_group_context_request_is_a_structured_notification() {
+        let mut mailbox = Mailbox::default();
+        let mut events = mailbox.port.subscribe();
+        let source = DownloadSource {
+            agent_id: AgentId([3; 32]),
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+        };
+        let room = Hash32([5; 32]);
+        let request_id = Id128([1; 16]);
+        let request = WireFrame::ContextRequest(ContextRequest {
+            message_id: request_id,
+            reference: SemanticContextRef {
+                authority: AgentId([7; 32]),
+                namespace: 12,
+                revision: 2,
+                digest: Hash32([9; 32]),
+            },
+            expires_at_ms: 90,
+        });
+        assert!(mailbox.observe(
+            source,
+            [4; 16],
+            Some((
+                room,
+                9,
+                GroupTransferBinding {
+                    group_id: GroupId(Id128([6; 16])),
+                    membership_epoch: 8,
+                },
+            )),
+            &request,
+            3,
+        ));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.kind, "context_request");
+        assert_eq!(
+            event.details["request_id"],
+            json!(hex::encode(request_id.0))
+        );
+        assert_eq!(
+            event.details["room"],
+            json!(format!("group:{}", hex::encode(room.0)))
+        );
+        assert!(event.details["control_cbor_hex"].as_str().is_some());
+    }
+
+    #[test]
+    fn incoming_group_context_agreement_is_a_structured_notification() {
+        let mut mailbox = Mailbox::default();
+        let mut events = mailbox.port.subscribe();
+        let source = DownloadSource {
+            agent_id: AgentId([3; 32]),
+            peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+        };
+        let room = Hash32([5; 32]);
+        let request_id = Id128([1; 16]);
+        let agreement = WireFrame::ContextAgreement(ContextAgreement {
+            message_id: Id128([2; 16]),
+            request_id,
+            reference: SemanticContextRef {
+                authority: AgentId([7; 32]),
+                namespace: 12,
+                revision: 2,
+                digest: Hash32([9; 32]),
+            },
+            status: ContextAgreementStatus::Conformant,
+        });
+        assert!(mailbox.observe(
+            source,
+            [4; 16],
+            Some((
+                room,
+                9,
+                GroupTransferBinding {
+                    group_id: GroupId(Id128([6; 16])),
+                    membership_epoch: 8,
+                },
+            )),
+            &agreement,
+            3,
+        ));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.kind, "context_agreement");
+        assert_eq!(
+            event.details["request_id"],
+            json!(hex::encode(request_id.0))
+        );
+        assert_eq!(event.details["status"], json!("conformant"));
+        assert_eq!(
+            event.details["room"],
+            json!(format!("group:{}", hex::encode(room.0)))
+        );
     }
 }

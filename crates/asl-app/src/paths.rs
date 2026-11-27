@@ -112,6 +112,14 @@ impl AppPaths {
         self.state.join("network-identity-v1.json")
     }
 
+    pub fn identity_onboarding_configuration(&self) -> PathBuf {
+        self.state.join("identity-onboarding-v1.json")
+    }
+
+    pub fn identity_onboarding_status(&self) -> PathBuf {
+        self.state.join("identity-onboarding-status-v1.json")
+    }
+
     pub fn network_settings_configuration(&self) -> PathBuf {
         self.state.join("network-settings-v1.json")
     }

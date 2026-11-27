@@ -286,6 +286,8 @@ mod tests {
             admins: Vec::new(),
             muted: Vec::new(),
             owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: Vec::new(),
         });
         let bytes = application.clone().encode().unwrap();
         assert_eq!(GroupApplication::decode(&bytes).unwrap(), application);

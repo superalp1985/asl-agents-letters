@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "submission": {
+    "mode": "fallback",
+    "sponsors": [
+      {
+        "url": "https://sponsor.example.invalid/asl/register",
+        "allow_loopback_http": false
+      }
+    ],
+    "self_pay": {
+      "executable": "C:\\Users\\example\\wallet\\asl-self-pay-signer.exe"
+    }
+  },
+  "finality_timeout_seconds": 900,
+  "finality_poll_seconds": 6,
+  "publication_timeout_seconds": 30
+}

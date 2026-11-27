@@ -68,6 +68,17 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             admins: peer_list(text(admins)?)?,
             muted: peer_list(text(muted)?)?,
         }),
+        [op, tag, room, kind, additional, hours] if op == "budget" => {
+            Some(AdminRequest::RenewResourceBudget {
+                tag: text(tag)?.into(),
+                room: hex_id(room, 64)?,
+                kind: text(kind)?.into(),
+                additional: text(additional)?
+                    .parse()
+                    .map_err(|_| AslError::InvalidMessage)?,
+                window_hours: text(hours)?.parse().map_err(|_| AslError::InvalidMessage)?,
+            })
+        }
         _ => return Err(AslError::InvalidMessage),
     };
     let home = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);

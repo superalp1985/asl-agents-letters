@@ -25,15 +25,15 @@
 | 能力 | 已完成 | 尚缺 |
 | --- | --- | --- |
 | 公网入口与资源 provider 发布 | `bootstrap_multiaddrs` 按地址策略拨号；配置发布公钥和 network ID 后校验 Ed25519 seed；显式 public grant 的 content/concept hash 进入 provider 发布集合 | 真实签名 `network-seeds.json`、地址部署、冷启动公网、双机和资源索引验收 |
-| 链上身份生命周期 | 签名设备目录生成、commitment 计算、注册/更新/撤销 EIP-712 请求、ABI calldata、raw transaction RPC 提交入口和 Foundry 部署脚本已编译/格式通过 | 真实合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
+| 链上身份生命周期 | 签名目录、register/update/revoke、config-driven sponsor/self-pay/fallback、最终性等待、目录安装、typed DHT 发布、`resume/status/revoke-onchain` 状态机和 Foundry 部署脚本 | 真实合约部署、资金、真实交易和跨设备链上迁移验收 |
 | AutoNAT / DCUtR | libp2p AutoNAT 与 DCUtR behaviour 已注册，relay v2 保持现有预约/降级路径 | 真实公网 NAT 矩阵、打洞成功率和 relay 降级策略验收 |
-| DHT 持久化 | SQLite v40/v41 增加 DHT record/provider cache；已验证记录和 provider 发布写入本地缓存 | 重启时回灌 Net DHT store、远端记录重放和跨机 DHT 持久性尚未验收 |
+| DHT 持久化 | SQLite provider 缓存支持同一 key 多 provider；验证后的 record/provider 观测落盘；启动和网络恢复时按可配置批次回灌 Net store，过期数据跳过 | 真实跨机 DHT 重启、NAT 后持久性和长时间 provider 重放尚未验收 |
 | Act 送达确认 | 已认证群成员收到非 Ack Act 后，按消息 ID 去重并生成带期限的结构化 `Act Ack`，复用 MLS、预算和 DHT 邮箱 | 真实双机送达时间、回执丢失/重试和 GUI 状态显示尚未验收 |
-| 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；群子流可跟随 loopback/LAN/Internet/relay 地址策略，默认关闭 | 真实双机公网/NAT/relay、跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
-| 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、群主转移 key 6、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员代管动作和更细粒度逐文件策略 |
+| 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；10,000 成员确定性 shard plan、shard/backbone topic、bridge 转发和 >512 路由选择 | 真正创建多个子 MLS 群并分配成员、真实双机公网/NAT/relay、跨机多跳和容量矩阵 |
+| 群权限 | owner policy、管理员能力位、禁言委派、文字/文件/邀请权限、群主转移、逐内容哈希文件权限和入站/出站检查 | 真实多设备策略同步；MLS 限制下单群成员移除仍由 creator 提交 |
 | 群加入/重入请求 | 经认证连接的结构化 `InviteRequest`、5 分钟期限、群主本机审批队列、设备/Agent 精确绑定、每群 32 条及每 Agent 每小时 5 条上限、在线连接复核后复用定向邀请、GUI/CLI/MCP 持久拒绝 | 真实双机审批和跨设备迁移全链路验收 |
 | 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer、Offer 可进入密文邮箱等待补收 | 公网跨机、真实两设备大文件验收；邮箱只保存 Offer/密文，文件字节仍走在线授权传输；Offer 本身不是下载许可 |
-| 预算 | 消息数授予、续期、发送侧原子扣减；SQLite resource budget ledger 已加入字节/模型/CPU/邮箱种类 | 各类资源的实际计费接线、GUI 策略和跨机配额验收 |
+| 预算 | 消息数 + 消息字节/模型调用/CPU/邮箱默认预算、续期、发送/模型/邮箱实际扣减；GUI 显示用量并续期 24h；MCP/CLI 可续期 | 真实跨机配额压力、CPU 外部进程计量精度和用户自定义策略验收 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
 | 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
 
@@ -44,29 +44,39 @@
 | libp2p 去中心化传输 | TCP/QUIC + Noise、mDNS、DHT provider、relay v2、AutoNAT/DCUtR behaviour、bootstrap 配置和签名 seed 解析 | 多 bootstrap 故障切换、真实 NAT/relay 自适应；DHT 缓存回灌 Net store | 至少两个独立运营的 bootstrap/relay、真实双机公网、断线重连和 72 小时运行 |
 | 区块链身份与迁移 | 根身份、AgentId、设备证书、Helios/MPT 验证、注册/更新/撤销 EIP-712、calldata、部署脚本、迁移线索 | 注册后自动发布目录、注册/迁移/撤销的完整编排和真实交易状态机 | 合约正式部署、真实 RPC/最终性、资金/赞助策略、跨设备迁移和撤销传播 |
 | 去中心化资源发现 | Kademlia provider、公开 content/concept hash、public/contacts/groups audience、密文邮箱 | 资源 provider 的持久化索引、分层/分片群拓扑、更多离线补收路径 | 真实公网 DHT、NAT 后节点、资源索引和冷启动发现 |
-| 所有语义高效表达 | 确定性 CBOR、ASL/1.1 表达式、ASL/1.2 上下文、ASL/1.3 act/action/attachment、语义历史匹配排序、MCP 结构化工具 | 跨保留期索引、群组上下文同步和更完整的模型输出约束测试 | 真实模型、跨机语义包、提示注入红队和跨 audience 测试 |
+| 所有语义高效表达 | 确定性 CBOR、ASL/1.1 表达式、ASL/1.2 上下文、ASL/1.3 act/action/attachment、群组 Context* MLS 路由、语义历史匹配、365 天哈希 token 索引和 MCP 结构化工具 | 更完整的模型输出约束测试 | 真实模型、跨机语义包、提示注入红队和跨 audience 测试 |
 | 文件传输 | 分块 hash、断点、多来源、双端审批、群文件 Offer/Fetch/Bulk、inline 和收件目录 | 生产公网传输编排、更多复合预算和故障恢复策略 | 两台真实设备大文件、NAT/relay、重启续传和恶意分块压力测试 |
-| Agent 安装与可用性 | `asl.exe setup`、MCP bootstrap、首次语言选择、托盘、头像、网络/群/传输 GUI 基础控制 | 一条命令完成可信网络配置、链注册状态跟踪和安装后引导闭环 | 真实签名种子/发布包、正式链交易、Windows 实机 DPI/托盘和 Linux infra 包 |
-| 用户授权 | 目录白名单、硬路径边界、设备/群/受众授权、逐次传输审批、信任与授权解耦、群主转移和复合预算账本 | 管理员代管成员、逐文件群策略和授权策略迁移的实际计费接线 | 真实多设备管理员操作、跨 audience 外泄测试和独立安全审计 |
+| Agent 安装与可用性 | `asl.exe setup`、MCP bootstrap、首次语言选择、`identity-registration onboard/resume/status/revoke-onchain`、目录 DHT 发布重试、托盘、头像和网络/群/传输 GUI | 更傻瓜化的签名 seed 导入向导 | 真实签名种子/发布包、正式链交易、Windows 实机 DPI/托盘和 Linux infra 实机 |
+| 用户授权 | 目录白名单、硬路径边界、设备/群/受众授权、逐次传输审批、信任与授权解耦、群主转移、逐文件策略、管理员禁言委派和复合预算 | 成员移除委派仍需 MLS creator 提交的设计闭环 | 真实多设备管理员操作、跨 audience 外泄测试和独立安全审计 |
 
 ## 尚未实现
 
 - 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取，离线 Offer 需来源设备在 Offer 有效期内重新上线后才可进入在线分块传输。
-- Act 历史的跨保留期索引；当前已有当前用户可解密、最多扫描 1,000 条的本地子串搜索/匹配排序及显式 JSON 导出。
+- 单 MLS 群成员移除仍只能由 creator 提交；管理员目前可委派禁言、邀请和文件管理，但不能代替 creator 产生 Remove Commit。
 - 提示注入红队、跨 audience 外泄测试和分身资源压力测试。
 - 两台真实设备上的建群、迁移群线索、加入/重入请求、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
-- 分层万人群和完整发布包。
+- 多个 >512 子 MLS 群的真实创建、成员分配、迁移和 2,000/10,000 跨机容量验收。
 
 ## 最近一次整体检查
 
 - `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0，**0 失败、13 项环境/子进程用途忽略**；包含 ASL/1.3 act、DHT 密文邮箱、Act 历史搜索/导出、群加入/重入请求、无密钥迁移群线索、群组进程、文件审批和 v39 迁移。首次回归发现群管理快照 200 条上限与请求列表 100 条上限不一致，已统一；v32 升级夹具也已显式清理 v38/v39 表。
 - 最终改动后的 `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：304 通过、0 失败、5 忽略；`cargo +1.100.0 clippy -p asl-types -p asl-store -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings`：通过。
 - `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
-- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，35 个向量中 25 接受、10 拒绝，签名是合成夹具。
-- `scripts/validate-cddl.ps1`：通过；两个 CDDL 文件语法符合，25 接受、10 拒绝符合预期。
+- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，36 个向量中 26 接受、10 拒绝，签名是合成夹具。
+- `scripts/validate-cddl.ps1`：通过；两个 CDDL 文件语法符合，26 接受、10 拒绝符合预期。
 - 全量测试未覆盖公网、跨机多跳、真实链 RPC、真实窗口/DPI 或安全审计。远程密文邮箱已有 DHT 单元/双节点网络验证，但未完成真实两设备、NAT/relay 和重启补收验收。`asl_send_file` 的 Core→MLS→接收端闭环仍待两设备验收。
 - 最终全量回归曾出现一次 `positive_proof_is_reverified_after_restart_without_renewing_expiry` 的 `InvalidLocalState`；定位为测试数据库名在 PID 复用时潜在碰撞，已加入随机后缀。精确测试连续 3 次通过；修复后的 `cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0，所有非忽略用例通过。
 - 同一工作树的 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。上面的测试和 Clippy 覆盖当前工作区；仍未覆盖真实双机公网/NAT/relay、真实链 RPC、真实窗口/DPI 或独立安全审计。
+
+## 2026-11-27 完整工作区回归
+
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0，所有非忽略测试通过；AppContainer 管理员权限、PowerShell 7、外部 TCP/UDP 目标和生产计时器用例仍按设计 ignored。
+- `cargo +1.100.0 clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
+- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：36 vectors，26 accepted / 10 rejected。
+- `scripts/validate-cddl.ps1` 在 E 盘 cddl 0.10.7 下通过。
+
+本轮代码新增：DHT record/provider 持久回灌、链身份 onboard/resume/status/revoke 状态机、群 Context* MLS 路径、逐文件哈希权限、管理员禁言委派、复合预算默认授予/实际扣减/GUI 与 MCP 续期、Act 365 天哈希索引、10,000 成员 shard plan 和 shard/backbone 转发。尚未完成真实链交易、公开 NAT/relay、两机、多子 MLS 群和 72 小时/安全审计验收。
 
 ## 2026-11-27 功能接线（新增代码，待集中测试）
 
@@ -78,6 +88,7 @@
 
 ## Windows 测试包
 
-- 离线 release 便携包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-final-125045.zip`
-- 文件大小：48,684,435 字节；SHA-256：`BDC39BF371AFD37E7BAC81A80DAC795B08D00BD190BE26920E07DAD38330B47C`
+- 离线 debug 便携包（2026-11-27）：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-27-20261127-131810.zip`
+- 文件大小：77,884,442 字节。
+- SHA-256：`3207D1142F9B680EBA054ED7E81C3192691CDD35A76158FFF41CAB4D58B00486`
 - 包内 18 个文件，包含 `asl-core.exe`、`asl-ui.exe`、启动/更新脚本、SHA256SUMS、SBOM、第三方许可和 MPL sources。

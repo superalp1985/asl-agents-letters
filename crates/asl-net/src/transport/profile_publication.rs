@@ -5,7 +5,7 @@ use std::{
 
 use asl_types::{
     ids::AgentId,
-    record::{MAX_RECORD_LIFETIME_MS, RecordKind, RecordPayload, decode_record},
+    record::{MAX_RECORD_LIFETIME_MS, RecordKind, decode_record},
 };
 use libp2p::{
     PeerId,
@@ -21,6 +21,7 @@ const READY_LIFETIME: Duration = Duration::from_secs(10);
 pub(super) struct Publication {
     id: [u8; 16],
     agent: AgentId,
+    kind: RecordKind,
     stage: Stage,
 }
 
@@ -35,6 +36,23 @@ enum Stage {
 
 impl LocalTransport {
     pub fn prepare_profile_publication(&mut self, id: [u8; 16], agent: AgentId) -> io::Result<()> {
+        self.prepare_identity_publication(id, agent, RecordKind::Profile)
+    }
+
+    pub fn prepare_directory_publication(
+        &mut self,
+        id: [u8; 16],
+        agent: AgentId,
+    ) -> io::Result<()> {
+        self.prepare_identity_publication(id, agent, RecordKind::DeviceDirectory)
+    }
+
+    fn prepare_identity_publication(
+        &mut self,
+        id: [u8; 16],
+        agent: AgentId,
+        kind: RecordKind,
+    ) -> io::Result<()> {
         if matches!(&self.profile_publication, Some(pending)
             if matches!(pending.stage, Stage::Ready { deadline, .. } if Instant::now() >= deadline))
         {
@@ -46,7 +64,7 @@ impl LocalTransport {
         if self.profile_publication.is_some() {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let key = profile_key(agent)?;
+        let key = identity_key(agent, kind)?;
         let query = self
             .swarm
             .behaviour_mut()
@@ -55,12 +73,26 @@ impl LocalTransport {
         self.profile_publication = Some(Publication {
             id,
             agent,
+            kind,
             stage: Stage::Lookup(query),
         });
         Ok(())
     }
 
     pub fn publish_prepared_profile(&mut self, id: [u8; 16], value: Vec<u8>) -> io::Result<()> {
+        self.publish_prepared_identity(id, value, RecordKind::Profile)
+    }
+
+    pub fn publish_prepared_directory(&mut self, id: [u8; 16], value: Vec<u8>) -> io::Result<()> {
+        self.publish_prepared_identity(id, value, RecordKind::DeviceDirectory)
+    }
+
+    fn publish_prepared_identity(
+        &mut self,
+        id: [u8; 16],
+        value: Vec<u8>,
+        kind: RecordKind,
+    ) -> io::Result<()> {
         let pending = self
             .profile_publication
             .take_if(|pending| pending.id == id && matches!(pending.stage, Stage::Ready { .. }))
@@ -71,6 +103,9 @@ impl LocalTransport {
         if Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
+        if pending.kind != kind {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let peers = peers
             .into_iter()
             .filter(|peer| self.swarm.is_connected(peer))
@@ -79,12 +114,11 @@ impl LocalTransport {
             return Err(io::ErrorKind::NotConnected.into());
         }
         let signed = decode_record(&value).map_err(|_| io::ErrorKind::InvalidInput)?;
-        let RecordPayload::Profile(profile) = signed.record.payload else {
-            return Err(io::ErrorKind::InvalidInput.into());
-        };
         // Core authorized the exact signed payload before IPC. Net forwards a
         // typed reference only; it never resolves it or reads any file.
-        if profile.agent_id != pending.agent {
+        if signed.record.payload.agent_id() != pending.agent
+            || signed.record.payload.kind() != pending.kind
+        {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let now_ms = u64::try_from(
@@ -99,7 +133,7 @@ impl LocalTransport {
         }
         let remaining = signed.record.expires_at_ms - now_ms;
         let record = kad::Record {
-            key: profile_key(pending.agent)?,
+            key: identity_key(pending.agent, pending.kind)?,
             value,
             publisher: None,
             expires: Some(
@@ -126,6 +160,10 @@ impl LocalTransport {
         {
             query.finish();
         }
+    }
+
+    pub fn cancel_directory_publication(&mut self, id: [u8; 16]) {
+        self.cancel_profile_publication(id);
     }
 
     pub(super) fn handle_profile_publication_progress(
@@ -179,8 +217,8 @@ impl LocalTransport {
     }
 }
 
-fn profile_key(agent: AgentId) -> io::Result<RecordKey> {
-    identity_record_key(agent, RecordKind::Profile).map_err(|_| io::ErrorKind::InvalidInput.into())
+fn identity_key(agent: AgentId, kind: RecordKind) -> io::Result<RecordKey> {
+    identity_record_key(agent, kind).map_err(|_| io::ErrorKind::InvalidInput.into())
 }
 
 #[cfg(test)]
@@ -190,7 +228,7 @@ mod tests {
     use asl_types::{
         ids::{Hash32, Signature65},
         protocol::{ConceptRef, Profile},
-        record::{SignedRecord, UnsignedRecord, encode_record},
+        record::{RecordPayload, SignedRecord, UnsignedRecord, encode_record},
     };
     use libp2p::{Multiaddr, identity::Keypair, kad::store::RecordStore};
 
@@ -207,6 +245,15 @@ mod tests {
     #[tokio::test]
     async fn avatar_reference_survives_profile_put_and_get_over_tcp() {
         profile_exchange(true, Some(Hash32([9; 32]))).await;
+    }
+
+    #[test]
+    fn device_directory_publication_uses_its_own_identity_key() {
+        let agent = AgentId([6; 32]);
+        assert_ne!(
+            identity_key(agent, RecordKind::Profile).unwrap(),
+            identity_key(agent, RecordKind::DeviceDirectory).unwrap()
+        );
     }
 
     async fn profile_exchange(serve: bool, avatar: Option<Hash32>) {
@@ -247,7 +294,7 @@ mod tests {
         .await
         .unwrap();
         let agent = AgentId([4; 32]);
-        let key = profile_key(agent).unwrap();
+        let key = identity_key(agent, RecordKind::Profile).unwrap();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

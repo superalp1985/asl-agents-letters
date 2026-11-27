@@ -28,8 +28,20 @@
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
 | ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复、双许可本地证据、CLI/MCP Act 历史搜索、CLI 导出和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无缓存证据过期恢复、真实两设备重启补收、跨机多跳/规模验收 |
 | 两人 MLS 私聊（G00） | 已走两人 MLS 房间工具，真实双机验收未完成 | 与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v41、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主转移、加入/重入请求、DHT 本地缓存和无密钥迁移群线索已部分实现 | 拒绝审计、真实多设备策略同步、真实双机邮箱/群请求、公网/NAT/relay 和分层拓扑待验收；不设固定 64 人业务上限 |
+| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v43、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主转移、逐文件权限、委派管理员禁言、加入/重入请求、DHT record/provider 持久回灌、10,000 shard plan 和 shard/backbone 路由已实现 | 真正多子 MLS 群、真实多设备策略同步、真实双机邮箱/群请求、公网/NAT/relay 和容量矩阵待验收；不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
+
+2026-11-27 高级闭环集中验证（Windows x64，Rust 1.100.0，Cargo/target/临时目录位于 E 盘，离线）：
+
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0；所有非忽略测试通过。环境/子进程用途的 AppContainer、PowerShell 7、外部 TCP/UDP 目标和生产计时器用例仍按设计 ignored。
+- `cargo +1.100.0 clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo +1.100.0 clippy -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings` 与 desktop-ui lib 测试：通过。
+- `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
+- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：36 个向量，26 accepted / 10 rejected。
+- `scripts/validate-cddl.ps1`：两个 CDDL 文件通过，26 accepted / 10 rejected。
+- identity onboarding 5 项、群上下文 4 项、group policy/file/admin 4 项、DHT provider 多 key 测试 1 项、net provider 5 项、topology 3 项、Act 语义索引 4 项通过。
+
+本轮新增代码覆盖 DHT provider 持久化和启动/恢复回灌、链身份 `onboard/resume/status/revoke-onchain` 状态机、群语义上下文、逐文件权限、管理员禁言委派、复合预算默认授予/消耗/续期、Act 跨保留期哈希索引，以及 10,000 成员 shard plan/路由。仍未执行真实链交易、真实多运营商 RPC、公开 seed/relay/NAT、两台真实设备、多个 >512 子 MLS 群、72 小时运行或独立安全审计；这些不能由本机测试替代。
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
 

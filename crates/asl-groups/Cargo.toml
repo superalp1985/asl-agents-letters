@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 asl-types = { path = "../asl-types" }
+blake3.workspace = true
 openmls.workspace = true
 openmls_basic_credential = "=0.6.0"
 
@@ -21,4 +22,5 @@ serde_bytes = "=0.11.19"
 zeroize.workspace = true
 
 [dev-dependencies]
+libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }
 openmls_rust_crypto = "=0.6.0"

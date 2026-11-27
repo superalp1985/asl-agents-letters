@@ -13,7 +13,13 @@ use asl_policy::PolicyEngine;
 use asl_store::{
     Store,
     act_history::{ActDirection, ActHistoryRecord},
-    group_access::{GroupAccessKind, GroupMemberAccess},
+    budgets::{
+        BudgetKind, DEFAULT_CPU_BUDGET_MS, DEFAULT_MAILBOX_BYTE_BUDGET,
+        DEFAULT_MESSAGE_BYTE_BUDGET, DEFAULT_MODEL_CALL_BUDGET,
+    },
+    group_access::{
+        GroupAccessKind, GroupAdminCapabilityKind, GroupFileAccessKind, GroupMemberAccess,
+    },
     group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
     mailbox::{
         ConversationBudgetGrant, MAX_BUDGET_MESSAGES, MAX_BUDGET_RENEWALS, MAX_BUDGET_WINDOW_MS,
@@ -26,8 +32,7 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{
         Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
-        GroupControl, GroupPacket, Intent, MediaKind, ResultShape, WireFrame, decode_frame,
-        encode_frame,
+        GroupControl, Intent, MediaKind, ResultShape, WireFrame,
     },
     task::GroupId,
 };
@@ -94,6 +99,12 @@ pub enum LocalGroupAction {
     SetAccess {
         room: Hash32,
         update: GroupAccessUpdate,
+    },
+    RenewResourceBudget {
+        room: Hash32,
+        kind: String,
+        additional: u64,
+        window_hours: u32,
     },
     ConfigureInbound {
         browse_enabled: bool,
@@ -288,7 +299,30 @@ impl Supervisor {
             .mls_room_snapshot(room)?
             .ok_or(AslError::NotFound)?;
         let policy = groups.store.group_access_policy(&snapshot.local_id)?;
-        let mut members = groups.store.group_members(&snapshot.local_id)?;
+        let topology_members = groups.store.group_topology_members(&snapshot.local_id)?;
+        let sharded = topology_members.len() > asl_groups::topology::MAX_DIRECT_SHARD_MEMBERS;
+        let topology = if sharded {
+            let plan = asl_groups::topology::plan_group_shards(
+                topology_members,
+                asl_groups::topology::MAX_DIRECT_SHARD_MEMBERS,
+            )?;
+            json!({
+                "mode": "layered",
+                "shard_count": plan.shards.len(),
+                "shards": plan.shards.iter().map(|shard| json!({
+                    "index": shard.index,
+                    "bridge": peer_text(&shard.bridge),
+                    "members": shard.members.len(),
+                })).collect::<Vec<_>>(),
+            })
+        } else {
+            json!({"mode": "direct", "shard_count": 1})
+        };
+        let mut members = if sharded {
+            Vec::new()
+        } else {
+            groups.store.group_members(&snapshot.local_id)?
+        };
         members.sort_by(|left, right| {
             left.role
                 .as_str()
@@ -302,6 +336,15 @@ impl Supervisor {
             "allow_member_text": policy.permissions & GROUP_ALLOW_MEMBER_TEXT != 0,
             "allow_member_files": policy.permissions & GROUP_ALLOW_MEMBER_FILES != 0,
             "allow_member_invite": policy.permissions & GROUP_ALLOW_MEMBER_INVITE != 0,
+            "file_policies": policy.file_policies.iter().map(|policy| json!({
+                "content_id": hex::encode(policy.content_id.0),
+                "permissions": policy.permissions,
+            })).collect::<Vec<_>>(),
+            "admin_capabilities": policy.admin_capabilities.iter().map(|capability| json!({
+                "peer": peer_text(&capability.peer),
+                "capabilities": capability.capabilities,
+            })).collect::<Vec<_>>(),
+            "topology": topology,
             "members": members.iter().map(member_view).collect::<Vec<_>>(),
         }))
     }
@@ -327,10 +370,39 @@ impl Supervisor {
             .store
             .group_access_owner(room)?
             .ok_or(AslError::NotFound)?;
-        if owner != self.device_peer_id {
-            return Err(AslError::PolicyDenied);
-        }
         let current = groups.store.group_access_policy(&snapshot.local_id)?;
+        let delegated = owner != self.device_peer_id;
+        if delegated {
+            let current_text = current.permissions & GROUP_ALLOW_MEMBER_TEXT != 0;
+            let current_files = current.permissions & GROUP_ALLOW_MEMBER_FILES != 0;
+            let current_invite = current.permissions & GROUP_ALLOW_MEMBER_INVITE != 0;
+            if update.allow_member_text != current_text
+                || update.allow_member_files != current_files
+                || update.allow_member_invite != current_invite
+                || update.admins != current.admins
+                || update.owner.as_ref().is_some_and(|owner| {
+                    current
+                        .owner
+                        .as_ref()
+                        .is_some_and(|current| current != owner)
+                })
+                || update
+                    .file_policies
+                    .as_ref()
+                    .is_some_and(|policies| policies != &current.file_policies)
+                || update
+                    .admin_capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities != &current.admin_capabilities)
+                || !groups.store.group_admin_has_capability(
+                    &snapshot.local_id,
+                    &self.device_peer_id,
+                    GroupAdminCapabilityKind::ManageMembers,
+                )?
+            {
+                return Err(AslError::PolicyDenied);
+            }
+        }
         let mut permissions = 0;
         if update.allow_member_text {
             permissions |= GROUP_ALLOW_MEMBER_TEXT;
@@ -341,23 +413,62 @@ impl Supervisor {
         if update.allow_member_invite {
             permissions |= GROUP_ALLOW_MEMBER_INVITE;
         }
+        let file_policies = if delegated {
+            current.file_policies.clone()
+        } else {
+            update
+                .file_policies
+                .unwrap_or_else(|| current.file_policies.clone())
+        };
+        let admin_capabilities = if delegated {
+            current.admin_capabilities.clone()
+        } else {
+            update
+                .admin_capabilities
+                .unwrap_or_else(|| current.admin_capabilities.clone())
+        };
+        let admins = if delegated {
+            current.admins.clone()
+        } else {
+            update.admins
+        };
+        let owner = if delegated {
+            current.owner.clone()
+        } else {
+            update.owner
+        };
         let control = GroupControl {
             message_id: Id128(fresh_id()?),
-            policy_revision: current
-                .revision
-                .checked_add(1)
-                .ok_or(AslError::QuotaExceeded)?,
+            policy_revision: if delegated {
+                current.revision
+            } else {
+                current
+                    .revision
+                    .checked_add(1)
+                    .ok_or(AslError::QuotaExceeded)?
+            },
             permissions,
-            admins: update.admins,
+            admins,
             muted: update.muted,
-            owner: update.owner,
+            owner,
+            file_policies,
+            admin_capabilities,
         };
-        groups.store.apply_group_control(
-            &snapshot.local_id,
-            &self.device_peer_id,
-            &control,
-            now,
-        )?;
+        if delegated {
+            groups.store.apply_group_moderation(
+                &snapshot.local_id,
+                &self.device_peer_id,
+                &control,
+                now,
+            )?;
+        } else {
+            groups.store.apply_group_control(
+                &snapshot.local_id,
+                &self.device_peer_id,
+                &control,
+                now,
+            )?;
+        }
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
         let sent = admission.send_loopback_mls_application_with_gossip(
             &mut groups.store,
@@ -372,14 +483,12 @@ impl Supervisor {
                 }
             },
         )?;
-        let payload = encode_frame(&WireFrame::GroupEnvelope(sent.packet.into_envelope()?))?;
-        let _ = self.net.try_send(
-            &NetworkCommand::GossipPublish {
-                operation_id: fresh_id()?,
-                key: room.0,
-                payload,
-            }
-            .into_ipc()?,
+        let _ = super::group_routing::publish_packet(
+            &self.net,
+            &groups.store,
+            room,
+            &self.device_peer_id,
+            &sent.packet,
         );
         Ok(json!({
             "room": hex::encode(room.0),
@@ -389,6 +498,7 @@ impl Supervisor {
             "muted": control.muted.iter().map(peer_text).collect::<Vec<_>>(),
             "queued": sent.queued,
             "available": sent.available,
+            "delegated": delegated,
         }))
     }
 
@@ -495,9 +605,14 @@ impl Supervisor {
                             .store
                             .group_can_send(&member.group_id, sender, GroupAccessKind::Text)
                             .unwrap_or(false),
-                        GroupApplication::Offer(_) => groups
+                        GroupApplication::Offer(offer) => groups
                             .store
-                            .group_can_send(&member.group_id, sender, GroupAccessKind::Files)
+                            .group_can_access_file(
+                                &member.group_id,
+                                sender,
+                                &offer.content_id,
+                                GroupFileAccessKind::Send,
+                            )
                             .unwrap_or(false),
                         _ => true,
                     });
@@ -586,13 +701,18 @@ impl Supervisor {
                     );
                 }
             }
+            let context_reply_requested =
+                matches!(application.as_ref(), GroupApplication::ContextRequest(_))
+                    && GroupInboundPolicy::load(&groups.store)
+                        .is_ok_and(|policy| policy.answer_enabled);
             if matches!(
                 application.as_ref(),
                 GroupApplication::FetchRequest(_)
                     | GroupApplication::FetchGrant(_)
                     | GroupApplication::FetchPending(_)
                     | GroupApplication::Error(_)
-            ) {
+            ) || context_reply_requested
+            {
                 if groups.pending_transfers.len() == MAX_PENDING_GROUP_TRANSFERS {
                     groups.pending_transfers.pop_front();
                 }
@@ -668,15 +788,18 @@ impl Supervisor {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<(), AslError> {
-        let envelope = match decode_frame(payload)? {
-            WireFrame::GroupEnvelope(envelope) => envelope,
-            _ => return Err(AslError::InvalidMessage),
-        };
-        let packet = GroupPacket::from_envelope(envelope)?;
-        if packet.group_id != key {
-            return Err(AslError::InvalidMessage);
-        }
+        let groups = self.groups.as_ref().ok_or(AslError::NotFound)?;
+        let incoming = super::group_routing::decode_incoming(
+            &groups.store,
+            key,
+            payload,
+            &self.device_peer_id,
+        )?;
+        let key = incoming.room;
+        let packet = incoming.packet;
+        let forward = incoming.forward;
         let directories = HashMap::new();
+        let net = &self.net;
         let (Some(groups), Some(admission), libraries, home) = (
             self.groups.as_mut(),
             self.admission.as_mut(),
@@ -692,6 +815,9 @@ impl Supervisor {
         else {
             return Ok(());
         };
+        if let Some((topic, payload)) = forward {
+            let _ = super::group_routing::forward_packet(net, topic, payload);
+        }
         let snapshot = groups
             .store
             .mls_room_snapshot(key)?
@@ -716,9 +842,14 @@ impl Supervisor {
                 .store
                 .group_can_send(&local_group_id, &peer, GroupAccessKind::Text)
                 .unwrap_or(false),
-            GroupApplication::Offer(_) => groups
+            GroupApplication::Offer(offer) => groups
                 .store
-                .group_can_send(&local_group_id, &peer, GroupAccessKind::Files)
+                .group_can_access_file(
+                    &local_group_id,
+                    &peer,
+                    &offer.content_id,
+                    GroupFileAccessKind::Send,
+                )
                 .unwrap_or(false),
             _ => true,
         };
@@ -839,6 +970,20 @@ impl Supervisor {
             };
             match pending.application {
                 GroupApplication::FetchRequest(request) => {
+                    let file_allowed = self.groups.as_ref().is_some_and(|groups| {
+                        groups
+                            .store
+                            .group_can_access_file(
+                                &requester.group_id,
+                                &requester.direct.peer,
+                                &request.content_id,
+                                GroupFileAccessKind::Fetch,
+                            )
+                            .unwrap_or(false)
+                    });
+                    if !file_allowed {
+                        continue;
+                    }
                     let prepared = match transfers.prepare_group_fetch(requester, &request, now_ms)
                     {
                         Ok(prepared) => prepared,
@@ -892,6 +1037,16 @@ impl Supervisor {
                     }
                     result?;
                 }
+                GroupApplication::ContextRequest(request) => {
+                    self.handle_group_context_request(
+                        transfers,
+                        &requester,
+                        pending.connection_id,
+                        pending.wire_id,
+                        &request,
+                        now_ms,
+                    )?;
+                }
                 reply @ (GroupApplication::FetchGrant(_)
                 | GroupApplication::FetchPending(_)
                 | GroupApplication::Error(_)) => {
@@ -931,7 +1086,6 @@ impl Supervisor {
                 | GroupApplication::Expression(_)
                 | GroupApplication::Act(_)
                 | GroupApplication::Policy(_)
-                | GroupApplication::ContextRequest(_)
                 | GroupApplication::ContextOffer(_)
                 | GroupApplication::ContextAgreement(_)
                 | GroupApplication::ContextExpression(_) => {}
@@ -1056,13 +1210,21 @@ impl Supervisor {
                 && !groups.cleanup_failed
             {
                 for (wire_id, _) in groups.store.list_mls_room_ids()? {
-                    if groups.gossip_subscriptions.insert(wire_id) {
-                        let command = NetworkCommand::GossipSubscribe {
-                            operation_id: fresh_id()?,
-                            key: wire_id.0,
-                        };
-                        if enqueue(&self.net, command).is_err() {
-                            groups.gossip_subscriptions.remove(&wire_id);
+                    let topics = super::group_routing::topics_for_room(
+                        &groups.store,
+                        wire_id,
+                        &self.device_peer_id,
+                    )
+                    .unwrap_or_else(|_| vec![wire_id]);
+                    for topic in topics {
+                        if groups.gossip_subscriptions.insert(topic) {
+                            let command = NetworkCommand::GossipSubscribe {
+                                operation_id: fresh_id()?,
+                                key: topic.0,
+                            };
+                            if enqueue(&self.net, command).is_err() {
+                                groups.gossip_subscriptions.remove(&topic);
+                            }
                         }
                     }
                 }
@@ -1285,6 +1447,34 @@ impl Supervisor {
                 }
                 return Ok(json!({"state": "rejected"}));
             }
+            LocalGroupAction::RenewResourceBudget {
+                room,
+                kind,
+                additional,
+                window_hours,
+            } => {
+                let snapshot = store.mls_room_snapshot(room)?.ok_or(AslError::NotFound)?;
+                let kind = resource_budget_kind(&kind)?;
+                let conversation = hex::encode(snapshot.local_id.0.0);
+                let expires_at_ms =
+                    now_ms.saturating_add(u64::from(window_hours).saturating_mul(60 * 60 * 1_000));
+                if !store.renew_resource_budget(
+                    &conversation,
+                    kind,
+                    additional,
+                    expires_at_ms,
+                    now_ms,
+                )? {
+                    return Err(AslError::NotFound);
+                }
+                return Ok(json!({
+                    "room": hex::encode(room.0),
+                    "conversation_id": conversation,
+                    "kind": kind_name(kind),
+                    "additional": additional,
+                    "expires_at_ms": expires_at_ms,
+                }));
+            }
             _ => {}
         }
 
@@ -1400,6 +1590,17 @@ impl Supervisor {
                 Ok(json!({"queued": true}))
             }
             LocalGroupAction::Remove { room, peer } => {
+                let snapshot = store.mls_room_snapshot(room)?.ok_or(AslError::NotFound)?;
+                let policy = store.group_access_policy(&snapshot.local_id)?;
+                if policy.admins.contains(local_peer)
+                    && !store.group_admin_has_capability(
+                        &snapshot.local_id,
+                        local_peer,
+                        GroupAdminCapabilityKind::ManageMembers,
+                    )?
+                {
+                    return Err(AslError::PolicyDenied);
+                }
                 let version =
                     admission.remove_local_mls_member(store, room, &peer, &directories, now_ms)?;
                 Ok(json!({
@@ -1441,6 +1642,7 @@ impl Supervisor {
             | LocalGroupAction::Room(_)
             | LocalGroupAction::Reject(_)
             | LocalGroupAction::RejectJoinRequest { .. }
+            | LocalGroupAction::RenewResourceBudget { .. }
             | LocalGroupAction::ConfigureInbound { .. } => unreachable!(),
         }
     }
@@ -1527,11 +1729,15 @@ impl LoopbackGroups {
             return Ok(None);
         };
         if matches!(&frame, WireFrame::Offer(_))
-            && !self.store.group_can_send(
-                &requester.group_id,
-                local_peer,
-                GroupAccessKind::Files,
-            )?
+            && !match &frame {
+                WireFrame::Offer(offer) => self.store.group_can_access_file(
+                    &requester.group_id,
+                    local_peer,
+                    &offer.content_id,
+                    GroupFileAccessKind::Send,
+                )?,
+                _ => false,
+            }
         {
             return Ok(None);
         }
@@ -1696,13 +1902,14 @@ fn apply_group_policy(
     let owner = store
         .group_access_owner(wire_id)?
         .ok_or(AslError::NotFound)?;
-    if &owner != sender {
-        return Err(AslError::PolicyDenied);
-    }
     let snapshot = store
         .mls_room_snapshot(wire_id)?
         .ok_or(AslError::NotFound)?;
-    store.apply_group_control(&snapshot.local_id, sender, control, now_ms)?;
+    if &owner == sender {
+        store.apply_group_control(&snapshot.local_id, sender, control, now_ms)?;
+    } else {
+        store.apply_group_moderation(&snapshot.local_id, sender, control, now_ms)?;
+    }
     Ok(())
 }
 
@@ -1729,11 +1936,31 @@ fn invite_view(store: &Store, invite: &MlsIncomingInvite) -> Result<Value, AslEr
     }))
 }
 
+fn resource_budget_kind(kind: &str) -> Result<BudgetKind, AslError> {
+    match kind {
+        "message_bytes" => Ok(BudgetKind::MessageBytes),
+        "model_calls" => Ok(BudgetKind::ModelCalls),
+        "cpu_ms" => Ok(BudgetKind::CpuMs),
+        "mailbox_bytes" => Ok(BudgetKind::MailboxBytes),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn kind_name(kind: BudgetKind) -> &'static str {
+    match kind {
+        BudgetKind::MessageBytes => "message_bytes",
+        BudgetKind::ModelCalls => "model_calls",
+        BudgetKind::CpuMs => "cpu_ms",
+        BudgetKind::MailboxBytes => "mailbox_bytes",
+    }
+}
+
 fn grant_act_budget(
     store: &mut Store,
     conversation_id: Id128,
     now_ms: u64,
 ) -> Result<(), AslError> {
+    let now_raw = now_ms;
     let now_ms = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
     let first = fresh_id()?;
     let second = fresh_id()?;
@@ -1748,11 +1975,21 @@ fn grant_act_budget(
         now_ms,
         expires_at_ms: now_ms.saturating_add(MAX_BUDGET_WINDOW_MS),
     })?;
-    if matches!(inserted, MailboxPut::Inserted | MailboxPut::Duplicate) {
-        Ok(())
-    } else {
-        Err(AslError::InvalidPolicyState)
+    if !matches!(inserted, MailboxPut::Inserted | MailboxPut::Duplicate) {
+        return Err(AslError::InvalidPolicyState);
     }
+    let expires_at_ms = now_raw
+        .saturating_add(u64::try_from(MAX_BUDGET_WINDOW_MS).map_err(|_| AslError::InvalidMessage)?);
+    let conversation = hex::encode(conversation_id.0);
+    for (kind, granted) in [
+        (BudgetKind::MessageBytes, DEFAULT_MESSAGE_BYTE_BUDGET),
+        (BudgetKind::ModelCalls, DEFAULT_MODEL_CALL_BUDGET),
+        (BudgetKind::CpuMs, DEFAULT_CPU_BUDGET_MS),
+        (BudgetKind::MailboxBytes, DEFAULT_MAILBOX_BYTE_BUDGET),
+    ] {
+        store.grant_resource_budget(&conversation, kind, granted, expires_at_ms, now_raw)?;
+    }
+    Ok(())
 }
 
 fn describe_join_failure(error: AslError) -> &'static str {

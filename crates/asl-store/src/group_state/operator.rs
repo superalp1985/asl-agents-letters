@@ -51,6 +51,13 @@ pub enum AdminRequest {
         admins: Vec<String>,
         muted: Vec<String>,
     },
+    RenewResourceBudget {
+        tag: String,
+        room: String,
+        kind: String,
+        additional: u64,
+        window_hours: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +72,7 @@ pub enum AdminOutcome {
     JoinRequestRejected,
     RequestJoinQueued,
     AccessUpdated,
+    BudgetUpdated,
     Failed,
     Unconfirmed,
 }
@@ -84,6 +92,16 @@ pub struct AdminRoom {
     #[serde(default)]
     pub allow_member_invite: bool,
     pub members: Vec<AdminMember>,
+    #[serde(default)]
+    pub budgets: Vec<AdminBudget>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminBudget {
+    pub kind: String,
+    pub granted: u64,
+    pub consumed: u64,
+    pub expires_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +212,9 @@ impl AdminSnapshot {
                             })
                 }
                 AdminRequest::RequestJoin { .. } => false,
+                AdminRequest::RenewResourceBudget { tag, room, .. } => {
+                    tag == &self.tag && self.rooms.iter().any(|r| &r.room == room)
+                }
             }
     }
 }
@@ -220,6 +241,17 @@ impl AdminTicket {
 
 fn default_true() -> bool {
     true
+}
+
+fn budget_kind_name(kind: i64) -> Result<String, AslError> {
+    Ok(match kind {
+        1 => "message_bytes",
+        2 => "model_calls",
+        3 => "cpu_ms",
+        4 => "mailbox_bytes",
+        _ => return Err(AslError::InvalidDatabase),
+    }
+    .into())
 }
 
 fn read(db: &Connection, now: u64) -> Result<Option<AdminTicket>, AslError> {
@@ -326,6 +358,7 @@ impl Store {
                     allow_member_files: row.get::<_, i64>(4).map_err(database_error)? & 2 != 0,
                     allow_member_invite: row.get::<_, i64>(4).map_err(database_error)? & 4 != 0,
                     members: vec![],
+                    budgets: vec![],
                 });
             }
             let members = &mut rooms.last_mut().ok_or(AslError::InvalidDatabase)?.members;
@@ -359,6 +392,40 @@ impl Store {
                     && (can_send
                         || permissions & asl_types::protocol::GROUP_ALLOW_MEMBER_INVITE != 0),
             });
+        }
+        for room in &mut rooms {
+            let mut wire = [0; 32];
+            hex::decode_to_slice(&room.room, &mut wire).map_err(|_| AslError::InvalidDatabase)?;
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT r.kind,r.granted,r.consumed,r.expires_at_ms
+                     FROM mls_room_states s
+                     JOIN resource_budget_grants r ON r.conversation_id=s.local_group_id
+                     WHERE s.wire_group_id=?1 ORDER BY r.kind",
+                )
+                .map_err(database_error)?;
+            let rows = statement
+                .query_map([wire.as_slice()], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .map_err(database_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?;
+            for (kind, granted, consumed, expires_at_ms) in rows {
+                room.budgets.push(AdminBudget {
+                    kind: budget_kind_name(kind)?,
+                    granted: u64::try_from(granted).map_err(|_| AslError::InvalidDatabase)?,
+                    consumed: u64::try_from(consumed).map_err(|_| AslError::InvalidDatabase)?,
+                    expires_at_ms: u64::try_from(expires_at_ms)
+                        .map_err(|_| AslError::InvalidDatabase)?,
+                });
+            }
         }
         Ok(rooms)
     }

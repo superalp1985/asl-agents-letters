@@ -9,6 +9,7 @@ use crate::{Store, database_error};
 
 const MAX_CACHED_RECORD_BYTES: usize = 8 * 1024;
 const MAX_CACHED_PROVIDER_ADDRESSES: usize = 8;
+const MAX_CACHED_PROVIDERS: i64 = 4_096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedDhtRecord {
@@ -178,8 +179,7 @@ impl Store {
                 "INSERT INTO dht_provider_cache(
                     key,provider_id,addresses_json,expires_at_ms,updated_at_ms
                  ) VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(key) DO UPDATE SET
-                   provider_id=excluded.provider_id,
+                 ON CONFLICT(key,provider_id) DO UPDATE SET
                    addresses_json=excluded.addresses_json,
                    expires_at_ms=excluded.expires_at_ms,
                    updated_at_ms=excluded.updated_at_ms",
@@ -190,6 +190,23 @@ impl Store {
                     i64::try_from(expires_at_ms).map_err(|_| AslError::InvalidMessage)?,
                     i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?,
                 ],
+            )
+            .map_err(database_error)?;
+        self.connection
+            .execute(
+                "DELETE FROM dht_provider_cache
+                 WHERE rowid IN (
+                   SELECT rowid FROM dht_provider_cache
+                   ORDER BY updated_at_ms ASC, rowid ASC
+                   LIMIT (
+                     SELECT CASE
+                       WHEN COUNT(*) > ?1 THEN COUNT(*) - ?1
+                       ELSE 0
+                     END
+                     FROM dht_provider_cache
+                   )
+                 )",
+                [MAX_CACHED_PROVIDERS],
             )
             .map(|_| ())
             .map_err(database_error)

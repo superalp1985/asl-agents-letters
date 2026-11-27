@@ -288,6 +288,7 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TRIGGER avatar_receipts_local_update;
          DROP TRIGGER avatar_receipts_local_delete;
          DROP TABLE avatar_receipts;
+         DROP TABLE conversation_act_semantic_index;
          DROP TABLE conversation_attachment_refs;
          DROP TABLE conversation_act_events;
          DROP TABLE conversation_budget_grants;
@@ -297,11 +298,17 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TABLE local_capacity_measurements;
          DROP TABLE semantic_context_resources;
          DROP TABLE semantic_context_candidates;
+         DROP TABLE group_admin_capabilities;
+         DROP TABLE group_file_policies;
          DROP TABLE group_access_members;
          DROP TABLE group_access_policies;
          DROP TABLE group_invite_requests;
          DROP TABLE migration_group_hints;
-         DELETE FROM schema_migrations WHERE version IN (33,34,35,36,37,38,39,40,41);",
+         DROP TABLE resource_budget_grants;
+         DROP TABLE IF EXISTS dht_provider_cache_v42;
+         DROP TABLE dht_provider_cache;
+         DROP TABLE dht_record_cache;
+         DELETE FROM schema_migrations WHERE version IN (33,34,35,36,37,38,39,40,41,42,43);",
         )
         .unwrap();
 }

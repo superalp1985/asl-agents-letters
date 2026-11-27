@@ -318,6 +318,44 @@ impl TransferService {
         Ok(None)
     }
 
+    pub(crate) fn group_context_offer(
+        &mut self,
+        requester: &GroupRequester,
+        request_id: Id128,
+        reference: SemanticContextRef,
+        request_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<(PolicyRevision, Permit, ContextOffer)>, AslError> {
+        let resources = self.store.semantic_context_resources(reference)?;
+        for resource in resources {
+            match self.authorize_group_content(requester, resource.content_id, now_ms) {
+                Ok((_, permit))
+                    if permit.file_size() == resource.file_size
+                        && permit.content_id() == resource.content_id =>
+                {
+                    let expires_at_ms = request_expires_at_ms
+                        .min(requester.direct.session_expires_at_ms)
+                        .min(permit.expires_at_ms());
+                    if expires_at_ms <= now_ms {
+                        return Ok(None);
+                    }
+                    let offer = ContextOffer {
+                        message_id: Id128(crate::profile::fresh_id()?),
+                        request_id,
+                        reference,
+                        content_id: resource.content_id,
+                        file_size: resource.file_size,
+                        expires_at_ms,
+                    };
+                    return Ok(Some((permit.policy_revision(), permit, offer)));
+                }
+                Ok(_) | Err(AslError::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn with_current_context_authority<T>(
         &self,
         requester: &DirectRequester,
@@ -327,6 +365,17 @@ impl TransferService {
     ) -> Result<T, AslError> {
         self.store
             .with_current_direct_authority(requester, revision, Some(permit), None, enqueue)
+    }
+
+    pub(crate) fn with_current_group_context_authority<T>(
+        &self,
+        requester: &GroupRequester,
+        revision: PolicyRevision,
+        permit: &Permit,
+        enqueue: impl FnOnce() -> Result<T, AslError>,
+    ) -> Result<T, AslError> {
+        self.store
+            .with_current_group_authority(requester, revision, Some(permit), None, enqueue)
     }
 
     pub(crate) fn expect_fetch_response(

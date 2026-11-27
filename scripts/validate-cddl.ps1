@@ -13,12 +13,12 @@ $schema = Join-Path $root "schemas\asl-v1.cddl"
 $contactInviteSchema = Join-Path $root "schemas\contact-invite-v1.cddl"
 $vectors = Join-Path $root "schemas\vectors"
 $index = Get-Content -LiteralPath (Join-Path $vectors "index.json") -Raw | ConvertFrom-Json
-if ($index.version -ne 1 -or $index.vectors.Count -ne 35) {
-    throw "Expected schema corpus version 1 with 35 vectors."
+if ($index.version -ne 1 -or $index.vectors.Count -ne 36) {
+    throw "Expected schema corpus version 1 with 36 vectors."
 }
-if (@($index.vectors | Where-Object { $_.accepted -eq $true }).Count -ne 25 -or
+if (@($index.vectors | Where-Object { $_.accepted -eq $true }).Count -ne 26 -or
     @($index.vectors | Where-Object { $_.accepted -eq $false }).Count -ne 10) {
-    throw "Expected 25 accepted and 10 rejected vectors."
+    throw "Expected 26 accepted and 10 rejected vectors."
 }
 
 & $tool.Source compile-cddl --cddl $schema
@@ -92,7 +92,7 @@ try {
             $process.Dispose()
         }
     }
-    Write-Output "CDDL corpus: 25 accepted, 10 rejected as expected."
+    Write-Output "CDDL corpus: 26 accepted, 10 rejected as expected."
 }
 finally {
     if (Test-Path -LiteralPath $wrapper) {

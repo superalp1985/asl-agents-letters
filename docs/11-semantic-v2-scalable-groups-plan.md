@@ -1,6 +1,6 @@
 # 修订计划：结构化控制 + 加密自然语言、按性能伸缩的群聊与不限次交流
 
-状态：第 4 版实现基线（2026-11-26）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 已用于表达式信件，ASL/1.2 已用于签名语义上下文，ASL/1.3 新增 `act-nl`；当前存储 schema 为 v39。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、发送侧持久预算、libp2p gossipsub 网络与 Core act 路由、v35 opaque 邮箱底座、v36 群主策略/管理员/禁言投影、v37 有期限联系人邀请、v38 群加入/重入请求、v39 不含 MLS 密钥的迁移群线索已经落地。回答开启时，`Ask` act 可由本机已批准模型生成严格结构的 `Inform/Clarify`；在线连接、DHT 邮箱和 gossip 经 MLS 认证后都从缓存链/设备证据重建群作用域，并按当前 audience 自动选择双许可本地证据。DHT 密文邮箱可投递和补收群 act/Offer；Act 正文预览可保留并随加密身份迁移包跨设备迁移。缓存证据过期恢复、MLS 群密钥迁移、真实两设备重启补收和大规模跨机验收仍未完成。
+状态：第 5 版实现基线（2026-11-27）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 已用于表达式信件，ASL/1.2 已用于签名语义上下文，ASL/1.3 新增 `act-nl`；当前存储 schema 为 v43。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、持久消息/字节/模型/CPU/邮箱预算、libp2p gossipsub 网络与 Core act/Policy 路由、v35 opaque 邮箱底座、v36 群主策略/管理员/禁言投影、v37 有期限联系人邀请、v38 群加入/重入请求、v39 不含 MLS 密钥的迁移群线索、v40/v41 DHT 与群主设备字段、v42 逐文件权限/委派管理员能力/多 provider 缓存、v43 Act 跨保留期哈希索引已经落地。群语义 ContextExpression/Request/Offer/Agreement 已走 MLS application；管理员可委派禁言快照。10,000 成员确定性 shard plan、shard/backbone topic 和 bridge 转发已接入 Core gossip，但真正创建多个 >512 子 MLS 群仍未完成。回答开启时，`Ask` act 可由本机已批准模型生成严格结构的 `Inform/Clarify`；在线连接、DHT 邮箱和 gossip 经 MLS 认证后都从缓存链/设备证据重建群作用域，并按当前 audience 自动选择双许可本地证据。DHT 密文邮箱可投递和补收群 act/Offer；Act 正文预览可保留并随加密身份迁移包跨设备迁移。真实两设备重启补收、多子 MLS 群和公网规模验收仍未完成。
 
 ## 0. 决策记录（2026-11-25）
 
@@ -366,9 +366,9 @@ v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_ac
 
 当前实现状态以代码、README、`docs/06-implementation-plan.md` 恢复点和 `docs/07-testing-release.md` 为准：
 
-- 已实现：严格确定性 CBOR、ASL/1.1 表达式、ASL/1.2 语义上下文、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v36、查询/文件基础、OpenMLS 群房间、群文件授权、act codec、act MLS 收发、MCP 发 act、群/MCP 管理、群主策略/管理员/禁言投影、p2p/gossipsub 网络层及 Core act/Policy 路径。
-- 部分实现：两人 MLS 会话工具已存在但缺两台真实设备验收；gossipsub 有真实双节点网络测试和 Core 路径，但缺跨机多跳/规模验收；v35 opaque 邮箱仓储之上已接 DHT 密文投递和已知发送者补收，但缺真实双机重启、送达回执和公网/NAT/relay 验收；v36 已有群主策略和管理员/禁言投影，但缺真实多设备策略同步验收；发送预算已持久扣减和可续期，其他复合额度未接。
-- 尚未实现：缓存证据过期恢复、Act 历史全文搜索/独立明文导出、MLS 群密钥迁移、邮箱送达回执、真实两设备重启补收、分层拓扑、完整 GUI 操作、提示注入红队和公网/链 RPC 全链路验收。
+- 已实现：严格确定性 CBOR、ASL/1.1/1.2 语义路径、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v43、OpenMLS 群房间、act codec/MLS 收发、群语义上下文、逐文件权限、管理员禁言委派、MCP 群管理、消息/模型/CPU/邮箱复合预算、p2p/gossipsub、DHT record/provider 持久回灌及 Core act/Policy 路径。
+- 部分实现：两人 MLS 和群操作可通过本机进程/回环验证，但缺两台真实设备验收；gossipsub 有真实双节点网络测试，但缺跨机多跳与规模验收；DHT 密文邮箱可投递和补收，缺真实双机重启、送达回执和公网/NAT/relay 验收；多设备策略同步、多子 MLS 群容量和真实链 RPC 仍未验收。
+- 尚未实现：多子 MLS 群的真实创建/成员分配/迁移、MLS 群密钥迁移、邮箱送达回执、真实两设备重启补收、提示注入红队、公网 NAT/relay、真实链 RPC 和 72 小时/规模验收。Act 当前保留期搜索、显式导出和过期后哈希索引已经存在。
 
 待实现：
 
@@ -376,7 +376,7 @@ v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_ac
 - 两台真实设备的两人 MLS 建群/邀请/重启恢复验收。
 - 字节数、模型调用、CPU/时间和邮箱复合预算，以及 GUI/Agent 续期策略。
 - DHT/relay 密文邮箱远程投递、主题轮换、离线补收和签收。
-- 跨机 gossipsub 多跳收敛、分层拓扑和 512/2,000/10,000 档容量验收。
+- shard plan 和 shard/backbone 路由代码已存在；跨机 gossipsub 多跳收敛、多个 >512 子 MLS 群和 512/2,000/10,000 档容量验收仍未完成。
 - 提示注入红队、audience 外泄测试和分身资源压力测试。
 
 本轮只补方案，不宣称上述待实现项已完成。交付口径是完整 1.0 功能闭环，不设 MVP。

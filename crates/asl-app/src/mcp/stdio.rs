@@ -29,7 +29,8 @@ use super::{
         ContextRequestArgs, EmptyArgs, ExpressionArgs, FetchArgs, GroupInviteArgs,
         GroupInviteRequestArgs, GroupRejectJoinRequestArgs, GroupRoomArgs, GroupSetAccessArgs,
         QueryArgs, ReceiveOfferArgs, RecoveryDownloadArgs, RecoveryDownloadDecisionArgs,
-        RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs, Request, SendFileArgs, TaskArgs,
+        RecoveryEventsArgs, RecoveryQueryArgs, RenewActBudgetArgs, RenewResourceBudgetArgs,
+        Request, SendFileArgs, TaskArgs,
     },
 };
 
@@ -52,6 +53,7 @@ const GROUP_INVITE_REQUEST: &str = "asl_group_invite_request";
 const GROUP_REJECT_JOIN_REQUEST: &str = "asl_group_reject_join_request";
 const DIRECT_OPEN: &str = "asl_direct_open";
 const RENEW_ACT_BUDGET: &str = "asl_renew_act_budget";
+const RENEW_RESOURCE_BUDGET: &str = "asl_renew_resource_budget";
 const REQUEST_CONTEXT: &str = "asl_request_context";
 const CONFIRM_CONTEXT: &str = "asl_confirm_context";
 const RECEIVE: &str = "asl_receive_offer";
@@ -246,7 +248,7 @@ impl ServerHandler for ToolServer {
             if caps["send_context_expression"] == true {
                 tools.push(Tool::new(
                     SEND_CONTEXT,
-                    "Queue a structured expression bound to exact, locally verified semantic context digests for one admitted agent. The peer's evaluation may remain unresolved. This is not delivery confirmation.",
+                    "Queue a structured expression bound to exact, locally verified semantic context digests for one admitted Agent or exact 32-byte group room. Group delivery uses MLS ContextExpression, not free text. Evaluation may remain unresolved and this is not delivery confirmation.",
                     schema_for_input::<ContextExpressionArgs>()
                         .map_err(|_| invalid_arguments())?,
                 ));
@@ -312,6 +314,12 @@ impl ServerHandler for ToolServer {
                     "Add a persistent, user-authorized act message budget to one MLS conversation. Renewal is bounded and auditable.",
                     schema_for_input::<RenewActBudgetArgs>().map_err(|_| invalid_arguments())?,
                 ));
+                tools.push(Tool::new(
+                    RENEW_RESOURCE_BUDGET,
+                    "Add a persistent resource budget for message bytes, model calls, CPU milliseconds, or mailbox bytes in one MLS conversation.",
+                    schema_for_input::<RenewResourceBudgetArgs>()
+                        .map_err(|_| invalid_arguments())?,
+                ));
             }
             if caps["act_history"] == true {
                 tools.push(Tool::new(
@@ -324,7 +332,7 @@ impl ServerHandler for ToolServer {
             if caps["request_context"] == true {
                 tools.push(Tool::new(
                     REQUEST_CONTEXT,
-                    "Request one exact signed semantic context from an admitted agent. Any resulting file offer still follows local inbox and transfer authorization.",
+                    "Request one exact signed semantic context from an admitted Agent or exact 32-byte group room. Group offers bind request ID, room and sender; file transfer still follows local inbox and group authorization.",
                     schema_for_input::<ContextRequestArgs>()
                         .map_err(|_| invalid_arguments())?,
                 ));
@@ -332,7 +340,7 @@ impl ServerHandler for ToolServer {
             if caps["confirm_context"] == true {
                 tools.push(Tool::new(
                     CONFIRM_CONTEXT,
-                    "After an authorized context download, revalidate the exact signed package graph and send a structured conformance agreement to the provider.",
+                    "Revalidate the exact signed package graph and send a structured ContextAgreement. Direct requests use request_id; group offers require request_id plus exact room and sender.",
                     schema_for_input::<ConfirmContextArgs>()
                         .map_err(|_| invalid_arguments())?,
                 ));
@@ -520,6 +528,7 @@ fn parse_request(params: CallToolRequestParams) -> Result<Request, ErrorData> {
         }
         DIRECT_OPEN => Ok(Request::DirectOpen(parse_arguments(arguments)?)),
         RENEW_ACT_BUDGET => Ok(Request::RenewActBudget(parse_arguments(arguments)?)),
+        RENEW_RESOURCE_BUDGET => Ok(Request::RenewResourceBudget(parse_arguments(arguments)?)),
         REQUEST_CONTEXT => Ok(Request::RequestContext(parse_arguments(arguments)?)),
         CONFIRM_CONTEXT => {
             let args: ConfirmContextArgs = parse_arguments(arguments)?;

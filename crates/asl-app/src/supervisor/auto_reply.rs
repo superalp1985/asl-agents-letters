@@ -49,6 +49,7 @@ enum JobResult {
         room: Hash32,
         request: ActQuestion,
         plan: ActReplyPlan,
+        elapsed_ms: u64,
     },
     Failed,
 }
@@ -141,6 +142,9 @@ pub(super) fn queue_auto_reply(
     if !store
         .resource_budget_available(&conversation, BudgetKind::ModelCalls, now_ms)
         .unwrap_or(false)
+        || !store
+            .resource_budget_available(&conversation, BudgetKind::CpuMs, now_ms)
+            .unwrap_or(false)
     {
         return;
     }
@@ -163,10 +167,20 @@ impl Supervisor {
                 room,
                 request,
                 plan,
+                elapsed_ms,
             } = result
             else {
                 continue;
             };
+            if let Some(groups) = &self.groups {
+                let conversation = alloy_primitives::hex::encode(request.conversation_id.0);
+                let _ = groups.store.consume_resource_budget(
+                    &conversation,
+                    BudgetKind::CpuMs,
+                    elapsed_ms.max(1),
+                    unix_time_ms()?,
+                );
+            }
             if !self.groups.as_ref().is_some_and(|groups| {
                 asl_store::group_state::GroupInboundPolicy::load(&groups.store)
                     .is_ok_and(|policy| policy.answer_enabled)
@@ -207,6 +221,7 @@ fn worker_loop(
         evidence,
     }) = jobs.recv()
     {
+        let started = Instant::now();
         let result = if let Some(context) = evidence {
             let provider = context.provider.clone();
             let (read_policy, model_policy) = context.policies();
@@ -242,6 +257,7 @@ fn worker_loop(
                 room,
                 request,
                 plan,
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             },
             Err(_) => JobResult::Failed,
         };

@@ -22,6 +22,7 @@ pub mod evidence;
 pub mod group_access;
 mod group_observations;
 pub mod group_state;
+pub mod group_topology;
 mod host_inbox;
 pub mod inbound_observations;
 pub mod mailbox;
@@ -40,7 +41,7 @@ pub mod semantic_context;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 43;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -82,6 +83,8 @@ const SCHEMA_V38: &str = include_str!("../../../specs/schema-v38.sql");
 const SCHEMA_V39: &str = include_str!("../../../specs/schema-v39.sql");
 const SCHEMA_V40: &str = include_str!("../../../specs/schema-v40.sql");
 const SCHEMA_V41: &str = include_str!("../../../specs/schema-v41.sql");
+const SCHEMA_V42: &str = include_str!("../../../specs/schema-v42.sql");
+const SCHEMA_V43: &str = include_str!("../../../specs/schema-v43.sql");
 
 pub struct Store {
     connection: Connection,
@@ -327,6 +330,12 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 41 {
             apply_migration_in_transaction(&transaction, SCHEMA_V41, 41, now)?;
+        }
+        if version < 42 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V42, 42, now)?;
+        }
+        if version < 43 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V43, 43, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

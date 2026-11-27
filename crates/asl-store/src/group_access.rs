@@ -7,8 +7,11 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, PeerId},
     protocol::{
-        GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_TEXT, GROUP_ALLOWED_PERMISSION_BITS,
-        GroupControl,
+        GROUP_ADMIN_MANAGE_FILES, GROUP_ADMIN_MANAGE_INVITES, GROUP_ADMIN_MANAGE_MEMBERS,
+        GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_TEXT, GROUP_ALLOWED_ADMIN_CAPABILITY_BITS,
+        GROUP_ALLOWED_FILE_PERMISSION_BITS, GROUP_ALLOWED_PERMISSION_BITS, GROUP_FILE_FETCH,
+        GROUP_FILE_READ, GROUP_FILE_SEND, GroupAdminCapability, GroupControl, GroupFilePolicy,
+        MAX_GROUP_CONTROL_FILE_POLICIES, MAX_GROUP_CONTROL_PEERS,
     },
     task::GroupId,
 };
@@ -23,6 +26,40 @@ pub enum GroupAccessKind {
     Text,
     Files,
     Invite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupFileAccessKind {
+    Read,
+    Send,
+    Fetch,
+}
+
+impl GroupFileAccessKind {
+    fn permission_bit(self) -> u8 {
+        match self {
+            Self::Read => GROUP_FILE_READ,
+            Self::Send => GROUP_FILE_SEND,
+            Self::Fetch => GROUP_FILE_FETCH,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupAdminCapabilityKind {
+    ManageMembers,
+    ManageFiles,
+    ManageInvites,
+}
+
+impl GroupAdminCapabilityKind {
+    fn permission_bit(self) -> u8 {
+        match self {
+            Self::ManageMembers => GROUP_ADMIN_MANAGE_MEMBERS,
+            Self::ManageFiles => GROUP_ADMIN_MANAGE_FILES,
+            Self::ManageInvites => GROUP_ADMIN_MANAGE_INVITES,
+        }
+    }
 }
 
 impl GroupAccessKind {
@@ -59,6 +96,8 @@ pub struct GroupAccessPolicy {
     pub admins: Vec<PeerId>,
     pub muted: Vec<PeerId>,
     pub owner: Option<PeerId>,
+    pub file_policies: Vec<GroupFilePolicy>,
+    pub admin_capabilities: Vec<GroupAdminCapability>,
 }
 
 impl Default for GroupAccessPolicy {
@@ -69,6 +108,8 @@ impl Default for GroupAccessPolicy {
             admins: Vec::new(),
             muted: Vec::new(),
             owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: Vec::new(),
         }
     }
 }
@@ -125,7 +166,7 @@ impl Store {
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if rows.len() > 512 {
+        if rows.len() > MAX_GROUP_CONTROL_PEERS {
             return Err(AslError::InvalidDatabase);
         }
         let mut admins = Vec::new();
@@ -143,12 +184,16 @@ impl Store {
                 return Err(AslError::InvalidDatabase);
             }
         }
+        let file_policies = self.group_file_policies(group_id)?;
+        let admin_capabilities = self.group_admin_capabilities(group_id)?;
         Ok(GroupAccessPolicy {
             revision: u64::try_from(revision).map_err(|_| AslError::InvalidDatabase)?,
             permissions: u8::try_from(permissions).map_err(|_| AslError::InvalidDatabase)?,
             admins,
             muted,
             owner: Some(parse_peer(&owner)?),
+            file_policies,
+            admin_capabilities,
         })
     }
 
@@ -163,11 +208,34 @@ impl Store {
     ) -> Result<GroupAccessPolicy, AslError> {
         if control.permissions & !GROUP_ALLOWED_PERMISSION_BITS != 0
             || control.policy_revision == 0
-            || control.admins.len() > 512
-            || control.muted.len() > 512
+            || control.admins.len() > MAX_GROUP_CONTROL_PEERS
+            || control.muted.len() > MAX_GROUP_CONTROL_PEERS
+            || control.file_policies.len() > MAX_GROUP_CONTROL_FILE_POLICIES
+            || control.admin_capabilities.len() > MAX_GROUP_CONTROL_PEERS
+            || !unique_peers(&control.admins)
+            || !unique_peers(&control.muted)
+            || !unique_file_policies(&control.file_policies)
+            || !unique_admin_capabilities(&control.admin_capabilities)
+            || control
+                .file_policies
+                .iter()
+                .any(|policy| policy.permissions & !GROUP_ALLOWED_FILE_PERMISSION_BITS != 0)
+            || control.admin_capabilities.iter().any(|capability| {
+                capability.capabilities & !GROUP_ALLOWED_ADMIN_CAPABILITY_BITS != 0
+                    || !control.admins.contains(&capability.peer)
+            })
         {
             return Err(AslError::InvalidMessage);
         }
+        let mut admins = control.admins.clone();
+        admins.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let mut muted = control.muted.clone();
+        muted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let mut file_policies = control.file_policies.clone();
+        file_policies
+            .sort_by(|left, right| left.content_id.as_bytes().cmp(right.content_id.as_bytes()));
+        let mut admin_capabilities = control.admin_capabilities.clone();
+        admin_capabilities.sort_by(|left, right| left.peer.as_bytes().cmp(right.peer.as_bytes()));
         let group = group_text(group_id);
         let now = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
         let tx = self
@@ -254,13 +322,53 @@ impl Store {
             )
             .map_err(database_error)?;
         }
+        tx.execute(
+            "DELETE FROM group_file_policies WHERE group_id=?1",
+            [&group],
+        )
+        .map_err(database_error)?;
+        for policy in &file_policies {
+            tx.execute(
+                "INSERT INTO group_file_policies(
+                    group_id,content_id,permissions,updated_at_ms)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    group,
+                    policy.content_id.as_bytes().as_slice(),
+                    i64::from(policy.permissions),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        }
+        tx.execute(
+            "DELETE FROM group_admin_capabilities WHERE group_id=?1",
+            [&group],
+        )
+        .map_err(database_error)?;
+        for capability in &admin_capabilities {
+            tx.execute(
+                "INSERT INTO group_admin_capabilities(
+                    group_id,peer_id,capabilities,updated_at_ms)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    group,
+                    peer_text(&capability.peer),
+                    i64::from(capability.capabilities),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        }
         tx.commit().map_err(database_error)?;
         Ok(GroupAccessPolicy {
             revision: control.policy_revision,
             permissions: control.permissions,
-            admins: control.admins.clone(),
-            muted: control.muted.clone(),
+            admins,
+            muted,
             owner: Some(owner),
+            file_policies,
+            admin_capabilities,
         })
     }
 
@@ -330,6 +438,199 @@ impl Store {
         Ok(permissions & kind.permission_bit() != 0)
     }
 
+    /// Applies an administrator moderation snapshot. The control revision and
+    /// every field except `muted` must exactly match the current owner policy,
+    /// so an administrator cannot mint or roll back owner policy.
+    pub fn apply_group_moderation(
+        &mut self,
+        group_id: &GroupId,
+        sender: &PeerId,
+        control: &GroupControl,
+        now_ms: u64,
+    ) -> Result<GroupAccessPolicy, AslError> {
+        control.encode()?;
+        let current = self.group_access_policy(group_id)?;
+        let owner = current.owner.clone().ok_or(AslError::InvalidDatabase)?;
+        if sender == &owner
+            || !self.group_admin_has_capability(
+                group_id,
+                sender,
+                GroupAdminCapabilityKind::ManageMembers,
+            )?
+            || control.policy_revision != current.revision
+            || control.permissions != current.permissions
+            || control.admins != current.admins
+            || control.owner.as_ref() != Some(&owner)
+            || control.file_policies != current.file_policies
+            || control.admin_capabilities != current.admin_capabilities
+            || control.muted.len() > MAX_GROUP_CONTROL_PEERS
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let active = self.group_topology_members(group_id)?;
+        if control
+            .muted
+            .iter()
+            .any(|peer| peer == &owner || !active.contains(peer))
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let group = group_text(group_id);
+        let now = i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        tx.execute(
+            "UPDATE group_access_members SET muted=0,updated_at_ms=?2 WHERE group_id=?1",
+            params![group, now],
+        )
+        .map_err(database_error)?;
+        for peer in &control.muted {
+            tx.execute(
+                "INSERT INTO group_access_members(group_id,peer_id,role,muted,updated_at_ms)
+                 VALUES (?1,?2,'member',1,?3)
+                 ON CONFLICT(group_id,peer_id) DO UPDATE SET
+                   muted=1,updated_at_ms=excluded.updated_at_ms",
+                params![group, peer_text(peer), now],
+            )
+            .map_err(database_error)?;
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(GroupAccessPolicy {
+            muted: control.muted.clone(),
+            ..current
+        })
+    }
+
+    pub fn group_can_access_file(
+        &self,
+        group_id: &GroupId,
+        peer: &PeerId,
+        content_id: &Hash32,
+        kind: GroupFileAccessKind,
+    ) -> Result<bool, AslError> {
+        let group = group_text(group_id);
+        let owner: String = self
+            .connection
+            .query_row(
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM asl_groups g
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
+                [&group],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if owner == peer_text(peer) {
+            return Ok(true);
+        }
+        let row = self
+            .connection
+            .query_row(
+                "SELECT p.permissions,r.role,coalesce(r.muted,0),f.permissions
+                 FROM asl_groups g
+                 JOIN group_members m
+                   ON m.group_id=g.group_id AND m.peer_id=?2 AND m.state='active'
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 LEFT JOIN group_access_members r
+                   ON r.group_id=g.group_id AND r.peer_id=?2
+                 LEFT JOIN group_file_policies f
+                   ON f.group_id=g.group_id AND f.content_id=?3
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
+                params![group, peer_text(peer), content_id.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((permissions, role, muted, file_permissions)) = row else {
+            return Ok(false);
+        };
+        if muted != 0 {
+            return Ok(false);
+        }
+        if let Some(file_permissions) = file_permissions {
+            let file_permissions =
+                u8::try_from(file_permissions).map_err(|_| AslError::InvalidDatabase)?;
+            return Ok(file_permissions & kind.permission_bit() != 0);
+        }
+        if role.as_deref() == Some("admin") {
+            return Ok(true);
+        }
+        let permissions = permissions
+            .map(u8::try_from)
+            .transpose()
+            .map_err(|_| AslError::InvalidDatabase)?
+            .unwrap_or(DEFAULT_GROUP_PERMISSIONS);
+        Ok(permissions & GROUP_ALLOW_MEMBER_FILES != 0)
+    }
+
+    /// Missing key-8 entries intentionally retain the old v1 admin behavior:
+    /// active, unmuted admins have all delegated capabilities.
+    pub fn group_admin_has_capability(
+        &self,
+        group_id: &GroupId,
+        peer: &PeerId,
+        capability: GroupAdminCapabilityKind,
+    ) -> Result<bool, AslError> {
+        let group = group_text(group_id);
+        let owner: String = self
+            .connection
+            .query_row(
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM asl_groups g
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
+                [&group],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if owner == peer_text(peer) {
+            return Ok(true);
+        }
+        let row = self
+            .connection
+            .query_row(
+                "SELECT r.role,coalesce(r.muted,0),c.capabilities
+                 FROM asl_groups g
+                 JOIN group_members m
+                   ON m.group_id=g.group_id AND m.peer_id=?2 AND m.state='active'
+                 LEFT JOIN group_access_members r
+                   ON r.group_id=g.group_id AND r.peer_id=?2
+                 LEFT JOIN group_admin_capabilities c
+                   ON c.group_id=g.group_id AND c.peer_id=?2
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
+                params![group, peer_text(peer)],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((role, muted, capabilities)) = row else {
+            return Ok(false);
+        };
+        if role.as_deref() != Some("admin") || muted != 0 {
+            return Ok(false);
+        }
+        let Some(capabilities) = capabilities else {
+            return Ok(true);
+        };
+        let capabilities = u8::try_from(capabilities).map_err(|_| AslError::InvalidDatabase)?;
+        Ok(capabilities & capability.permission_bit() != 0)
+    }
+
     pub fn group_members(&self, group_id: &GroupId) -> Result<Vec<GroupMemberAccess>, AslError> {
         let group = group_text(group_id);
         let owner: String = self
@@ -366,7 +667,7 @@ impl Store {
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if rows.len() > 512 {
+        if rows.len() > MAX_GROUP_CONTROL_PEERS {
             return Err(AslError::InvalidDatabase);
         }
         rows.into_iter()
@@ -421,6 +722,79 @@ impl Store {
             .collect()
     }
 
+    pub fn group_file_policies(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<GroupFilePolicy>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT content_id,permissions FROM group_file_policies
+                 WHERE group_id=?1 ORDER BY content_id LIMIT 513",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([group_text(group_id)], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if rows.len() > MAX_GROUP_CONTROL_FILE_POLICIES {
+            return Err(AslError::InvalidDatabase);
+        }
+        rows.into_iter()
+            .map(|(content_id, permissions)| {
+                Ok(GroupFilePolicy {
+                    content_id: Hash32(
+                        content_id
+                            .try_into()
+                            .map_err(|_| AslError::InvalidDatabase)?,
+                    ),
+                    permissions: u8::try_from(permissions)
+                        .map_err(|_| AslError::InvalidDatabase)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn group_admin_capabilities(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<GroupAdminCapability>, AslError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT c.peer_id,c.capabilities
+                 FROM group_admin_capabilities c
+                 JOIN group_members m
+                   ON m.group_id=c.group_id AND m.peer_id=c.peer_id AND m.state='active'
+                 JOIN group_access_members r
+                   ON r.group_id=c.group_id AND r.peer_id=c.peer_id AND r.role='admin'
+                 WHERE c.group_id=?1 ORDER BY c.peer_id LIMIT 513",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([group_text(group_id)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if rows.len() > MAX_GROUP_CONTROL_PEERS {
+            return Err(AslError::InvalidDatabase);
+        }
+        rows.into_iter()
+            .map(|(peer, capabilities)| {
+                Ok(GroupAdminCapability {
+                    peer: parse_peer(&peer)?,
+                    capabilities: u8::try_from(capabilities)
+                        .map_err(|_| AslError::InvalidDatabase)?,
+                })
+            })
+            .collect()
+    }
+
     pub fn group_access_owner(&self, wire_id: Hash32) -> Result<Option<PeerId>, AslError> {
         let owner: Option<String> = self
             .connection
@@ -453,6 +827,29 @@ fn parse_peer(text: &str) -> Result<PeerId, AslError> {
     PeerId::from_bytes(bytes).map_err(|_| AslError::InvalidDatabase)
 }
 
+fn unique_peers(peers: &[PeerId]) -> bool {
+    peers
+        .iter()
+        .enumerate()
+        .all(|(index, peer)| !peers[..index].contains(peer))
+}
+
+fn unique_file_policies(policies: &[GroupFilePolicy]) -> bool {
+    policies.iter().enumerate().all(|(index, policy)| {
+        !policies[..index]
+            .iter()
+            .any(|candidate| candidate.content_id == policy.content_id)
+    })
+}
+
+fn unique_admin_capabilities(capabilities: &[GroupAdminCapability]) -> bool {
+    capabilities.iter().enumerate().all(|(index, capability)| {
+        !capabilities[..index]
+            .iter()
+            .any(|candidate| candidate.peer == capability.peer)
+    })
+}
+
 fn active_peers(tx: &rusqlite::Transaction<'_>, group_id: &str) -> Result<Vec<PeerId>, AslError> {
     let mut statement = tx
         .prepare("SELECT peer_id FROM group_members WHERE group_id=?1 AND state='active' ORDER BY peer_id LIMIT 513")
@@ -462,7 +859,7 @@ fn active_peers(tx: &rusqlite::Transaction<'_>, group_id: &str) -> Result<Vec<Pe
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
-    if rows.len() > 512 {
+    if rows.len() > MAX_GROUP_CONTROL_PEERS {
         return Err(AslError::InvalidDatabase);
     }
     rows.into_iter().map(|text| parse_peer(&text)).collect()
@@ -556,6 +953,8 @@ mod tests {
             admins: vec![admin.clone()],
             muted: vec![member.clone()],
             owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: Vec::new(),
         };
         let policy = store
             .apply_group_control(&group, &owner, &control, 10)
@@ -604,6 +1003,8 @@ mod tests {
             admins: Vec::new(),
             muted: Vec::new(),
             owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: Vec::new(),
         };
         assert!(matches!(
             store.apply_group_control(&group, &member, &control, 10),
@@ -613,5 +1014,165 @@ mod tests {
             store.group_access_policy(&group).unwrap(),
             GroupAccessPolicy::default()
         );
+    }
+
+    #[test]
+    fn file_policies_and_delegated_admin_capabilities_are_enforced() {
+        let (_directory, mut store, group, owner, admin, member) = fixture();
+        let admin_file = Hash32([0x21; 32]);
+        let member_file = Hash32([0x22; 32]);
+        let missing_file = Hash32([0x23; 32]);
+        let control = GroupControl {
+            message_id: Id128([9; 16]),
+            policy_revision: 1,
+            permissions: GROUP_ALLOW_MEMBER_TEXT,
+            admins: vec![admin.clone()],
+            muted: Vec::new(),
+            owner: None,
+            file_policies: vec![
+                GroupFilePolicy {
+                    content_id: admin_file,
+                    permissions: GROUP_FILE_READ,
+                },
+                GroupFilePolicy {
+                    content_id: member_file,
+                    permissions: GROUP_FILE_FETCH | GROUP_FILE_READ,
+                },
+            ],
+            admin_capabilities: vec![GroupAdminCapability {
+                peer: admin.clone(),
+                capabilities: GROUP_ADMIN_MANAGE_FILES | GROUP_ADMIN_MANAGE_INVITES,
+            }],
+        };
+
+        store
+            .apply_group_control(&group, &owner, &control, 20)
+            .unwrap();
+
+        assert!(
+            store
+                .group_can_access_file(&group, &owner, &missing_file, GroupFileAccessKind::Send)
+                .unwrap()
+        );
+        assert!(
+            store
+                .group_can_access_file(&group, &admin, &admin_file, GroupFileAccessKind::Read)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .group_can_access_file(&group, &admin, &admin_file, GroupFileAccessKind::Send)
+                .unwrap()
+        );
+        assert!(
+            store
+                .group_can_access_file(&group, &member, &member_file, GroupFileAccessKind::Fetch)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .group_can_access_file(&group, &member, &missing_file, GroupFileAccessKind::Read)
+                .unwrap()
+        );
+        assert!(
+            store
+                .group_admin_has_capability(&group, &admin, GroupAdminCapabilityKind::ManageFiles)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .group_admin_has_capability(&group, &admin, GroupAdminCapabilityKind::ManageMembers)
+                .unwrap()
+        );
+        assert!(
+            store
+                .group_admin_has_capability(&group, &owner, GroupAdminCapabilityKind::ManageMembers)
+                .unwrap()
+        );
+
+        let policy = store.group_access_policy(&group).unwrap();
+        assert_eq!(policy.file_policies, control.file_policies);
+        assert_eq!(policy.admin_capabilities, control.admin_capabilities);
+    }
+
+    #[test]
+    fn v42_adds_only_the_file_and_admin_capability_projections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite3");
+        let store = crate::open_store(&path).unwrap();
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE group_admin_capabilities;
+                 DROP TABLE group_file_policies;
+                 DROP TABLE conversation_act_semantic_index;
+                 DELETE FROM schema_migrations WHERE version IN (42,43);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = crate::open_store(&path).unwrap();
+        assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
+        for table in ["group_file_policies", "group_admin_capabilities"] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing table {table}");
+        }
+    }
+
+    #[test]
+    fn delegated_admin_can_only_apply_the_muted_field_of_current_policy() {
+        let (_directory, mut store, group, owner, admin, member) = fixture();
+        let base = GroupControl {
+            message_id: Id128([9; 16]),
+            policy_revision: 1,
+            permissions: GROUP_ALLOW_MEMBER_TEXT,
+            admins: vec![admin.clone()],
+            muted: Vec::new(),
+            owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: vec![GroupAdminCapability {
+                peer: admin.clone(),
+                capabilities: asl_types::protocol::GROUP_ADMIN_MANAGE_MEMBERS,
+            }],
+        };
+        store
+            .apply_group_control(&group, &owner, &base, 10)
+            .unwrap();
+        let moderation = GroupControl {
+            message_id: Id128([10; 16]),
+            muted: vec![member.clone()],
+            owner: Some(owner.clone()),
+            ..base
+        };
+        let policy = store
+            .apply_group_moderation(&group, &admin, &moderation, 11)
+            .unwrap();
+        assert_eq!(policy.muted, vec![member.clone()]);
+        assert!(
+            !store
+                .group_can_send(&group, &member, GroupAccessKind::Text)
+                .unwrap()
+        );
+
+        let forged = GroupControl {
+            message_id: Id128([11; 16]),
+            permissions: 0,
+            ..moderation
+        };
+        assert!(matches!(
+            store.apply_group_moderation(&group, &admin, &forged, 12),
+            Err(AslError::PolicyDenied)
+        ));
     }
 }

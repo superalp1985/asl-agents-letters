@@ -97,8 +97,19 @@ impl MailboxWireRuntime {
             return Err(AslError::InvalidMessage);
         }
         let conversation = alloy_primitives::hex::encode(room.0);
+        let recipients = group_recipient_agents(store, room, local_agent)?;
         let frame_bytes = u64::try_from(frame.len()).map_err(|_| AslError::InvalidMessage)?;
-        if !store.resource_budget_available(&conversation, BudgetKind::MailboxBytes, now_ms)? {
+        let total_bytes = frame_bytes
+            .checked_mul(u64::try_from(recipients.len()).map_err(|_| AslError::InvalidMessage)?)
+            .ok_or(AslError::QuotaExceeded)?;
+        if total_bytes == 0
+            || !store.consume_resource_budget(
+                &conversation,
+                BudgetKind::MailboxBytes,
+                total_bytes,
+                now_ms,
+            )?
+        {
             return Err(AslError::QuotaExceeded);
         }
         let epoch = now_ms / MAILBOX_EPOCH_MS;
@@ -108,7 +119,7 @@ impl MailboxWireRuntime {
             .ok_or(AslError::InvalidMessage)?
             .min(i64::MAX as u64);
         let padded_size = padded_size(frame.len())?;
-        for recipient_id in group_recipient_agents(store, room, local_agent)? {
+        for recipient_id in recipients {
             let topic_id = mailbox_topic(recipient_id, local_agent, epoch);
             store.put_mailbox_envelope(MailboxEnvelope {
                 topic_id,
@@ -125,12 +136,6 @@ impl MailboxWireRuntime {
                 },
             })?;
         }
-        let _ = store.consume_resource_budget(
-            &conversation,
-            BudgetKind::MailboxBytes,
-            frame_bytes,
-            now_ms,
-        );
         self.next_publish = Some(Instant::now());
         Ok(())
     }

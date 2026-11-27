@@ -36,7 +36,7 @@ Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重
 
 ## 2. 数据表
 
-当前版本为 SQLite v39。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影；v37 新增有期限联系人邀请、一次性消费 receipt、Pairing 确认提示和 CLI/Core 动作队列；v38 新增有界、短期有效的群加入/重入请求；v39 新增不含 MLS 快照的迁移群线索。DHT 邮箱投递、Core/Net 命令和已知联系人或群成员轮换拉取已接通；送达回执和真实公网/NAT/relay 验收尚未完成。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
+当前版本为 SQLite v43。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影；v37 新增有期限联系人邀请、一次性消费 receipt、Pairing 确认提示和 CLI/Core 动作队列；v38 新增有界、短期有效的群加入/重入请求；v39 新增不含 MLS 快照的迁移群线索；v40/v41 增加 DHT 持久缓存与群主设备字段；v42 增加逐文件权限、委派管理员能力和同 key 多 provider 缓存；v43 增加不保存正文的 Act token 哈希索引。`group_file_policies` 的 key 是本地群 ID 与 32 字节内容 hash，只保存 read/send/fetch 位，不保存文件名或路径；`group_admin_capabilities` 只保存活动管理员 PeerId 与能力位。两项均在 `apply_group_control` 的同一事务内整表替换；管理员禁言只能提交与当前 owner 策略 revision、权限、owner、文件策略和能力位完全一致的 muted 快照。`conversation_act_semantic_index` 只保存域分离 token 哈希、room/act ID、方向和类型，默认保留 365 天；正文到期删除后仍可返回引用和命中分数，但不会恢复明文。DHT 邮箱投递、Core/Net 命令和已知联系人或群成员轮换拉取已接通；送达回执和真实公网/NAT/relay 验收尚未完成。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
 
 v22 增加 `observed_remote_profiles`，保存 Core 已验签的远端公开主题投影。每个 Agent 一条、总量最多 200 条，不保存头像或原始报文。只读面板按有效期、链观察与本机撤销状态过滤；该表不用于身份、权限或信任判定。
 
@@ -57,7 +57,7 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 | 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、contact_bindings、contact_binding_candidates、contact_binding_actions、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、本机身份 pin、待核验发现候选及受限动作队列 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
-| 群组 | asl_groups、group_members、group_events、group_access_policies、group_access_members、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、群主策略、管理员/禁言投影、定向入群邀请与有期限密文事件 |
+| 群组 | asl_groups、group_members、group_events、group_access_policies、group_access_members、group_file_policies、group_admin_capabilities、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、群主策略、管理员/禁言/能力投影、逐文件权限、定向入群邀请与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources、semantic_context_candidates、semantic_context_resources | 物理内容、授权引用、本机检索索引、溯源和已验证语义上下文候选/精确资源关联 |
 | 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
 | 本机观察 | direct_inbound_observations | 有界、短期的结构化直连请求浏览记录，不含请求正文或回复 |

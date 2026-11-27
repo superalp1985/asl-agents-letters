@@ -2,6 +2,7 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use asl_app::{
     identity::{AgentIdentity, DeviceIdentity},
+    identity_onboarding::{self, IdentityOnboardingConfigV1, OnboardingPhaseV1},
     identity_registration::{
         IdentityRegistrationRequest, default_deadline, prepare_device_directory,
     },
@@ -27,6 +28,30 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
     if let ["prepare-directory"] = args.as_slice() {
         return prepare_directory(&paths, &identity, 1);
+    }
+    if let ["status"] = args.as_slice() {
+        return print_onboarding_status(&paths);
+    }
+    if matches!(args.as_slice(), ["onboard"] | ["resume"]) {
+        return onboard(&paths);
+    }
+    if let ["revoke-onchain", sequence, deadline] = args.as_slice() {
+        let sequence = sequence
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 1)
+            .ok_or(AslError::InvalidMessage)?;
+        let deadline = deadline
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(AslError::InvalidMessage)?;
+        let status = identity_onboarding::revoke(&paths, sequence, deadline)?;
+        println!(
+            "{}",
+            serde_json::to_string(&status).map_err(|_| AslError::InvalidMessage)?
+        );
+        return Ok(());
     }
     if let ["prepare-directory", sequence] = args.as_slice() {
         let sequence = sequence
@@ -94,6 +119,50 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     println!(
         "{}",
         serde_json::to_string(&request).map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn print_onboarding_status(paths: &AppPaths) -> Result<(), AslError> {
+    let status = identity_onboarding::status(paths)?.ok_or(AslError::NotFound)?;
+    println!(
+        "{}",
+        serde_json::to_string(&status).map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn onboard(paths: &AppPaths) -> Result<(), AslError> {
+    let mut status = identity_onboarding::onboard(paths)?;
+    if status.phase == OnboardingPhaseV1::DirectoryInstalled {
+        let config = IdentityOnboardingConfigV1::load(&paths.identity_onboarding_configuration())?;
+        let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+        let commitment = parse_hex32(&status.state_commitment)?;
+        match asl_app::supervisor::Supervisor::publish_signed_directory_once(
+            paths,
+            identity.agent_id(),
+            status.registry_sequence,
+            commitment,
+            std::time::Duration::from_secs(config.publication_timeout_seconds),
+        ) {
+            Ok(()) => {
+                status = identity_onboarding::mark_directory_published(
+                    paths,
+                    &status.state_commitment.clone(),
+                )?;
+            }
+            Err(_) => {
+                status = identity_onboarding::note_publication_failure(
+                    paths,
+                    &status.state_commitment.clone(),
+                    "directory publication is pending; start Core with network access and resume",
+                )?;
+            }
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&status).map_err(|_| AslError::InvalidMessage)?
     );
     Ok(())
 }

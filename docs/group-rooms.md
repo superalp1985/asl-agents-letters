@@ -5,11 +5,13 @@
 本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
-- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_group_invite_request`、`asl_group_reject_join_request`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
+- `ASL_MCP_GROUPS=admin` 时，MCP 暴露群列表/创建/成员/访问策略/邀请/加入请求、两人会话、消息预算和复合资源预算续期工具；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
-- 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
-- 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
-- DHT 密文邮箱已接群 act/Offer 的分片投递和已知成员拉取；v35 提供本地 opaque 仓储与预算，v36 提供群主策略和管理员/禁言投影。真实两设备重启补收、送达回执和公网/NAT/relay 仍未验收。
+- 群创建/加入时生成消息数、消息字节、模型调用、CPU 和邮箱预算。群管理页显示用量并允许按 24 小时续期；MCP 和 `asl-core --group-admin budget` 也提供精确续期入口。预算耗尽后 fail closed。
+- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。拥有 `manage-members` 的管理员可提交只修改 muted 的委派快照；其他 owner 字段必须完全一致。MLS 的 Remove Commit 仍只能由 creator 提交。
+- 群语义 `ContextExpression/ContextRequest/ContextOffer/ContextAgreement` 已进入 MLS application 路径，确认时绑定 request ID、room 和 sender。
+- 单 MLS 群编译硬上限为 512。成员投影超过 512 时，Core 可生成最多 10,000 成员的确定性 shard plan，并使用 shard topic、backbone topic 和 bridge 转发 MLS 密文；真正创建多个子 MLS 群和跨机 2,000/10,000 验收仍未完成。
+- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引。真实两设备重启补收、送达回执和公网/NAT/relay 仍未验收。
 
 ## 已实现：群消息编解码
 
@@ -197,6 +199,8 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 
 - 成员默认允许/禁止发送 `act`、发起查询或表达式、发送文件 Offer、邀请新成员。
 - 群主可指定管理员 PeerId，也可指定禁言设备；管理员仍只能发送消息/文件/邀请，不能替代群主修改策略或改变 MLS 创建者。
+- 群主可按 32 字节内容 hash 下发逐文件 `read/send/fetch` 权限；未配置的内容沿用成员默认文件权限，显式 entry 是群策略授权而不是本机目录读取许可。
+- 群主可为活动管理员绑定 `manage-members/manage-files/manage-invites` 能力位；未绑定的旧 v1 管理员保持全部委派能力，群主始终拥有全部能力。
 - 策略 revision 单调递增；非群主 sender、回退 revision、非活动成员、禁言群主和重复/乱序 PeerId 都被拒绝。
 
-策略只通过 MLS application plaintext 传播，不写入 DHT、文件名、路径或自然语言字段。接收端在通知 Agent、收取 act/Offer 或开始文件传输前重新检查当前群策略；本机目录授权、收件目录授权、设备证书和传输审批仍然是独立硬边界。当前验证覆盖控制值 round-trip、存储策略/角色/禁言、MCP 参数和发送/接收代码路径；尚未完成两台真实设备的管理员策略同步、群主转移和管理员管理动作验收。
+策略只通过 MLS application plaintext 传播，不写入 DHT、文件名、路径或自然语言字段。key 7/8 缺省时兼容旧 v1。接收端在通知 Agent、收取 act/Offer 或开始文件传输前重新检查当前群策略；文件授权调用 `group_can_access_file`，管理动作调用管理员能力检查。本机目录授权、收件目录授权、设备证书和传输审批仍然是独立硬边界。当前验证覆盖控制值 round-trip、兼容解码、存储策略/角色/禁言、逐文件权限和委派能力；尚未完成两台真实设备的管理员策略同步、群主转移和管理员管理动作验收。

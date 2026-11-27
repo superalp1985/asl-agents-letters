@@ -24,6 +24,15 @@ identity proves a person, a unique operator, or a benign Agent.
   token, points market, or paid tier. The default submission path is a set of
   replaceable volunteer sponsors; the identity owner may also submit a
   transaction using externally acquired ETH. Sponsors can stop or rate-limit.
+- The local onboarding command reads explicit sponsor and external signer
+  configuration from `state/identity-onboarding-v1.json`. It never contains or
+  prints the root private key. Sponsors receive the signed typed request, not
+  account custody. The command resumes the same persisted proposal across
+  restart and waits for a matching finalized storage proof before installing or
+  publishing the device directory.
+- `revoke-onchain` emits a local finalized-revocation hook that suspends
+  admission. Offline peers still need to refresh the finalized revoked proof;
+  no immediate global broadcast is claimed.
 
 ## Identity and Keys
 

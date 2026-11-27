@@ -67,7 +67,10 @@ mod auto_reply_evidence;
 mod avatar_download;
 mod bindings;
 mod contact_invites;
+mod dht_cache;
 mod directory;
+#[cfg(windows)]
+mod group_routing;
 #[cfg(windows)]
 mod groups;
 #[cfg(windows)]
@@ -76,6 +79,7 @@ mod mail;
 mod mailbox_wire;
 mod network_pause;
 mod network_report;
+mod onboarding_publication;
 mod profile_signing;
 mod resource_providers;
 #[cfg(windows)]
@@ -109,6 +113,7 @@ pub struct Supervisor {
     device_key_path: PathBuf,
     transport_connections: HashMap<[u8; 16], PeerId>,
     network_report: network_report::NetworkStatus,
+    onboarding_publication: onboarding_publication::OnboardingPublicationRuntime,
     profile_signing: profile_signing::ProfileSigningRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
@@ -123,6 +128,7 @@ pub struct Supervisor {
     contact_bindings: bindings::ContactBindingRuntime,
     contact_invites: contact_invites::ContactInviteRuntime,
     resource_providers: resource_providers::ResourceProviderRuntime,
+    dht_restore: dht_cache::DhtRestoreRuntime,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -196,13 +202,6 @@ impl Supervisor {
                 network_settings.loopback_groups,
             )?
         };
-        if !paused && let Ok(records) = network_store.cached_dht_records(unix_time_ms()?, 512) {
-            for record in records {
-                let _ = net.try_send(&IpcMessage::RestoreDhtRecord {
-                    value: record.record,
-                });
-            }
-        }
         #[cfg(windows)]
         let auto_reply = auto_reply::AutoReplyRuntime::spawn(&paths)?;
         let mut supervisor = Self {
@@ -219,6 +218,7 @@ impl Supervisor {
             model_gateway,
             net,
             profile_signing: profile_signing::ProfileSigningRuntime::open(&state_database)?,
+            onboarding_publication: onboarding_publication::OnboardingPublicationRuntime::new(),
             network_report: network_report::NetworkStatus::new(network_store, &network_settings),
             network_settings,
             device_key_path,
@@ -236,6 +236,7 @@ impl Supervisor {
             contact_bindings: bindings::ContactBindingRuntime::default(),
             contact_invites: contact_invites::ContactInviteRuntime::default(),
             resource_providers: resource_providers::ResourceProviderRuntime::default(),
+            dht_restore: dht_cache::DhtRestoreRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -255,6 +256,8 @@ impl Supervisor {
             supervisor
                 .net
                 .apply_settings(&supervisor.network_settings)?;
+            supervisor.reload_dht_restore()?;
+            supervisor.pump_dht_restore()?;
             supervisor
                 .network_report
                 .set_runtime(NetworkRuntimeState::Running);
@@ -403,6 +406,92 @@ impl Supervisor {
         self.net.next_nonce = nonce.checked_add(1).ok_or(AslError::InvalidMessage)?;
         self.net.send(&IpcMessage::Ping { nonce })?;
         self.net.wait_for_pong(nonce, NET_PING_TIMEOUT)
+    }
+
+    /// One-shot typed DHT publication used by the onboarding command. The
+    /// signed record is checked against the finalized directory commitment
+    /// before it enters the Net process.
+    pub fn publish_signed_directory_once(
+        paths: &AppPaths,
+        expected_agent: AgentId,
+        expected_sequence: u64,
+        expected_commitment: [u8; 32],
+        timeout: Duration,
+    ) -> Result<(), AslError> {
+        let bytes = std::fs::read(paths.signed_device_directory())?;
+        crate::identity_onboarding::verify_signed_directory(
+            &bytes,
+            expected_agent,
+            expected_sequence,
+            expected_commitment,
+        )?;
+
+        let reopened = AppPaths::open_existing(paths.root())?;
+        let mut supervisor = Self::start(reopened)?;
+        if !supervisor.net.is_running()
+            || supervisor.network_admission_status != NetworkAdmissionStatus::Active
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let operation_id = fresh_id()?;
+        supervisor.send_network_command(NetworkCommand::PrepareDirectory {
+            operation_id,
+            agent: expected_agent,
+        })?;
+        let deadline = Instant::now() + timeout;
+        let mut publishing = false;
+        loop {
+            if Instant::now() >= deadline {
+                let _ = supervisor.net.send(&IpcMessage::CancelDirectory {
+                    operation_id,
+                    receipt_id: fresh_id()?,
+                });
+                return Err(AslError::ExpiredMessage);
+            }
+            let Some(message) = supervisor.net.receive_runtime_message_optional(
+                NETWORK_EVENT_POLL_INTERVAL.min(Duration::from_secs(1)),
+            )?
+            else {
+                continue;
+            };
+            match message {
+                IpcMessage::Pong { nonce } => {
+                    supervisor.net.acknowledge_pong(nonce)?;
+                }
+                IpcMessage::OperationAccepted {
+                    operation_id: accepted,
+                } if accepted == operation_id && !publishing => {
+                    supervisor.send_network_command(NetworkCommand::PublishDirectory {
+                        operation_id,
+                        value: bytes.clone(),
+                    })?;
+                    publishing = true;
+                }
+                IpcMessage::OperationAccepted {
+                    operation_id: accepted,
+                } if accepted == operation_id && publishing => {
+                    return Ok(());
+                }
+                IpcMessage::OperationFailed {
+                    operation_id: failed,
+                    ..
+                } if failed == operation_id => {
+                    let _ = supervisor.net.send(&IpcMessage::CancelDirectory {
+                        operation_id,
+                        receipt_id: fresh_id()?,
+                    });
+                    return Err(AslError::InvalidIdentity);
+                }
+                message if is_network_event(&message) => {
+                    let event = NetworkEvent::try_from(message)?;
+                    let batch = supervisor.handle_admitted_event(event, unix_time_ms()?)?;
+                    for command in batch.commands {
+                        supervisor.send_network_command(command)?;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn send_network_ipc(&mut self, message: IpcMessage) -> Result<(), AslError> {
@@ -588,6 +677,7 @@ impl Supervisor {
                 }
             },
             |supervisor, observation| {
+                supervisor.observe_dht_provider_observation(&observation)?;
                 supervisor.observe_contact_binding_network(observation.clone())?;
                 supervisor.observe_contact_invite_network(observation.clone())?;
                 match observation {
@@ -1309,6 +1399,8 @@ impl Supervisor {
                 self.poll_contact_invites()?;
                 self.poll_resource_providers()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
+                self.poll_onboarding_directory_publication(now);
+                self.pump_dht_restore()?;
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
             }
@@ -1334,6 +1426,23 @@ impl Supervisor {
             else {
                 continue;
             };
+            if let IpcMessage::OperationAccepted { operation_id } = &message {
+                match self.advance_onboarding_publication(*operation_id, Instant::now()) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => {
+                        let _ = self.note_onboarding_publication_failure(*operation_id);
+                        continue;
+                    }
+                }
+            }
+            if let IpcMessage::OperationFailed { operation_id, .. } = &message {
+                match self.note_onboarding_publication_failure(*operation_id) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => continue,
+                }
+            }
             let event = match message {
                 IpcMessage::Pong { nonce } => {
                     self.net.acknowledge_pong(nonce)?;
@@ -2114,6 +2223,7 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::DiscoveryCandidate { .. }
             | IpcMessage::DhtRecordCandidate { .. }
             | IpcMessage::DhtProviders { .. }
+            | IpcMessage::DhtProviderObserved { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
@@ -2159,6 +2269,7 @@ pub(crate) fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
         }
         NetworkEvent::DiscoveryCandidate { .. } => {}
         NetworkEvent::DhtProviders { .. } => {}
+        NetworkEvent::DhtProviderObserved { .. } => {}
         NetworkEvent::DhtRecordCandidate { candidate_id, .. } => {
             batch.commands.push(NetworkCommand::DecideDhtRecord {
                 candidate_id,
@@ -2210,6 +2321,7 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::DhtRecordCandidate { .. }
         | NetworkEvent::DhtProviders { .. }
+        | NetworkEvent::DhtProviderObserved { .. }
         | NetworkEvent::GossipReceived { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,

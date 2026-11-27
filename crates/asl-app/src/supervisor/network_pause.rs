@@ -51,6 +51,8 @@ impl Supervisor {
             (false, NetworkRuntimeState::Paused) => match self.restart_net(start_net) {
                 Ok(net) => {
                     self.net = net;
+                    self.reload_dht_restore()?;
+                    self.pump_dht_restore()?;
                     self.resource_providers.reset_resource_providers();
                     self.network_report
                         .set_runtime(NetworkRuntimeState::Running);

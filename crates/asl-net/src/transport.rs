@@ -9,7 +9,7 @@ use std::{
     str::FromStr,
     sync::{Arc, Weak},
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::address_policy::{
@@ -43,7 +43,7 @@ use libp2p::{
     },
     futures::StreamExt,
     identity::Keypair,
-    kad::{self, RecordKey, store::RecordStore},
+    kad::{self, ProviderRecord, RecordKey, store::RecordStore},
     mdns,
     multiaddr::Protocol,
     noise,
@@ -76,6 +76,8 @@ const MAX_PENDING_DHT_PROVIDER_LOOKUPS: usize = 24;
 const MAX_DHT_PROVIDER_CANDIDATES: usize = 20;
 const DHT_CANDIDATE_LIFETIME: Duration = Duration::from_secs(10);
 const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+const DHT_RECORD_RESTORE_TTL: Duration = Duration::from_secs(30 * 60);
+const DHT_PROVIDER_RESTORE_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_RELAY_ENDPOINTS: usize = 8;
 const MAX_PENDING_RESPONSES: usize = MAX_CONNECTIONS * 4 * 2;
 const MAX_PENDING_REQUESTS: usize = MAX_PENDING_RESPONSES;
@@ -253,6 +255,12 @@ pub enum TransportEvent {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    DhtProviderObserved {
+        key: [u8; 32],
+        provider: PeerId,
+        addresses: Vec<String>,
+        expires_in: Duration,
     },
     DhtRecordCandidate {
         candidate_id: [u8; 16],
@@ -651,18 +659,66 @@ impl LocalTransport {
 
     /// Rehydrates a previously verified signed record into the local Kademlia
     /// store without treating it as a fresh network response.
-    pub fn restore_dht_record(&mut self, value: Vec<u8>) -> io::Result<()> {
+    pub fn restore_dht_record(&mut self, value: Vec<u8>, expires_at_ms: u64) -> io::Result<()> {
         let signed = decode_record(&value).map_err(|_| io::ErrorKind::InvalidData)?;
         let key = crate::dht::record_key_for_payload(&signed.record.payload)
             .map_err(|_| io::ErrorKind::InvalidData)?;
+        let remaining_ms = expires_at_ms
+            .checked_sub(unix_time_ms()?)
+            .ok_or(io::ErrorKind::TimedOut)?;
+        if remaining_ms == 0 {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         let mut record = kad::Record::new(key, value);
-        record.expires = Some(Instant::now() + Duration::from_secs(30 * 60));
+        record.expires =
+            Some(Instant::now() + Duration::from_millis(remaining_ms).min(DHT_RECORD_RESTORE_TTL));
         self.swarm
             .behaviour_mut()
             .dht
             .store_mut()
             .put(record)
             .map_err(|_| io::Error::other("DHT restore capacity reached"))
+    }
+
+    pub fn restore_dht_provider(
+        &mut self,
+        key: [u8; 32],
+        provider: &PeerId,
+        addresses: &[String],
+        expires_at_ms: u64,
+    ) -> io::Result<()> {
+        let remaining_ms = expires_at_ms
+            .checked_sub(unix_time_ms()?)
+            .ok_or(io::ErrorKind::TimedOut)?;
+        if remaining_ms == 0 {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let provider = libp2p::PeerId::from_bytes(provider.as_bytes())
+            .map_err(|_| io::ErrorKind::InvalidInput)?;
+        let addresses = addresses
+            .iter()
+            .take(MAX_DHT_PROVIDER_ADDRESSES)
+            .filter_map(|address| {
+                let address = address.parse::<Multiaddr>().ok()?;
+                validate_multiaddr(self.address_policy, &provider, &address)
+                    .ok()
+                    .map(|_| address)
+            })
+            .collect();
+        let record = ProviderRecord {
+            key: RecordKey::new(&key),
+            provider,
+            addresses,
+            expires: Some(
+                Instant::now() + Duration::from_millis(remaining_ms).min(DHT_PROVIDER_RESTORE_TTL),
+            ),
+        };
+        self.swarm
+            .behaviour_mut()
+            .dht
+            .store_mut()
+            .add_provider(record)
+            .map_err(|_| io::Error::other("DHT provider restore capacity reached"))
     }
 
     pub fn start_providing(
@@ -1212,24 +1268,16 @@ impl LocalTransport {
         let record = match event {
             kad::Event::InboundRequest {
                 request:
-                    kad::InboundRequest::PutRecord {
-                        record: Some(record),
-                        ..
-                    },
-            } => record,
-            kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))),
-                ..
-            } => peer_record.record,
-            kad::Event::InboundRequest {
-                request:
                     kad::InboundRequest::AddProvider {
                         record: Some(mut record),
                     },
             } => {
-                if record.key.as_ref().len() != 32 {
+                if record.key.as_ref().len() != 32 || record.provider == *self.swarm.local_peer_id()
+                {
                     return Ok(None);
                 }
+                let key: [u8; 32] = record.key.as_ref().try_into().unwrap();
+                let provider = record.provider;
                 let mut addresses = Vec::new();
                 for address in record.addresses {
                     if addresses.len() == MAX_DHT_PROVIDER_ADDRESSES {
@@ -1240,14 +1288,46 @@ impl LocalTransport {
                     }
                 }
                 record.addresses = addresses;
-                let _ = self
-                    .swarm
-                    .behaviour_mut()
-                    .dht
-                    .store_mut()
-                    .add_provider(record);
-                return Ok(None);
+                let store = self.swarm.behaviour_mut().dht.store_mut();
+                if store.add_provider(record).is_err() {
+                    return Ok(None);
+                }
+                let Some(stored) = store
+                    .providers(&RecordKey::new(&key))
+                    .into_iter()
+                    .find(|record| record.provider == provider)
+                else {
+                    return Ok(None);
+                };
+                let expires_in = stored
+                    .expires
+                    .unwrap_or_else(|| Instant::now() + DHT_PROVIDER_RESTORE_TTL)
+                    .saturating_duration_since(Instant::now());
+                if expires_in.is_zero() {
+                    return Ok(None);
+                }
+                return Ok(Some(TransportEvent::DhtProviderObserved {
+                    key,
+                    provider: device_peer(provider)?,
+                    addresses: stored
+                        .addresses
+                        .into_iter()
+                        .map(|address| address.to_string())
+                        .collect(),
+                    expires_in,
+                }));
             }
+            kad::Event::InboundRequest {
+                request:
+                    kad::InboundRequest::PutRecord {
+                        record: Some(record),
+                        ..
+                    },
+            } => record,
+            kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))),
+                ..
+            } => peer_record.record,
             _ => return Ok(None),
         };
 
@@ -1384,6 +1464,16 @@ impl LocalTransport {
             .map(|(_, deadline)| *deadline)
             .min()
     }
+}
+
+fn unix_time_ms() -> io::Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| io::Error::other("system clock is before UNIX epoch"))
+        .and_then(|elapsed| {
+            u64::try_from(elapsed.as_millis())
+                .map_err(|_| io::Error::other("system clock overflow"))
+        })
 }
 
 fn select_provider_endpoint(
@@ -1996,6 +2086,81 @@ mod tests {
             select_provider_endpoint(AddressPolicy::LanOnly, &remote, [wrong_peer]),
             None
         );
+    }
+
+    #[test]
+    fn provider_restore_reinserts_only_policy_valid_addresses() {
+        let provider = peer();
+        let key = [19; 32];
+        let mut transport = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
+        transport
+            .set_address_policy(AddressPolicy::LoopbackOnly)
+            .unwrap();
+        let provider_id =
+            asl_types::ids::PeerId::from_bytes(provider.to_bytes()).expect("canonical peer id");
+        let expires_at_ms = unix_time_ms().unwrap() + 60_000;
+
+        transport
+            .restore_dht_provider(
+                key,
+                &provider_id,
+                &[
+                    "/ip4/127.0.0.1/tcp/4001".into(),
+                    "/ip4/8.8.8.8/tcp/4001".into(),
+                ],
+                expires_at_ms,
+            )
+            .unwrap();
+
+        let providers = transport
+            .swarm
+            .behaviour_mut()
+            .dht
+            .store_mut()
+            .providers(&RecordKey::new(&key));
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider, provider);
+        assert_eq!(
+            providers[0].addresses,
+            vec!["/ip4/127.0.0.1/tcp/4001".parse().unwrap()]
+        );
+    }
+
+    #[test]
+    fn accepted_inbound_provider_emits_a_persistence_observation() {
+        let provider = peer();
+        let key = [23; 32];
+        let mut transport = LocalTransport::new(Keypair::generate_ed25519()).unwrap();
+        transport
+            .set_address_policy(AddressPolicy::LoopbackOnly)
+            .unwrap();
+        let event = kad::Event::InboundRequest {
+            request: kad::InboundRequest::AddProvider {
+                record: Some(ProviderRecord {
+                    key: RecordKey::new(&key),
+                    provider,
+                    addresses: vec![
+                        "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),
+                        "/ip4/8.8.8.8/tcp/4001".parse().unwrap(),
+                    ],
+                    expires: Some(Instant::now() + Duration::from_secs(30)),
+                }),
+            },
+        };
+
+        let Some(TransportEvent::DhtProviderObserved {
+            key: observed_key,
+            provider: observed_provider,
+            addresses,
+            expires_in,
+        }) = transport.handle_dht(event).unwrap()
+        else {
+            panic!("expected a validated provider observation");
+        };
+        assert_eq!(observed_key, key);
+        assert_eq!(observed_provider.as_bytes(), provider.to_bytes().as_slice());
+        assert_eq!(addresses, vec!["/ip4/127.0.0.1/tcp/4001".to_string()]);
+        assert!(expires_in <= Duration::from_secs(30));
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use asl_agent::QueryScope;
+use asl_store::budgets::BudgetKind;
 use asl_transfer::scheduler::MAX_ACTIVE_SOURCES;
 use asl_types::{
     error::ErrorCode,
@@ -77,6 +78,7 @@ pub(super) enum Request {
     GroupRejectJoinRequest(GroupRejectJoinRequestArgs),
     DirectOpen(AgentTargetArgs),
     RenewActBudget(RenewActBudgetArgs),
+    RenewResourceBudget(RenewResourceBudgetArgs),
     RequestContext(ContextRequestArgs),
     ConfirmContext(ConfirmContextArgs),
     ReceiveOffer(ReceiveOfferArgs),
@@ -152,7 +154,7 @@ impl ExpressionArgs {
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ContextExpressionArgs {
-    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    #[schemars(regex(pattern = r"^(agent|group):[a-fA-F0-9]{64}$"))]
     pub target: String,
     #[schemars(length(equal = 32))]
     pub root: Option<String>,
@@ -181,7 +183,10 @@ impl ContextExpressionArgs {
             .target
             .split_once(':')
             .ok_or(ErrorCode::InvalidMessage)?;
-        if kind != "agent" || id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !matches!(kind, "agent" | "group")
+            || id.len() != 64
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
             return Err(ErrorCode::InvalidMessage);
         }
         let root = self.root.as_deref().map(parse_id).transpose()?;
@@ -457,6 +462,12 @@ pub(super) struct GroupSetAccessArgs {
     #[schemars(length(max = 512))]
     pub muted: Vec<String>,
     pub owner: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub file_policies: Option<Vec<GroupFilePolicyArgs>>,
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub admin_capabilities: Option<Vec<GroupAdminCapabilityArgs>>,
 }
 
 impl GroupSetAccessArgs {
@@ -477,6 +488,34 @@ impl GroupSetAccessArgs {
             .iter()
             .map(|peer| parse_peer(peer))
             .collect::<Result<Vec<_>, _>>()?;
+        let file_policies = self
+            .file_policies
+            .map(|policies| {
+                policies
+                    .into_iter()
+                    .map(|policy| {
+                        Ok(asl_types::protocol::GroupFilePolicy {
+                            content_id: parse_hash32(&policy.content_id)?,
+                            permissions: policy.permissions,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ErrorCode>>()
+            })
+            .transpose()?;
+        let admin_capabilities = self
+            .admin_capabilities
+            .map(|capabilities| {
+                capabilities
+                    .into_iter()
+                    .map(|capability| {
+                        Ok(asl_types::protocol::GroupAdminCapability {
+                            peer: parse_peer(&capability.peer)?,
+                            capabilities: capability.capabilities,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ErrorCode>>()
+            })
+            .transpose()?;
         Ok((
             room,
             crate::agent_mail::GroupAccessUpdate {
@@ -486,9 +525,26 @@ impl GroupSetAccessArgs {
                 admins,
                 muted,
                 owner: self.owner.as_deref().map(parse_peer).transpose()?,
+                file_policies,
+                admin_capabilities,
             },
         ))
     }
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupFilePolicyArgs {
+    #[schemars(length(equal = 64))]
+    pub content_id: String,
+    pub permissions: u8,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupAdminCapabilityArgs {
+    pub peer: String,
+    pub capabilities: u8,
 }
 
 fn parse_peer(value: &str) -> Result<asl_types::ids::PeerId, ErrorCode> {
@@ -576,6 +632,48 @@ pub(super) struct RenewActBudgetArgs {
     pub window_hours: u32,
 }
 
+type ParsedResourceBudget = (String, BudgetKind, u64, u64);
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RenewResourceBudgetArgs {
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{32}$"))]
+    pub conversation_id: String,
+    pub kind: String,
+    #[schemars(range(min = 1))]
+    pub additional: u64,
+    #[schemars(range(min = 1, max = 720))]
+    pub window_hours: u32,
+}
+
+impl RenewResourceBudgetArgs {
+    pub(super) fn validate(self) -> Result<ParsedResourceBudget, ErrorCode> {
+        if self.conversation_id.len() != 32
+            || !self
+                .conversation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.additional == 0
+            || !(1..=720).contains(&self.window_hours)
+        {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        let kind = match self.kind.as_str() {
+            "message_bytes" => BudgetKind::MessageBytes,
+            "model_calls" => BudgetKind::ModelCalls,
+            "cpu_ms" => BudgetKind::CpuMs,
+            "mailbox_bytes" => BudgetKind::MailboxBytes,
+            _ => return Err(ErrorCode::InvalidMessage),
+        };
+        Ok((
+            self.conversation_id,
+            kind,
+            self.additional,
+            u64::from(self.window_hours) * 60 * 60 * 1_000,
+        ))
+    }
+}
+
 impl RenewActBudgetArgs {
     pub(super) fn validate(self) -> Result<(String, u32, u64), ErrorCode> {
         if self.conversation_id.len() != 32
@@ -599,7 +697,7 @@ impl RenewActBudgetArgs {
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ContextRequestArgs {
-    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    #[schemars(regex(pattern = r"^(agent|group):[a-fA-F0-9]{64}$"))]
     pub target: String,
     #[schemars(length(equal = 64))]
     pub authority: String,
@@ -616,7 +714,10 @@ impl ContextRequestArgs {
             .target
             .split_once(':')
             .ok_or(ErrorCode::InvalidMessage)?;
-        if kind != "agent" || id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !matches!(kind, "agent" | "group")
+            || id.len() != 64
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
             return Err(ErrorCode::InvalidMessage);
         }
         let reference = SemanticContextRef {
@@ -646,6 +747,39 @@ impl ContextRequestArgs {
 pub(super) struct ConfirmContextArgs {
     #[schemars(length(equal = 32))]
     pub request_id: String,
+    #[schemars(regex(pattern = r"^[a-fA-F0-9]{64}$"))]
+    pub room: Option<String>,
+    #[schemars(regex(pattern = r"^agent:[a-fA-F0-9]{64}$"))]
+    pub sender: Option<String>,
+}
+
+impl ConfirmContextArgs {
+    pub(super) fn validate(self) -> Result<(Id128, Option<(Hash32, AgentId)>), ErrorCode> {
+        let request_id = parse_id(&self.request_id)?;
+        let group = match (self.room, self.sender) {
+            (None, None) => None,
+            (Some(room), Some(sender)) => {
+                let room = parse_hash32(&room)?;
+                if room.0 == [0; 32] {
+                    return Err(ErrorCode::InvalidMessage);
+                }
+                let (kind, id) = sender.split_once(':').ok_or(ErrorCode::InvalidMessage)?;
+                if kind != "agent" || id.len() != 64 {
+                    return Err(ErrorCode::InvalidMessage);
+                }
+                let agent = AgentId(
+                    alloy_primitives::hex::decode_to_array(id)
+                        .map_err(|_| ErrorCode::InvalidMessage)?,
+                );
+                if agent.0 == [0; 32] {
+                    return Err(ErrorCode::InvalidMessage);
+                }
+                Some((room, agent))
+            }
+            _ => return Err(ErrorCode::InvalidMessage),
+        };
+        Ok((request_id, group))
+    }
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -798,8 +932,21 @@ mod tests {
         };
         assert!(args.validate().is_ok());
 
+        let group = ContextExpressionArgs {
+            target: format!("group:{}", "41".repeat(32)),
+            root: None,
+            expression: vec![json!("meaning"), json!(["concept", authority, 4, 1, 7])],
+            required_contexts: vec![ContextRefArgs {
+                authority: authority.clone(),
+                namespace: 4,
+                revision: 1,
+                digest: "31".repeat(32),
+            }],
+        };
+        assert!(group.validate().is_ok());
+
         let incomplete = ContextExpressionArgs {
-            target: format!("agent:{authority}"),
+            target: format!("agent:{}", "41".repeat(32)),
             root: None,
             expression: vec![json!("meaning"), json!(["concept", authority, 4, 1, 7])],
             required_contexts: Vec::new(),
@@ -811,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn context_request_binds_a_direct_agent_to_one_full_reference() {
+    fn context_request_accepts_direct_agent_or_exact_group_target() {
         let authority = "21".repeat(32);
         let digest = "31".repeat(32);
         let args = ContextRequestArgs {
@@ -833,8 +980,44 @@ mod tests {
             revision: 1,
             digest,
         };
+        let (target, reference) = group_target.validate().unwrap();
+        assert_eq!(target, format!("group:{}", "41".repeat(32)));
+        assert_eq!(reference.authority, AgentId([0x21; 32]));
+    }
+
+    #[test]
+    fn group_context_confirmation_requires_room_and_sender_together() {
+        let request_id = "51".repeat(16);
+        let (parsed, group) = ConfirmContextArgs {
+            request_id: request_id.clone(),
+            room: None,
+            sender: None,
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(parsed, Id128([0x51; 16]));
+        assert_eq!(group, None);
+
+        let room = "61".repeat(32);
+        let sender = format!("agent:{}", "71".repeat(32));
+        let (parsed, group) = ConfirmContextArgs {
+            request_id,
+            room: Some(room),
+            sender: Some(sender),
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(parsed, Id128([0x51; 16]));
+        assert_eq!(group, Some((Hash32([0x61; 32]), AgentId([0x71; 32]))));
+
         assert_eq!(
-            group_target.validate().unwrap_err(),
+            ConfirmContextArgs {
+                request_id: "51".repeat(16),
+                room: Some("61".repeat(32)),
+                sender: None,
+            }
+            .validate()
+            .unwrap_err(),
             ErrorCode::InvalidMessage
         );
     }

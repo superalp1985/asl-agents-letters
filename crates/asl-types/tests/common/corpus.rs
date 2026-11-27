@@ -1,10 +1,11 @@
 use std::{collections::BTreeSet, error::Error, fs, path::Path};
 
 use asl_types::{
-    ids::{Hash32, Id128, Signature65},
+    ids::{Hash32, Id128, PeerId, Signature65},
     protocol::{
-        Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_TEXT, GroupControl, WireFrame,
-        decode_frame, encode_frame,
+        Act, ActType, GROUP_ADMIN_MANAGE_FILES, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_TEXT,
+        GROUP_FILE_FETCH, GROUP_FILE_READ, GroupAdminCapability, GroupControl, GroupFilePolicy,
+        WireFrame, decode_frame, encode_frame,
     },
     record::{
         DeviceDirectory, RecordPayload, ShortCodeClaim, SignedRecord, UnsignedRecord,
@@ -19,8 +20,8 @@ pub mod frames;
 
 pub type CorpusResult<T> = Result<T, Box<dyn Error>>;
 
-pub const VECTOR_COUNT: usize = 35;
-pub const ACCEPTED_COUNT: usize = 25;
+pub const VECTOR_COUNT: usize = 36;
+pub const ACCEPTED_COUNT: usize = 26;
 pub const REJECTED_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,6 +164,39 @@ pub fn vector_cases() -> Vec<VectorCase> {
             admins: Vec::new(),
             muted: Vec::new(),
             owner: None,
+            file_policies: Vec::new(),
+            admin_capabilities: Vec::new(),
+        }
+        .encode()
+        .unwrap(),
+    });
+
+    let policy_admin = PeerId::from_bytes(
+        bs58::decode("12D3KooWJ1jPzo4GNd8Zh66dhmDUfPHEjkzurJzMy5ws5bWGV4kS")
+            .into_vec()
+            .unwrap(),
+    )
+    .unwrap();
+    cases.push(VectorCase {
+        name: "group-policy-v2",
+        root: "group-policy",
+        codec: Codec::GroupPolicy,
+        accepted: true,
+        bytes: GroupControl {
+            message_id: Id128([9; 16]),
+            policy_revision: 2,
+            permissions: GROUP_ALLOW_MEMBER_TEXT | GROUP_ALLOW_MEMBER_FILES,
+            admins: vec![policy_admin.clone()],
+            muted: Vec::new(),
+            owner: None,
+            file_policies: vec![GroupFilePolicy {
+                content_id: Hash32([0x11; 32]),
+                permissions: GROUP_FILE_READ | GROUP_FILE_FETCH,
+            }],
+            admin_capabilities: vec![GroupAdminCapability {
+                peer: policy_admin,
+                capabilities: GROUP_ADMIN_MANAGE_FILES,
+            }],
         }
         .encode()
         .unwrap(),

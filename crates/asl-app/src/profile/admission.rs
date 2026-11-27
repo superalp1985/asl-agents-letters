@@ -735,6 +735,7 @@ impl CoreAdmission {
             }
             NetworkEvent::DiscoveryCandidate { .. }
             | NetworkEvent::DhtProviders { .. }
+            | NetworkEvent::DhtProviderObserved { .. }
             | NetworkEvent::GossipReceived { .. } => {}
             NetworkEvent::DhtRecordCandidate {
                 candidate_id,

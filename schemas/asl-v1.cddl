@@ -226,13 +226,22 @@ act = {
 ; The room creator is the initial owner; optional key 6 transfers the effective
 ; owner. Admins and muted members are PeerId device references. Permissions
 ; bits: 1=member text, 2=member files, 4=member invite.
+; Key 7 entries are sorted by hash32 and unique. File bits:
+; 1=read, 2=send, 4=fetch.
+; Key 8 entries are sorted by peer-id and unique, and each peer must also appear
+; in key 4 admins. Admin capability bits: 1=manage members, 2=manage files,
+; 4=manage invites. Missing key 7 or 8 preserves old v1 policy behavior.
+group-file-policy = [hash32, uint .le 7]
+group-admin-capability = [peer-id, uint .le 7]
 group-policy = {
   1: id128,
   2: 1..9223372036854775807,
   3: uint .le 7,
   4: [0*512 peer-id],
   5: [0*512 peer-id],
-  ? 6: peer-id
+  ? 6: peer-id,
+  ? 7: [0*512 group-file-policy],
+  ? 8: [0*512 group-admin-capability]
 }
 
 expression-term = [0, expression-i64] / [1, expression-i64, 1..18] / [2, bool] /

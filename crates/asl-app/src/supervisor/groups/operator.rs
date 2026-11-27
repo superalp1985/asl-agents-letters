@@ -189,9 +189,30 @@ impl Supervisor {
                             admins,
                             muted,
                             owner: None,
+                            file_policies: None,
+                            admin_capabilities: None,
                         },
                     },
                     AdminOutcome::AccessUpdated,
+                )
+            }
+            AdminRequest::RenewResourceBudget {
+                room,
+                kind,
+                additional,
+                window_hours,
+                ..
+            } => {
+                let live = groups.store.managed_mls_rooms(&self.device_peer_id)?;
+                let selected = current_room(&issued, room, &live)?;
+                (
+                    LocalGroupAction::RenewResourceBudget {
+                        room: wire_id(&selected.room)?,
+                        kind: kind.clone(),
+                        additional: *additional,
+                        window_hours: *window_hours,
+                    },
+                    AdminOutcome::BudgetUpdated,
                 )
             }
             AdminRequest::Refresh => unreachable!(),
@@ -279,6 +300,7 @@ mod tests {
             allow_member_files: true,
             allow_member_invite: false,
             members: vec![],
+            budgets: vec![],
         };
         let peer = AdminPeer {
             agent: "agent".into(),

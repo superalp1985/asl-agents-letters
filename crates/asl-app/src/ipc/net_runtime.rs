@@ -225,8 +225,35 @@ impl NetworkBridge {
                 self.send_operation_result(operation_id, result, writer)?;
                 Ok(false)
             }
-            IpcMessage::RestoreDhtRecord { value } => {
-                let _ = self.transport.restore_dht_record(value);
+            IpcMessage::RestoreDhtRecord {
+                expires_at_ms,
+                value,
+            } => {
+                if let Err(error) = self.transport.restore_dht_record(value, expires_at_ms) {
+                    writer
+                        .send(&IpcMessage::NetworkError {
+                            code: error_code(&error),
+                        })
+                        .map_err(|_| NetworkErrorCode::Transport)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::RestoreDhtProvider {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            } => {
+                if let Err(error) =
+                    self.transport
+                        .restore_dht_provider(key, &peer_id, &addresses, expires_at_ms)
+                {
+                    writer
+                        .send(&IpcMessage::NetworkError {
+                            code: error_code(&error),
+                        })
+                        .map_err(|_| NetworkErrorCode::Transport)?;
+                }
                 Ok(false)
             }
             IpcMessage::PublishMailboxRecord {
@@ -328,6 +355,38 @@ impl NetworkBridge {
                 receipt_id,
             } => {
                 self.transport.cancel_profile_publication(operation_id);
+                self.send_operation_result(receipt_id, Ok(()), writer)?;
+                Ok(false)
+            }
+            IpcMessage::PrepareDirectory {
+                operation_id,
+                agent,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .prepare_directory_publication(operation_id, agent)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::PublishDirectory {
+                operation_id,
+                value,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .publish_prepared_directory(operation_id, value)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::CancelDirectory {
+                operation_id,
+                receipt_id,
+            } => {
+                self.transport.cancel_directory_publication(operation_id);
                 self.send_operation_result(receipt_id, Ok(()), writer)?;
                 Ok(false)
             }
@@ -1006,6 +1065,20 @@ impl NetworkBridge {
                     providers,
                 })?;
             }
+            TransportEvent::DhtProviderObserved {
+                key,
+                provider,
+                addresses,
+                expires_in,
+            } => {
+                writer.send(&IpcMessage::DhtProviderObserved {
+                    key,
+                    peer_id: provider,
+                    addresses,
+                    expires_at_ms: unix_time_ms()?
+                        .saturating_add(u64::try_from(expires_in.as_millis()).unwrap_or(u64::MAX)),
+                })?;
+            }
             TransportEvent::DhtRecordCandidate {
                 candidate_id,
                 key,
@@ -1434,6 +1507,13 @@ fn fresh_handle<T>(values: &HashMap<[u8; 16], T>) -> Result<[u8; 16], AslError> 
         }
     }
     Err(AslError::InvalidIdentity)
+}
+
+fn unix_time_ms() -> Result<u64, AslError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AslError::InvalidMessage)?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| AslError::InvalidMessage)
 }
 
 fn error_code(error: &io::Error) -> NetworkErrorCode {

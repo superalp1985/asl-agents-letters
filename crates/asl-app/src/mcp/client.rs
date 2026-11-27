@@ -108,6 +108,7 @@ impl Client {
             | Request::GroupRejectJoinRequest(_)
             | Request::DirectOpen(_)
             | Request::RenewActBudget(_)
+            | Request::RenewResourceBudget(_)
                 if connection.capabilities["groups_admin"] != true =>
             {
                 Err(ErrorCode::PolicyDenied)

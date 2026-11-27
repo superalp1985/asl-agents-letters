@@ -82,6 +82,7 @@ async fn next_reservation_after_recovery(
             | TransportEvent::DiscoveryCandidate(_)
             | TransportEvent::DhtRecordCandidate { .. }
             | TransportEvent::DhtProviders { .. }
+            | TransportEvent::DhtProviderObserved { .. }
             | TransportEvent::ProfilePublicationProgress { .. }
             | TransportEvent::MailboxRecordPut { .. }
             | TransportEvent::PairingInviteRequest { .. }
@@ -162,6 +163,7 @@ async fn next_connected(
             | TransportEvent::DiscoveryCandidate(_)
             | TransportEvent::DhtRecordCandidate { .. }
             | TransportEvent::DhtProviders { .. }
+            | TransportEvent::DhtProviderObserved { .. }
             | TransportEvent::ProfilePublicationProgress { .. }
             | TransportEvent::MailboxRecordPut { .. }
             | TransportEvent::PairingInviteRequest { .. }

@@ -29,8 +29,8 @@ verification. Schema values and fixture changes still require protocol review.
 The script requires PowerShell 7.2 or newer and invokes the pinned independent
 `cddl 0.10.7` executable.
 It places a temporary first rule referencing each case's exact frozen root in a
-wrapper, followed by the unchanged application schema. It validates all 35
-cases, requiring 25 accepted and ten rejected. Temporary files are under this
+wrapper, followed by the unchanged application schema. It validates all 36
+cases, requiring 26 accepted and ten rejected. Temporary files are under this
 checkout's ignored `work/` directory and removed after execution.
 
 The tool's global `--ci` flag is required: without it, version 0.10.7 can report

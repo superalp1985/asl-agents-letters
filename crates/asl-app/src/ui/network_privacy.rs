@@ -2,7 +2,7 @@ use asl_app::network_settings::{NetworkAddressScopeV1, NetworkSettingsV1};
 use asl_store::dashboard::Dashboard;
 use asl_store::network_privacy::NetworkRuntimeState;
 use asl_types::error::AslError;
-use eframe::egui::{Button, Checkbox, ComboBox, RichText, TextEdit, Ui};
+use eframe::egui::{Button, Checkbox, ComboBox, Id, RichText, TextEdit, Ui};
 
 use super::{LocalAction, MUTED, locale::Language};
 
@@ -134,7 +134,7 @@ pub(super) fn show(
             ))
             .color(MUTED),
         );
-        let input_id = egui::Id::new("asl-network-bootstrap-input");
+        let input_id = Id::new("asl-network-bootstrap-input");
         let mut input = ui
             .ctx()
             .data_mut(|data| data.get_temp::<String>(input_id).unwrap_or_default());
@@ -170,7 +170,7 @@ pub(super) fn show(
         });
         ui.ctx().data_mut(|data| data.insert_temp(input_id, input));
         if c.address_scope != NetworkAddressScopeV1::RelayOnly {
-            let port_id = egui::Id::new("asl-network-ports");
+            let port_id = Id::new("asl-network-ports");
             let mut ports = ui.ctx().data_mut(|data| {
                 data.get_temp::<(String, String)>(port_id)
                     .unwrap_or_else(|| {

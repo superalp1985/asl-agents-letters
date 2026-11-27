@@ -174,6 +174,7 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
         .execute_batch(
             "DROP TABLE semantic_context_candidates;
              DROP TABLE semantic_context_resources;
+             DROP TABLE conversation_act_semantic_index;
              DROP TABLE conversation_attachment_refs;
              DROP TABLE conversation_act_events;
              DROP TABLE conversation_budget_grants;
@@ -181,17 +182,23 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
              DROP TABLE mailbox_slots;
              DROP TABLE gossip_topic_state;
              DROP TABLE local_capacity_measurements;
+             DROP TABLE group_admin_capabilities;
+             DROP TABLE group_file_policies;
              DROP TABLE group_access_members;
              DROP TABLE group_access_policies;
              DROP TABLE group_invite_requests;
              DROP TABLE migration_group_hints;
+             DROP TABLE resource_budget_grants;
+             DROP TABLE IF EXISTS dht_provider_cache_v42;
+             DROP TABLE dht_provider_cache;
+             DROP TABLE dht_record_cache;
              DELETE FROM schema_migrations WHERE version>32;",
         )
         .unwrap();
     drop(connection);
 
     let store = open_store(&path).unwrap();
-    assert_eq!(store.schema_version(), 41);
+    assert_eq!(store.schema_version(), 43);
     assert_eq!(
         store.get_setting("test.preserved").unwrap().as_deref(),
         Some("\"yes\"")
