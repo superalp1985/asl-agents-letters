@@ -227,7 +227,7 @@ fn registration_calldata(
     deadline: u64,
     signature: Signature65,
 ) -> Vec<u8> {
-    let mut calldata = Vec::with_capacity(4 + 7 * 32);
+    let mut calldata = Vec::with_capacity(4 + 9 * 32);
     calldata.extend_from_slice(&keccak256(selector)[..4]);
     calldata.extend_from_slice(agent.as_bytes());
     calldata.extend_from_slice(&state_commitment);
@@ -236,7 +236,7 @@ fn registration_calldata(
     calldata.extend_from_slice(&uint256(5 * 32));
     calldata.extend_from_slice(&uint256(signature.0.len() as u64));
     calldata.extend_from_slice(&signature.0);
-    calldata.resize(4 + 8 * 32, 0);
+    calldata.resize(4 + 9 * 32, 0);
     calldata
 }
 
