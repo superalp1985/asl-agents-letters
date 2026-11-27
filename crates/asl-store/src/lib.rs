@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 pub mod act_history;
 pub mod avatar_publication;
 pub mod avatar_receipts;
+pub mod budgets;
 pub mod chain;
 pub mod contact_bindings;
 pub mod contact_invites;

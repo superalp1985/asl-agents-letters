@@ -5,6 +5,7 @@ use asl_groups::GroupApplication;
 use asl_store::{
     Store,
     act_history::ActDirection,
+    budgets::BudgetKind,
     group_access::GroupAccessKind,
     group_state::{GROUP_INVITE_REQUEST_TTL_MS, GroupInboundPolicy},
     mailbox::ConversationBudgetRenewal,
@@ -773,6 +774,16 @@ impl Supervisor {
         }
         let conversation_id = alloy_primitives::hex::encode(act.conversation_id.0);
         let now_i64 = i64::try_from(now).map_err(|_| AslError::InvalidMessage)?;
+        let message_bytes = u64::try_from(act.encode()?.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .saturating_add(1024);
+        if !groups.store.resource_budget_available(
+            &conversation_id,
+            BudgetKind::MessageBytes,
+            now,
+        )? {
+            return Err(AslError::QuotaExceeded);
+        }
         if !groups
             .store
             .conversation_budget_available(&conversation_id, 1, now_i64)?
@@ -813,6 +824,12 @@ impl Supervisor {
         groups
             .store
             .consume_conversation_budget(&conversation_id, 1, now_i64)?;
+        let _ = groups.store.consume_resource_budget(
+            &conversation_id,
+            BudgetKind::MessageBytes,
+            message_bytes,
+            now,
+        );
         let envelope = sent.packet.into_envelope()?;
         let payload = encode_frame(&WireFrame::GroupEnvelope(envelope))?;
         let _ = self.net.try_send(

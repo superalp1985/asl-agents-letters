@@ -515,7 +515,7 @@ mod tests {
              DROP TABLE group_access_policies;
              DROP TABLE group_invite_requests;
              DROP TABLE migration_group_hints;
-             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35,36,37,38,39);",
+             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35,36,37,38,39,40,41);",
             )
             .unwrap();
         drop(store);

@@ -952,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn v35_through_v39_migrations_create_all_new_tables() {
+    fn v35_through_v41_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
         assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         for table in [
@@ -1005,7 +1005,7 @@ mod tests {
                  DROP TABLE group_access_policies;
                  DROP TABLE group_invite_requests;
                  DROP TABLE migration_group_hints;
-                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39);",
+                 DELETE FROM schema_migrations WHERE version IN (35,36,37,38,39,40,41);",
             )
             .unwrap();
         drop(connection);

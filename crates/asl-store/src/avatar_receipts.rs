@@ -301,7 +301,7 @@ pub(crate) fn remove_schema_for_legacy_fixture(store: &Store) {
          DROP TABLE group_access_policies;
          DROP TABLE group_invite_requests;
          DROP TABLE migration_group_hints;
-         DELETE FROM schema_migrations WHERE version IN (33,34,35,36,37,38,39);",
+         DELETE FROM schema_migrations WHERE version IN (33,34,35,36,37,38,39,40,41);",
         )
         .unwrap();
 }
