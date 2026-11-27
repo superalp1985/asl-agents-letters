@@ -162,6 +162,7 @@ pub fn vector_cases() -> Vec<VectorCase> {
             permissions: GROUP_ALLOW_MEMBER_TEXT | GROUP_ALLOW_MEMBER_FILES,
             admins: Vec::new(),
             muted: Vec::new(),
+            owner: None,
         }
         .encode()
         .unwrap(),

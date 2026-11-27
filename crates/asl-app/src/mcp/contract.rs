@@ -456,6 +456,7 @@ pub(super) struct GroupSetAccessArgs {
     pub admins: Vec<String>,
     #[schemars(length(max = 512))]
     pub muted: Vec<String>,
+    pub owner: Option<String>,
 }
 
 impl GroupSetAccessArgs {
@@ -484,6 +485,7 @@ impl GroupSetAccessArgs {
                 allow_member_invite: self.allow_member_invite,
                 admins,
                 muted,
+                owner: self.owner.as_deref().map(parse_peer).transpose()?,
             },
         ))
     }

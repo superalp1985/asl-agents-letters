@@ -59,7 +59,13 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 serde_json::json!({
                     "agent_id": bs58::encode(result.agent_id.as_bytes()).into_string(),
                     "peer_id": bs58::encode(result.peer_id.as_bytes()).into_string(),
-                    "state": "pending_device_registration"
+                    "state": "pending_device_registration",
+                    "next_steps": [
+                        "set ASL_HOME to the imported profile",
+                        "run asl-core --identity-registration prepare-directory <new registry sequence>",
+                        "run asl-core --identity-registration update <sequence> <state commitment> <deadline>",
+                        "submit the update with a verified wallet or sponsor transaction"
+                    ]
                 })
             );
             Ok(())

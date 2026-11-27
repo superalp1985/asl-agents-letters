@@ -28,7 +28,7 @@ ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame
 
 当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。回答开启时，`Ask` 可由本机已批准模型生成严格解析的 `Inform/Clarify`，模型不能返回 action、tool、path 或附件控制字段；在线群请求会从当前 audience 快照选择最多 4 个同时具备 `ReadChunk`/`ModelInput` permit 的本地文本证据。DHT 密文邮箱已接 8 KiB 记录、分片批次、3 天轮换键和 7 天 TTL；已知联系人或群成员可拉取并用 MLS 重新验证发送者。Act 元数据和 DPAPI 保护的本机正文预览进入活动历史，选择 `history` 的加密身份迁移包可携带未过期历史。邮箱不携带文件字节，不提供远端送达回执；真实两设备、公网/NAT/relay 和 MLS 密钥迁移仍待验收。
 
-ASL/1.3 群内还定义了 `group-policy` 控制值：它只在 MLS 解密后由群创建者（群主）发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId 和禁言 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是该群创建者，再原子替换本机策略。成员端对入站 act 和文件 Offer 都重新检查该策略；策略消息本身不进入自然语言数据区，也记录为无文本控制事件。
+ASL/1.3 群内还定义了 `group-policy` 控制值：它只在 MLS 解密后由当前群主发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId、禁言 PeerId 和可选的新群主 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。key 6 存在时执行群主转移，新群主必须是当前 MLS 活动成员，不能被禁言；接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是当前群主，再原子替换本机策略。成员端对入站 act 和文件 Offer 都重新检查该策略；策略消息本身不进入自然语言数据区，也记录为无文本控制事件。
 
 - 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件和预算均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
 - 规范结构外的字节串只允许出现在用途固定的密码学值、hash、签名、PeerId、文件/MLS 密文载荷中。验证器按具体用途检查长度、格式和状态转移，不把未知 blob 交给模型。

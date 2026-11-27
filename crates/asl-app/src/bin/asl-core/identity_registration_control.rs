@@ -38,6 +38,17 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             .ok_or(AslError::InvalidIdentity)?;
 
     let request = match args.as_slice() {
+        ["bootstrap"] => {
+            if std::fs::symlink_metadata(paths.signed_device_directory()).is_err() {
+                prepare_directory(&paths, &identity, 1)?;
+            }
+            IdentityRegistrationRequest::build(
+                &identity,
+                configuration.resolver.deployment,
+                directory_commitment(&paths)?,
+                default_deadline()?,
+            )?
+        }
         ["request"] => IdentityRegistrationRequest::build(
             &identity,
             configuration.resolver.deployment,

@@ -160,6 +160,7 @@ impl Supervisor {
             .join("network-seeds.json");
         settings.apply_packaged_bootstrap(&packaged_seeds, unix_time_ms()?)?;
         let network_store = open_store(&state_database)?;
+        let _ = network_store.prune_dht_cache(unix_time_ms()?);
         let network_settings =
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
         let model_gateway =
@@ -1480,8 +1481,43 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
-            self.resource_providers
-                .observe_resource_provider_event(&event);
+            if let Some((key, true)) = self
+                .resource_providers
+                .observe_resource_provider_event(&event)
+                && let Ok(store) = open_store(&self.state_database)
+            {
+                let now = unix_time_ms()?;
+                let _ = store.cache_dht_provider(
+                    key,
+                    self.device_peer_id.clone(),
+                    &[],
+                    now.saturating_add(60 * 60 * 1_000),
+                    now,
+                );
+            }
+            if let AdmittedNetworkEvent::DhtRecordAvailable {
+                agent_id,
+                kind,
+                sequence,
+                registry_sequence,
+                record,
+            } = &event
+                && let Ok(store) = open_store(&self.state_database)
+                && let Ok(signed) = asl_types::record::decode_record(record)
+            {
+                let now = unix_time_ms()?;
+                let _ = store.cache_dht_record(
+                    &asl_store::dht_cache::CachedDhtRecord {
+                        agent_id: *agent_id,
+                        kind: *kind,
+                        sequence: *sequence,
+                        registry_sequence: *registry_sequence,
+                        record: record.clone(),
+                        expires_at_ms: signed.record.expires_at_ms,
+                    },
+                    now,
+                );
+            }
             self.observe_contact_binding_event(&event)?;
             self.observe_contact_invite_operation(&event);
             self.profile_signing

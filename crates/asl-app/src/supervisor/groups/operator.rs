@@ -188,6 +188,7 @@ impl Supervisor {
                             allow_member_invite: *allow_member_invite,
                             admins,
                             muted,
+                            owner: None,
                         },
                     },
                     AdminOutcome::AccessUpdated,

@@ -4,7 +4,7 @@ use super::*;
 use crate::address_policy::{AddressPolicy, validate_multiaddr};
 use crate::dht::BoundedRecordStore;
 use libp2p::{
-    gossipsub, kad, mdns, relay,
+    autonat, dcutr, gossipsub, kad, mdns, relay,
     request_response::ProtocolSupport,
     swarm::{THandlerInEvent, behaviour::toggle::Toggle, dummy},
 };
@@ -26,6 +26,8 @@ pub(super) struct AslBehaviour {
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
     pub(super) group: Toggle<request_response::Behaviour<GroupStreamCodec>>,
     pub(super) gossip: super::gossip::GossipBehaviour,
+    pub(super) autonat: autonat::Behaviour,
+    pub(super) dcutr: dcutr::Behaviour,
 }
 
 #[derive(Debug)]
@@ -41,6 +43,8 @@ pub(super) enum BehaviourEvent {
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
     Group(request_response::Event<TimedGroupEnvelope, GroupEnvelope>),
     Gossip(gossipsub::Event),
+    Autonat(autonat::Event),
+    Dcutr(dcutr::Event),
 }
 
 #[derive(Debug)]
@@ -108,6 +112,18 @@ impl From<gossipsub::Event> for BehaviourEvent {
     }
 }
 
+impl From<autonat::Event> for BehaviourEvent {
+    fn from(value: autonat::Event) -> Self {
+        Self::Autonat(value)
+    }
+}
+
+impl From<dcutr::Event> for BehaviourEvent {
+    fn from(value: dcutr::Event) -> Self {
+        Self::Dcutr(value)
+    }
+}
+
 impl AslBehaviour {
     pub(super) fn new(
         local_peer_id: libp2p::PeerId,
@@ -165,6 +181,8 @@ impl AslBehaviour {
                 .into(),
             gossip: super::gossip::new_behaviour()
                 .expect("static bounded gossipsub configuration must be valid"),
+            autonat: autonat::Behaviour::new(local_peer_id, autonat::Config::default()),
+            dcutr: dcutr::Behaviour::new(local_peer_id),
         }
     }
 

@@ -17,8 +17,8 @@ pub const GROUP_ALLOWED_PERMISSION_BITS: u8 =
     GROUP_ALLOW_MEMBER_TEXT | GROUP_ALLOW_MEMBER_FILES | GROUP_ALLOW_MEMBER_INVITE;
 
 /// Owner-authoritative, deterministic policy carried only inside MLS
-/// application plaintext. The owner is the MLS room creator; this record
-/// names admins and muted member devices, but cannot rename the owner.
+/// application plaintext. The creator is the initial owner; key 6 can transfer
+/// the effective owner to another active device.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupControl {
     pub message_id: Id128,
@@ -26,6 +26,7 @@ pub struct GroupControl {
     pub permissions: u8,
     pub admins: Vec<PeerId>,
     pub muted: Vec<PeerId>,
+    pub owner: Option<PeerId>,
 }
 
 impl GroupControl {
@@ -34,7 +35,7 @@ impl GroupControl {
             return Err(AslError::InvalidMessage);
         }
         let mut fields = fields(decode_canonical(bytes)?)?;
-        check_keys(&fields, &[1, 2, 3, 4, 5])?;
+        check_keys(&fields, &[1, 2, 3, 4, 5, 6])?;
         let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 1)?)?);
         let policy_revision = match take(&mut fields, 2)? {
             Value::Integer(value) => u64::try_from(value).map_err(|_| AslError::InvalidMessage)?,
@@ -46,6 +47,15 @@ impl GroupControl {
         };
         let admins = decode_peers(take(&mut fields, 4)?)?;
         let muted = decode_peers(take(&mut fields, 5)?)?;
+        let owner = fields
+            .remove(&6)
+            .map(|value| match value {
+                Value::Bytes(bytes) => {
+                    PeerId::from_bytes(bytes).map_err(|_| AslError::InvalidMessage)
+                }
+                _ => Err(AslError::InvalidMessage),
+            })
+            .transpose()?;
         finish(fields)?;
         if !canonical_peer_order(&admins) || !canonical_peer_order(&muted) {
             return Err(AslError::InvalidMessage);
@@ -56,6 +66,7 @@ impl GroupControl {
             permissions,
             admins,
             muted,
+            owner,
         };
         control.validate()?;
         Ok(control)
@@ -67,7 +78,7 @@ impl GroupControl {
         admins.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         let mut muted = self.muted.clone();
         muted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        let entries = [
+        let mut entries = vec![
             (1, Value::Bytes(self.message_id.0.to_vec())),
             (2, uint(self.policy_revision)),
             (3, uint(u64::from(self.permissions))),
@@ -90,6 +101,9 @@ impl GroupControl {
                 ),
             ),
         ];
+        if let Some(owner) = &self.owner {
+            entries.push((6, Value::Bytes(owner.as_bytes().to_vec())));
+        }
         let bytes = cbor2::to_canonical_vec(&map(entries)).map_err(|_| AslError::InvalidMessage)?;
         if bytes.len() > MAX_GROUP_CONTROL_BYTES {
             return Err(AslError::InvalidMessage);
@@ -163,6 +177,7 @@ mod tests {
             permissions: GROUP_ALLOW_MEMBER_TEXT | GROUP_ALLOW_MEMBER_FILES,
             admins: vec![peer(0), peer(1)],
             muted: vec![peer(2)],
+            owner: None,
         };
         control
             .admins

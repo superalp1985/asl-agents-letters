@@ -256,6 +256,7 @@ mod tests {
                 | asl_types::protocol::GROUP_ALLOW_MEMBER_FILES,
             admins: Vec::new(),
             muted: Vec::new(),
+            owner: None,
         });
         let bytes = application.clone().encode().unwrap();
         assert_eq!(GroupApplication::decode(&bytes).unwrap(), application);

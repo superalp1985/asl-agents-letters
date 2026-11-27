@@ -58,6 +58,7 @@ pub struct GroupAccessPolicy {
     pub permissions: u8,
     pub admins: Vec<PeerId>,
     pub muted: Vec<PeerId>,
+    pub owner: Option<PeerId>,
 }
 
 impl Default for GroupAccessPolicy {
@@ -67,6 +68,7 @@ impl Default for GroupAccessPolicy {
             permissions: DEFAULT_GROUP_PERMISSIONS,
             admins: Vec::new(),
             muted: Vec::new(),
+            owner: None,
         }
     }
 }
@@ -87,13 +89,22 @@ impl Store {
         let policy = self
             .connection
             .query_row(
-                "SELECT revision,permissions FROM group_access_policies WHERE group_id=?1",
+                "SELECT p.revision,p.permissions,coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM asl_groups g
+                 JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
                 [&group],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(database_error)?;
-        let Some((revision, permissions)) = policy else {
+        let Some((revision, permissions, owner)) = policy else {
             return Ok(GroupAccessPolicy::default());
         };
         let mut statement = self
@@ -137,6 +148,7 @@ impl Store {
             permissions: u8::try_from(permissions).map_err(|_| AslError::InvalidDatabase)?,
             admins,
             muted,
+            owner: Some(parse_peer(&owner)?),
         })
     }
 
@@ -162,15 +174,18 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let creator: String = tx
+        let (creator, prior_owner): (String, Option<String>) = tx
             .query_row(
-                "SELECT creator_peer_id FROM asl_groups WHERE group_id=?1
-                 AND state IN ('active','needs_sync')",
+                "SELECT g.creator_peer_id,p.owner_peer_id
+                 FROM asl_groups g
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
                 [&group],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(database_error)?;
-        if creator != peer_text(sender) {
+        let current_owner = prior_owner.as_deref().unwrap_or(&creator);
+        if current_owner != peer_text(sender) {
             return Err(AslError::PolicyDenied);
         }
         let previous: Option<i64> = tx
@@ -185,7 +200,15 @@ impl Store {
             return Err(AslError::PolicyVersionConflict);
         }
         let active = active_peers(&tx, &group)?;
-        let owner = parse_peer(&creator)?;
+        let owner_text = control
+            .owner
+            .as_ref()
+            .map(peer_text)
+            .unwrap_or_else(|| current_owner.to_owned());
+        let owner = parse_peer(&owner_text)?;
+        if !active.iter().any(|candidate| candidate == &owner) {
+            return Err(AslError::PolicyDenied);
+        }
         if control.admins.iter().chain(&control.muted).any(|peer| {
             !active.iter().any(|candidate| candidate == peer)
                 || (peer == &owner && control.muted.contains(peer))
@@ -193,15 +216,17 @@ impl Store {
             return Err(AslError::PolicyDenied);
         }
         tx.execute(
-            "INSERT INTO group_access_policies(group_id,revision,permissions,updated_at_ms)
-             VALUES (?1,?2,?3,?4)
+            "INSERT INTO group_access_policies(group_id,revision,permissions,owner_peer_id,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5)
              ON CONFLICT(group_id) DO UPDATE SET
                revision=excluded.revision,permissions=excluded.permissions,
+               owner_peer_id=excluded.owner_peer_id,
                updated_at_ms=excluded.updated_at_ms",
             params![
                 group,
                 i64::try_from(control.policy_revision).map_err(|_| AslError::InvalidMessage)?,
                 i64::from(control.permissions),
+                owner_text,
                 now,
             ],
         )
@@ -235,6 +260,7 @@ impl Store {
             permissions: control.permissions,
             admins: control.admins.clone(),
             muted: control.muted.clone(),
+            owner: Some(owner),
         })
     }
 
@@ -245,16 +271,18 @@ impl Store {
         kind: GroupAccessKind,
     ) -> Result<bool, AslError> {
         let group = group_text(group_id);
-        let creator: String = self
+        let owner: String = self
             .connection
             .query_row(
-                "SELECT creator_peer_id FROM asl_groups WHERE group_id=?1
-                 AND state IN ('active','needs_sync')",
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM asl_groups g
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
                 [&group],
                 |row| row.get(0),
             )
             .map_err(database_error)?;
-        if creator == peer_text(peer) {
+        if owner == peer_text(peer) {
             return Ok(true);
         }
         let active: bool = self
@@ -304,11 +332,13 @@ impl Store {
 
     pub fn group_members(&self, group_id: &GroupId) -> Result<Vec<GroupMemberAccess>, AslError> {
         let group = group_text(group_id);
-        let creator: String = self
+        let owner: String = self
             .connection
             .query_row(
-                "SELECT creator_peer_id FROM asl_groups WHERE group_id=?1
-                 AND state IN ('active','needs_sync')",
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM asl_groups g
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE g.group_id=?1 AND g.state IN ('active','needs_sync')",
                 [&group],
                 |row| row.get(0),
             )
@@ -342,7 +372,7 @@ impl Store {
         rows.into_iter()
             .map(|(peer, role, muted)| {
                 let peer = parse_peer(&peer)?;
-                let role = if peer_text(&peer) == creator {
+                let role = if peer_text(&peer) == owner {
                     GroupMemberRole::Owner
                 } else if role == "admin" {
                     GroupMemberRole::Admin
@@ -392,18 +422,19 @@ impl Store {
     }
 
     pub fn group_access_owner(&self, wire_id: Hash32) -> Result<Option<PeerId>, AslError> {
-        let creator: Option<String> = self
+        let owner: Option<String> = self
             .connection
             .query_row(
-                "SELECT g.creator_peer_id FROM asl_groups g
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id) FROM asl_groups g
                  JOIN mls_room_states s ON s.local_group_id=g.group_id
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
                  WHERE s.wire_group_id=?1 AND g.state IN ('active','needs_sync')",
                 [wire_id.as_bytes()],
                 |row| row.get(0),
             )
             .optional()
             .map_err(database_error)?;
-        creator.map(|text| parse_peer(&text)).transpose()
+        owner.map(|text| parse_peer(&text)).transpose()
     }
 }
 
@@ -524,6 +555,7 @@ mod tests {
             permissions: GROUP_ALLOW_MEMBER_TEXT,
             admins: vec![admin.clone()],
             muted: vec![member.clone()],
+            owner: None,
         };
         let policy = store
             .apply_group_control(&group, &owner, &control, 10)
@@ -571,6 +603,7 @@ mod tests {
             permissions: GROUP_ALLOW_MEMBER_TEXT,
             admins: Vec::new(),
             muted: Vec::new(),
+            owner: None,
         };
         assert!(matches!(
             store.apply_group_control(&group, &member, &control, 10),

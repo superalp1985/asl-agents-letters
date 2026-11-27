@@ -97,7 +97,7 @@ impl ResourceProviderRuntime {
     pub(super) fn observe_resource_provider_event(
         &mut self,
         event: &crate::profile::AdmittedNetworkEvent,
-    ) {
+    ) -> Option<([u8; 32], bool)> {
         match event {
             crate::profile::AdmittedNetworkEvent::OperationAccepted { operation_id } => {
                 if let Some((key, start)) = self.pending.remove(operation_id) {
@@ -106,6 +106,7 @@ impl ResourceProviderRuntime {
                     } else {
                         self.published.remove(&key);
                     }
+                    return Some((key, start));
                 }
             }
             crate::profile::AdmittedNetworkEvent::OperationFailed { operation_id, .. } => {
@@ -113,6 +114,7 @@ impl ResourceProviderRuntime {
             }
             _ => {}
         }
+        None
     }
 
     pub(super) fn reset_resource_providers(&mut self) {

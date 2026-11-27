@@ -350,6 +350,7 @@ impl Supervisor {
             permissions,
             admins: update.admins,
             muted: update.muted,
+            owner: update.owner,
         };
         groups.store.apply_group_control(
             &snapshot.local_id,

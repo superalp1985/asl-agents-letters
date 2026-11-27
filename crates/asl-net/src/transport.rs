@@ -865,6 +865,12 @@ impl LocalTransport {
                         return Ok(event);
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Autonat(event)) => {
+                    let _ = event;
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
+                    let _ = event;
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Discovery(DiscoveryEvent::Mdns(event))) => {
                     self.handle_discovery(event)?;
                 }

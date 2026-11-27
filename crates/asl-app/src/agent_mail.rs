@@ -158,6 +158,7 @@ pub struct GroupAccessUpdate {
     pub allow_member_invite: bool,
     pub admins: Vec<asl_types::ids::PeerId>,
     pub muted: Vec<asl_types::ids::PeerId>,
+    pub owner: Option<asl_types::ids::PeerId>,
 }
 
 #[derive(Clone)]

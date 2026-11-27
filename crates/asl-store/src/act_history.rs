@@ -211,14 +211,25 @@ impl Store {
         }
         let query = query.to_lowercase();
         let rows = self.recent_act_history(now_ms, MAX_ACT_HISTORY_ROWS)?;
-        Ok(rows
+        let mut matches = rows
             .into_iter()
-            .filter(|row| {
-                row.body
-                    .as_ref()
-                    .is_some_and(|body| body.to_lowercase().contains(&query))
+            .filter_map(|row| {
+                let body = row.body.as_ref()?.to_lowercase();
+                let score = body.matches(&query).count();
+                (score > 0).then_some((score, row))
             })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+                .then_with(|| left.act_id.cmp(&right.act_id))
+        });
+        Ok(matches
+            .into_iter()
             .take(limit as usize)
+            .map(|(_, row)| row)
             .collect())
     }
 
