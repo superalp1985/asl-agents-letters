@@ -18,6 +18,7 @@ impl Supervisor {
         match (paused, self.network_report.runtime()) {
             (true, NetworkRuntimeState::Running) => {
                 self.net.stop_for_pause()?;
+                self.resource_providers.reset_resource_providers();
                 self.profile_signing.reset_transport();
                 let now = unix_time_ms()?;
                 for (connection_id, peer_id) in std::mem::take(&mut self.transport_connections) {
@@ -50,6 +51,7 @@ impl Supervisor {
             (false, NetworkRuntimeState::Paused) => match self.restart_net(start_net) {
                 Ok(net) => {
                     self.net = net;
+                    self.resource_providers.reset_resource_providers();
                     self.network_report
                         .set_runtime(NetworkRuntimeState::Running);
                     return Ok(true);

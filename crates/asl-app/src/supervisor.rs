@@ -154,11 +154,7 @@ impl Supervisor {
     ) -> Result<Self, AslError> {
         let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
-        let mut settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
-        let packaged_seeds = sibling_binary_directory()?
-            .join("assets")
-            .join("network-seeds.json");
-        settings.apply_packaged_bootstrap(&packaged_seeds, unix_time_ms()?)?;
+        let settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
         let network_store = open_store(&state_database)?;
         let network_settings =
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
@@ -1480,6 +1476,8 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
+            self.resource_providers
+                .observe_resource_provider_event(&event);
             self.observe_contact_binding_event(&event)?;
             self.observe_contact_invite_operation(&event);
             self.profile_signing

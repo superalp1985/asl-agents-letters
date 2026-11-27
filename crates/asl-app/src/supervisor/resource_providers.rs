@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -13,6 +13,7 @@ const PROVIDER_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub(super) struct ResourceProviderRuntime {
     published: HashSet<[u8; 32]>,
+    pending: HashMap<[u8; 16], ([u8; 32], bool)>,
     next_sync: Option<Instant>,
 }
 
@@ -44,12 +45,22 @@ impl Supervisor {
             .copied()
             .collect::<Vec<_>>()
         {
+            if self
+                .resource_providers
+                .pending
+                .values()
+                .any(|(pending, _)| pending == &key)
+            {
+                continue;
+            }
             let operation_id = fresh_id()?;
             if self
                 .send_network_command(NetworkCommand::StartProviding { operation_id, key })
                 .is_ok()
             {
-                self.resource_providers.published.insert(key);
+                self.resource_providers
+                    .pending
+                    .insert(operation_id, (key, true));
             }
         }
 
@@ -60,14 +71,53 @@ impl Supervisor {
             .copied()
             .collect::<Vec<_>>()
         {
+            if self
+                .resource_providers
+                .pending
+                .values()
+                .any(|(pending, _)| pending == &key)
+            {
+                continue;
+            }
             let operation_id = fresh_id()?;
             if self
                 .send_network_command(NetworkCommand::StopProviding { operation_id, key })
                 .is_ok()
             {
-                self.resource_providers.published.remove(&key);
+                self.resource_providers
+                    .pending
+                    .insert(operation_id, (key, false));
             }
         }
         Ok(())
+    }
+}
+
+impl ResourceProviderRuntime {
+    pub(super) fn observe_resource_provider_event(
+        &mut self,
+        event: &crate::profile::AdmittedNetworkEvent,
+    ) {
+        match event {
+            crate::profile::AdmittedNetworkEvent::OperationAccepted { operation_id } => {
+                if let Some((key, start)) = self.pending.remove(operation_id) {
+                    if start {
+                        self.published.insert(key);
+                    } else {
+                        self.published.remove(&key);
+                    }
+                }
+            }
+            crate::profile::AdmittedNetworkEvent::OperationFailed { operation_id, .. } => {
+                self.pending.remove(operation_id);
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn reset_resource_providers(&mut self) {
+        self.published.clear();
+        self.pending.clear();
+        self.next_sync = None;
     }
 }

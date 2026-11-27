@@ -56,6 +56,10 @@ const INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_JOIN_DIAGNOSTICS: usize = 5;
 const MAX_RECENT_ROOMS: usize = 32;
 const MAX_PENDING_GROUP_TRANSFERS: usize = 64;
+const MAX_PENDING_ACKS: usize = 128;
+const MAX_ACKED_ACTS: usize = 512;
+const ACK_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_ACK_ATTEMPTS: u8 = 5;
 
 pub enum LocalGroupAction {
     List,
@@ -120,8 +124,9 @@ pub(super) struct LoopbackGroups {
     sync_cursor: Option<(Hash32, PeerId)>,
     pending_transfers: VecDeque<PendingGroupTransfer>,
     gossip_subscriptions: HashSet<Hash32>,
-    pending_acks: VecDeque<(Hash32, Act)>,
+    pending_acks: VecDeque<PendingAck>,
     acked_acts: HashSet<Id128>,
+    acked_order: VecDeque<Id128>,
 }
 
 struct ReceivedApplication {
@@ -139,6 +144,13 @@ struct PendingGroupTransfer {
     envelope_id: Id128,
     sender: PeerId,
     application: GroupApplication,
+}
+
+struct PendingAck {
+    room: Hash32,
+    act: Act,
+    attempts: u8,
+    next_attempt: Instant,
 }
 
 impl LoopbackGroups {
@@ -194,19 +206,27 @@ impl LoopbackGroups {
             gossip_subscriptions: HashSet::new(),
             pending_acks: VecDeque::new(),
             acked_acts: HashSet::new(),
+            acked_order: VecDeque::new(),
         })
     }
 
     fn queue_ack(&mut self, room: Hash32, act: &Act, now_ms: u64) -> Result<(), AslError> {
-        if act.act_type == ActType::Ack || !self.acked_acts.insert(act.message_id) {
+        if act.act_type == ActType::Ack
+            || self.acked_acts.contains(&act.message_id)
+            || self.pending_acks.len() >= MAX_PENDING_ACKS
+        {
             return Ok(());
         }
-        if self.pending_acks.len() >= 128 {
-            self.pending_acks.pop_front();
+        if self.acked_acts.len() >= MAX_ACKED_ACTS
+            && let Some(oldest) = self.acked_order.pop_front()
+        {
+            self.acked_acts.remove(&oldest);
         }
-        self.pending_acks.push_back((
+        self.acked_acts.insert(act.message_id);
+        self.acked_order.push_back(act.message_id);
+        self.pending_acks.push_back(PendingAck {
             room,
-            Act {
+            act: Act {
                 message_id: Id128([0; 16]),
                 conversation_id: act.conversation_id,
                 act_type: ActType::Ack,
@@ -218,12 +238,37 @@ impl LoopbackGroups {
                 hop: act.hop.saturating_add(1),
                 expires_at_ms: Some(now_ms.saturating_add(10 * 60 * 1_000)),
             },
-        ));
+            attempts: 0,
+            next_attempt: Instant::now(),
+        });
         Ok(())
     }
 
-    fn take_pending_acks(&mut self) -> Vec<(Hash32, Act)> {
-        self.pending_acks.drain(..).collect()
+    fn take_due_acks(&mut self, now: Instant) -> Vec<PendingAck> {
+        let mut due = Vec::new();
+        let mut waiting = VecDeque::new();
+        for pending in self.pending_acks.drain(..) {
+            if now >= pending.next_attempt {
+                due.push(pending);
+            } else {
+                waiting.push_back(pending);
+            }
+        }
+        self.pending_acks = waiting;
+        due
+    }
+
+    fn retry_ack(&mut self, mut pending: PendingAck) {
+        if pending.attempts >= MAX_ACK_ATTEMPTS {
+            self.acked_acts
+                .remove(&pending.act.reply_to.unwrap_or(Id128([0; 16])));
+            self.acked_order
+                .retain(|id| *id != pending.act.reply_to.unwrap_or(Id128([0; 16])));
+            return;
+        }
+        pending.attempts = pending.attempts.saturating_add(1);
+        pending.next_attempt = Instant::now() + ACK_RETRY_DELAY;
+        self.pending_acks.push_back(pending);
     }
 }
 
@@ -438,7 +483,7 @@ impl Supervisor {
             let member_allowed =
                 requester
                     .as_ref()
-                    .is_none_or(|member| match application.as_ref() {
+                    .is_some_and(|member| match application.as_ref() {
                         GroupApplication::Act(_)
                         | GroupApplication::Query(_)
                         | GroupApplication::Expression(_) => groups
@@ -992,10 +1037,16 @@ impl Supervisor {
         let acks = self
             .groups
             .as_mut()
-            .map(LoopbackGroups::take_pending_acks)
+            .map(|groups| groups.take_due_acks(Instant::now()))
             .unwrap_or_default();
-        for (room, act) in acks {
-            let _ = self.send_group_act(room, act);
+        for pending in acks {
+            let room = pending.room;
+            let act = pending.act.clone();
+            if self.send_group_act(room, act).is_err()
+                && let Some(groups) = self.groups.as_mut()
+            {
+                groups.retry_ack(pending);
+            }
         }
         self.poll_group_review();
         let Some(controls) = &self.group_controls else {

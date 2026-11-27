@@ -22,22 +22,22 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let root = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
     let paths = AppPaths::open_existing(&root)?;
     let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+    if let ["prepare-directory"] = args.as_slice() {
+        return prepare_directory(&paths, &identity, 1);
+    }
+    if let ["prepare-directory", sequence] = args.as_slice() {
+        let sequence = sequence
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(AslError::InvalidMessage)?;
+        return prepare_directory(&paths, &identity, sequence);
+    }
     let configuration =
         NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?
             .ok_or(AslError::InvalidIdentity)?;
 
     let request = match args.as_slice() {
-        ["prepare-directory"] => {
-            return prepare_directory(&paths, &identity, 1);
-        }
-        ["prepare-directory", sequence] => {
-            let sequence = sequence
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .ok_or(AslError::InvalidMessage)?;
-            return prepare_directory(&paths, &identity, sequence);
-        }
         ["request"] => IdentityRegistrationRequest::build(
             &identity,
             configuration.resolver.deployment,

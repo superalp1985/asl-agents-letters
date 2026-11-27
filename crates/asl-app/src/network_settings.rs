@@ -139,7 +139,12 @@ impl NetworkSettingsV1 {
 
     /// Explicit settings win over a packaged seed file. The seed file is
     /// intentionally empty in this repository until real operators publish it.
-    pub fn apply_packaged_bootstrap(&mut self, path: &Path, now_ms: u64) -> Result<(), AslError> {
+    #[allow(dead_code)]
+    pub(crate) fn apply_packaged_bootstrap(
+        &mut self,
+        path: &Path,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
         if !self.bootstrap_multiaddrs.is_empty() {
             return Ok(());
         }
