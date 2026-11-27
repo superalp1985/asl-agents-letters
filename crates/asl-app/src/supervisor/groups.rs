@@ -487,7 +487,11 @@ impl Supervisor {
                     .is_some_and(|member| match application.as_ref() {
                         GroupApplication::Act(_)
                         | GroupApplication::Query(_)
-                        | GroupApplication::Expression(_) => groups
+                        | GroupApplication::Expression(_)
+                        | GroupApplication::ContextRequest(_)
+                        | GroupApplication::ContextOffer(_)
+                        | GroupApplication::ContextAgreement(_)
+                        | GroupApplication::ContextExpression(_) => groups
                             .store
                             .group_can_send(&member.group_id, sender, GroupAccessKind::Text)
                             .unwrap_or(false),
@@ -557,6 +561,12 @@ impl Supervisor {
                     GroupApplication::Answer(a) => Some(WireFrame::Answer(a.clone())),
                     GroupApplication::Offer(o) => Some(WireFrame::Offer(o.clone())),
                     GroupApplication::Expression(e) => Some(WireFrame::Expression(e.clone())),
+                    GroupApplication::ContextRequest(r) => Some(WireFrame::ContextRequest(*r)),
+                    GroupApplication::ContextOffer(o) => Some(WireFrame::ContextOffer(*o)),
+                    GroupApplication::ContextAgreement(a) => Some(WireFrame::ContextAgreement(*a)),
+                    GroupApplication::ContextExpression(e) => {
+                        Some(WireFrame::ContextExpression(e.clone()))
+                    }
                     _ => None,
                 };
                 if let Some(frame) = frame {
@@ -698,7 +708,11 @@ impl Supervisor {
         let member_allowed = match &application {
             GroupApplication::Act(_)
             | GroupApplication::Query(_)
-            | GroupApplication::Expression(_) => groups
+            | GroupApplication::Expression(_)
+            | GroupApplication::ContextRequest(_)
+            | GroupApplication::ContextOffer(_)
+            | GroupApplication::ContextAgreement(_)
+            | GroupApplication::ContextExpression(_) => groups
                 .store
                 .group_can_send(&local_group_id, &peer, GroupAccessKind::Text)
                 .unwrap_or(false),
@@ -769,6 +783,14 @@ impl Supervisor {
             GroupApplication::Answer(answer) => Some(WireFrame::Answer(answer)),
             GroupApplication::Offer(offer) => Some(WireFrame::Offer(offer)),
             GroupApplication::Expression(expression) => Some(WireFrame::Expression(expression)),
+            GroupApplication::ContextRequest(request) => Some(WireFrame::ContextRequest(request)),
+            GroupApplication::ContextOffer(offer) => Some(WireFrame::ContextOffer(offer)),
+            GroupApplication::ContextAgreement(agreement) => {
+                Some(WireFrame::ContextAgreement(agreement))
+            }
+            GroupApplication::ContextExpression(expression) => {
+                Some(WireFrame::ContextExpression(expression))
+            }
             _ => None,
         };
         if let Some(frame) = frame
@@ -908,7 +930,11 @@ impl Supervisor {
                 | GroupApplication::Offer(_)
                 | GroupApplication::Expression(_)
                 | GroupApplication::Act(_)
-                | GroupApplication::Policy(_) => {}
+                | GroupApplication::Policy(_)
+                | GroupApplication::ContextRequest(_)
+                | GroupApplication::ContextOffer(_)
+                | GroupApplication::ContextAgreement(_)
+                | GroupApplication::ContextExpression(_) => {}
             }
         }
     }

@@ -439,6 +439,12 @@ pub(super) fn application_times(application: &GroupApplication) -> (Option<u64>,
         GroupApplication::Expression(letter) => (Some(letter.created_at_ms), letter.expires_at_ms),
         GroupApplication::Act(act) => (None, act.expires_at_ms.unwrap_or(u64::MAX)),
         GroupApplication::Policy(_) => (None, u64::MAX),
+        GroupApplication::ContextRequest(request) => (None, request.expires_at_ms),
+        GroupApplication::ContextOffer(offer) => (None, offer.expires_at_ms),
+        GroupApplication::ContextAgreement(_) => (None, u64::MAX),
+        GroupApplication::ContextExpression(expression) => {
+            (Some(expression.created_at_ms), expression.expires_at_ms)
+        }
     }
 }
 

@@ -2,9 +2,9 @@ use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
     protocol::{
-        Act, Answer, ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody,
-        GroupControl, GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control,
-        encode_control,
+        Act, Answer, ContextAgreement, ContextExpression, ContextOffer, ContextRequest,
+        ExpressionLetter, FetchGrant, FetchPending, FetchRequest, GroupBody, GroupControl,
+        GroupPacket, Offer, ProtocolError, Query, WireFrame, decode_control, encode_control,
     },
 };
 use openmls::prelude::{LeafNodeIndex, MlsGroup, OpenMlsProvider, ProcessedMessageContent, Sender};
@@ -25,6 +25,10 @@ pub enum GroupApplication {
     Expression(ExpressionLetter),
     Act(Act),
     Policy(GroupControl),
+    ContextRequest(ContextRequest),
+    ContextOffer(ContextOffer),
+    ContextAgreement(ContextAgreement),
+    ContextExpression(ContextExpression),
 }
 
 impl GroupApplication {
@@ -40,6 +44,10 @@ impl GroupApplication {
             Self::Expression(_) => "expression",
             Self::Act(_) => "act",
             Self::Policy(_) => "policy",
+            Self::ContextRequest(_) => "context_request",
+            Self::ContextOffer(_) => "context_offer",
+            Self::ContextAgreement(_) => "context_agreement",
+            Self::ContextExpression(_) => "context_expression",
         }
     }
 
@@ -55,6 +63,10 @@ impl GroupApplication {
             Self::Expression(letter) => letter.message_id,
             Self::Act(act) => act.message_id,
             Self::Policy(control) => control.message_id,
+            Self::ContextRequest(request) => request.message_id,
+            Self::ContextOffer(offer) => offer.message_id,
+            Self::ContextAgreement(agreement) => agreement.message_id,
+            Self::ContextExpression(expression) => expression.message_id,
         }
     }
 
@@ -69,6 +81,10 @@ impl GroupApplication {
                 WireFrame::FetchPending(pending) => Ok(Self::FetchPending(pending)),
                 WireFrame::Error(error) => Ok(Self::Error(error)),
                 WireFrame::Expression(letter) => Ok(Self::Expression(letter)),
+                WireFrame::ContextRequest(request) => Ok(Self::ContextRequest(request)),
+                WireFrame::ContextOffer(offer) => Ok(Self::ContextOffer(offer)),
+                WireFrame::ContextAgreement(agreement) => Ok(Self::ContextAgreement(agreement)),
+                WireFrame::ContextExpression(expression) => Ok(Self::ContextExpression(expression)),
                 _ => Err(AslError::InvalidMessage),
             };
         }
@@ -82,6 +98,14 @@ impl GroupApplication {
         match self {
             Self::Act(act) => act.encode(),
             Self::Policy(control) => control.encode(),
+            Self::ContextRequest(request) => encode_control(&WireFrame::ContextRequest(request)),
+            Self::ContextOffer(offer) => encode_control(&WireFrame::ContextOffer(offer)),
+            Self::ContextAgreement(agreement) => {
+                encode_control(&WireFrame::ContextAgreement(agreement))
+            }
+            Self::ContextExpression(expression) => {
+                encode_control(&WireFrame::ContextExpression(expression))
+            }
             frame => encode_control(&match frame {
                 Self::Query(query) => WireFrame::Query(query),
                 Self::Answer(answer) => WireFrame::Answer(answer),
@@ -91,7 +115,12 @@ impl GroupApplication {
                 Self::FetchPending(pending) => WireFrame::FetchPending(pending),
                 Self::Error(error) => WireFrame::Error(error),
                 Self::Expression(letter) => WireFrame::Expression(letter),
-                Self::Act(_) | Self::Policy(_) => unreachable!(),
+                Self::Act(_)
+                | Self::Policy(_)
+                | Self::ContextRequest(_)
+                | Self::ContextOffer(_)
+                | Self::ContextAgreement(_)
+                | Self::ContextExpression(_) => unreachable!(),
             }),
         }
     }
