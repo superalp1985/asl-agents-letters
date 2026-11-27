@@ -6,7 +6,12 @@ use std::{
 
 use age::secrecy::SecretString;
 use asl_app::{
+    identity::{AgentIdentity, DeviceIdentity},
+    identity_registration::{
+        IdentityRegistrationRequest, default_deadline, prepare_device_directory,
+    },
     migration::{self, Selection},
+    network_identity::NetworkIdentityConfigurationV1,
     paths::AppPaths,
 };
 use asl_types::error::AslError;
@@ -70,8 +75,51 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             );
             Ok(())
         }
+        [command, destination, sequence] if command == "registration-request" => {
+            let sequence = sequence
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 1)
+                .ok_or(AslError::InvalidMessage)?;
+            prepare_registration_request(Path::new(destination), sequence)
+        }
         _ => Err(AslError::InvalidMessage),
     }
+}
+
+fn prepare_registration_request(destination: &Path, sequence: u64) -> Result<(), AslError> {
+    let paths = AppPaths::open_existing(destination)?;
+    let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+    let device = DeviceIdentity::load_protected(&paths.device_key())?;
+    let (bytes, commitment) =
+        prepare_device_directory(&identity, &device, sequence, unix_time_ms()?)?;
+    if std::fs::symlink_metadata(paths.signed_device_directory()).is_err() {
+        std::fs::write(paths.signed_device_directory(), bytes)?;
+    }
+    let configuration =
+        NetworkIdentityConfigurationV1::load(&paths.network_identity_configuration())?
+            .ok_or(AslError::InvalidIdentity)?;
+    let request = IdentityRegistrationRequest::build_update(
+        &identity,
+        configuration.resolver.deployment,
+        commitment,
+        sequence,
+        default_deadline()?,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string(&request).map_err(|_| AslError::InvalidMessage)?
+    );
+    Ok(())
+}
+
+fn unix_time_ms() -> Result<u64, AslError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| AslError::ExpiredMessage)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| AslError::InvalidMessage)
 }
 
 fn prompt_passphrase(confirm: bool) -> Result<SecretString, AslError> {
