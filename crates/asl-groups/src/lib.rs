@@ -6,6 +6,7 @@ pub mod local_state;
 pub mod membership;
 #[cfg(windows)]
 pub mod pending_join;
+pub mod topology;
 
 pub use application::{
     GroupApplication, encrypt_application, open_application, open_application_with_sender,
