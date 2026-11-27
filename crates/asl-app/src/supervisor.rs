@@ -34,7 +34,7 @@ use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::direct_inbound::{self, DirectInbound};
 use crate::direct_outbound::DirectOutbound;
-use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
+use crate::documents::{MAX_AVATAR_BYTES, MAX_DOCUMENT_TEXT_BYTES};
 use crate::downloads::{
     DownloadBridge, DownloadDriverEvent, DownloadEnqueue, DownloadRuntime, WorkerRequest,
     download_channel,
@@ -532,6 +532,21 @@ impl Supervisor {
     /// Extracts text in a fresh, networkless PDF helper process.
     pub fn extract_pdf_text(&self, task_id: [u8; 16], pdf: &[u8]) -> Result<String, AslError> {
         let output = run_extractor_task(&self.launcher, task_id, ExtractorOperation::PdfText, pdf)?;
+        String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
+    }
+
+    /// Detects PDF/OOXML in the extractor and returns bounded plain text.
+    pub fn extract_document_text(
+        &self,
+        task_id: [u8; 16],
+        document: &[u8],
+    ) -> Result<String, AslError> {
+        let output = run_extractor_task(
+            &self.launcher,
+            task_id,
+            ExtractorOperation::DocumentText,
+            document,
+        )?;
         String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
     }
 
@@ -2478,7 +2493,23 @@ pub(crate) fn sanitize_avatar_with(
     run_extractor_task(launcher, rand::random(), ExtractorOperation::Avatar, input)
 }
 
-fn run_extractor_task(
+pub(crate) fn extract_document_text_once(document: &[u8]) -> Result<String, AslError> {
+    let directory = sibling_binary_directory()?;
+    let launcher = SandboxLauncher::new(
+        directory.join("asl-net.exe"),
+        directory.join("asl-worker.exe"),
+        directory.join("asl-extractor.exe"),
+    )?;
+    let output = run_extractor_task(
+        &launcher,
+        rand::random(),
+        ExtractorOperation::DocumentText,
+        document,
+    )?;
+    String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
+}
+
+pub(crate) fn run_extractor_task(
     launcher: &SandboxLauncher,
     task_id: [u8; 16],
     operation: ExtractorOperation,
@@ -2518,7 +2549,9 @@ fn run_extractor_task(
         _ => return Err(AslError::InvalidMessage),
     };
     let maximum_output_bytes = match operation {
-        ExtractorOperation::PdfText => MAX_PDF_TEXT_BYTES,
+        ExtractorOperation::PdfText | ExtractorOperation::DocumentText => {
+            MAX_DOCUMENT_TEXT_BYTES
+        }
         ExtractorOperation::Avatar => MAX_AVATAR_BYTES,
     };
     let invalid_output = output.len() > maximum_output_bytes

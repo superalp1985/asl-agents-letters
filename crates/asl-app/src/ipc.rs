@@ -122,6 +122,7 @@ impl WorkerOperation {
 pub enum ExtractorOperation {
     PdfText = 1,
     Avatar = 2,
+    DocumentText = 3,
 }
 
 impl ExtractorOperation {
@@ -129,6 +130,7 @@ impl ExtractorOperation {
         match value {
             1 => Ok(Self::PdfText),
             2 => Ok(Self::Avatar),
+            3 => Ok(Self::DocumentText),
             _ => Err(AslError::InvalidMessage),
         }
     }
