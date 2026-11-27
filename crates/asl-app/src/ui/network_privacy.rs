@@ -169,6 +169,70 @@ pub(super) fn show(
             }
         });
         ui.ctx().data_mut(|data| data.insert_temp(input_id, input));
+        if c.address_scope != NetworkAddressScopeV1::RelayOnly {
+            let port_id = egui::Id::new("asl-network-ports");
+            let mut ports = ui.ctx().data_mut(|data| {
+                data.get_temp::<(String, String)>(port_id)
+                    .unwrap_or_else(|| {
+                        (
+                            if c.tcp_port == 0 {
+                                "4001".to_owned()
+                            } else {
+                                c.tcp_port.to_string()
+                            },
+                            if c.quic_port == 0 {
+                                "4001".to_owned()
+                            } else {
+                                c.quic_port.to_string()
+                            },
+                        )
+                    })
+            });
+            let mut listen = c.listen_on_interfaces;
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        enabled && action.is_none(),
+                        Checkbox::new(
+                            &mut listen,
+                            label(language, "监听外部连接", "Listen for external connections"),
+                        ),
+                    )
+                    .changed()
+                {
+                    *action = Some(LocalAction::new(
+                        "network",
+                        [
+                            "listen".into(),
+                            (if listen { "on" } else { "off" }).into(),
+                            ports.0.clone().into(),
+                            ports.1.clone().into(),
+                        ],
+                    ));
+                }
+                ui.label("TCP");
+                ui.add_sized([70.0, 26.0], TextEdit::singleline(&mut ports.0));
+                ui.label("QUIC");
+                ui.add_sized([70.0, 26.0], TextEdit::singleline(&mut ports.1));
+            });
+            ui.ctx().data_mut(|data| data.insert_temp(port_id, ports));
+        }
+        let mut groups = c.loopback_groups;
+        if ui
+            .add_enabled(
+                enabled && action.is_none(),
+                Checkbox::new(
+                    &mut groups,
+                    label(language, "启用群组网络", "Enable group networking"),
+                ),
+            )
+            .changed()
+        {
+            *action = Some(LocalAction::new(
+                "network",
+                ["groups".into(), (if groups { "on" } else { "off" }).into()],
+            ));
+        }
     }
     if let Some(last) = &data.network_report {
         let mode = if last.relay_only {

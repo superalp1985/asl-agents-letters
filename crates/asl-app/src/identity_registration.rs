@@ -24,6 +24,8 @@ const REGISTER_SELECTOR: &[u8] = b"register(bytes32,bytes32,uint64,uint64,bytes)
 const UPDATE_TYPEHASH: &[u8] =
     b"UpdateState(bytes32 agentId,bytes32 stateCommitment,uint64 sequence,uint64 deadline)";
 const UPDATE_SELECTOR: &[u8] = b"updateState(bytes32,bytes32,uint64,uint64,bytes)";
+const REVOKE_TYPEHASH: &[u8] = b"Revoke(bytes32 agentId,uint64 sequence,uint64 deadline)";
+const REVOKE_SELECTOR: &[u8] = b"revoke(bytes32,uint64,uint64,bytes)";
 const DIRECTORY_RECORD_LIFETIME_MS: u64 = 30 * 60 * 1_000;
 const DEVICE_CERTIFICATE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
@@ -82,6 +84,39 @@ impl IdentityRegistrationRequest {
             sequence,
             deadline,
         )
+    }
+
+    pub fn build_revoke(
+        identity: &AgentIdentity,
+        deployment: RegistryDeploymentV1,
+        sequence: u64,
+        deadline: u64,
+    ) -> Result<Self, AslError> {
+        if sequence <= 1 || deadline == 0 {
+            return Err(AslError::InvalidMessage);
+        }
+        deployment
+            .validate()
+            .map_err(|_| AslError::InvalidIdentity)?;
+        let domain = domain_separator(deployment);
+        let struct_hash = revoke_struct_hash(identity.agent_id(), sequence, deadline);
+        let digest = eip712_digest(domain, struct_hash);
+        let signature = identity.sign_prehash(digest.as_slice())?;
+        let calldata = revoke_calldata(identity.agent_id(), sequence, deadline, signature);
+        Ok(Self {
+            schema: "asl-identity-registration-v1",
+            operation: "revoke",
+            chain_id: deployment.chain_id,
+            registry: format!("0x{}", hex::encode(deployment.address)),
+            agent_id: format!("0x{}", hex::encode(identity.agent_id().as_bytes())),
+            controller: format!("0x{}", hex::encode(identity.controller_address())),
+            sequence,
+            deadline,
+            state_commitment: String::new(),
+            digest: format!("0x{}", hex::encode(digest.as_slice())),
+            signature: format!("0x{}", hex::encode(signature.0)),
+            calldata: format!("0x{}", hex::encode(calldata)),
+        })
     }
 
     fn build_with(
@@ -219,6 +254,15 @@ fn eip712_digest(domain: B256, struct_hash: B256) -> B256 {
     keccak256(encoded)
 }
 
+fn revoke_struct_hash(agent: AgentId, sequence: u64, deadline: u64) -> B256 {
+    let mut encoded = Vec::with_capacity(4 * 32);
+    encoded.extend_from_slice(keccak256(REVOKE_TYPEHASH).as_slice());
+    encoded.extend_from_slice(agent.as_bytes());
+    encoded.extend_from_slice(&uint256(sequence));
+    encoded.extend_from_slice(&uint256(deadline));
+    keccak256(encoded)
+}
+
 fn registration_calldata(
     selector: &[u8],
     agent: AgentId,
@@ -237,6 +281,24 @@ fn registration_calldata(
     calldata.extend_from_slice(&uint256(signature.0.len() as u64));
     calldata.extend_from_slice(&signature.0);
     calldata.resize(4 + 9 * 32, 0);
+    calldata
+}
+
+fn revoke_calldata(
+    agent: AgentId,
+    sequence: u64,
+    deadline: u64,
+    signature: Signature65,
+) -> Vec<u8> {
+    let mut calldata = Vec::with_capacity(4 + 8 * 32);
+    calldata.extend_from_slice(&keccak256(REVOKE_SELECTOR)[..4]);
+    calldata.extend_from_slice(agent.as_bytes());
+    calldata.extend_from_slice(&uint256(sequence));
+    calldata.extend_from_slice(&uint256(deadline));
+    calldata.extend_from_slice(&uint256(4 * 32));
+    calldata.extend_from_slice(&uint256(signature.0.len() as u64));
+    calldata.extend_from_slice(&signature.0);
+    calldata.resize(4 + 8 * 32, 0);
     calldata
 }
 

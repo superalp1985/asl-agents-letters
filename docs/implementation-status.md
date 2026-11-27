@@ -25,7 +25,7 @@
 | 能力 | 已完成 | 尚缺 |
 | --- | --- | --- |
 | 公网入口与资源 provider 发布 | `bootstrap_multiaddrs` 按地址策略拨号；显式列表为空时可校验安装目录 `assets/network-seeds.json`；显式 public grant 的 content/concept hash 进入 provider 发布集合 | 真实签名 `network-seeds.json`、地址部署、冷启动公网、双机和资源索引验收 |
-| 链上首次注册 | 签名设备目录生成、commitment 计算、EIP-712 签名、注册 calldata、注册请求 JSON 和 raw transaction RPC 提交入口已编译通过 | 合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
+| 链上身份生命周期 | 签名设备目录生成、commitment 计算、注册/更新/撤销 EIP-712 请求、ABI calldata 和 raw transaction RPC 提交入口已编译通过 | 合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
 | Act 送达确认 | 已认证群成员收到非 Ack Act 后，按消息 ID 去重并生成带期限的结构化 `Act Ack`，复用 MLS、预算和 DHT 邮箱 | 真实双机送达时间、回执丢失/重试和 GUI 状态显示尚未验收 |
 | 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；群子流可跟随 loopback/LAN/Internet/relay 地址策略，默认关闭 | 真实双机公网/NAT/relay、跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
 | 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员管理动作、群主转移和更细粒度逐文件策略 |

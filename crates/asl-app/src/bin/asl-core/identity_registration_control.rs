@@ -66,6 +66,15 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 .ok_or(AslError::InvalidMessage)?,
             parse_deadline(deadline)?,
         )?,
+        ["revoke", sequence, deadline] => IdentityRegistrationRequest::build_revoke(
+            &identity,
+            configuration.resolver.deployment,
+            sequence
+                .parse::<u64>()
+                .ok()
+                .ok_or(AslError::InvalidMessage)?,
+            parse_deadline(deadline)?,
+        )?,
         _ => return Err(AslError::InvalidMessage),
     };
     println!(
