@@ -145,6 +145,7 @@ impl NetworkSettingsV1 {
             .network_seed_public_key
             .as_ref()
             .is_some_and(|key| parse_hex32(key).is_err())
+            || (self.network_seed_public_key.is_some() && self.network_seed_network_id.is_none())
             || self
                 .network_seed_network_id
                 .as_ref()
@@ -179,11 +180,7 @@ impl NetworkSettingsV1 {
         let payload = serde_json::to_vec(&seeds.payload).map_err(|_| AslError::InvalidIdentity)?;
         key.verify_strict(&payload, &Signature::from_bytes(&signature))
             .map_err(|_| AslError::InvalidIdentity)?;
-        if self
-            .network_seed_network_id
-            .as_deref()
-            .is_some_and(|network_id| network_id != seeds.payload.network_id)
-        {
+        if self.network_seed_network_id.as_deref() != Some(seeds.payload.network_id.as_str()) {
             return Err(AslError::InvalidIdentity);
         }
         seeds.payload.validate(now_ms)?;
