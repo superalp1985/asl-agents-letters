@@ -26,12 +26,14 @@
 | --- | --- | --- |
 | 公网入口与资源 provider 发布 | `bootstrap_multiaddrs` 按地址策略拨号；配置发布公钥和 network ID 后校验 Ed25519 seed；显式 public grant 的 content/concept hash 进入 provider 发布集合 | 真实签名 `network-seeds.json`、地址部署、冷启动公网、双机和资源索引验收 |
 | 链上身份生命周期 | 签名设备目录生成、commitment 计算、注册/更新/撤销 EIP-712 请求、ABI calldata、raw transaction RPC 提交入口和 Foundry 部署脚本已编译/格式通过 | 真实合约部署、资金策略、真实交易、注册后目录发布与跨设备迁移验收 |
+| AutoNAT / DCUtR | libp2p AutoNAT 与 DCUtR behaviour 已注册，relay v2 保持现有预约/降级路径 | 真实公网 NAT 矩阵、打洞成功率和 relay 降级策略验收 |
+| DHT 持久化 | SQLite v40/v41 增加 DHT record/provider cache；已验证记录和 provider 发布写入本地缓存 | 重启时回灌 Net DHT store、远端记录重放和跨机 DHT 持久性尚未验收 |
 | Act 送达确认 | 已认证群成员收到非 Ack Act 后，按消息 ID 去重并生成带期限的结构化 `Act Ack`，复用 MLS、预算和 DHT 邮箱 | 真实双机送达时间、回执丢失/重试和 GUI 状态显示尚未验收 |
 | 群伸缩与网络 | 单 MLS 编译上限 512；direct fan-out、gossipsub、Core act 路由；群子流可跟随 loopback/LAN/Internet/relay 地址策略，默认关闭 | 真实双机公网/NAT/relay、跨机多跳收敛、2/32/128/512/2,000/10,000 容量矩阵、分层桥接 |
-| 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员管理动作、群主转移和更细粒度逐文件策略 |
+| 群权限 | 群主策略消息、管理员、禁言、成员文字/文件/邀请默认权限、群主转移 key 6、入站/出站 act/Offer 检查 | 真实多设备策略同步、管理员代管动作和更细粒度逐文件策略 |
 | 群加入/重入请求 | 经认证连接的结构化 `InviteRequest`、5 分钟期限、群主本机审批队列、设备/Agent 精确绑定、每群 32 条及每 Agent 每小时 5 条上限、在线连接复核后复用定向邀请、GUI/CLI/MCP 持久拒绝 | 真实双机审批和跨设备迁移全链路验收 |
 | 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file` 对本机已授权快照发 Offer、Offer 可进入密文邮箱等待补收 | 公网跨机、真实两设备大文件验收；邮箱只保存 Offer/密文，文件字节仍走在线授权传输；Offer 本身不是下载许可 |
-| 预算 | 消息数授予、续期、发送侧原子扣减 | 字节、模型调用、CPU、邮箱复合额度与 GUI 策略 |
+| 预算 | 消息数授予、续期、发送侧原子扣减；SQLite resource budget ledger 已加入字节/模型/CPU/邮箱种类 | 各类资源的实际计费接线、GUI 策略和跨机配额验收 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
 | 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；群列表和管理详情显示完整 Group ID 并可复制 | 邀请权限规则和多设备策略同步尚未接通；旧 16 位码只保留兼容 |
 
