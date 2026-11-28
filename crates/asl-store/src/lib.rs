@@ -43,7 +43,7 @@ pub mod semantic_context;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 49;
+const SCHEMA_VERSION: i64 = 50;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -93,6 +93,7 @@ const SCHEMA_V46: &str = include_str!("../../../specs/schema-v46.sql");
 const SCHEMA_V47: &str = include_str!("../../../specs/schema-v47.sql");
 const SCHEMA_V48: &str = include_str!("../../../specs/schema-v48.sql");
 const SCHEMA_V49: &str = include_str!("../../../specs/schema-v49.sql");
+const SCHEMA_V50: &str = include_str!("../../../specs/schema-v50.sql");
 
 pub struct Store {
     connection: Connection,
@@ -363,6 +364,9 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         if version < 49 {
             apply_migration_in_transaction(&transaction, SCHEMA_V49, 49, now)?;
         }
+        if version < 50 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V50, 50, now)?;
+        }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;
     }
@@ -451,6 +455,24 @@ fn apply_migration_in_transaction(
     version: i64,
     applied_at_ms: i64,
 ) -> Result<(), AslError> {
+    if version == 50 {
+        ensure_v50_outbox_column(
+            transaction,
+            "delivery_kind",
+            "TEXT NOT NULL DEFAULT 'forward' \
+             CHECK(delivery_kind IN ('forward','owner_relay','owner_reply'))",
+        )?;
+        ensure_v50_outbox_column(
+            transaction,
+            "content_id",
+            "BLOB CHECK(content_id IS NULL OR length(content_id)=32)",
+        )?;
+        ensure_v50_outbox_column(
+            transaction,
+            "target_peer_id",
+            "TEXT CHECK(target_peer_id IS NULL OR length(target_peer_id) BETWEEN 1 AND 128)",
+        )?;
+    }
     transaction
         .execute_batch(migration_sql)
         .map_err(database_error)?;
@@ -460,6 +482,34 @@ fn apply_migration_in_transaction(
             params![version, applied_at_ms],
         )
         .map_err(database_error)?;
+    Ok(())
+}
+
+fn ensure_v50_outbox_column(
+    transaction: &Transaction<'_>,
+    column: &str,
+    definition: &str,
+) -> Result<(), AslError> {
+    let exists = {
+        let mut statement = transaction
+            .prepare("PRAGMA table_info(mls_shard_forward_outbox)")
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(database_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?
+            .iter()
+            .any(|name| name == column)
+    };
+    if !exists {
+        transaction
+            .execute(
+                &format!("ALTER TABLE mls_shard_forward_outbox ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(database_error)?;
+    }
     Ok(())
 }
 

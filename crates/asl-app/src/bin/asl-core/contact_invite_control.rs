@@ -13,7 +13,8 @@ use asl_store::{
 use asl_types::{
     contact_invite::ContactInviteV1,
     error::AslError,
-    ids::{Id128, Signature65},
+    ids::{Hash32, Id128, Signature65},
+    protocol::ContactProvenance,
 };
 use serde_json::json;
 
@@ -34,13 +35,14 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                 now_ms,
                 minutes.saturating_mul(60_000),
             )?;
-            open_store(&database)?.create_contact_invite(
+            open_store(&database)?.create_contact_invite_with_provenance(
                 invite.invite_id,
                 invite.token,
                 invite.inviter,
                 invite.created_at_ms,
                 invite.expires_at_ms,
                 &invite.note,
+                invite.provenance,
                 invite.signature.0,
             )?;
             println!(
@@ -55,6 +57,84 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                     ),
                     "expires_at_ms": invite.expires_at_ms,
                     "envelope": invite.to_envelope(now_ms)?,
+                })
+            );
+        }
+        [command, minutes, note, group, epoch] if command == "create-group" => {
+            let minutes = parse_minutes(text(minutes)?)?;
+            let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+            let device = DeviceIdentity::load_protected(&paths.device_key())?;
+            let provenance = ContactProvenance::SharedGroup {
+                group_id: parse_hash32(text(group)?)?,
+                membership_epoch: text(epoch)?.parse().map_err(|_| AslError::InvalidMessage)?,
+            };
+            let invite = contact_invite::issue_with_provenance(
+                &identity,
+                text(note)?,
+                Some(provenance),
+                now_ms,
+                minutes.saturating_mul(60_000),
+            )?;
+            open_store(&database)?.create_contact_invite_with_provenance(
+                invite.invite_id,
+                invite.token,
+                invite.inviter,
+                invite.created_at_ms,
+                invite.expires_at_ms,
+                &invite.note,
+                invite.provenance,
+                invite.signature.0,
+            )?;
+            println!(
+                "{}",
+                json!({
+                    "invite_id": hex_id(invite.invite_id),
+                    "short_code": contact_invite::short_code(&invite),
+                    "short_code_envelope": contact_invite::short_code_envelope(
+                        invite.inviter,
+                        &device.peer_id(),
+                        &invite
+                    ),
+                    "expires_at_ms": invite.expires_at_ms,
+                    "provenance": "shared_group",
+                    "envelope": invite.to_envelope(now_ms)?,
+                })
+            );
+        }
+        [command, minutes, digits, note] if command == "create-pake" => {
+            let minutes = parse_pake_minutes(text(minutes)?)?;
+            let digits = parse_pake_digits(text(digits)?)?;
+            let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+            let device = DeviceIdentity::load_protected(&paths.device_key())?;
+            let invite = contact_invite::issue_pake(
+                &identity,
+                text(note)?,
+                now_ms,
+                minutes.saturating_mul(60_000),
+                digits,
+            )?;
+            open_store(&database)?.create_contact_invite(
+                invite.invite_id,
+                invite.token,
+                invite.inviter,
+                invite.created_at_ms,
+                invite.expires_at_ms,
+                &invite.note,
+                invite.signature.0,
+            )?;
+            println!(
+                "{}",
+                json!({
+                    "invite_id": hex_id(invite.invite_id),
+                    "kind": "pake",
+                    "code_digits": digits,
+                    "pake_code": contact_invite::pake_code(&invite),
+                    "pake_envelope": contact_invite::pake_code_envelope(
+                        invite.inviter,
+                        &device.peer_id(),
+                        &invite
+                    ),
+                    "expires_at_ms": invite.expires_at_ms,
                 })
             );
         }
@@ -73,6 +153,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                         created_at_ms: row.created_at_ms,
                         expires_at_ms: row.expires_at_ms,
                         note: row.note.unwrap_or_default(),
+                        provenance: row.provenance,
                         signature: Signature65(row.signature),
                     };
                     Ok(json!({
@@ -84,6 +165,12 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                             &invite
                         ),
                         "expires_at_ms": row.expires_at_ms,
+                        "pake_code": contact_invite::pake_code(&invite),
+                        "pake_envelope": contact_invite::pake_code_envelope(
+                            invite.inviter,
+                            &device.peer_id(),
+                            &invite
+                        ),
                         "envelope": invite.to_envelope(now_ms)?,
                     }))
                 })
@@ -111,6 +198,18 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                         "remote_agent": bs58::encode(prompt.remote_agent.as_bytes()).into_string(),
                         "note": prompt.note,
                         "expires_at_ms": prompt.expires_at_ms,
+                        "provenance": prompt.provenance.map(|provenance| match provenance {
+                            ContactProvenance::SharedGroup { group_id, membership_epoch } => json!({
+                                "kind": "shared_group",
+                                "group_id": alloy_primitives::hex::encode(group_id.0),
+                                "membership_epoch": membership_epoch,
+                            }),
+                            ContactProvenance::RecentInteraction { interaction_id, expires_at_ms } => json!({
+                                "kind": "recent_interaction",
+                                "interaction_id": alloy_primitives::hex::encode(interaction_id.0),
+                                "expires_at_ms": expires_at_ms,
+                            }),
+                        }),
                     })).collect::<Vec<_>>()
                 })
             );
@@ -149,6 +248,22 @@ fn parse_minutes(value: &str) -> Result<u64, AslError> {
     }
 }
 
+fn parse_pake_minutes(value: &str) -> Result<u64, AslError> {
+    let minutes: u64 = value.parse().map_err(|_| AslError::InvalidMessage)?;
+    match minutes {
+        5 | 15 => Ok(minutes),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
+fn parse_pake_digits(value: &str) -> Result<u8, AslError> {
+    let digits: u8 = value.parse().map_err(|_| AslError::InvalidMessage)?;
+    match digits {
+        6 | 12 => Ok(digits),
+        _ => Err(AslError::InvalidMessage),
+    }
+}
+
 fn parse_id128(value: &str) -> Result<Id128, AslError> {
     let bytes = match alloy_primitives::hex::decode(value) {
         Ok(bytes) if bytes.len() == 16 => bytes,
@@ -157,6 +272,18 @@ fn parse_id128(value: &str) -> Result<Id128, AslError> {
             .map_err(|_| AslError::InvalidMessage)?,
     };
     Ok(Id128(
+        bytes.try_into().map_err(|_| AslError::InvalidMessage)?,
+    ))
+}
+
+fn parse_hash32(value: &str) -> Result<Hash32, AslError> {
+    let bytes = match alloy_primitives::hex::decode(value) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        _ => bs58::decode(value)
+            .into_vec()
+            .map_err(|_| AslError::InvalidMessage)?,
+    };
+    Ok(Hash32(
         bytes.try_into().map_err(|_| AslError::InvalidMessage)?,
     ))
 }

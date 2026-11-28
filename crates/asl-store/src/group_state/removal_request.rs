@@ -29,7 +29,6 @@ impl Store {
         let owner = self.group_access_owner(room)?.ok_or(AslError::NotFound)?;
         if state != "active"
             || requester == target
-            || target == &saved.creator
             || target == &owner
             || !saved.members.contains(target)
             || !self.group_admin_has_capability(
@@ -41,7 +40,7 @@ impl Store {
             return Err(AslError::PolicyDenied);
         }
         let revision = self.group_access_policy(&saved.snapshot.local_id)?.revision;
-        Ok((saved.creator, epoch, revision))
+        Ok((owner, epoch, revision))
     }
 
     pub fn record_group_removal_request(
@@ -52,9 +51,9 @@ impl Store {
         request: &GroupRemovalRequest,
         now_ms: u64,
     ) -> Result<(), AslError> {
-        let (creator, epoch, revision) =
+        let (owner, epoch, revision) =
             self.check_group_removal_request(room, requester, &request.target)?;
-        if local != &creator
+        if local != &owner
             || !(1..=GROUP_REMOVAL_REQUEST_TTL_MS)
                 .contains(&request.expires_at_ms.saturating_sub(now_ms))
         {
@@ -104,7 +103,9 @@ impl Store {
              JOIN mls_room_states s ON s.wire_group_id=r.wire_id
              JOIN asl_groups g ON g.group_id=s.local_group_id
              LEFT JOIN group_access_policies p ON p.group_id=g.group_id
-             WHERE r.wire_id=?1 AND g.creator_peer_id=?2 AND g.state='active'
+             WHERE r.wire_id=?1
+               AND coalesce(p.owner_peer_id,g.creator_peer_id)=?2
+               AND g.state='active'
                AND r.mls_epoch=g.mls_epoch AND r.policy_revision=coalesce(p.revision,0)
                AND r.expires_at_ms>?3 ORDER BY r.expires_at_ms,r.request_id LIMIT 16",
             )

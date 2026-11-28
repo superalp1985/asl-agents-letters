@@ -55,7 +55,7 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 
 群授权是独立的 audience 类型，不能隐式折算为 `contacts`。群成员变更增加群成员 epoch；群范围 permit、lease 和待处理传输绑定该 epoch，并在发送前重新判定。新成员只有在本地授权该群范围后才能读取群资源。每次询问确认同样绑定接收 PeerId 与群 epoch。
 
-群内角色参考 QQ/微信的群主、管理员、成员和禁言模型，但不把群角色当成全局授权。群主由 MLS room creator 绑定，通过 MLS application plaintext 的 `group-policy` 下发文字/文件/邀请权限、管理员和禁言设备；revision 单调递增，非群主 sender 不能改策略。成员端在 act/Query/Expression、文件 Offer 和邀请路径重新检查策略；群主、管理员、信任值和贡献值都不能绕过本机目录、收件目录、设备证书或传输审批。
+群内角色参考 QQ/微信的群主、管理员、成员和禁言模型，但不把群角色当成全局授权。RoomOrigin 保留 MLS creator 作为历史锚点，当前群主由可转移的 `owner_peer_id` 映射到活动 MLS leaf，通过 MLS application plaintext 的 `group-policy` 下发文字/文件/邀请权限、管理员和禁言设备；revision 单调递增，非当前 owner sender 不能改策略。成员端在 act/Query/Expression、文件 Offer 和邀请路径重新检查策略；群主、管理员、信任值和贡献值都不能绕过本机目录、收件目录、设备证书或传输审批。
 
 ### 2.1 act、私聊与预算
 

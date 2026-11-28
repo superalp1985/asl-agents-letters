@@ -53,6 +53,47 @@ pub const ASL_PROTOCOL_MAJOR: u16 = 1;
 pub const ASL_PROTOCOL_MINOR: u16 = 4;
 pub const MAX_PAIRING_NOTE_CHARS: usize = 120;
 pub const MAX_PAIRING_NOTE_BYTES: usize = MAX_PAIRING_NOTE_CHARS * 4;
+pub const PAKE_SHARE_BYTES: usize = 33;
+pub const MIN_PAKE_CODE_DIGITS: u8 = 6;
+pub const MAX_PAKE_CODE_DIGITS: u8 = 12;
+pub const MAX_PAKE_LIFETIME_MS: u64 = 15 * 60 * 1_000;
+pub const MAX_CONTACT_PROVENANCE_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContactProvenance {
+    SharedGroup {
+        group_id: Hash32,
+        membership_epoch: u64,
+    },
+    RecentInteraction {
+        interaction_id: Id128,
+        expires_at_ms: u64,
+    },
+}
+
+impl ContactProvenance {
+    pub fn validate(&self, now_ms: u64) -> Result<(), AslError> {
+        match self {
+            Self::SharedGroup {
+                group_id,
+                membership_epoch,
+            } if group_id.0 == [0; 32] || *membership_epoch == 0 => {
+                return Err(AslError::InvalidMessage);
+            }
+            Self::RecentInteraction {
+                interaction_id,
+                expires_at_ms,
+            } if interaction_id.0 == [0; 16]
+                || *expires_at_ms <= now_ms
+                || expires_at_ms.saturating_sub(now_ms) > MAX_CONTACT_PROVENANCE_LIFETIME_MS =>
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Self::SharedGroup { .. } | Self::RecentInteraction { .. } => {}
+        }
+        Ok(())
+    }
+}
 
 pub fn validate_pairing_note(note: &str) -> Result<(), AslError> {
     if note.chars().count() > MAX_PAIRING_NOTE_CHARS
@@ -445,6 +486,7 @@ pub struct PairingInvite {
     pub expires_at_ms: u64,
     pub nonce: Hash32,
     pub note: String,
+    pub provenance: Option<ContactProvenance>,
     pub signature: Signature65,
 }
 
@@ -457,6 +499,52 @@ pub struct PairingExchange {
     pub accepted: bool,
     pub signature: Signature65,
     pub transcript_hash: Hash32,
+}
+
+/// First PAKE control frame. It is sent by the Agent that entered the
+/// short-lived code; the invitation owner has not yet learned the password.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakeStart {
+    pub exchange_id: Id128,
+    pub owner: AgentId,
+    pub joiner: AgentId,
+    pub owner_peer: PeerId,
+    pub joiner_peer: PeerId,
+    pub expires_at_ms: u64,
+    pub code_digits: u8,
+    pub share: [u8; PAKE_SHARE_BYTES],
+    pub signature: Signature65,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakeAnswer {
+    pub exchange_id: Id128,
+    pub owner: AgentId,
+    pub joiner: AgentId,
+    pub owner_peer: PeerId,
+    pub joiner_peer: PeerId,
+    pub share: [u8; PAKE_SHARE_BYTES],
+    pub confirmation: Hash32,
+    pub signature: Signature65,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakeConfirm {
+    pub exchange_id: Id128,
+    pub owner: AgentId,
+    pub joiner: AgentId,
+    pub confirmation: Hash32,
+    pub signature: Signature65,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakeReceipt {
+    pub exchange_id: Id128,
+    pub owner: AgentId,
+    pub joiner: AgentId,
+    pub accepted: bool,
+    pub confirmation: Hash32,
+    pub signature: Signature65,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -484,6 +572,10 @@ pub enum WireFrame {
     IdentityProof(IdentityProof),
     PairingInvite(PairingInvite),
     PairingExchange(PairingExchange),
+    PakeStart(PakeStart),
+    PakeAnswer(PakeAnswer),
+    PakeConfirm(PakeConfirm),
+    PakeReceipt(PakeReceipt),
     GroupEnvelope(GroupEnvelope),
     Expression(ExpressionLetter),
     ContextRequest(ContextRequest),
@@ -506,6 +598,10 @@ impl WireFrame {
                 | Self::Error(_)
                 | Self::Ack(_)
                 | Self::Profile(_)
+                | Self::PakeStart(_)
+                | Self::PakeAnswer(_)
+                | Self::PakeConfirm(_)
+                | Self::PakeReceipt(_)
                 | Self::Expression(_)
                 | Self::ContextRequest(_)
                 | Self::ContextOffer(_)

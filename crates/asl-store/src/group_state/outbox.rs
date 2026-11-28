@@ -1,6 +1,6 @@
 use asl_types::{
     error::AslError,
-    ids::{Hash32, Id128},
+    ids::{Hash32, Id128, PeerId},
     protocol::MAX_EXTENDED_FRAME_BYTES,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -13,8 +13,37 @@ pub const SHARD_FORWARD_OUTBOX_RETRY_BASE_MS: u64 = 5_000;
 pub const SHARD_FORWARD_OUTBOX_RETRY_MAX_MS: u64 = 5 * 60 * 1_000;
 pub const SHARD_FORWARD_OUTBOX_TERMINAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShardForwardOutboxKind {
+    Forward,
+    OwnerRelay,
+    OwnerReply,
+}
+
+impl ShardForwardOutboxKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::OwnerRelay => "owner_relay",
+            Self::OwnerReply => "owner_reply",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, AslError> {
+        match value {
+            "forward" => Ok(Self::Forward),
+            "owner_relay" => Ok(Self::OwnerRelay),
+            "owner_reply" => Ok(Self::OwnerReply),
+            _ => Err(AslError::InvalidDatabase),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShardForwardOutboxRoute {
+    pub kind: ShardForwardOutboxKind,
+    pub content_id: Option<Hash32>,
+    pub target_peer: Option<PeerId>,
     pub forward_id: Id128,
     pub source_message_id: Id128,
     pub logical_root: Hash32,
@@ -53,7 +82,7 @@ impl Store {
             .prepare(
                 "SELECT forward_id,source_message_id,logical_root,source_wire_id,target_wire_id,
                         target_binding_revision,frame_cbor,observed_at_ms,expires_at_ms,
-                        attempts,next_attempt_ms
+                        attempts,next_attempt_ms,delivery_kind,content_id,target_peer_id
                  FROM mls_shard_forward_outbox
                  WHERE state='pending' AND next_attempt_ms<=?1
                  ORDER BY next_attempt_ms,created_at_ms,forward_id
@@ -79,6 +108,9 @@ impl Store {
                         row.get::<_, i64>(8)?,
                         row.get::<_, i64>(9)?,
                         row.get::<_, i64>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, Option<Vec<u8>>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
                     ))
                 },
             )
@@ -96,8 +128,14 @@ impl Store {
                 expires_at_ms,
                 attempts,
                 next_attempt_ms,
+                delivery_kind,
+                content_id,
+                target_peer,
             ) = row.map_err(database_error)?;
             let route = ShardForwardOutboxRoute {
+                kind: ShardForwardOutboxKind::parse(&delivery_kind)?,
+                content_id: content_id.map(hash32).transpose()?,
+                target_peer: target_peer.map(parse_peer).transpose()?,
                 forward_id: id128(forward_id)?,
                 source_message_id: id128(source_message_id)?,
                 logical_root: hash32(logical_root)?,
@@ -110,6 +148,7 @@ impl Store {
             if route.expires_at_ms <= route.observed_at_ms
                 || !(1..=MAX_EXTENDED_FRAME_BYTES).contains(&frame.len())
                 || u32::try_from(attempts).is_err()
+                || (route.kind == ShardForwardOutboxKind::OwnerReply) != route.target_peer.is_some()
             {
                 return Err(AslError::InvalidDatabase);
             }
@@ -219,6 +258,33 @@ impl Store {
             .optional()
             .map_err(database_error)
     }
+
+    pub fn has_pending_owner_relay(
+        &self,
+        source_child: Hash32,
+        target_child: Hash32,
+        content_id: Hash32,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mls_shard_forward_outbox
+                   WHERE source_wire_id=?1 AND target_wire_id=?2
+                     AND content_id=?3
+                     AND delivery_kind='owner_relay' AND state='pending'
+                     AND expires_at_ms>?4
+                 )",
+                params![
+                    source_child.as_bytes(),
+                    target_child.as_bytes(),
+                    content_id.as_bytes(),
+                    sql_number(now_ms)?,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
 }
 
 pub(super) fn insert(
@@ -227,6 +293,12 @@ pub(super) fn insert(
     now_ms: u64,
 ) -> Result<(), AslError> {
     let route = &record.route;
+    let target_peer_valid = match route.kind {
+        ShardForwardOutboxKind::OwnerReply => route.target_peer.is_some(),
+        ShardForwardOutboxKind::Forward | ShardForwardOutboxKind::OwnerRelay => {
+            route.target_peer.is_none()
+        }
+    };
     if route.forward_id.0 == [0; 16]
         || route.source_message_id.0 == [0; 16]
         || route.logical_root.0 == [0; 32]
@@ -236,6 +308,7 @@ pub(super) fn insert(
         || route.observed_at_ms > now_ms
         || route.expires_at_ms <= route.observed_at_ms
         || !(1..=MAX_EXTENDED_FRAME_BYTES).contains(&record.frame.len())
+        || !target_peer_valid
     {
         return Err(AslError::InvalidMessage);
     }
@@ -247,8 +320,8 @@ pub(super) fn insert(
         "INSERT INTO mls_shard_forward_outbox(
             forward_id,source_message_id,logical_root,source_wire_id,target_wire_id,
             target_binding_revision,frame_cbor,observed_at_ms,expires_at_ms,
-            created_at_ms,next_attempt_ms,attempts,state)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,'pending')
+            created_at_ms,next_attempt_ms,attempts,state,delivery_kind,content_id,target_peer_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,'pending',?12,?13,?14)
          ON CONFLICT(forward_id) DO NOTHING",
         params![
             route.forward_id.0.as_slice(),
@@ -262,6 +335,12 @@ pub(super) fn insert(
             sql_number(route.expires_at_ms)?,
             sql_number(now_ms)?,
             sql_number(next_attempt_ms)?,
+            route.kind.as_str(),
+            route
+                .content_id
+                .as_ref()
+                .map(|content| content.as_bytes().as_slice()),
+            route.target_peer.as_ref().map(peer_text),
         ],
     )
     .map_err(database_error)?;
@@ -278,4 +357,74 @@ fn hash32(bytes: Vec<u8>) -> Result<Hash32, AslError> {
     Ok(Hash32(
         bytes.try_into().map_err(|_| AslError::InvalidDatabase)?,
     ))
+}
+
+fn peer_text(peer: &PeerId) -> String {
+    bs58::encode(peer.as_bytes()).into_string()
+}
+
+fn parse_peer(text: String) -> Result<PeerId, AslError> {
+    PeerId::from_bytes(
+        bs58::decode(text)
+            .into_vec()
+            .map_err(|_| AslError::InvalidDatabase)?,
+    )
+    .map_err(|_| AslError::InvalidDatabase)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::open_store;
+
+    fn owner_reply_route(target_peer: Option<PeerId>) -> ShardForwardOutboxRoute {
+        ShardForwardOutboxRoute {
+            kind: ShardForwardOutboxKind::OwnerReply,
+            content_id: Some(Hash32([1; 32])),
+            target_peer,
+            forward_id: Id128([2; 16]),
+            source_message_id: Id128([3; 16]),
+            logical_root: Hash32([4; 32]),
+            source_child: Hash32([5; 32]),
+            target_child: Hash32([6; 32]),
+            target_binding_revision: 0,
+            observed_at_ms: 10,
+            expires_at_ms: 100,
+        }
+    }
+
+    #[test]
+    fn owner_reply_requires_and_persists_one_exact_target_peer() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(&home.path().join("state.sqlite3")).unwrap();
+        let target = super::super::tests::test_peer(7);
+        let route = owner_reply_route(Some(target.clone()));
+        let tx = store.connection.unchecked_transaction().unwrap();
+        insert(
+            &tx,
+            &ShardForwardOutboxRecord {
+                route: route.clone(),
+                frame: vec![1],
+            },
+            20,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let pending = store.due_shard_forward_outbox(99, 1).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].route.target_peer, Some(target));
+
+        let tx = store.connection.unchecked_transaction().unwrap();
+        assert!(matches!(
+            insert(
+                &tx,
+                &ShardForwardOutboxRecord {
+                    route: owner_reply_route(None),
+                    frame: vec![1],
+                },
+                20,
+            ),
+            Err(AslError::InvalidMessage)
+        ));
+    }
 }

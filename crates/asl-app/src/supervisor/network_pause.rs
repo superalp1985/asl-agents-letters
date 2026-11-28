@@ -49,6 +49,7 @@ impl Supervisor {
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);
                 self.reset_binding_transport()?;
                 self.reset_contact_invite_transport()?;
+                self.reset_contact_policy_sync_transport();
             }
             (true, NetworkRuntimeState::ResumeFailed) => {
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);

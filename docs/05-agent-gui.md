@@ -123,7 +123,7 @@ Windows 传输层按当前用户 SID 和本机 NTFS 数据根的文件标识派�
 
 **表达式与主动通知。** 用户可在 Core 启动环境中分别设置 `ASL_MCP_EXPRESSIONS=send` 和 `ASL_MCP_AGENT_PUSH=1`。前者允许宿主用 `asl_send_expression` 向已准入的在线 Agent 或当前群组投递；直连或群的回答开关也必须允许发送。返回 `message_id` 表示已入本机发送队列，不等于远端确认。目标格式、符号语法与示例见 [表达式信件](expression-language.md)，宿主也可读取 `asl://protocol/expression-v1`。
 
-ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、加入/重入请求、明确拒绝请求、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。`asl_group_invite_request` 只向一个已准入群主设备发送包含完整 room、本机 AgentId/PeerId 和 5 分钟期限的结构化请求；群主刷新后仍需本机审批，请求本身不创建成员资格。`asl_group_reject_join_request` 仅由群主对完整 room/device 拒绝持久请求，不授予或撤销其他权限。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。设置 `ASL_MCP_CONTACTS=manage` 是独立联系人能力：`asl_contact_status` 只读取本机策略、绑定和已认证候选，`asl_contact_lookup` 只排队一次完整 AgentId 精确查询；两者都不能批准候选、修改请求策略或授予联系人访问。
+ASL/1.3 另提供 `asl_send_act`：目标参数是本地 MLS room ID，act 在 Core 内绑定本地 `conversation-id` 后只作为 MLS application plaintext 发送。建群、群邀请、加入/重入请求、明确拒绝请求、两人会话创建、预算续期、成员/权限读取和 `asl_send_file` 属于管理动作，只有 Core 启动环境显式设置 `ASL_MCP_GROUPS=admin` 时才暴露。`asl_group_invite_request` 只向一个已准入群主设备发送包含完整 room、本机 AgentId/PeerId 和 5 分钟期限的结构化请求；群主刷新后仍需本机审批，请求本身不创建成员资格。`asl_group_reject_join_request` 仅由群主对完整 room/device 拒绝持久请求，不授予或撤销其他权限。群主可用 `asl_group_set_access` 设置成员默认文字/文件/邀请权限、管理员和禁言设备；策略以 MLS 加密控制消息下发，接收端由当前 epoch 的群主 sender 验证后执行。`asl_send_file` 只接受已导入本机快照的 content ID、媒体类型和有界 topic，把结构化 Offer 发到现有 MLS 会话，Offer 不是下载许可。目标 Agent 仍须在本机批准邀请。未设置该项时这些工具不出现，普通发信授权不能替代建群/邀请/续期/发文件授权。设置 `ASL_MCP_CONTACTS=manage` 是独立联系人能力：`asl_contact_status` 只读取本机策略 revision、撤销/同步授权状态、绑定和已认证候选，`asl_contact_lookup` 只排队一次完整 AgentId 精确查询；两者都不能批准候选、修改请求策略或授予联系人访问。GUI 联系人页可用 `policy-sync on/off` 明确允许/停止导入根签名密文策略，并用 `policy-revoke` 推进拒绝 revision、用 `policy-restore` 显式恢复逐次确认；这些操作不改变联系人访问或文件/群授权。
 
 设置 `ASL_MCP_HISTORY=read` 会额外暴露 `asl_act_history_search`。它只读当前 Windows 用户可解密的本地 Act 历史，查询最多 256 字节、默认返回 25 条且最多 100 条；结果只回给已认证的本机 MCP 宿主，不触发网络发送、模型调用或权限变更。该授权与群管理、表达式和收件授权相互独立。
 
@@ -187,7 +187,7 @@ ASL/1.3 当前路径中，会话视图以私聊和群聊统一呈现。每条 ac
 
 概览可设置直连请求为关闭、只浏览或允许回答，默认关闭。只浏览时，活动页显示已认证请求的意图、主题编号、约束数量、结果类型及发送身份。保留期限默认 7 天，最多 200 条。用户可在活动页选择「不保存」或 1 至 7 天并点击「应用期限」，或通过 `asl-core --retention direct <0..7>` 设置。缩短期限会清理过期记录，延长只影响新记录。选择 0 会立即清空本机直连浏览历史。直连接收模式独立设置。
 
-允许回答时按已有目录授权执行结构化检索和回复。联系人页提供完整 AgentId 精确查找、旧版短码兼容、公开精确发现开关、陌生人联系人请求策略、共享群/近期交互来源规则、身份准入后的候选列表及本机绑定、撤销和遗忘操作。请求策略默认逐次确认，也可选择自动接受或拒绝；共享群规则要求同一认证 PeerId 仍属于当前活动逻辑群，近期交互使用固定到期时间证据。自动接受只创建本机绑定，不授予问询、文件、群聊或模型权限，已撤销身份不会被自动重新绑定。候选显示完整 AgentId 和 PeerId 供确认。文件和群组权限需要单独授权。
+允许回答时按已有目录授权执行结构化检索和回复。联系人页提供完整 AgentId 精确查找、旧版短码兼容、公开精确发现开关、陌生人联系人请求策略、共享群/近期交互来源规则、身份准入后的候选列表及本机绑定、撤销和遗忘操作。页面同时提供一次性 6/12 位 PAKE 短码，默认 5 分钟、最长 15 分钟；短码只用于首次 SPAKE2 配对，双方 AgentId、PeerId、角色和期限进入签名 transcript，失败或过期即消费。请求策略默认逐次确认，也可选择自动接受或拒绝；共享群规则要求同一认证 PeerId 仍属于当前活动逻辑群，近期交互使用固定到期时间证据。自动接受只创建本机绑定，不授予问询、文件、群聊或模型权限，已撤销身份不会被自动重新绑定。候选显示完整 AgentId 和 PeerId 供确认。文件和群组权限需要单独授权。
 
 授权页分别管理共享目录和收件目录。共享授权明确选择扩展名、单文件上限、公开/联系人/指定 Agent/群组范围，以及是否允许派生经验继承公开范围；所有共享 grant 的模型策略保持 `never`。收件目录只允许目标目录内新建文件。撤销需本机确认，并使用现有 grant epoch / policy revision 栅栏。界面只展示摘要与本机完整路径，不向网络发送路径。建立共享授权不会自动导入或公告文件。
 

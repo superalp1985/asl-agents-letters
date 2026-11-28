@@ -36,10 +36,12 @@ pub(super) struct ActHistorySearchArgs {
     pub query: String,
     #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
+    #[schemars(length(max = 512))]
+    pub cursor: Option<String>,
 }
 
 impl ActHistorySearchArgs {
-    pub(super) fn validate(self) -> Result<(String, u32), ErrorCode> {
+    pub(super) fn validate(self) -> Result<(String, u32, Option<String>), ErrorCode> {
         if self.query.is_empty() || self.query.len() > 256 || self.query.as_bytes().contains(&0) {
             return Err(ErrorCode::InvalidMessage);
         }
@@ -47,7 +49,14 @@ impl ActHistorySearchArgs {
         if !(1..=100).contains(&limit) {
             return Err(ErrorCode::InvalidMessage);
         }
-        Ok((self.query, limit))
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 512)
+        {
+            return Err(ErrorCode::InvalidMessage);
+        }
+        Ok((self.query, limit, self.cursor))
     }
 }
 

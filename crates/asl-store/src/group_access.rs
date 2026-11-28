@@ -197,8 +197,8 @@ impl Store {
         })
     }
 
-    /// Apply a complete owner snapshot. Only the MLS room creator may change
-    /// the policy, and the revision must move forward.
+    /// Apply a complete owner snapshot. Only the current policy owner may
+    /// change it, and the revision must move forward.
     pub fn apply_group_control(
         &mut self,
         group_id: &GroupId,

@@ -414,6 +414,18 @@ impl TransferService {
     }
 
     #[cfg(windows)]
+    pub(crate) fn rebind_group_fetch_response(
+        &mut self,
+        request: Id128,
+        connection: [u8; 16],
+        requester: &DirectRequester,
+        now_ms: u64,
+    ) -> bool {
+        self.incoming_fetches
+            .rebind(request.0, connection, requester, now_ms)
+    }
+
+    #[cfg(windows)]
     pub(crate) fn matches_group_reply(
         &self,
         request: Id128,
@@ -1423,6 +1435,25 @@ mod bulk_response_tests {
             .register(connection, &source, id, &fetch, None, 1_002)
             .unwrap();
         assert!(!tracker.matches_group_reply(id, (room, 7), connection, &source, 1_003));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn owner_local_group_fetch_rebinds_to_the_real_source_connection() {
+        let (_, _, fetch, _) = fetch_fixture();
+        let id = fetch.message_id.0;
+        let owner = requester(1, 2);
+        let source = requester(3, 4);
+        let owner_connection = [5; 16];
+        let source_connection = [6; 16];
+        let room = Hash32([42; 32]);
+        let mut tracker = IncomingFetchTracker::default();
+        tracker
+            .register(owner_connection, &owner, id, &fetch, Some((room, 7)), 1_000)
+            .unwrap();
+        assert!(tracker.rebind(id, source_connection, &source, 1_001));
+        assert!(!tracker.matches_group_reply(id, (room, 7), source_connection, &owner, 1_001));
+        assert!(tracker.matches_group_reply(id, (room, 7), source_connection, &source, 1_001));
     }
 
     #[test]

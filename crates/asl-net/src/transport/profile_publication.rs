@@ -5,7 +5,9 @@ use std::{
 
 use asl_types::{
     ids::AgentId,
-    record::{MAX_RECORD_LIFETIME_MS, RecordKind, decode_record},
+    record::{
+        MAX_CONTACT_POLICY_RECORD_LIFETIME_MS, MAX_RECORD_LIFETIME_MS, RecordKind, decode_record,
+    },
 };
 use libp2p::{
     PeerId,
@@ -47,6 +49,14 @@ impl LocalTransport {
         self.prepare_identity_publication(id, agent, RecordKind::DeviceDirectory)
     }
 
+    pub fn prepare_contact_policy_publication(
+        &mut self,
+        id: [u8; 16],
+        agent: AgentId,
+    ) -> io::Result<()> {
+        self.prepare_identity_publication(id, agent, RecordKind::ContactPolicy)
+    }
+
     fn prepare_identity_publication(
         &mut self,
         id: [u8; 16],
@@ -85,6 +95,14 @@ impl LocalTransport {
 
     pub fn publish_prepared_directory(&mut self, id: [u8; 16], value: Vec<u8>) -> io::Result<()> {
         self.publish_prepared_identity(id, value, RecordKind::DeviceDirectory)
+    }
+
+    pub fn publish_prepared_contact_policy(
+        &mut self,
+        id: [u8; 16],
+        value: Vec<u8>,
+    ) -> io::Result<()> {
+        self.publish_prepared_identity(id, value, RecordKind::ContactPolicy)
     }
 
     fn publish_prepared_identity(
@@ -132,13 +150,16 @@ impl LocalTransport {
             return Err(io::ErrorKind::TimedOut.into());
         }
         let remaining = signed.record.expires_at_ms - now_ms;
+        let max_lifetime = if pending.kind == RecordKind::ContactPolicy {
+            MAX_CONTACT_POLICY_RECORD_LIFETIME_MS
+        } else {
+            MAX_RECORD_LIFETIME_MS
+        };
         let record = kad::Record {
             key: identity_key(pending.agent, pending.kind)?,
             value,
             publisher: None,
-            expires: Some(
-                Instant::now() + Duration::from_millis(remaining.min(MAX_RECORD_LIFETIME_MS)),
-            ),
+            expires: Some(Instant::now() + Duration::from_millis(remaining.min(max_lifetime))),
         };
         // A single-stage PUT does not seed libp2p's autonomous local republication.
         let query = self.swarm.behaviour_mut().dht.put_record_to(
@@ -163,6 +184,10 @@ impl LocalTransport {
     }
 
     pub fn cancel_directory_publication(&mut self, id: [u8; 16]) {
+        self.cancel_profile_publication(id);
+    }
+
+    pub fn cancel_contact_policy_publication(&mut self, id: [u8; 16]) {
         self.cancel_profile_publication(id);
     }
 

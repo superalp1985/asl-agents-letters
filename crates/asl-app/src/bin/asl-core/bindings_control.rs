@@ -1,5 +1,7 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
+use asl_app::contact_policy_sync;
+use asl_app::identity::AgentIdentity;
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::{
@@ -133,6 +135,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let paths = AppPaths::open_existing(&root)?;
     let _pin = PinnedHome::open(&root)?;
     let database = paths.state().join("asl.sqlite3");
+    let now_ms = unix_time_ms()?;
     fn text(v: &OsString) -> Result<&str, AslError> {
         v.to_str().ok_or(AslError::InvalidMessage)
     }
@@ -149,8 +152,50 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
                     "request_mode": policy.mode.as_str(),
                     "shared_group_auto_accept": policy.shared_group_auto_accept,
                     "recent_interaction_ttl_ms": policy.recent_interaction_ttl_ms,
+                    "revision": policy.revision,
+                    "revoked": policy.revoked,
+                    "sync_authorized": open_store_read_only(&database)?
+                        .contact_policy_sync_authorized()?,
                 })
             );
+        }
+        [command, mode] if command == "policy-sync" && mode == "on" => {
+            let store = open_store(&database)?;
+            store.set_contact_policy_sync_authorized(true, now_ms)?;
+            println!("{}", json!({"policy_sync_authorized": true}));
+        }
+        [command, mode] if command == "policy-sync" && mode == "off" => {
+            let store = open_store(&database)?;
+            store.set_contact_policy_sync_authorized(false, now_ms)?;
+            println!("{}", json!({"policy_sync_authorized": false}));
+        }
+        [command] if command == "policy-revoke" => {
+            let store = open_store(&database)?;
+            store.revoke_contact_request_policy(now_ms)?;
+            println!("{}", json!({"policy_revoked": true}));
+        }
+        [command] if command == "policy-restore" => {
+            let store = open_store(&database)?;
+            store.restore_contact_request_policy(now_ms)?;
+            println!("{}", json!({"policy_restored": true}));
+        }
+        [command, path] if command == "policy-export" => {
+            let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+            let store = open_store(&database)?;
+            let bytes = contact_policy_sync::export(&identity, &store, now_ms)?;
+            std::fs::write(PathBuf::from(path), bytes)?;
+            println!("{}", json!({"policy_exported": true}));
+        }
+        [command, path] if command == "policy-import" => {
+            let identity = AgentIdentity::load_protected(&paths.agent_root_key())?;
+            let store = open_store(&database)?;
+            let bytes = std::fs::read(PathBuf::from(path))?;
+            let outcome = contact_policy_sync::import(&identity, &store, &bytes, now_ms)?;
+            let revision = match outcome {
+                contact_policy_sync::ImportOutcome::Applied(revision)
+                | contact_policy_sync::ImportOutcome::KeptLocal(revision) => revision,
+            };
+            println!("{}", json!({"policy_imported": true, "revision": revision}));
         }
         [command, mode, agent, peer, at] if command == "access" && mode == "on" => {
             let agent = parse_agent(text(agent)?)?;

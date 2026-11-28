@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use asl_types::{
     error::AslError,
     ids::{Hash32, PeerId},
-    protocol::MAX_GROUP_MEMBERS,
+    protocol::{GROUP_ADMIN_MANAGE_MEMBERS, MAX_GROUP_MEMBERS},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -20,6 +20,7 @@ pub struct MlsSyncReadAuthority<'a> {
     pub wire_id: Hash32,
     pub expected: RoomVersion,
     pub creator: &'a PeerId,
+    pub owner: &'a PeerId,
     pub requester: &'a PeerId,
     pub members: &'a [MlsMemberEvidence],
     pub chain_id: u64,
@@ -34,6 +35,7 @@ pub struct MlsSyncAddAuthority<'a> {
 
 pub struct MlsRemoveAuthority<'a> {
     pub source: &'a PeerId,
+    pub committer: &'a PeerId,
     pub removed: &'a PeerId,
     pub survivors: &'a [MlsMemberEvidence],
     pub chain_id: u64,
@@ -54,9 +56,11 @@ impl Store {
             .query_row(
                 "SELECT s.wire_group_id FROM mls_room_states s
                  JOIN asl_groups g ON g.group_id=s.local_group_id
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
                  JOIN group_members m ON m.group_id=s.local_group_id
                  WHERE g.state IN ('needs_sync','active')
-                   AND g.creator_peer_id=?1 AND m.peer_id=?1 AND m.state='active'
+                   AND coalesce(p.owner_peer_id,g.creator_peer_id)=?1
+                   AND m.peer_id=?1 AND m.state='active'
                    AND (?2 IS NULL OR s.wire_group_id>?2 OR (?3 AND s.wire_group_id=?2))
                  ORDER BY s.wire_group_id LIMIT 1",
                 params![peer_text(peer), boundary, include_boundary],
@@ -100,6 +104,7 @@ impl Store {
             wire_id,
             expected,
             creator,
+            owner,
             requester,
             members,
             chain_id,
@@ -111,6 +116,7 @@ impl Store {
         let former = active_members(&tx, wire_id, creator)?;
         if room_version(&tx, wire_id, creator)? != expected
             || !former.contains(requester)
+            || !former.contains(owner)
             || member_ids(members)? != former.iter().map(peer_text).collect()
         {
             return Err(AslError::PolicyVersionConflict);
@@ -188,7 +194,8 @@ impl Store {
         Ok(version)
     }
 
-    /// Persist a single Remove by the room creator. The removed leaf's
+    /// Persist a single Remove by the current policy owner or a delegated
+    /// member administrator. The removed leaf's
     /// authority may have expired; it is never used as a source or survivor.
     pub fn commit_verified_mls_remove(
         &mut self,
@@ -199,6 +206,7 @@ impl Store {
     ) -> Result<RoomVersion, AslError> {
         let MlsRemoveAuthority {
             source,
+            committer,
             removed,
             survivors,
             chain_id,
@@ -207,7 +215,9 @@ impl Store {
         let projection = member_ids(survivors)?;
         if !matches!(event.kind, MlsJournalKind::SyncCommit(_))
             || removed == source
+            || removed == committer
             || removed == event.sender
+            || committer != event.sender
             || projection != update.members.iter().map(peer_text).collect()
         {
             return Err(AslError::InvalidPolicyState);
@@ -217,11 +227,16 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        if room_version(&tx, update.wire_id, event.sender)? != update.expected {
+        if room_version_wire(&tx, update.wire_id)? != update.expected {
             return Err(AslError::PolicyVersionConflict);
         }
-        let former = active_members(&tx, update.wire_id, event.sender)?;
+        if !remove_authorized(&tx, update.wire_id, committer)? {
+            return Err(AslError::PolicyDenied);
+        }
+        let creator = room_creator(&tx, update.wire_id)?;
+        let former = active_members(&tx, update.wire_id, &creator)?;
         if !former.contains(source)
+            || !former.contains(committer)
             || !former.contains(removed)
             || projection
                 != former
@@ -247,6 +262,77 @@ impl Store {
         tx.commit().map_err(database_error)?;
         Ok(version)
     }
+}
+
+fn room_creator(connection: &Connection, wire_id: Hash32) -> Result<PeerId, AslError> {
+    let creator: String = connection
+        .query_row(
+            "SELECT g.creator_peer_id FROM mls_room_states s
+             JOIN asl_groups g ON g.group_id=s.local_group_id
+             WHERE s.wire_group_id=?1 AND g.state IN ('needs_sync','active')",
+            [wire_id.as_bytes()],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    PeerId::from_bytes(
+        bs58::decode(creator)
+            .into_vec()
+            .map_err(|_| AslError::InvalidDatabase)?,
+    )
+    .map_err(|_| AslError::InvalidDatabase)
+}
+
+fn room_version_wire(connection: &Connection, wire_id: Hash32) -> Result<RoomVersion, AslError> {
+    let (revision, mls_epoch, membership_epoch, policy_revision) = connection
+        .query_row(
+            "SELECT s.revision,g.mls_epoch,g.membership_epoch,p.revision
+             FROM mls_room_states s JOIN asl_groups g ON g.group_id=s.local_group_id
+             CROSS JOIN policy_state p WHERE s.wire_group_id=?1
+               AND g.state IN ('needs_sync','active') AND p.singleton=1",
+            [wire_id.as_bytes()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(database_error)?;
+    Ok(RoomVersion {
+        revision: unsigned(revision)?,
+        mls_epoch: unsigned(mls_epoch)?,
+        membership_epoch: unsigned(membership_epoch)?,
+        policy_revision: unsigned(policy_revision)?,
+    })
+}
+
+fn remove_authorized(
+    connection: &Connection,
+    wire_id: Hash32,
+    committer: &PeerId,
+) -> Result<bool, AslError> {
+    connection
+        .query_row(
+            "SELECT CASE
+                 WHEN coalesce(p.owner_peer_id,g.creator_peer_id)=?2 THEN 1
+                 ELSE EXISTS(
+                   SELECT 1 FROM group_access_members m
+                   LEFT JOIN group_admin_capabilities c
+                     ON c.group_id=m.group_id AND c.peer_id=m.peer_id
+                   WHERE m.group_id=g.group_id AND m.peer_id=?2
+                     AND m.role='admin' AND coalesce(m.muted,0)=0
+                     AND (c.capabilities IS NULL OR (c.capabilities & ?3)<>0)
+                 )
+               END
+             FROM mls_room_states s
+             JOIN asl_groups g ON g.group_id=s.local_group_id
+             LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+             JOIN group_members gm
+               ON gm.group_id=g.group_id AND gm.peer_id=?2 AND gm.state='active'
+             WHERE s.wire_group_id=?1 AND g.state IN ('needs_sync','active')",
+            params![
+                wire_id.as_bytes(),
+                peer_text(committer),
+                i64::from(GROUP_ADMIN_MANAGE_MEMBERS)
+            ],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
 }
 
 pub(super) fn member_ids(members: &[MlsMemberEvidence]) -> Result<BTreeSet<String>, AslError> {

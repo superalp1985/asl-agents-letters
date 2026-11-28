@@ -2,6 +2,7 @@
 //! access until Core reconciles it with live chain and policy state.
 
 mod application;
+mod fetch_relay;
 mod invite;
 mod invite_request;
 pub mod invite_review;
@@ -24,6 +25,7 @@ mod sync_log;
 mod transition;
 
 pub use application::MlsApplicationAuthority;
+pub use fetch_relay::FetchRelay;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use invite_request::{
     GROUP_INVITE_REQUEST_TTL_MS, GroupInviteRequest, GroupInviteRequestInput,
@@ -31,7 +33,7 @@ pub use invite_request::{
 pub use outbox::{
     MAX_SHARD_FORWARD_OUTBOX_BATCH, PendingShardForwardOutbox, SHARD_FORWARD_OUTBOX_RETRY_BASE_MS,
     SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, SHARD_FORWARD_OUTBOX_TERMINAL_RETENTION_MS,
-    ShardForwardOutboxRecord, ShardForwardOutboxRoute,
+    ShardForwardOutboxKind, ShardForwardOutboxRecord, ShardForwardOutboxRoute,
 };
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use policy::{GroupInboundPolicy, GroupInboundSwitch};

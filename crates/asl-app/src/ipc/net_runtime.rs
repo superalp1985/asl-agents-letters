@@ -398,6 +398,39 @@ impl NetworkBridge {
                 self.send_operation_result(receipt_id, Ok(()), writer)?;
                 Ok(false)
             }
+            IpcMessage::PrepareContactPolicy {
+                operation_id,
+                agent,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .prepare_contact_policy_publication(operation_id, agent)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::PublishContactPolicy {
+                operation_id,
+                value,
+            } => {
+                if let Err(error) = self
+                    .transport
+                    .publish_prepared_contact_policy(operation_id, value)
+                {
+                    self.send_operation_result(operation_id, Err(error), writer)?;
+                }
+                Ok(false)
+            }
+            IpcMessage::CancelContactPolicy {
+                operation_id,
+                receipt_id,
+            } => {
+                self.transport
+                    .cancel_contact_policy_publication(operation_id);
+                self.send_operation_result(receipt_id, Ok(()), writer)?;
+                Ok(false)
+            }
             IpcMessage::CloseConnection { connection_id } => {
                 self.close_connection(connection_id)
                     .map_err(|error| error_code(&error))?;

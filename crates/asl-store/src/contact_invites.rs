@@ -1,12 +1,16 @@
 use asl_types::{
     error::AslError,
     ids::{AgentId, Id128},
+    protocol::ContactProvenance,
 };
 use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::{Store, database_error};
 
 pub const MAX_CONTACT_INVITE_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
+const INVITE_PROVENANCE_SETTING_PREFIX: &str = "contacts.invite_provenance.v1.";
+const PROMPT_PROVENANCE_SETTING_PREFIX: &str = "contacts.prompt_provenance.v1.";
+const INVITE_ATTEMPT_SETTING_PREFIX: &str = "contacts.invite_attempt.v1.";
 const MAX_PENDING_CONTACT_INVITES_PER_AGENT: i64 = 4;
 const MAX_PENDING_CONTACT_INVITES: i64 = 64;
 const MAX_PENDING_CONTACT_INVITE_PROMPTS: i64 = 64;
@@ -25,6 +29,7 @@ pub struct ContactInvite {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub note: Option<String>,
+    pub provenance: Option<ContactProvenance>,
     pub signature: [u8; 65],
 }
 
@@ -57,6 +62,7 @@ pub struct ContactInvitePrompt {
     pub note: String,
     pub expires_at_ms: u64,
     pub state: ContactInvitePromptState,
+    pub provenance: Option<ContactProvenance>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +116,30 @@ impl Store {
         note: &str,
         signature: [u8; 65],
     ) -> Result<(), AslError> {
+        self.create_contact_invite_with_provenance(
+            invite_id,
+            token,
+            agent_id,
+            created_at_ms,
+            expires_at_ms,
+            note,
+            None,
+            signature,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_contact_invite_with_provenance(
+        &mut self,
+        invite_id: Id128,
+        token: Id128,
+        agent_id: AgentId,
+        created_at_ms: u64,
+        expires_at_ms: u64,
+        note: &str,
+        provenance: Option<ContactProvenance>,
+        signature: [u8; 65],
+    ) -> Result<(), AslError> {
         if invite_id.0 == [0; 16]
             || token.0 == [0; 16]
             || agent_id.0 == [0; 32]
@@ -119,6 +149,9 @@ impl Store {
             || expires_at_ms - created_at_ms > MAX_CONTACT_INVITE_LIFETIME_MS
         {
             return Err(AslError::InvalidMessage);
+        }
+        if let Some(provenance) = &provenance {
+            provenance.validate(created_at_ms)?;
         }
         let note = normalize_note(note)?;
         let transaction = self
@@ -187,6 +220,15 @@ impl Store {
                 ],
             )
             .map_err(database_error)?;
+        if let Some(provenance) = provenance {
+            let bytes = asl_types::contact_invite::encode_provenance(&provenance)?;
+            crate::write_setting(
+                &transaction,
+                &provenance_setting_key(invite_id),
+                &hex::encode(bytes),
+                created_at_ms as i64,
+            )?;
+        }
         transaction.commit().map_err(database_error)
     }
 
@@ -206,7 +248,13 @@ impl Store {
         let rows = statement
             .query_map([now_ms as i64], decode_invite)
             .map_err(database_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+        let mut rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        for row in &mut rows {
+            row.provenance = load_invite_provenance(&self.connection, row.invite_id, now_ms)?;
+        }
+        Ok(rows)
     }
 
     pub fn find_active_contact_invite_by_token(
@@ -217,7 +265,8 @@ impl Store {
         if token.0 == [0; 16] || now_ms > i64::MAX as u64 {
             return Err(AslError::InvalidMessage);
         }
-        self.connection
+        let mut invite = self
+            .connection
             .query_row(
                 "SELECT invite_id,token,agent_id,created_at_ms,expires_at_ms,note,signature
                  FROM contact_invites
@@ -226,7 +275,79 @@ impl Store {
                 decode_invite,
             )
             .optional()
-            .map_err(database_error)
+            .map_err(database_error)?;
+        if let Some(invite) = &mut invite {
+            invite.provenance = load_invite_provenance(&self.connection, invite.invite_id, now_ms)?;
+        }
+        Ok(invite)
+    }
+
+    pub fn find_active_contact_invite_by_id(
+        &self,
+        invite_id: Id128,
+        now_ms: u64,
+    ) -> Result<Option<ContactInvite>, AslError> {
+        if invite_id.0 == [0; 16] || now_ms > i64::MAX as u64 {
+            return Err(AslError::InvalidMessage);
+        }
+        let mut invite = self
+            .connection
+            .query_row(
+                "SELECT invite_id,token,agent_id,created_at_ms,expires_at_ms,note,signature
+                 FROM contact_invites
+                 WHERE invite_id=?1 AND state='pending' AND expires_at_ms>?2",
+                params![invite_id.as_bytes().as_slice(), now_ms as i64],
+                decode_invite,
+            )
+            .optional()
+            .map_err(database_error)?;
+        if let Some(invite) = &mut invite {
+            invite.provenance = load_invite_provenance(&self.connection, invite.invite_id, now_ms)?;
+        }
+        Ok(invite)
+    }
+
+    /// Persist the single allowed PAKE attempt before any answer is emitted.
+    /// A lost reply, wrong code, or process restart cannot reopen the same
+    /// low-entropy code for another online guess.
+    pub fn claim_contact_invite_attempt(
+        &mut self,
+        invite_id: Id128,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        if invite_id.0 == [0; 16] || now_ms > i64::MAX as u64 {
+            return Err(AslError::InvalidMessage);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let active = transaction
+            .query_row(
+                "SELECT 1 FROM contact_invites
+                 WHERE invite_id=?1 AND state='pending' AND expires_at_ms>?2",
+                params![invite_id.as_bytes().as_slice(), now_ms as i64],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if !active {
+            return Ok(false);
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT INTO settings(key,value_json,updated_at_ms)
+                 VALUES (?1,'\"claimed\"',?2)
+                 ON CONFLICT(key) DO NOTHING",
+                params![invite_attempt_setting_key(invite_id), now_ms as i64],
+            )
+            .map_err(database_error)?;
+        if inserted != 1 {
+            return Ok(false);
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(true)
     }
 
     pub fn consume_contact_invite(
@@ -277,6 +398,18 @@ impl Store {
         if consumed != 1 {
             return Ok(false);
         }
+        transaction
+            .execute(
+                "DELETE FROM settings WHERE key=?1",
+                [provenance_setting_key(invite_id)],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM settings WHERE key=?1",
+                [invite_attempt_setting_key(invite_id)],
+            )
+            .map_err(database_error)?;
         let receipt = transaction
             .execute(
                 "INSERT INTO contact_invite_receipts(
@@ -302,19 +435,61 @@ impl Store {
         if invite_id.0 == [0; 16] || now_ms > i64::MAX as u64 {
             return Err(AslError::InvalidMessage);
         }
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE contact_invites SET state='revoked'
                  WHERE invite_id=?1 AND state='pending' AND expires_at_ms>?2",
                 params![invite_id.as_bytes().as_slice(), now_ms as i64],
             )
-            .map(|changed| changed == 1)
-            .map_err(database_error)
+            .map_err(database_error)?;
+        if changed == 1 {
+            self.connection
+                .execute(
+                    "DELETE FROM settings WHERE key=?1",
+                    [provenance_setting_key(invite_id)],
+                )
+                .map_err(database_error)?;
+            self.connection
+                .execute(
+                    "DELETE FROM settings WHERE key=?1",
+                    [invite_attempt_setting_key(invite_id)],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(changed == 1)
     }
 
     pub fn cleanup_expired_contact_invites(&self, now_ms: u64) -> Result<usize, AslError> {
         if now_ms > i64::MAX as u64 {
             return Err(AslError::InvalidMessage);
+        }
+        let ids = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT invite_id FROM contact_invites WHERE expires_at_ms<=?1")
+                .map_err(database_error)?;
+            let rows = statement
+                .query_map([now_ms as i64], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(database_error)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?
+        };
+        for id in &ids {
+            if let Ok(bytes) = <[u8; 16]>::try_from(id.as_slice()) {
+                self.connection
+                    .execute(
+                        "DELETE FROM settings WHERE key=?1",
+                        [invite_attempt_setting_key(Id128(bytes))],
+                    )
+                    .map_err(database_error)?;
+                self.connection
+                    .execute(
+                        "DELETE FROM settings WHERE key=?1",
+                        [provenance_setting_key(Id128(bytes))],
+                    )
+                    .map_err(database_error)?;
+            }
         }
         self.connection
             .execute(
@@ -333,6 +508,30 @@ impl Store {
         remote_agent: AgentId,
         note: &str,
         expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        self.upsert_contact_invite_prompt_with_provenance(
+            prompt_id,
+            tag,
+            invite_id,
+            remote_agent,
+            note,
+            expires_at_ms,
+            None,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_contact_invite_prompt_with_provenance(
+        &mut self,
+        prompt_id: Id128,
+        tag: &str,
+        invite_id: Id128,
+        remote_agent: AgentId,
+        note: &str,
+        expires_at_ms: u64,
+        provenance: Option<ContactProvenance>,
         now_ms: u64,
     ) -> Result<(), AslError> {
         let tag = tag.trim();
@@ -425,6 +624,20 @@ impl Store {
                 )
                 .map_err(database_error)?;
         }
+        let provenance_key = prompt_provenance_setting_key(prompt_id);
+        if let Some(provenance) = provenance {
+            let bytes = asl_types::contact_invite::encode_provenance(&provenance)?;
+            crate::write_setting(
+                &transaction,
+                &provenance_key,
+                &hex::encode(bytes),
+                now_ms as i64,
+            )?;
+        } else {
+            transaction
+                .execute("DELETE FROM settings WHERE key=?1", [provenance_key])
+                .map_err(database_error)?;
+        }
         transaction.commit().map_err(database_error)
     }
 
@@ -446,7 +659,7 @@ impl Store {
                 [now_ms as i64],
             )
             .map_err(database_error)?;
-        let prompts = {
+        let mut prompts = {
             let mut statement = transaction
                 .prepare(
                     "SELECT prompt_id,tag,invite_id,remote_agent,note,expires_at_ms,state
@@ -461,6 +674,9 @@ impl Store {
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(database_error)?
         };
+        for prompt in &mut prompts {
+            prompt.provenance = load_prompt_provenance(&transaction, prompt.prompt_id, now_ms)?;
+        }
         transaction.commit().map_err(database_error)?;
         Ok(prompts)
     }
@@ -475,14 +691,23 @@ impl Store {
             return Err(AslError::InvalidMessage);
         }
         let state = if accepted { "approved" } else { "rejected" };
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE contact_invite_prompts SET state=?2,updated_at_ms=?3
                  WHERE prompt_id=?1 AND state='pending' AND expires_at_ms>?3",
                 params![prompt_id.as_bytes().as_slice(), state, now_ms as i64],
             )
-            .map(|changed| changed == 1)
-            .map_err(database_error)
+            .map_err(database_error)?;
+        if changed == 1 {
+            self.connection
+                .execute(
+                    "DELETE FROM settings WHERE key=?1",
+                    [prompt_provenance_setting_key(prompt_id)],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(changed == 1)
     }
 
     pub fn contact_invite_prompt(
@@ -504,7 +729,7 @@ impl Store {
                 params![prompt_id.as_bytes().as_slice(), now_ms as i64],
             )
             .map_err(database_error)?;
-        let prompt = transaction
+        let mut prompt = transaction
             .query_row(
                 "SELECT prompt_id,tag,invite_id,remote_agent,note,expires_at_ms,state
                  FROM contact_invite_prompts WHERE prompt_id=?1",
@@ -513,6 +738,9 @@ impl Store {
             )
             .optional()
             .map_err(database_error)?;
+        if let Some(prompt) = &mut prompt {
+            prompt.provenance = load_prompt_provenance(&transaction, prompt.prompt_id, now_ms)?;
+        }
         transaction.commit().map_err(database_error)?;
         Ok(prompt)
     }
@@ -725,7 +953,13 @@ pub(crate) fn active_invites_for_dashboard(
     let rows = statement
         .query_map([now_ms], decode_invite)
         .map_err(database_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    let mut rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    for row in &mut rows {
+        row.provenance = load_invite_provenance(db, row.invite_id, now_ms as u64)?;
+    }
+    Ok(rows)
 }
 
 pub(crate) fn prompts_for_dashboard(
@@ -743,11 +977,71 @@ pub(crate) fn prompts_for_dashboard(
     let rows = statement
         .query_map([], decode_prompt)
         .map_err(database_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    let mut rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    for row in &mut rows {
+        row.provenance = load_prompt_provenance(db, row.prompt_id, _now_ms as u64)?;
+    }
+    Ok(rows)
 }
 
 fn invite_token_hash(token: Id128) -> [u8; 32] {
     *blake3::hash(token.as_bytes()).as_bytes()
+}
+
+fn provenance_setting_key(invite_id: Id128) -> String {
+    format!(
+        "{INVITE_PROVENANCE_SETTING_PREFIX}{}",
+        hex::encode(invite_id.0)
+    )
+}
+
+fn invite_attempt_setting_key(invite_id: Id128) -> String {
+    format!(
+        "{INVITE_ATTEMPT_SETTING_PREFIX}{}",
+        hex::encode(invite_id.0)
+    )
+}
+
+fn prompt_provenance_setting_key(prompt_id: Id128) -> String {
+    format!(
+        "{PROMPT_PROVENANCE_SETTING_PREFIX}{}",
+        hex::encode(prompt_id.0)
+    )
+}
+
+fn load_invite_provenance(
+    connection: &rusqlite::Connection,
+    invite_id: Id128,
+    now_ms: u64,
+) -> Result<Option<ContactProvenance>, AslError> {
+    let Some(value) = crate::read_setting(connection, &provenance_setting_key(invite_id))? else {
+        return Ok(None);
+    };
+    let bytes = hex::decode(value).map_err(|_| AslError::InvalidDatabase)?;
+    match asl_types::contact_invite::decode_provenance(&bytes, now_ms) {
+        Ok(provenance) => Ok(Some(provenance)),
+        Err(AslError::ExpiredMessage) => Ok(None),
+        Err(_) => Err(AslError::InvalidDatabase),
+    }
+}
+
+fn load_prompt_provenance(
+    connection: &rusqlite::Connection,
+    prompt_id: Id128,
+    now_ms: u64,
+) -> Result<Option<ContactProvenance>, AslError> {
+    let Some(value) = crate::read_setting(connection, &prompt_provenance_setting_key(prompt_id))?
+    else {
+        return Ok(None);
+    };
+    let bytes = hex::decode(value).map_err(|_| AslError::InvalidDatabase)?;
+    match asl_types::contact_invite::decode_provenance(&bytes, now_ms) {
+        Ok(provenance) => Ok(Some(provenance)),
+        Err(AslError::ExpiredMessage) => Ok(None),
+        Err(_) => Err(AslError::InvalidDatabase),
+    }
 }
 
 fn decode_invite(row: &Row<'_>) -> rusqlite::Result<ContactInvite> {
@@ -776,6 +1070,7 @@ fn decode_invite(row: &Row<'_>) -> rusqlite::Result<ContactInvite> {
         created_at_ms: u64::try_from(created_at_ms).map_err(|_| rusqlite::Error::InvalidQuery)?,
         expires_at_ms: u64::try_from(expires_at_ms).map_err(|_| rusqlite::Error::InvalidQuery)?,
         note: row.get(5)?,
+        provenance: None,
         signature: signature
             .try_into()
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -810,6 +1105,7 @@ fn decode_prompt(row: &Row<'_>) -> rusqlite::Result<ContactInvitePrompt> {
         expires_at_ms: u64::try_from(expires_at_ms).map_err(|_| rusqlite::Error::InvalidQuery)?,
         state: ContactInvitePromptState::parse(&state)
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        provenance: None,
     })
 }
 
@@ -1037,6 +1333,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(receipts, 1);
+    }
+
+    #[test]
+    fn contact_invite_pake_attempt_survives_restart_and_cannot_repeat() {
+        let database = TestDatabase::new();
+        let invite_id = {
+            let mut store = open_store(&database.path).unwrap();
+            let invite_id = create_invite(&mut store, 30, 130, 12, 50_000, 3_650_000, "");
+            assert!(
+                store
+                    .claim_contact_invite_attempt(invite_id, 51_000)
+                    .unwrap()
+            );
+            invite_id
+        };
+
+        let mut store = open_store(&database.path).unwrap();
+        assert!(
+            !store
+                .claim_contact_invite_attempt(invite_id, 52_000)
+                .unwrap()
+        );
+        assert!(
+            store
+                .consume_contact_invite(invite_id, 53_000, true)
+                .unwrap()
+        );
     }
 
     #[test]

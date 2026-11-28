@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Store, chain::agent_text, database_error, read_setting};
 
 const REQUEST_POLICY_SETTING: &str = "contacts.request_policy.v1";
+const POLICY_SYNC_AUTHORIZED_SETTING: &str = "contacts.policy_sync_authorized.v1";
 const REQUEST_POLICY_VERSION: u64 = 1;
 pub const MAX_RECENT_INTERACTION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
@@ -39,6 +40,10 @@ struct ContactRequestPolicyV1 {
     shared_group_auto_accept: bool,
     #[serde(default)]
     recent_interaction_ttl_ms: u64,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    revoked: bool,
     updated_at_ms: i64,
 }
 
@@ -47,6 +52,8 @@ pub struct ContactRequestPolicy {
     pub mode: ContactRequestMode,
     pub shared_group_auto_accept: bool,
     pub recent_interaction_ttl_ms: u64,
+    pub revision: u64,
+    pub revoked: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +71,20 @@ impl Store {
 
     pub fn contact_request_policy(&self) -> Result<ContactRequestPolicy, AslError> {
         contact_request_policy(&self.connection)
+    }
+
+    /// Give the default policy a durable revision before it is exported.
+    /// This does not change the policy's effective behavior.
+    pub fn materialize_contact_request_policy(
+        &self,
+        now_ms: u64,
+    ) -> Result<ContactRequestPolicy, AslError> {
+        let mut policy = self.contact_request_policy()?;
+        if policy.revision == 0 {
+            policy.revision = 1;
+            write_contact_request_policy(&self.connection, policy, now_ms)?;
+        }
+        Ok(policy)
     }
 
     pub fn set_contact_request_mode(
@@ -93,7 +114,116 @@ impl Store {
         policy: ContactRequestPolicy,
         now_ms: u64,
     ) -> Result<(), AslError> {
+        let current = self.contact_request_policy()?;
+        if current.revoked {
+            return Err(AslError::PolicyDenied);
+        }
+        let mut next = policy;
+        next.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        next.revoked = false;
+        write_contact_request_policy(&self.connection, next, now_ms)
+    }
+
+    pub fn revoke_contact_request_policy(&self, now_ms: u64) -> Result<(), AslError> {
+        let mut policy = self.contact_request_policy()?;
+        policy.mode = ContactRequestMode::Reject;
+        policy.revision = policy
+            .revision
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        policy.revoked = true;
         write_contact_request_policy(&self.connection, policy, now_ms)
+    }
+
+    /// Explicit local re-authorization after `revoke_contact_request_policy`.
+    /// This is separate from ordinary policy edits so queued stale actions
+    /// cannot silently clear a revocation.
+    pub fn restore_contact_request_policy(&self, now_ms: u64) -> Result<(), AslError> {
+        let mut policy = self.contact_request_policy()?;
+        if !policy.revoked {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        policy.mode = ContactRequestMode::Review;
+        policy.revoked = false;
+        policy.revision = policy
+            .revision
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        write_contact_request_policy(&self.connection, policy, now_ms)
+    }
+
+    /// Advance a policy document revision without changing its effective
+    /// settings. Used when an encrypted publication record expires.
+    pub fn advance_contact_policy_revision(
+        &self,
+        now_ms: u64,
+    ) -> Result<ContactRequestPolicy, AslError> {
+        let mut policy = self.contact_request_policy()?;
+        policy.revision = policy
+            .revision
+            .checked_add(1)
+            .ok_or(AslError::PolicyVersionConflict)?;
+        write_contact_request_policy(&self.connection, policy, now_ms)?;
+        Ok(policy)
+    }
+
+    pub fn contact_policy_sync_authorized(&self) -> Result<bool, AslError> {
+        contact_policy_sync_authorized(&self.connection)
+    }
+
+    pub fn set_contact_policy_sync_authorized(
+        &self,
+        enabled: bool,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if now_ms > i64::MAX as u64 {
+            return Err(AslError::InvalidMessage);
+        }
+        crate::write_setting(
+            &self.connection,
+            POLICY_SYNC_AUTHORIZED_SETTING,
+            if enabled { "true" } else { "false" },
+            now_ms as i64,
+        )
+    }
+
+    /// Applies a locally authorized, already authenticated policy snapshot.
+    /// This is deliberately separate from local policy edits: remote/device
+    /// snapshots may only move the revision forward.
+    pub fn apply_contact_policy_snapshot(
+        &self,
+        policy: ContactRequestPolicy,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if !self.contact_policy_sync_authorized()? {
+            return Err(AslError::PolicyDenied);
+        }
+        let current = self.contact_request_policy()?;
+        if policy.revision <= current.revision {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        write_contact_request_policy(&self.connection, policy, now_ms)
+    }
+
+    /// Apply the deterministic same-revision winner selected by the signed
+    /// record hash. The caller must have compared the exact record bytes and
+    /// obtained local policy-sync authorization.
+    pub fn replace_contact_policy_snapshot_tiebreak(
+        &self,
+        policy: ContactRequestPolicy,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if !self.contact_policy_sync_authorized()? {
+            return Err(AslError::PolicyDenied);
+        }
+        let current = self.contact_request_policy()?;
+        if policy.revision != current.revision {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        write_contact_request_policy_tiebreak(&self.connection, policy, now_ms)
     }
 
     pub fn shared_active_group_evidence(
@@ -106,20 +236,26 @@ impl Store {
         }
         self.connection
             .query_row(
-                "SELECT state.wire_group_id,room.membership_epoch
-                    FROM group_members mine
-                    JOIN local_device_identity local ON local.peer_id=mine.peer_id
-                    JOIN group_members other ON other.group_id=mine.group_id
-                    JOIN peers peer ON peer.peer_id=other.peer_id
-                    JOIN asl_groups room ON room.group_id=mine.group_id
-                    JOIN mls_room_states state ON state.local_group_id=room.group_id
-                    WHERE peer.agent_id=?1
-                      AND peer.peer_id=?2
-                      AND mine.state='active'
-                      AND other.state='active'
-                      AND room.state='active'
-                    ORDER BY room.membership_epoch DESC,state.wire_group_id
-                    LIMIT 1",
+                &format!(
+                    "{cte}
+                     SELECT member.root_wire_id,MAX(room.membership_epoch)
+                     FROM logical_group_peers member
+                     JOIN mls_room_states room ON room.wire_group_id=member.shard_wire_id
+                     WHERE member.agent_id=?1
+                       AND member.peer_id=?2
+                       AND room.state='active'
+                       AND EXISTS(
+                           SELECT 1
+                           FROM logical_group_peers mine
+                           JOIN local_device_identity mine_local
+                             ON mine_local.peer_id=mine.peer_id
+                           WHERE mine.root_wire_id=member.root_wire_id
+                       )
+                     GROUP BY member.root_wire_id
+                     ORDER BY MAX(room.membership_epoch) DESC,member.root_wire_id
+                     LIMIT 1",
+                    cte = crate::group_topology::LOGICAL_GROUP_PEERS_CTE
+                ),
                 params![
                     agent_text(agent_id),
                     bs58::encode(peer_id.as_bytes()).into_string()
@@ -203,6 +339,7 @@ impl Store {
     pub fn recent_contact_interaction_evidence(
         &self,
         agent_id: AgentId,
+        peer_id: &PeerId,
         now_ms: u64,
     ) -> Result<Option<RecentContactInteraction>, AslError> {
         if agent_id.0 == [0; 32] || now_ms > i64::MAX as u64 {
@@ -212,10 +349,14 @@ impl Store {
             .query_row(
                 "SELECT interaction_id,group_id,group_epoch,expires_at_ms
                  FROM contact_interaction_evidence
-                 WHERE agent_id=?1 AND expires_at_ms>?2
+                 WHERE agent_id=?1 AND peer_id=?2 AND expires_at_ms>?3
                  ORDER BY observed_at_ms DESC,interaction_id DESC
                  LIMIT 1",
-                params![agent_id.as_bytes().as_slice(), now_ms as i64],
+                params![
+                    agent_id.as_bytes().as_slice(),
+                    bs58::encode(peer_id.as_bytes()).into_string(),
+                    now_ms as i64
+                ],
                 |row| {
                     let interaction: Vec<u8> = row.get(0)?;
                     let group: Option<Vec<u8>> = row.get(1)?;
@@ -250,12 +391,52 @@ impl Store {
     }
 }
 
+pub(crate) fn contact_policy_sync_authorized(connection: &Connection) -> Result<bool, AslError> {
+    match read_setting(connection, POLICY_SYNC_AUTHORIZED_SETTING)?.as_deref() {
+        Some("true") => Ok(true),
+        Some("false") | None => Ok(false),
+        _ => Err(AslError::InvalidDatabase),
+    }
+}
+
 pub(crate) fn write_contact_request_policy(
     connection: &Connection,
     policy: ContactRequestPolicy,
     now_ms: u64,
 ) -> Result<(), AslError> {
-    if now_ms > i64::MAX as u64 || policy.recent_interaction_ttl_ms > MAX_RECENT_INTERACTION_TTL_MS
+    if now_ms > i64::MAX as u64
+        || policy.recent_interaction_ttl_ms > MAX_RECENT_INTERACTION_TTL_MS
+        || (policy.revoked && policy.mode != ContactRequestMode::Reject)
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    let current = contact_request_policy(connection)?;
+    if policy.revision < current.revision
+        || (policy.revision == current.revision && policy != current)
+    {
+        return Err(AslError::PolicyVersionConflict);
+    }
+    let stored = ContactRequestPolicyV1 {
+        version: REQUEST_POLICY_VERSION,
+        mode: policy.mode,
+        shared_group_auto_accept: policy.shared_group_auto_accept,
+        recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+        revision: policy.revision,
+        revoked: policy.revoked,
+        updated_at_ms: now_ms as i64,
+    };
+    let value = serde_json::to_string(&stored).map_err(|_| AslError::InvalidMessage)?;
+    crate::write_setting(connection, REQUEST_POLICY_SETTING, &value, now_ms as i64)
+}
+
+fn write_contact_request_policy_tiebreak(
+    connection: &Connection,
+    policy: ContactRequestPolicy,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    if now_ms > i64::MAX as u64
+        || policy.recent_interaction_ttl_ms > MAX_RECENT_INTERACTION_TTL_MS
+        || (policy.revoked && policy.mode != ContactRequestMode::Reject)
     {
         return Err(AslError::InvalidMessage);
     }
@@ -264,6 +445,8 @@ pub(crate) fn write_contact_request_policy(
         mode: policy.mode,
         shared_group_auto_accept: policy.shared_group_auto_accept,
         recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+        revision: policy.revision,
+        revoked: policy.revoked,
         updated_at_ms: now_ms as i64,
     };
     let value = serde_json::to_string(&stored).map_err(|_| AslError::InvalidMessage)?;
@@ -281,6 +464,8 @@ pub(crate) fn contact_request_policy(
     if policy.version != REQUEST_POLICY_VERSION
         || policy.updated_at_ms < 0
         || policy.recent_interaction_ttl_ms > MAX_RECENT_INTERACTION_TTL_MS
+        || policy.revision > i64::MAX as u64
+        || (policy.revoked && policy.mode != ContactRequestMode::Reject)
     {
         return Err(AslError::InvalidDatabase);
     }
@@ -288,6 +473,8 @@ pub(crate) fn contact_request_policy(
         mode: policy.mode,
         shared_group_auto_accept: policy.shared_group_auto_accept,
         recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+        revision: policy.revision,
+        revoked: policy.revoked,
     })
 }
 

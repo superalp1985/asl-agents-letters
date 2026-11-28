@@ -141,6 +141,18 @@ pub enum NetworkCommand {
         operation_id: [u8; 16],
         value: Vec<u8>,
     },
+    PrepareContactPolicy {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishContactPolicy {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
+    },
+    CancelContactPolicy {
+        operation_id: [u8; 16],
+        receipt_id: [u8; 16],
+    },
     GossipSubscribe {
         operation_id: [u8; 16],
         key: [u8; 32],
@@ -329,6 +341,27 @@ impl NetworkCommand {
             } => IpcMessage::PublishDirectory {
                 operation_id,
                 value,
+            },
+            Self::PrepareContactPolicy {
+                operation_id,
+                agent,
+            } => IpcMessage::PrepareContactPolicy {
+                operation_id,
+                agent,
+            },
+            Self::PublishContactPolicy {
+                operation_id,
+                value,
+            } => IpcMessage::PublishContactPolicy {
+                operation_id,
+                value,
+            },
+            Self::CancelContactPolicy {
+                operation_id,
+                receipt_id,
+            } => IpcMessage::CancelContactPolicy {
+                operation_id,
+                receipt_id,
             },
             Self::GossipSubscribe { operation_id, key } => {
                 IpcMessage::GossipSubscribe { operation_id, key }

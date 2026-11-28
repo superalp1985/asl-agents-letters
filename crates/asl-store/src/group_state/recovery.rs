@@ -108,7 +108,26 @@ impl Store {
         &mut self,
         activation: MlsRoomActivation<'_>,
     ) -> Result<RoomVersion, AslError> {
-        if activation.creator_device != activation.creator {
+        let creator = activation.creator.to_owned();
+        self.activate_mls_room_at_authority_head(activation, &creator)
+    }
+
+    /// Activate a room from the current policy owner's live head. The MLS
+    /// creator remains the historical RoomOrigin anchor.
+    pub fn activate_mls_room_at_owner_head(
+        &mut self,
+        activation: MlsRoomActivation<'_>,
+        owner: &PeerId,
+    ) -> Result<RoomVersion, AslError> {
+        self.activate_mls_room_at_authority_head(activation, owner)
+    }
+
+    fn activate_mls_room_at_authority_head(
+        &mut self,
+        activation: MlsRoomActivation<'_>,
+        authority: &PeerId,
+    ) -> Result<RoomVersion, AslError> {
+        if activation.creator_device != authority {
             return Err(AslError::PolicyDenied);
         }
         let tx = self
@@ -117,6 +136,20 @@ impl Store {
             .map_err(database_error)?;
         if room_version(&tx, activation.wire_id, activation.creator)? != activation.expected {
             return Err(AslError::PolicyVersionConflict);
+        }
+        let owner: String = tx
+            .query_row(
+                "SELECT coalesce(p.owner_peer_id,g.creator_peer_id)
+                 FROM mls_room_states s
+                 JOIN asl_groups g ON g.group_id=s.local_group_id
+                 LEFT JOIN group_access_policies p ON p.group_id=g.group_id
+                 WHERE s.wire_group_id=?1 AND g.state IN ('needs_sync','active')",
+                [activation.wire_id.as_bytes()],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if owner != peer_text(authority) {
+            return Err(AslError::PolicyDenied);
         }
         let projection = active_members(&tx, activation.wire_id, activation.creator)?;
         if member_ids(activation.members)? != projection.iter().map(peer_text).collect() {

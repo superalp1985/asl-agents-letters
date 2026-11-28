@@ -1106,3 +1106,20 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - `Offer`/`FetchRequest` 增加可选逻辑根和源 shard 元数据；群文件请求可经逻辑群主转发回源 shard，文件字节仍要求直接认证传输。
 - 本轮最终集中验收：workspace/all-targets 退出码 0，1006 通过、0 失败、13 忽略；`asl-app` desktop-ui 库 323 通过、5 忽略；严格 Clippy、格式、schema 36 向量、CDDL 和 `git diff --check` 通过；release build 通过。
 - 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v49.zip`，80,952,123 字节，SHA-256 `A60E314973480E98FFE7536E6154D1DE887AE12C4229FB3307C09DB01D088789`。这是未签名 debug/test 包，不是生产签名发行包。
+
+### 2026-11-28 PAKE 短码配对
+
+- 采用稳定版 `spake2 0.4.0`（MIT OR Apache-2.0，MSRV 1.60）；未采用 `0.5.0-pre`。该 crate 没有独立安全审计且不保证严格 constant-time，因此只用于一次性 6/12 位短码，不作为长期身份或授权 bearer。
+- 新增控制帧 `pake-start(20)`、`pake-answer(21)`、`pake-confirm(22)`、`pake-receipt(23)`；Start/Answer/Confirm/Receipt 均由 Agent 根签名，transcript 绑定双 AgentId、双设备 PeerId、角色、exchange id、短码长度和期限，并在 SPAKE2 后完成双向 key confirmation。
+- 短码邀请默认 5 分钟、最长 15 分钟；每个 invite 只允许一个 owner 会话，失败、超时或重复 Confirm 会消费邀请。成功只建立本机联系人 binding，不创建文件、目录、模型或群权限。
+- 代码已接入 `asl-core --contact-invites create-pake <5|15> <6|12> "..."`、联系人 GUI 和 CDDL；本轮只执行了 `cargo check --workspace --all-targets --features asl-app/desktop-ui --locked --offline` 和 `cargo fmt --all -- --check`，未运行测试，也未做真实双机、NAT/relay、二维码扫描或审计验收。
+
+### 2026-11-28 1.0 代码收尾验收
+
+- workspace `--list` 枚举 1,026 项测试；全量串行执行结果为 **1,013 通过、0 失败、13 项按环境要求忽略**。
+- desktop-ui 库 331 项：**326 通过、0 失败、5 忽略**。新增测试覆盖网络快照持久化与新鲜度、语义历史加权稳定排序、游标分页无重复和 PAKE 尝试跨重启不可重复。
+- v50 迁移改为检查列后逐列补齐，旧库升级和“删除 schema_migrations 后重放”夹具均幂等；修复了 `delivery_kind` 重复列失败。
+- 跨 shard Fetch 已改为持久 relay 映射和精确目标 PeerId 回程；owner 离线只重试原 MLS 密文，不重新推进 ratchet，不 gossipsub 广播回包。
+- 联系人策略自动 DHT lookup/publish、同 revision 撤销优先与哈希收敛、群主转移后的 owner Remove Commit 均纳入全量测试。
+- 1.0.0 Windows 离线测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v1.0.0.zip`，81,987,474 字节，SHA-256 `7F1B265B7F66637CE6C5DEB92D38231917BA7C9078716F73D1C5BCFF0723659E`。未签名，仅用于真人验收。
+- 真实双机、公网 NAT/relay、真实链部署、跨机 512/2,000/10,000 矩阵、真实 GUI/DPI、正式签名发行和独立审计未由本机测试替代；必须按 [1.0 真人验收清单](14-human-acceptance.md) 另行完成。

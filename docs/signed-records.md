@@ -8,12 +8,13 @@ T13 依赖已实现的 T03 codec 和 T06 根身份，与 T08 尚缺少的系统�
 原协议已有精确签名原文、profile 控制对象和设备目录语义，但没有完整
 DHT 记录封装及目录/短码 CDDL。按 `docs/03-protocol.md` 第 3 节补全：
 
-- 保留已有 kind 1/2；追加 kind 3 短码声明。
+- 保留已有 kind 1/2；追加 kind 3 短码声明；追加 kind 4 联系策略密文封套。
 - 外层固定字段与规范载荷都必须严格解析，整个记录不超过 8 KiB。
 - profile 复用原控制对象，并核对内外 owner/sequence。
 - 设备目录包含明确 registry sequence；BLAKE3 域分离承诺绑定其完整规范载荷。
 - 目录外层续发时间与 publication sequence 不进入目录承诺，不要求每 5 分钟上链。
 - 短码为固定算法派生的整数；它仍允许碰撞，不构成认证或授权。
+- kind 4 只承载根签名加密策略密文，sequence 等于策略 revision；联系人 ID 和来源规则不进 DHT 明文。
 
 线上没有文本、昵称、路径、地址或可以任意解释的扩展字段。
 未来需要新字段或记录种类时必须显式修改版本化规范。
@@ -39,7 +40,7 @@ DHT 记录封装及目录/短码 CDDL。按 `docs/03-protocol.md` 第 3 节补�
 
 ## 单调观察
 
-`RecordHistory` 保存一个 owner 三种记录的序号和精确字节摘要。
+`RecordHistory` 保存一个 owner 四类身份记录的序号和精确字节摘要。
 更低序号拒绝，同序号只接受相同字节；过期或错误记录不能覆盖已有观察。
 设备观察记住同一 PeerId 的最高 serial/证书、serial 所属设备及已知撤销，
 换目录后也不能重新启用已观察的撤销 serial。
@@ -52,11 +53,15 @@ DHT 记录封装及目录/短码 CDDL。按 `docs/03-protocol.md` 第 3 节补�
 当前历史只在内存中。T17 将通过 DHT 的记录候选先交 Core 校验，再由 Core
 回传明确接受/拒绝决定；记录键、根签名、当前 Active 链状态、有效期和本地
 序号历史都通过后才落入 net store。profile、device directory 与短码声明使用
-按 owner/kind 分开的域分离键，短码查找本身使用可多候选的 provider 键，
+按 owner/kind 分开的域分离键；联系策略使用独立加密 kind 4 键，短码查找本身使用可多候选的 provider 键，
 不会用碰撞的短码覆盖单值记录。DHT store 和历史高水位仍未持久化；进程重启
 不保证防回滚观察延续，不能把这里写成重启防回滚已完成。
 入站验证的机器级 CPU/请求额度也由后续 broker/net 闸门执行，
 不能把单条记录的结构上限当成全局女巫防护已经完成。
+
+## 联系策略密文同步
+
+联系人请求策略保存在 SQLite `settings`，不是授权表。每次本机修改（模式、共享群来源、近期交互 TTL 或撤销）推进单调 revision。`asl-core --bindings policy-export <path>` 生成或复用根签名 kind 4 记录；内部 JSON 先由 Agent root secret 派生的 age 密钥加密，外层只暴露 revision、revoked 与密文。自动同步把精确记录字节和退避状态保存在 `settings`，重试不重签；记录过期后才推进 revision。同一 revision 的多设备冲突先保证 revoked 优先，再按完整记录 BLAKE3 较小的字节串胜出，DHT store、Core 历史、DHT cache 和 runtime 使用同一规则。`policy-import` 只在本地 `policy-sync on` 已授权、记录 owner/控制器/期限/签名正确时应用；策略撤销使用更高 revision 的拒绝快照，旧快照不能回滚当前策略。`Selection.contacts` 的加密身份迁移包也携带同一 revision 和 revoked 字段，用于新设备恢复。该机制不同步 pending invite、候选、联系人访问 grant、文件或群权限。
 
 ## 本机资料续发
 

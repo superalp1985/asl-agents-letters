@@ -1,10 +1,14 @@
 use asl_app::network_settings::{NetworkAddressScopeV1, NetworkSettingsV1};
 use asl_store::dashboard::Dashboard;
-use asl_store::network_privacy::NetworkRuntimeState;
+use asl_store::network_privacy::{NetworkReachability, NetworkRouteFailure, NetworkRuntimeState};
 use asl_types::error::AslError;
 use eframe::egui::{Button, Checkbox, ComboBox, Id, RichText, TextEdit, Ui};
 
-use super::{LocalAction, MUTED, locale::Language};
+use super::{
+    LocalAction, MUTED,
+    locale::Language,
+    tokens::{DANGER, SUCCESS, WARNING},
+};
 
 pub(super) fn show(
     ui: &mut Ui,
@@ -246,16 +250,19 @@ pub(super) fn show(
             .as_millis()
             .min(i64::MAX as u128) as i64;
         let age_s = now.saturating_sub(last.observed_at_ms).max(0) / 1000;
+        let (freshness, freshness_color) = report_freshness(language, age_s);
         let runtime = match last.runtime {
-            NetworkRuntimeState::Unknown => label(language, "状态未报告", "Status not reported"),
+            NetworkRuntimeState::Unknown => label(language, "未报告", "Not reported"),
             NetworkRuntimeState::Running => {
-                label(language, "对等网络运行中", "Peer network running")
+                label(language, "后台报告为运行中", "Backend reported running")
             }
-            NetworkRuntimeState::Paused => label(language, "对等网络已暂停", "Peer network paused"),
+            NetworkRuntimeState::Paused => {
+                label(language, "后台报告为已暂停", "Backend reported paused")
+            }
             NetworkRuntimeState::ResumeFailed => label(
                 language,
-                "恢复失败，对等网络未运行",
-                "Resume failed, peer network stopped",
+                "后台报告恢复失败，对等网络未运行",
+                "Backend reported resume failure, peer network stopped",
             ),
         };
         ui.horizontal_wrapped(|ui| {
@@ -265,20 +272,89 @@ pub(super) fn show(
             ) {
                 super::views::inline_glyph(ui, super::art::Glyph::NetworkOffline);
             }
-            ui.label(format!(
-                "{} ({age_s}s): {runtime}",
-                label(language, "后台上次报告", "Last backend report")
-            ));
+            ui.label(RichText::new(freshness).strong().color(freshness_color));
+            ui.label(format!("{} · {}", age_label(language, age_s), runtime));
         });
         ui.colored_label(
             MUTED,
             format!(
-                "{mode} · {}: {}/{}",
-                label(language, "已预约", "Reserved"),
+                "{}: {mode} · {}: {}/{} · {}: {}",
+                label(language, "上报模式", "Reported mode"),
+                label(language, "已预约中继", "Reserved relays"),
                 last.reserved_relays,
-                last.configured_relays
+                last.configured_relays,
+                label(language, "监听入口", "Listening endpoints"),
+                last.listening_endpoints
             ),
         );
+        ui.colored_label(
+            MUTED,
+            format!(
+                "{}: {} · {}: {}% · {}: {}",
+                label(language, "入口可达性", "Entry reachability"),
+                reachability_label(language, last.reachability),
+                label(language, "置信度", "Confidence"),
+                last.reachability_confidence.min(100),
+                label(language, "公网入口地址", "Public entry address"),
+                label(
+                    language,
+                    if last.public_entry {
+                        "已报告"
+                    } else {
+                        "未报告"
+                    },
+                    if last.public_entry {
+                        "Reported"
+                    } else {
+                        "Not reported"
+                    }
+                )
+            ),
+        );
+        ui.colored_label(
+            MUTED,
+            format!(
+                "{}: {} · {}: {} · {}: {} · {}: {} · {}: {}",
+                label(language, "直连", "Direct"),
+                last.direct_routes,
+                label(language, "打洞直连", "Hole-punched"),
+                last.hole_punched_routes,
+                label(language, "中继", "Relayed"),
+                last.relayed_routes,
+                label(language, "协商中", "Negotiating"),
+                last.negotiating_routes,
+                label(language, "失败", "Failed"),
+                last.failed_routes
+            ),
+        );
+        if let Some(failure) = last.last_route_failure {
+            ui.colored_label(
+                DANGER,
+                format!(
+                    "{}: {}",
+                    label(language, "最近路由失败", "Latest route failure"),
+                    route_failure_label(language, failure)
+                ),
+            );
+        }
+        ui.colored_label(
+            MUTED,
+            label(
+                language,
+                "以上是 Core 持久化的最近观测快照，不是实时连接列表；超过 30 秒请按延迟状态理解。",
+                "This is Core's persisted latest observation, not a live connection list; after 30 seconds treat it as delayed.",
+            ),
+        );
+        if age_s > 300 && last.runtime == NetworkRuntimeState::Running {
+            ui.colored_label(
+                WARNING,
+                label(
+                    language,
+                    "后台可能已退出或长时间没有网络事件，请检查 Core 状态。",
+                    "The backend may have exited or received no network events for a long time; check Core status.",
+                ),
+            );
+        }
         match (data.network_pause_requested, last.runtime) {
             (true, NetworkRuntimeState::Running) => {
                 ui.colored_label(MUTED, label(language, "已请求暂停", "Pause requested"));
@@ -348,5 +424,80 @@ fn scope_code(scope: NetworkAddressScopeV1) -> &'static str {
         NetworkAddressScopeV1::InternetOnly => "internet",
         NetworkAddressScopeV1::Hybrid => "hybrid",
         NetworkAddressScopeV1::RelayOnly => "relay",
+    }
+}
+
+fn age_label(language: Language, age_s: i64) -> String {
+    match language {
+        Language::Zh if age_s < 60 => format!("上报于 {age_s} 秒前"),
+        Language::Zh if age_s < 3_600 => format!("上报于 {} 分钟前", age_s / 60),
+        Language::Zh => format!("上报于 {} 小时前", age_s / 3_600),
+        Language::En if age_s < 60 => format!("reported {age_s}s ago"),
+        Language::En if age_s < 3_600 => format!("reported {}m ago", age_s / 60),
+        Language::En => format!("reported {}h ago", age_s / 3_600),
+    }
+}
+
+fn report_freshness(language: Language, age_s: i64) -> (&'static str, eframe::egui::Color32) {
+    if age_s <= 30 {
+        (label(language, "状态新鲜", "Fresh status"), SUCCESS)
+    } else if age_s <= 300 {
+        (label(language, "状态有延迟", "Delayed status"), WARNING)
+    } else {
+        (
+            label(language, "快照可能过期", "Snapshot may be stale"),
+            DANGER,
+        )
+    }
+}
+
+fn reachability_label(language: Language, reachability: NetworkReachability) -> &'static str {
+    match (language, reachability) {
+        (Language::Zh, NetworkReachability::Unreported) => "尚未上报",
+        (Language::Zh, NetworkReachability::Unknown) => "未知",
+        (Language::Zh, NetworkReachability::Private) => "仅内网/需中继",
+        (Language::Zh, NetworkReachability::Public) => "公网可达",
+        (Language::En, NetworkReachability::Unreported) => "Not reported",
+        (Language::En, NetworkReachability::Unknown) => "Unknown",
+        (Language::En, NetworkReachability::Private) => "Private or relay required",
+        (Language::En, NetworkReachability::Public) => "Publicly reachable",
+    }
+}
+
+fn route_failure_label(language: Language, failure: NetworkRouteFailure) -> &'static str {
+    match (language, failure) {
+        (Language::Zh, NetworkRouteFailure::DirectUnavailable) => "直连不可用",
+        (Language::Zh, NetworkRouteFailure::RelayUnavailable) => "中继不可用",
+        (Language::Zh, NetworkRouteFailure::HolePunchFailed) => "打洞失败",
+        (Language::Zh, NetworkRouteFailure::TimedOut) => "超时",
+        (Language::Zh, NetworkRouteFailure::PeerIdentityMismatch) => "对端身份不匹配",
+        (Language::Zh, NetworkRouteFailure::Disconnected) => "已断开",
+        (Language::En, NetworkRouteFailure::DirectUnavailable) => "Direct unavailable",
+        (Language::En, NetworkRouteFailure::RelayUnavailable) => "Relay unavailable",
+        (Language::En, NetworkRouteFailure::HolePunchFailed) => "Hole punch failed",
+        (Language::En, NetworkRouteFailure::TimedOut) => "Timed out",
+        (Language::En, NetworkRouteFailure::PeerIdentityMismatch) => "Peer identity mismatch",
+        (Language::En, NetworkRouteFailure::Disconnected) => "Disconnected",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_report_freshness_uses_explicit_age_thresholds() {
+        assert_eq!(report_freshness(Language::Zh, 30), ("状态新鲜", SUCCESS));
+        assert_eq!(report_freshness(Language::Zh, 31), ("状态有延迟", WARNING));
+        assert_eq!(
+            report_freshness(Language::En, 300),
+            ("Delayed status", WARNING)
+        );
+        assert_eq!(
+            report_freshness(Language::En, 301),
+            ("Snapshot may be stale", DANGER)
+        );
+        assert_eq!(age_label(Language::Zh, 59), "上报于 59 秒前");
+        assert_eq!(age_label(Language::En, 301), "reported 5m ago");
     }
 }

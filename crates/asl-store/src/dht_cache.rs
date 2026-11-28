@@ -1,7 +1,7 @@
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
-    record::RecordKind,
+    record::{RecordKind, RecordPayload, decode_record},
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -33,6 +33,27 @@ impl Store {
     pub fn cache_dht_record(&self, record: &CachedDhtRecord, now_ms: u64) -> Result<(), AslError> {
         if record.record.is_empty() || record.record.len() > MAX_CACHED_RECORD_BYTES {
             return Err(AslError::InvalidMessage);
+        }
+        if record.kind == RecordKind::ContactPolicy {
+            let previous: Option<(i64, Vec<u8>)> = self
+                .connection
+                .query_row(
+                    "SELECT sequence,record FROM dht_record_cache
+                     WHERE agent_id=?1 AND kind=?2",
+                    params![
+                        crate::chain::agent_text(record.agent_id),
+                        kind_code(record.kind)
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(database_error)?;
+            if let Some((sequence, previous)) = previous
+                && u64::try_from(sequence).ok() == Some(record.sequence)
+                && !contact_policy_cache_precedes(&record.record, &previous)
+            {
+                return Ok(());
+            }
         }
         self.connection
             .execute(
@@ -283,11 +304,34 @@ impl Store {
     }
 }
 
+fn contact_policy_cache_precedes(candidate: &[u8], previous: &[u8]) -> bool {
+    let (Ok(candidate_signed), Ok(previous_signed)) =
+        (decode_record(candidate), decode_record(previous))
+    else {
+        return false;
+    };
+    let (
+        RecordPayload::ContactPolicy(candidate_policy),
+        RecordPayload::ContactPolicy(previous_policy),
+    ) = (
+        &candidate_signed.record.payload,
+        &previous_signed.record.payload,
+    )
+    else {
+        return false;
+    };
+    if candidate_policy.revoked != previous_policy.revoked {
+        return candidate_policy.revoked;
+    }
+    blake3::hash(candidate).as_bytes() < blake3::hash(previous).as_bytes()
+}
+
 fn kind_code(kind: RecordKind) -> i64 {
     match kind {
         RecordKind::Profile => 1,
         RecordKind::DeviceDirectory => 2,
         RecordKind::ShortCode => 3,
+        RecordKind::ContactPolicy => 4,
     }
 }
 
@@ -296,6 +340,7 @@ fn kind_from_code(value: i64) -> Result<RecordKind, AslError> {
         1 => Ok(RecordKind::Profile),
         2 => Ok(RecordKind::DeviceDirectory),
         3 => Ok(RecordKind::ShortCode),
+        4 => Ok(RecordKind::ContactPolicy),
         _ => Err(AslError::InvalidDatabase),
     }
 }

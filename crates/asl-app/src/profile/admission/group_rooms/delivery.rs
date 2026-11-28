@@ -103,6 +103,44 @@ impl CoreAdmission {
         packet: &GroupPacket,
         expires_at_ms: u64,
         now_ms: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        self.dispatch_prepared_loopback_mls_shard_forward_inner(
+            store,
+            packet,
+            None,
+            expires_at_ms,
+            now_ms,
+            enqueue,
+        )
+    }
+
+    pub fn dispatch_prepared_loopback_mls_shard_forward_to_peer(
+        &mut self,
+        store: &mut Store,
+        packet: &GroupPacket,
+        target_peer: &PeerId,
+        expires_at_ms: u64,
+        now_ms: u64,
+        enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        self.dispatch_prepared_loopback_mls_shard_forward_inner(
+            store,
+            packet,
+            Some(target_peer),
+            expires_at_ms,
+            now_ms,
+            enqueue,
+        )
+    }
+
+    fn dispatch_prepared_loopback_mls_shard_forward_inner(
+        &mut self,
+        store: &mut Store,
+        packet: &GroupPacket,
+        target_peer: Option<&PeerId>,
+        expires_at_ms: u64,
+        now_ms: u64,
         mut enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
     ) -> Result<MlsApplicationDispatch, AslError> {
         packet.validate_request()?;
@@ -131,12 +169,16 @@ impl CoreAdmission {
             &HashMap::new(),
             clock.now_ms()?,
         )?;
+        let owner = store
+            .group_access_owner(packet.group_id)?
+            .ok_or(AslError::PolicyDenied)?;
         let local = self.local_hello.peer_id.clone();
         let mut routes = Vec::new();
         let mut incompatible = false;
         for (agent, connection, peer) in self.admitted_connections(clock.now_ms()?) {
             if peer == local
-                || !creator_edge(&local, &peer, &candidate.creator)
+                || target_peer.is_some_and(|target| &peer != target)
+                || !owner_edge(&local, &peer, &owner)
                 || routes.iter().any(|(device, _, _)| *device == peer)
             {
                 continue;
@@ -291,13 +333,16 @@ impl CoreAdmission {
             &HashMap::new(),
             clock.now_ms()?,
         )?;
+        let owner = store
+            .group_access_owner(wire_id)?
+            .ok_or(AslError::PolicyDenied)?;
         let local = self.local_hello.peer_id.clone();
         let mut routes = Vec::new();
         let mut incompatible = false;
         for (agent, connection, peer) in self.admitted_connections(clock.now_ms()?) {
             if target_connection.is_some_and(|target| target != connection)
                 || peer == local
-                || !creator_edge(&local, &peer, &candidate.creator)
+                || !owner_edge(&local, &peer, &owner)
                 || routes.iter().any(|(device, _, _)| *device == peer)
             {
                 continue;
@@ -409,8 +454,10 @@ impl CoreAdmission {
         let saved = store
             .mls_room_for_reconciliation(packet.group_id)?
             .ok_or(AslError::PolicyDenied)?;
-        if peer == self.local_hello.peer_id
-            || !creator_edge(&self.local_hello.peer_id, &peer, &saved.creator)
+        let owner = store
+            .group_access_owner(packet.group_id)?
+            .ok_or(AslError::PolicyDenied)?;
+        if peer == self.local_hello.peer_id || !owner_edge(&self.local_hello.peer_id, &peer, &owner)
         {
             return Err(AslError::PolicyDenied);
         }
@@ -429,6 +476,6 @@ impl CoreAdmission {
     }
 }
 
-fn creator_edge(local: &PeerId, remote: &PeerId, creator: &PeerId) -> bool {
-    local == creator || remote == creator
+fn owner_edge(local: &PeerId, remote: &PeerId, owner: &PeerId) -> bool {
+    local == owner || remote == owner
 }

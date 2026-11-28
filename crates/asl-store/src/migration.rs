@@ -114,6 +114,10 @@ struct PortableContactPolicy {
     mode: ContactRequestMode,
     shared_group_auto_accept: bool,
     recent_interaction_ttl_ms: u64,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    revoked: bool,
 }
 
 impl Store {
@@ -144,6 +148,8 @@ impl Store {
                 mode: policy.mode,
                 shared_group_auto_accept: policy.shared_group_auto_accept,
                 recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+                revision: policy.revision.max(1),
+                revoked: policy.revoked,
             });
         }
         if selection.trust {
@@ -341,6 +347,8 @@ impl Store {
                     mode: policy.mode,
                     shared_group_auto_accept: policy.shared_group_auto_accept,
                     recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+                    revision: policy.revision.max(1),
+                    revoked: policy.revoked,
                 },
                 u64::try_from(now).map_err(|_| AslError::InvalidMessage)?,
             )?;

@@ -2,7 +2,7 @@ use asl_store::Store;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
-    protocol::{PairingExchange, PairingInvite, validate_pairing_note},
+    protocol::{ContactProvenance, PairingExchange, PairingInvite, validate_pairing_note},
 };
 use rand::{TryRng, rngs::SysRng};
 use std::collections::HashMap;
@@ -12,8 +12,13 @@ use crate::{
     profile::CoreAdmission,
 };
 
+mod pake;
+
+pub use pake::{JoinerAttempt, OwnerAttempt, PakeJoiner, PakeOwner, PakeRuntime};
+
 const INVITE_DOMAIN: &[u8] = b"ASL-PAIR-INVITE-v1\0";
 const ACCEPT_DOMAIN: &[u8] = b"ASL-PAIR-DECISION-v1\0";
+const PROVENANCE_DOMAIN: &[u8] = b"ASL-PAIR-PROVENANCE-v1\0";
 pub(crate) const INVITE_LIFETIME_MS: u64 = 3 * 60 * 1_000;
 const MAX_INVITE_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_PENDING_PAIRING_PROMPTS: usize = 5;
@@ -98,11 +103,21 @@ pub fn issue_signed_invite(
     note: &str,
     now_ms: u64,
 ) -> Result<PairingInvite, AslError> {
+    issue_signed_invite_with_provenance(identity, target, note, None, now_ms)
+}
+
+pub fn issue_signed_invite_with_provenance(
+    identity: &AgentIdentity,
+    target: AgentId,
+    note: &str,
+    provenance: Option<ContactProvenance>,
+    now_ms: u64,
+) -> Result<PairingInvite, AslError> {
     let mut nonce = [0; 32];
     SysRng
         .try_fill_bytes(&mut nonce)
         .map_err(|_| AslError::InvalidIdentity)?;
-    issue_signed_invite_with_nonce(
+    issue_signed_invite_with_nonce_and_provenance(
         identity,
         target,
         note,
@@ -111,6 +126,7 @@ pub fn issue_signed_invite(
             .checked_add(INVITE_LIFETIME_MS)
             .ok_or(AslError::InvalidMessage)?,
         Hash32(nonce),
+        provenance,
     )
 }
 
@@ -121,6 +137,26 @@ pub(crate) fn issue_signed_invite_with_nonce(
     now_ms: u64,
     expires_at_ms: u64,
     nonce: Hash32,
+) -> Result<PairingInvite, AslError> {
+    issue_signed_invite_with_nonce_and_provenance(
+        identity,
+        target,
+        note,
+        now_ms,
+        expires_at_ms,
+        nonce,
+        None,
+    )
+}
+
+pub(crate) fn issue_signed_invite_with_nonce_and_provenance(
+    identity: &AgentIdentity,
+    target: AgentId,
+    note: &str,
+    now_ms: u64,
+    expires_at_ms: u64,
+    nonce: Hash32,
+    provenance: Option<ContactProvenance>,
 ) -> Result<PairingInvite, AslError> {
     if target == identity.agent_id() || now_ms > i64::MAX as u64 {
         return Err(AslError::InvalidMessage);
@@ -148,8 +184,12 @@ pub(crate) fn issue_signed_invite_with_nonce(
         expires_at_ms,
         nonce,
         note: note.to_owned(),
+        provenance,
         signature: Signature65([0; Signature65::LENGTH]),
     };
+    if let Some(provenance) = &invite.provenance {
+        provenance.validate(now_ms)?;
+    }
     invite.signature = identity.sign_domain_message(&invite_signing_bytes(&invite)?)?;
     Ok(invite)
 }
@@ -344,6 +384,9 @@ fn validate_invite(
             AslError::InvalidIdentity
         });
     }
+    if let Some(provenance) = &invite.provenance {
+        provenance.validate(now_ms)?;
+    }
     verify_root_signature(&invite_signing_bytes(invite)?, invite.signature, controller)
 }
 
@@ -384,6 +427,27 @@ fn invite_signing_bytes(invite: &PairingInvite) -> Result<Vec<u8>, AslError> {
     bytes.extend_from_slice(invite.nonce.as_bytes());
     bytes.extend_from_slice(&note_length.to_be_bytes());
     bytes.extend_from_slice(invite.note.as_bytes());
+    if let Some(provenance) = &invite.provenance {
+        bytes.extend_from_slice(PROVENANCE_DOMAIN);
+        match provenance {
+            ContactProvenance::SharedGroup {
+                group_id,
+                membership_epoch,
+            } => {
+                bytes.push(1);
+                bytes.extend_from_slice(group_id.as_bytes());
+                bytes.extend_from_slice(&membership_epoch.to_be_bytes());
+            }
+            ContactProvenance::RecentInteraction {
+                interaction_id,
+                expires_at_ms,
+            } => {
+                bytes.push(2);
+                bytes.extend_from_slice(interaction_id.as_bytes());
+                bytes.extend_from_slice(&expires_at_ms.to_be_bytes());
+            }
+        }
+    }
     Ok(bytes)
 }
 

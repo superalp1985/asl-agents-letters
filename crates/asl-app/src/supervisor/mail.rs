@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use asl_agent::{QueryScope, runner::InboundMode};
 use asl_groups::GroupApplication;
 use asl_store::{
     Store,
-    act_history::ActDirection,
+    act_history::{ActDirection, ActHistoryRanking, MAX_ACT_HISTORY_ROWS},
     budgets::BudgetKind,
     contact_bindings::ContactBindingActionKind,
     group_access::{GroupAccessKind, GroupAdminCapabilityKind, GroupFileAccessKind},
@@ -40,6 +40,165 @@ use crate::{
 };
 
 const MAX_CONTEXT_GRAPH_ITEMS: usize = 256;
+const HISTORY_CURSOR_VERSION: &str = "v1";
+const HISTORY_CURSOR_BYTES: usize = 512;
+
+struct HistorySearchHit {
+    conversation_id: String,
+    act_id: [u8; 32],
+    mls_epoch: Option<u64>,
+    direction: ActDirection,
+    act_kind: u16,
+    causal_root: Option<[u8; 32]>,
+    reply_to: Option<[u8; 32]>,
+    body: Option<String>,
+    ranking: ActHistoryRanking,
+    score: u32,
+    received_at_ms: i64,
+    expires_at_ms: i64,
+    source: &'static str,
+}
+
+struct HistoryCursor {
+    score: u32,
+    term_weight: u32,
+    received_at_ms: i64,
+    conversation_id: String,
+    act_id: [u8; 32],
+}
+
+fn compare_history_hits(left: &HistorySearchHit, right: &HistorySearchHit) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| right.ranking.term_weight.cmp(&left.ranking.term_weight))
+        .then_with(|| right.received_at_ms.cmp(&left.received_at_ms))
+        .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+        .then_with(|| left.act_id.cmp(&right.act_id))
+}
+
+fn compare_history_key(hit: &HistorySearchHit, cursor: &HistoryCursor) -> Ordering {
+    cursor
+        .score
+        .cmp(&hit.score)
+        .then_with(|| cursor.term_weight.cmp(&hit.ranking.term_weight))
+        .then_with(|| cursor.received_at_ms.cmp(&hit.received_at_ms))
+        .then_with(|| hit.conversation_id.cmp(&cursor.conversation_id))
+        .then_with(|| hit.act_id.cmp(&cursor.act_id))
+}
+
+fn page_history_hits(
+    mut hits: Vec<HistorySearchHit>,
+    query_hash: [u8; 16],
+    requested: usize,
+    cursor: Option<&HistoryCursor>,
+) -> (Vec<HistorySearchHit>, bool, Option<String>) {
+    hits.sort_by(compare_history_hits);
+    if let Some(cursor) = cursor {
+        hits.retain(|hit| compare_history_key(hit, cursor) == Ordering::Greater);
+    }
+    let has_more = hits.len() > requested;
+    hits.truncate(requested);
+    let next_cursor = has_more
+        .then(|| {
+            hits.last()
+                .map(|hit| encode_history_cursor(query_hash, hit))
+        })
+        .flatten();
+    (hits, has_more, next_cursor)
+}
+
+fn history_hit_json(hit: HistorySearchHit) -> Value {
+    let coverage_ppm = if hit.ranking.query_terms == 0 {
+        0
+    } else {
+        u32::from(hit.ranking.matched_terms).saturating_mul(1_000_000)
+            / u32::from(hit.ranking.query_terms)
+    };
+    json!({
+        "conversation_id": hit.conversation_id,
+        "act_id": alloy_primitives::hex::encode(hit.act_id),
+        "mls_epoch": hit.mls_epoch,
+        "direction": hit.direction.as_str(),
+        "act_kind": hit.act_kind,
+        "causal_root": hit.causal_root.map(alloy_primitives::hex::encode),
+        "reply_to": hit.reply_to.map(alloy_primitives::hex::encode),
+        "body": hit.body,
+        "lexical_score": hit.score,
+        "semantic_score": hit.score,
+        "ranking": {
+            "kind": "lexical_overlap_v1",
+            "matched_terms": hit.ranking.matched_terms,
+            "query_terms": hit.ranking.query_terms,
+            "term_weight": hit.ranking.term_weight,
+            "coverage_ppm": coverage_ppm,
+            "score_formula": "matched_terms*1000000+term_weight",
+        },
+        "received_at_ms": hit.received_at_ms,
+        "expires_at_ms": hit.expires_at_ms,
+        "source": hit.source,
+    })
+}
+
+fn history_query_hash(query: &str) -> [u8; 16] {
+    let normalized = query.trim().to_lowercase();
+    let digest = blake3::hash(normalized.as_bytes());
+    digest.as_bytes()[..16]
+        .try_into()
+        .expect("fixed digest prefix")
+}
+
+fn encode_history_cursor(query_hash: [u8; 16], hit: &HistorySearchHit) -> String {
+    format!(
+        "{HISTORY_CURSOR_VERSION}:{}:{:08x}:{:08x}:{}:{}:{}",
+        alloy_primitives::hex::encode(query_hash),
+        hit.score,
+        hit.ranking.term_weight,
+        hit.received_at_ms,
+        alloy_primitives::hex::encode(hit.conversation_id.as_bytes()),
+        alloy_primitives::hex::encode(hit.act_id),
+    )
+}
+
+fn parse_history_cursor(
+    value: &str,
+    expected_query_hash: [u8; 16],
+) -> Result<HistoryCursor, AslError> {
+    if value.is_empty() || value.len() > HISTORY_CURSOR_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 7 || parts[0] != HISTORY_CURSOR_VERSION {
+        return Err(AslError::InvalidMessage);
+    }
+    let query_hash = alloy_primitives::hex::decode_to_array::<_, 16>(parts[1])
+        .map_err(|_| AslError::InvalidMessage)?;
+    if query_hash != expected_query_hash {
+        return Err(AslError::InvalidMessage);
+    }
+    let score = u32::from_str_radix(parts[2], 16).map_err(|_| AslError::InvalidMessage)?;
+    let term_weight = u32::from_str_radix(parts[3], 16).map_err(|_| AslError::InvalidMessage)?;
+    let received_at_ms = parts[4]
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0)
+        .ok_or(AslError::InvalidMessage)?;
+    let conversation =
+        alloy_primitives::hex::decode(parts[5]).map_err(|_| AslError::InvalidMessage)?;
+    if conversation.is_empty() || conversation.len() > 128 {
+        return Err(AslError::InvalidMessage);
+    }
+    let conversation_id = String::from_utf8(conversation).map_err(|_| AslError::InvalidMessage)?;
+    let act_id = alloy_primitives::hex::decode_to_array::<_, 32>(parts[6])
+        .map_err(|_| AslError::InvalidMessage)?;
+    Ok(HistoryCursor {
+        score,
+        term_weight,
+        received_at_ms,
+        conversation_id,
+        act_id,
+    })
+}
 
 impl Supervisor {
     pub(super) fn observe_direct_mail(
@@ -171,9 +330,10 @@ impl Supervisor {
             MailCommand::ActHistorySearch {
                 query,
                 limit,
+                cursor,
                 reply,
             } if !reply.is_closed() => {
-                let _ = reply.send(self.search_act_history(query, limit));
+                let _ = reply.send(self.search_act_history(query, limit, cursor));
             }
             MailCommand::RequestTaskInbox { reply } if !reply.is_closed() => {
                 let _ = reply.send(unix_time_ms().and_then(|now| {
@@ -1470,60 +1630,81 @@ impl Supervisor {
             "request_mode": policy.mode.as_str(),
             "shared_group_auto_accept": policy.shared_group_auto_accept,
             "recent_interaction_ttl_ms": policy.recent_interaction_ttl_ms,
+            "policy_revision": policy.revision,
+            "revoked": policy.revoked,
+            "policy_sync_authorized": store.contact_policy_sync_authorized()?,
             "bindings": store.recent_contact_bindings()?,
             "candidates": candidates,
         }))
     }
 
-    fn search_act_history(&self, query: String, limit: u32) -> Result<Value, AslError> {
+    fn search_act_history(
+        &self,
+        query: String,
+        limit: u32,
+        cursor: Option<String>,
+    ) -> Result<Value, AslError> {
         let now = i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidPolicyState)?;
         let store = asl_store::open_store_read_only(&self.state_database)?;
-        let live_rows = store.search_act_history(now, &query, limit)?.into_iter();
-        let mut entries = Vec::new();
-        let mut seen = BTreeMap::new();
+        let archive_rows = store.search_act_history_archive(now, &query, MAX_ACT_HISTORY_ROWS)?;
+        let live_rows = store.search_act_history(now, &query, MAX_ACT_HISTORY_ROWS)?;
+        let query_hash = history_query_hash(&query);
+        let cursor = cursor
+            .as_deref()
+            .map(|value| parse_history_cursor(value, query_hash))
+            .transpose()?;
+        let mut hits = BTreeMap::new();
+        for row in archive_rows {
+            hits.insert(
+                (row.conversation_id.clone(), row.act_id),
+                HistorySearchHit {
+                    conversation_id: row.conversation_id,
+                    act_id: row.act_id,
+                    mls_epoch: None,
+                    direction: row.direction,
+                    act_kind: row.act_kind,
+                    causal_root: None,
+                    reply_to: None,
+                    body: None,
+                    ranking: row.ranking,
+                    score: row.score,
+                    received_at_ms: row.received_at_ms,
+                    expires_at_ms: row.expires_at_ms,
+                    source: "semantic_index",
+                },
+            );
+        }
         for row in live_rows {
-            seen.insert((row.conversation_id.clone(), row.act_id), ());
-            entries.push({
-                json!({
-                    "conversation_id": row.conversation_id,
-                    "act_id": alloy_primitives::hex::encode(row.act_id),
-                    "mls_epoch": row.mls_epoch,
-                    "direction": row.direction.as_str(),
-                    "act_kind": row.act_kind,
-                    "causal_root": alloy_primitives::hex::encode(row.causal_root),
-                    "reply_to": row.reply_to.map(alloy_primitives::hex::encode),
-                    "body": row.body,
-                    "received_at_ms": row.created_at_ms,
-                    "expires_at_ms": row.expires_at_ms,
-                    "source": "live_history",
-                })
-            });
+            hits.insert(
+                (row.conversation_id.clone(), row.act_id),
+                HistorySearchHit {
+                    conversation_id: row.conversation_id,
+                    act_id: row.act_id,
+                    mls_epoch: Some(row.mls_epoch),
+                    direction: row.direction,
+                    act_kind: row.act_kind,
+                    causal_root: Some(row.causal_root),
+                    reply_to: row.reply_to,
+                    body: row.body,
+                    ranking: row.ranking,
+                    score: row.score,
+                    received_at_ms: row.created_at_ms,
+                    expires_at_ms: row.expires_at_ms,
+                    source: "live_history",
+                },
+            );
         }
-        let remaining = limit.saturating_sub(u32::try_from(entries.len()).unwrap_or(limit));
-        if remaining > 0 {
-            for row in store.search_act_history_archive(now, &query, remaining)? {
-                if seen
-                    .insert((row.conversation_id.clone(), row.act_id), ())
-                    .is_some()
-                {
-                    continue;
-                }
-                entries.push(json!({
-                    "conversation_id": row.conversation_id,
-                    "act_id": alloy_primitives::hex::encode(row.act_id),
-                    "direction": row.direction.as_str(),
-                    "act_kind": row.act_kind,
-                    "body": Value::Null,
-                    "semantic_score": row.score,
-                    "received_at_ms": row.received_at_ms,
-                    "expires_at_ms": row.expires_at_ms,
-                    "source": "semantic_index",
-                }));
-            }
-        }
+        let hits = hits.into_values().collect::<Vec<_>>();
+        let requested = usize::try_from(limit).map_err(|_| AslError::InvalidMessage)?;
+        let (hits, has_more, next_cursor) =
+            page_history_hits(hits, query_hash, requested, cursor.as_ref());
+        let entries = hits.into_iter().map(history_hit_json).collect::<Vec<_>>();
         Ok(json!({
             "query": query,
             "limit": limit,
+            "ranking": "lexical_overlap_v1",
+            "has_more": has_more,
+            "next_cursor": next_cursor,
             "entries": entries,
         }))
     }
@@ -1813,4 +1994,81 @@ fn check_letter_target(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(
+        score: u32,
+        term_weight: u32,
+        received_at_ms: i64,
+        name: &str,
+        id: u8,
+    ) -> HistorySearchHit {
+        HistorySearchHit {
+            conversation_id: name.into(),
+            act_id: [id; 32],
+            mls_epoch: None,
+            direction: ActDirection::In,
+            act_kind: 1,
+            causal_root: None,
+            reply_to: None,
+            body: None,
+            ranking: ActHistoryRanking {
+                matched_terms: 2,
+                query_terms: 2,
+                term_weight,
+            },
+            score,
+            received_at_ms,
+            expires_at_ms: received_at_ms + 1_000,
+            source: "semantic_index",
+        }
+    }
+
+    fn sample_hits() -> Vec<HistorySearchHit> {
+        vec![
+            hit(1_000_004, 4, 100, "a", 1),
+            hit(3_000_013, 13, 300, "c", 3),
+            hit(2_000_013, 13, 200, "b", 2),
+        ]
+    }
+
+    fn key(hit: &HistorySearchHit) -> (String, [u8; 32]) {
+        (hit.conversation_id.clone(), hit.act_id)
+    }
+
+    #[test]
+    fn history_cursor_pages_are_stable_and_do_not_repeat_entries() {
+        let query_hash = [9; 16];
+        let (first_page, has_more, next_cursor) =
+            page_history_hits(sample_hits(), query_hash, 2, None);
+        assert!(has_more);
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|hit| hit.conversation_id.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "b"]
+        );
+        let next_cursor = next_cursor.unwrap();
+        assert!(parse_history_cursor(&next_cursor, [8; 16]).is_err());
+        let cursor = parse_history_cursor(&next_cursor, query_hash).unwrap();
+        let (second_page, has_more, next_cursor) =
+            page_history_hits(sample_hits(), query_hash, 2, Some(&cursor));
+        assert!(!has_more);
+        assert!(next_cursor.is_none());
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].conversation_id, "a");
+
+        let first_keys = first_page.iter().map(key).collect::<Vec<_>>();
+        assert!(
+            second_page
+                .iter()
+                .map(key)
+                .all(|key| !first_keys.contains(&key))
+        );
+    }
 }

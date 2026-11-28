@@ -67,6 +67,7 @@ mod auto_reply_evidence;
 mod avatar_download;
 mod bindings;
 mod contact_invites;
+mod contact_policy_sync;
 mod dht_cache;
 mod directory;
 #[cfg(windows)]
@@ -127,6 +128,8 @@ pub struct Supervisor {
     directory_renewal_retry_at: Instant,
     contact_bindings: bindings::ContactBindingRuntime,
     contact_invites: contact_invites::ContactInviteRuntime,
+    contact_policy_sync: contact_policy_sync::ContactPolicySyncRuntime,
+    pake: pairing::PakeRuntime,
     resource_providers: resource_providers::ResourceProviderRuntime,
     dht_restore: dht_cache::DhtRestoreRuntime,
     pending_disconnects: PendingDisconnects,
@@ -248,6 +251,8 @@ impl Supervisor {
             directory_renewal_retry_at: Instant::now(),
             contact_bindings: bindings::ContactBindingRuntime::default(),
             contact_invites: contact_invites::ContactInviteRuntime::default(),
+            contact_policy_sync: contact_policy_sync::ContactPolicySyncRuntime::default(),
+            pake: pairing::PakeRuntime::default(),
             resource_providers: resource_providers::ResourceProviderRuntime::default(),
             dht_restore: dht_cache::DhtRestoreRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
@@ -1427,6 +1432,7 @@ impl Supervisor {
                 self.poll_contact_invites()?;
                 self.poll_resource_providers()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
+                self.poll_contact_policy_sync(now, unix_time_ms()?)?;
                 self.poll_onboarding_directory_publication(now);
                 self.pump_dht_restore()?;
                 tick(&mut self)?;
@@ -1474,6 +1480,24 @@ impl Supervisor {
             let event = match message {
                 IpcMessage::Pong { nonce } => {
                     self.net.acknowledge_pong(nonce)?;
+                    continue;
+                }
+                IpcMessage::OperationAccepted { operation_id }
+                    if self.handle_contact_policy_sync_response(
+                        operation_id,
+                        true,
+                        Instant::now(),
+                    ) =>
+                {
+                    continue;
+                }
+                IpcMessage::OperationFailed { operation_id, .. }
+                    if self.handle_contact_policy_sync_response(
+                        operation_id,
+                        false,
+                        Instant::now(),
+                    ) =>
+                {
                     continue;
                 }
                 IpcMessage::OperationAccepted { operation_id }
@@ -1625,6 +1649,15 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
+            if let AdmittedNetworkEvent::DhtRecordAvailable {
+                agent_id,
+                kind,
+                record,
+                ..
+            } = &event
+            {
+                self.observe_contact_policy_record(*agent_id, *kind, record, unix_time_ms()?);
+            }
             if let Some((key, true)) = self
                 .resource_providers
                 .observe_resource_provider_event(&event)
@@ -1666,6 +1699,9 @@ impl Supervisor {
             self.observe_contact_invite_operation(&event);
             self.profile_signing
                 .observe_remote_record(self.agent_identity.agent_id(), &event);
+            if self.handle_pake_event(&event, unix_time_ms()?)? {
+                continue;
+            }
             match self.handle_contact_invite_event(&event, unix_time_ms()?) {
                 Ok(Some(command)) => self.send_network_command(command)?,
                 Ok(None) => {}

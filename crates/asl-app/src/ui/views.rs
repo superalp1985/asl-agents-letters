@@ -1092,6 +1092,66 @@ fn contacts(
             ));
         }
     });
+    ui.horizontal_wrapped(|ui| {
+        let mut sync_authorized = data.contact_policy_sync_authorized;
+        if ui
+            .add_enabled(
+                actions_enabled && action.is_none(),
+                egui::Checkbox::new(
+                    &mut sync_authorized,
+                    ui_text(
+                        language,
+                        "允许同一 Agent 的加密策略同步",
+                        "Allow encrypted policy sync from this Agent's devices",
+                    ),
+                ),
+            )
+            .on_hover_text(ui_text(
+                language,
+                "只接受根签名且 revision 更高的密文策略；联系人 ID 和来源规则不会以明文进入 DHT。",
+                "Only root-signed encrypted policies with a higher revision are accepted. Contact IDs and source rules never enter the DHT as plaintext.",
+            ))
+            .changed()
+            && action.is_none()
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [
+                    OsString::from("policy-sync"),
+                    OsString::from(if sync_authorized { "on" } else { "off" }),
+                ],
+            ));
+        }
+        ui.weak(format!(
+            "{} {}",
+            ui_text(language, "策略 revision:", "Policy revision:"),
+            data.contact_policy_revision
+        ));
+        if !data.contact_policy_revoked
+            && ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(ui_text(language, "撤销策略", "Revoke policy")),
+                )
+                .clicked()
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy-revoke")],
+            ));
+        } else if ui
+            .add_enabled(
+                actions_enabled && action.is_none(),
+                egui::Button::new(ui_text(language, "恢复逐次确认", "Restore review")),
+            )
+            .clicked()
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy-restore")],
+            ));
+        }
+    });
     ui.label(
         RichText::new(ui_text(
             language,

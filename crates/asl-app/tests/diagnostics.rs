@@ -69,6 +69,16 @@ fn diagnostics_cli_exports_only_the_local_summary_and_never_replaces_an_output()
                 "relay_only": true,
                 "configured_relays": 2,
                 "reserved_relays": 0,
+                "listening_endpoints": 0,
+                "reachability": "unreported",
+                "reachability_confidence": 0,
+                "public_entry": false,
+                "direct_routes": 0,
+                "hole_punched_routes": 0,
+                "relayed_routes": 0,
+                "negotiating_routes": 0,
+                "failed_routes": 0,
+                "last_route_failure": null,
                 "observed_at_ms": report["last_network_report"]["observed_at_ms"]
             },
             "counts": {

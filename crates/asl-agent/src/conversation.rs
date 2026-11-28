@@ -384,7 +384,11 @@ fn frame_metadata(
         | WireFrame::ContextRequest(_)
         | WireFrame::ContextOffer(_)
         | WireFrame::ContextAgreement(_)
-        | WireFrame::ContextExpression(_) => None,
+        | WireFrame::ContextExpression(_)
+        | WireFrame::PakeStart(_)
+        | WireFrame::PakeAnswer(_)
+        | WireFrame::PakeConfirm(_)
+        | WireFrame::PakeReceipt(_) => None,
     }
 }
 

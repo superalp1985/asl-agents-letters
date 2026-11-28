@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use asl_groups::membership::{read_group_message, sync_epoch_binding};
 use asl_net::transport::REQUEST_TIMEOUT;
-use asl_store::{Store, group_state::RoomVersion};
+use asl_store::{Store, group_access::GroupAdminCapabilityKind, group_state::RoomVersion};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
@@ -17,8 +17,9 @@ use super::{
 use crate::profile::admission::fresh_id;
 
 impl CoreAdmission {
-    /// Stage a creator-local removal. No network or model message calls this
-    /// method. The target need not still have a live certificate.
+    /// Stage a removal by the current policy owner or a delegated member
+    /// administrator. No network or model message calls this method. The
+    /// target need not still have a live certificate.
     pub(crate) fn remove_local_mls_member(
         &mut self,
         store: &mut Store,
@@ -38,8 +39,20 @@ impl CoreAdmission {
             .room_evidence(directories, now_ms)
             .load_sealed_room(store, wire_id)?
             .ok_or(AslError::PolicyDenied)?;
-        if room.creator != self.local_hello.peer_id
-            || room.creator_index != room.group.own_leaf_index()
+        if room.group.own_leaf_index() == room.creator_index
+            && self.local_hello.peer_id != room.creator
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let owner = store
+            .group_access_owner(wire_id)?
+            .ok_or(AslError::PolicyDenied)?;
+        if owner != self.local_hello.peer_id
+            && !store.group_admin_has_capability(
+                &room.local_id,
+                &self.local_hello.peer_id,
+                GroupAdminCapabilityKind::ManageMembers,
+            )?
         {
             return Err(AslError::PolicyDenied);
         }
@@ -49,7 +62,7 @@ impl CoreAdmission {
             .find(|leaf| &leaf.certificate.peer_id == target)
             .map(|leaf| leaf.member.index)
             .ok_or(AslError::NotFound)?;
-        room.removal_target(index, &room.creator)?;
+        room.removal_target(index, &owner)?;
         let base = sync_epoch_binding(&room.group, room.provider.crypto())?;
         let (commit, welcome, _) = room
             .group
@@ -79,6 +92,7 @@ impl CoreAdmission {
             MemberChange::Remove(index),
             CommitProgress {
                 wire_id,
+                committer: self.local_hello.peer_id.clone(),
                 base,
                 ciphertext,
                 from: None,
@@ -93,9 +107,18 @@ impl SealedRoom {
     pub(super) fn removal_target(
         &self,
         index: LeafNodeIndex,
-        source: &PeerId,
+        protected: &PeerId,
     ) -> Result<&PeerId, AslError> {
-        if index == self.creator_index || index == self.group.own_leaf_index() {
+        let protected_index = self
+            .leaves
+            .iter()
+            .find(|leaf| &leaf.certificate.peer_id == protected)
+            .map(|leaf| leaf.member.index)
+            .ok_or(AslError::PolicyDenied)?;
+        if index == protected_index
+            || index == self.creator_index
+            || index == self.group.own_leaf_index()
+        {
             return Err(AslError::PolicyDenied);
         }
         let removed = self
@@ -104,7 +127,7 @@ impl SealedRoom {
             .find(|leaf| leaf.member.index == index)
             .map(|leaf| &leaf.certificate.peer_id)
             .ok_or(AslError::PolicyDenied)?;
-        if removed == source {
+        if removed == protected {
             return Err(AslError::PolicyDenied);
         }
         Ok(removed)

@@ -6,7 +6,8 @@
 
 control-frame = hello / query / answer / offer / fetch-request /
                 fetch-grant / error / ack / profile / fetch-pending / expression-letter /
-                context-request / context-offer / context-agreement / context-expression
+                context-request / context-offer / context-agreement / context-expression /
+                pake-start / pake-answer / pake-confirm / pake-receipt
 identity-proof-frame = identity-proof-request / identity-proof
 pairing-frame = pairing-invite / pairing-exchange
 group-frame = group-envelope
@@ -378,7 +379,22 @@ pairing-invite = {
   5: time-ms,
   6: hash32,
   7: signature65,
-  8: tstr .size (0..480)
+  8: tstr .size (0..480),
+  ? 9: contact-provenance
+}
+
+contact-provenance = shared-group-provenance / recent-interaction-provenance
+
+shared-group-provenance = {
+  0: 1,
+  1: hash32,
+  2: uint
+}
+
+recent-interaction-provenance = {
+  0: 2,
+  3: id128,
+  4: time-ms
 }
 
 pairing-exchange = {
@@ -391,6 +407,56 @@ pairing-exchange = {
   6: signature65,
   7: hash32,
   8: bool
+}
+
+pake-share = bstr .size 33
+
+pake-start = {
+  0: 1,
+  1: 20,
+  2: id128,
+  3: agent-id,
+  4: agent-id,
+  5: peer-id,
+  6: peer-id,
+  7: time-ms,
+  8: 6 / 12,
+  9: pake-share,
+  10: signature65
+}
+
+pake-answer = {
+  0: 1,
+  1: 21,
+  2: id128,
+  3: agent-id,
+  4: agent-id,
+  5: peer-id,
+  6: peer-id,
+  7: pake-share,
+  8: hash32,
+  9: signature65
+}
+
+pake-confirm = {
+  0: 1,
+  1: 22,
+  2: id128,
+  3: agent-id,
+  4: agent-id,
+  5: hash32,
+  6: signature65
+}
+
+pake-receipt = {
+  0: 1,
+  1: 23,
+  2: id128,
+  3: agent-id,
+  4: agent-id,
+  5: bool,
+  6: hash32,
+  7: signature65
 }
 
 group-envelope = {
@@ -426,11 +492,12 @@ group-invite-request = [1, 9, agent-id, peer-id, time-ms]
 ; and cross-field rules are normative in docs/03-protocol.md.
 
 ; T13 signed records: complete canonical envelope <= 8192 bytes.
-; Lifetimes satisfy 0 <= issued < expires <= i64::MAX and expires-issued <= 1800000.
+; Lifetimes satisfy 0 <= issued < expires <= i64::MAX. Kinds 1/2/3 have
+; lifetime <= 1800000 ms; kind 4 ContactPolicy has lifetime <= 86400000 ms.
 ; Outer sequence is independent of registry sequence; profile sequence and owner
 ; must equal the envelope sequence and owner. Every payload owner must match.
 signed-record = signed-profile-record / signed-device-directory-record /
-                signed-short-code-record
+                signed-short-code-record / signed-contact-policy-record
 signed-profile-record = {
   0: 1,
   1: 1,
@@ -461,6 +528,16 @@ signed-short-code-record = {
   6: bstr .cbor short-code-claim,
   7: signature65
 }
+signed-contact-policy-record = {
+  0: 1,
+  1: 4,
+  2: agent-id,
+  3: uint .ge 1,
+  4: time-ms,
+  5: time-ms,
+  6: bstr .cbor contact-policy-envelope,
+  7: signature65
+}
 
 ; Devices are strictly ordered by raw PeerId, with unique PeerIds and serials.
 ; Certificate owners match the directory; existing certificate TTL rules apply.
@@ -480,4 +557,15 @@ short-code-claim = {
   0: 1,
   1: agent-id,
   2: uint .le 9999999999999999
+}
+
+; The ciphertext is produced with a key derived from the Agent root secret
+; and is never a plaintext contact list or source-rule document.
+contact-policy-envelope = {
+  0: 1,
+  1: agent-id,
+  2: uint .ge 1,
+  3: bstr .size 32,
+  4: bstr .size (1..4096),
+  5: bool
 }
