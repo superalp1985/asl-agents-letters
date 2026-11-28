@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-date-epoch", required=True, type=int)
+    parser.add_argument("--component-name", default="asl-infra")
+    parser.add_argument("--runtime-label", default="infrastructure")
     parser.add_argument("--offline", action="store_true")
     return parser.parse_args()
 
@@ -151,7 +153,7 @@ def main() -> int:
     )
 
     lines = [
-        "ASL Linux infrastructure runtime dependencies",
+        f"ASL Linux {args.runtime_label} runtime dependencies",
         "ASL project code is licensed under the repository MIT license.",
         "MPL-SOURCES.zip contains original crate archives for MPL-2.0 components.",
     ]
@@ -179,7 +181,7 @@ def main() -> int:
         }
         if package.get("license"):
             component["licenses"] = [{"expression": package["license"]}]
-        if package.get("source", "").startswith("registry+"):
+        if (package.get("source") or "").startswith("registry+"):
             component["purl"] = f'pkg:cargo/{package["name"]}@{package["version"]}'
         if package.get("checksum"):
             component["hashes"] = [
@@ -214,7 +216,7 @@ def main() -> int:
         "metadata": {
             "component": {
                 "type": "application",
-                "name": "asl-infra",
+                "name": args.component_name,
                 "version": args.version,
                 "licenses": [
                     {"expression": application.get("license") or "MIT"}

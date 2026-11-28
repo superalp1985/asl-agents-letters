@@ -22,7 +22,6 @@ use crate::{
 pub(crate) use admission::MAX_ADMISSION_CONNECTIONS;
 pub(crate) use admission::fresh_id;
 pub use admission::{AdmissionBatch, AdmittedNetworkEvent, CoreAdmission};
-#[cfg(windows)]
 pub use admission::{
     MlsApplicationDispatch, MlsApplicationReceive, MlsApplicationSendToConnection, MlsInviteSend,
     MlsJoinSend, MlsNetworkOutcome, ReconciledMlsRoom,

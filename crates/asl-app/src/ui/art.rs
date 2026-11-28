@@ -2,16 +2,17 @@ use eframe::egui::{self, ColorImage, IconData, TextureHandle, TextureOptions};
 
 const ICON_256: &[u8] = include_bytes!("../../assets/icons/asl-icon-256.png");
 const MASCOT_IDLE_256: &[u8] = include_bytes!("../../assets/mascot/mascot-idle-256.png");
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const TRAY_PNG: &[u8] = include_bytes!("../../assets/icons/asl-icon-32.png");
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[repr(align(4))]
 struct AlignedTrayPng([u8; TRAY_PNG.len()]);
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 static TRAY_ICON: AlignedTrayPng =
     AlignedTrayPng(*include_bytes!("../../assets/icons/asl-icon-32.png"));
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(super) fn tray_icon() -> &'static [u8] {
     &TRAY_ICON.0
 }

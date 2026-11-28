@@ -1,6 +1,6 @@
 # 修订计划：结构化控制 + 加密自然语言、按性能伸缩的群聊与不限次交流
 
-状态：第 7 版实现基线（2026-11-28）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 用于表达式信件，ASL/1.2 用于签名语义上下文，ASL/1.3 增加 `act-nl`，ASL/1.4 增加签名 shard binding/forward；当前存储 schema 为 v49。v46 增加联系人策略动作与固定期限交互证据，v47 曾增加逻辑群唯一 Agent 成员视图，v48 用代码内递归查询取代持久视图，v49 增加加密 shard-forward outbox。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、持久复合预算、libp2p AutoNAT/DCUtR/relay、Core act/Policy 路由、opaque 邮箱、群策略、逐文件权限和管理员能力已经落地。普通邀请自动选择或创建独立子 MLS 群，根策略逐子群提交并返回部分结果；跨 shard 应用由逻辑群主根签名证明来源，各子群分别加密并可持久重试。文件 Offer/Fetch 现在携带可选的逻辑根和源 shard 元数据，使跨 shard 的文档授权路径可回到源 shard；文件字节仍要求双方建立直接认证传输。管理员能力按 `manage-members`/`manage-files`/`manage-invites` 分片。真实两设备重启补收、512/2,000/10,000 跨机矩阵、公网 NAT/relay 和链上部署仍未验收。
+状态：第 9 版实现基线（2026-11-28）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 用于表达式信件，ASL/1.2 用于签名语义上下文，ASL/1.3 增加 `act-nl`，ASL/1.4 增加签名 shard binding/forward；当前存储 schema 为 v50。v46 增加联系人策略动作与固定期限交互证据，v47 曾增加逻辑群唯一 Agent 成员视图，v48 用代码内递归查询取代持久视图，v49 增加加密 shard-forward outbox，v50 增加 Fetch owner-relay、精确 owner-reply 和持久 relay 映射。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、持久复合预算、libp2p AutoNAT/DCUtR/relay、Core act/Policy 路由、opaque 邮箱、群策略、逐文件权限和管理员能力已经落地。普通邀请自动选择或创建独立子 MLS 群，根策略逐子群提交并返回部分结果；跨 shard 应用由逻辑群主根签名证明来源，各子群分别加密并可持久重试。跨 shard FetchRequest 在 owner 离线时保留已加密 pending 帧，FetchGrant/FetchPending 只定向回真实请求设备的认证连接；文件字节仍要求双方建立直接认证传输。Remove Commit 由当前策略 owner 提交，具备 `manage-members` 的管理员请求由 owner 自动复核执行。真实两设备重启补收、512/2,000/10,000 跨机矩阵、公网 NAT/relay 和链上部署仍未验收。
 
 ## 0. 决策记录（2026-11-25）
 
@@ -370,13 +370,13 @@ v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_ac
 
 当前实现状态以代码、README、`docs/06-implementation-plan.md` 恢复点和 `docs/07-testing-release.md` 为准：
 
-- 代码闭环：严格确定性 CBOR、ASL/1.1/1.2 语义路径、ASL/1.3 act、ASL/1.4 shard binding/forward、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v49、OpenMLS 群房间、根群策略/子群策略传播、逐文件权限、能力分层管理员、群移除审批、MCP 群管理、复合预算、AutoNAT/DCUtR/relay、p2p/gossipsub、DHT 持久化及 Core act/Policy 路径。
+- 代码闭环：严格确定性 CBOR、ASL/1.1/1.2 语义路径、ASL/1.3 act、ASL/1.4 shard binding/forward、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v50、OpenMLS 群房间、根群策略/子群策略传播、逐文件权限、能力分层管理员、群移除审批、MCP 群管理、复合预算、AutoNAT/DCUtR/relay、p2p/gossipsub、DHT 持久化及 Core act/Policy 路径。
 - 待统一验收：两人 MLS、群操作、AutoNAT/DCUtR、DHT 密文邮箱、多子 MLS 创建/分配、跨 shard 转发、群策略、文件 Offer/Fetch 和迁移编排均需在当前工作树统一执行本机/容器测试；不能沿用先前提交的通过记录代替本轮结果。
 - 待真实外部环境：两设备重启补收、512/2,000/10,000 跨机矩阵、公网 NAT/relay、真实链 RPC/部署、72 小时运行和独立安全审计仍未完成。MLS 私钥不随身份迁移；新设备必须重新入群。
 
 代码层剩余：
 
-- 联系人来源规则目前使用本机共享群和近期真实交互证据；远端签名的来源记录、多设备在线策略同步尚未实现。
+- 联系人来源规则使用本机共享群和近期真实交互证据；远端声明只有根签名 provenance，且仍由本机证据复核。同一 AgentId 多设备策略已通过根签名加密 DHT 记录自动同步并确定性收敛，真实双机时延和并发仍待外部验收。
 
 已完成的收尾代码：
 

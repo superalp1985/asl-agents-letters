@@ -461,11 +461,11 @@ T18 Public provider 查询集中验收（2026-11-20，Windows x64，Rust 1.100.0
 
 ### T18a — 数字短码与签名邀请配对
 
-依赖 T06、T14、T17。创建 `asl-net/src/pairing`、签名邀请验证和本地联系人 pin 存储。持久 16 位短码只查询候选；候选通过 CoreAdmission 与链验证后再以 AgentId 匹配。首次配对使用目标绑定、身份根签名、至少 256-bit 随机 nonce 和短时效邀请；必须经过本机授权，成功只创建本地 AgentId pin，不写入资源授权。低熵口令 PAKE 暂不启用，除非有与目标 RFC 和当前 crate 版本对应的安全审计/规范一致性证据。
+依赖 T06、T14、T17。创建 `asl-net/src/pairing`、签名邀请验证和本地联系人 pin 存储。持久 16 位短码只查询候选；候选通过 CoreAdmission 与链验证后再以 AgentId 匹配。首次配对使用目标绑定、身份根签名、至少 256-bit 随机 nonce 和短时效邀请；必须经过本机授权，成功只创建本地 AgentId pin，不写入资源授权。低熵短码路径只使用稳定版 `spake2 0.4.0` 的一次性 6/12 位 PAKE，不自行实现密码协议；该依赖没有独立安全审计，必须保持短时效、单会话、在线尝试限制和明确风险说明。
 
 验收：持久短码碰撞保留多个候选，错误 AgentId 不匹配；伪造签名、错误目标、过期邀请和 transcript/PeerId 不匹配拒绝；邀请回执持久化且不可重放；配对成功只建立本地 AgentId pin，不隐式扩大目录授权。
 
-T18a 配对核心切片（2026-11-20）：新增有界短码 provider 候选集与 CoreAdmission 后 AgentId 派生码过滤；新增 256-bit 随机、目标绑定、身份根签名邀请及针对双方 PeerId 的响应 transcript 签名；只有显式 `PairingAuthorization::Approve` 可接受邀请。SQLite schema v6 新增与 `authorized_contacts` 隔离的 `paired_contacts` 和一次性邀请回执，接受邀请只 pin AgentId，不创建资源 grant。低熵 PAKE 未加入，尚无满足本任务证据门槛的依赖决定。
+T18a 配对核心切片（2026-11-20）：新增有界短码 provider 候选集与 CoreAdmission 后 AgentId 派生码过滤；新增 256-bit 随机、目标绑定、身份根签名邀请及针对双方 PeerId 的响应 transcript 签名；只有显式 `PairingAuthorization::Approve` 可接受邀请。SQLite schema v6 新增与 `authorized_contacts` 隔离的 `paired_contacts` 和一次性邀请回执，接受邀请只 pin AgentId，不创建资源 grant。低熵 PAKE 当时未加入；2026-11-28 已增加独立 short-code PAKE 控制帧和 `spake2 0.4.0` 路径，原签名邀请仍保留。
 
 T18a 配对 request-response 接线与提示限流（2026-11-20）：邀请和接受/拒绝响应已接入 `/asl/pair/1.0.0`、Net/Core IPC、Supervisor admission 流程。邀请可附一条签名覆盖的可选单句说明，最多 120 个 Unicode 字符；提示记录升级到 SQLite schema v7，按 AgentId 每 24 小时最多展示 1 次，全机每小时最多展示 20 次，最多 5 个并行待处理提示。超限邀请签名拒绝且不 pin；回答命令必须精确匹配当前待处理邀请、连接和响应句柄。完整配对 GUI 仍未实现，本轮不声明端到端 UI 已完成。
 

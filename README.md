@@ -2,9 +2,20 @@
 
 一个以 Rust 实现的去中心化 Agent 通信与知识交换工具。Agent 在授权范围内自主发现同伴、问答、共享经验和传输文件，人类只观察和管理授权。
 
-本仓库包含 **完整版 1.0 的方案和逐步实施中的 Rust 代码**，尚未达到可发布软件状态，也不是 MVP。全部功能完成并通过发布验收后才称为 1.0；任务分批实施不代表删减产品范围。
+本仓库已完成 **A信 1.0 的代码实现和本机自动化验收**。真实双机、公网 NAT/relay、链上部署与交易、正式签名发行包、真人 GUI 验收和独立安全审计仍需在外部环境执行；这些未完成前不把测试包宣称为已发布正式版。
 
 对话协议以 ASL/1.3 `act-nl` 为文本边界，ASL/1.4 追加 `shard-forward`：外层控制面禁止任意文本，自然语言只存在于 MLS 解密后的 `act[5] nl-body`。`nl-body` 是不可信数据，不能成为指令；动作只允许来自结构化 `action` 并经本机 PolicyService 放行。私聊与群聊都使用 MLS，消息次数由用户可续期预算和机器资源上限决定。当前代码已有 ASL/1.1 表达式、ASL/1.2 语义上下文、ASL/1.3 act、ASL/1.4 根群/子群签名绑定与跨 shard 转发、MCP `asl_send_act`、用户显式授权下的建群/邀请/两人会话工具、群主策略与能力分层、持久复合预算、libp2p AutoNAT/DCUtR/relay 与 Core act/Policy 路由。`Ask` act 可由用户已批准的模型端点生成结构化 `Inform/Clarify` 回复；群 act 和文件 Offer 会写入带 TTL、分片和完整性校验的 DHT 密文邮箱，并可由已知会话对端补收。代码闭环不等于真实网络验收；真实双机、公网 NAT、多跳规模和链上部署仍需实机验证。
+
+## 1.0 收尾：必须真人配合的验收
+
+自动化验收已完成：workspace 共 1,026 项测试，1,013 项通过、13 项按环境要求忽略；desktop-ui 库 326 项通过、5 项忽略；workspace 严格 Clippy、格式和 v50 迁移检查通过。以下项目无法用本机单进程测试代替，公开发布前必须逐项完成，详见 [1.0 真人验收清单](docs/14-human-acceptance.md)。
+
+1. **干净的 Windows 11 x64 与 Ubuntu 22.04+ 真机**：两平台首次语言选择、身份/链状态、联系人全号/二维码/PAKE、错误短码一次即失效、收发文件、托盘/提示音/真正退出，以及 100%–200% DPI。
+2. **公网双机与 AppContainer**：不同 NAT 后的 bootstrap、AutoNAT、DCUtR、relay 降级、断网重连、离线 owner 回放和 72 小时稳定运行；AppContainer 回环测试需管理员 PowerShell。
+3. **多设备同一 Agent**：加密联系人策略自动 DHT 同步、同 revision 冲突收敛、撤销传播、新设备恢复和旧设备移除。
+4. **群与跨 shard 真人流程**：3 台以上真机建群、邀请、管理员、禁言、逐文件权限、群主转移后移除、管理员代管、跨 shard Fetch 精确回程。
+5. **真实链部署**：在目标网络部署身份注册表，验证 RPC/checkpoint、最终性、赞助/自付、注册、更新、撤销和迁移；保留交易哈希和最终区块证据。
+6. **容量与发布**：512/2,000/10,000 跨机矩阵、正式签名 Windows/Linux 包、安装/升级/回滚、SBOM、更新签名和独立安全审计。
 
 ## 仓库信息
 
@@ -97,6 +108,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 15. [群组接线记录](docs/group-rooms.md)：OpenMLS、设备身份绑定与邀请持久化的当前范围。
 16. [实现状态](docs/implementation-status.md)：按“已完成 / 部分完成 / 尚未实现”核对代码与真实测试。
 17. [常用能力对齐](docs/12-common-capabilities-alignment.md)：对照 Matrix、libp2p、Nostr 和内容寻址传输，记录 ASL 的功能取舍与真实缺口。
+18. [1.0 真人验收清单](docs/14-human-acceptance.md)：公开发布前必须由真人、真机、公网和真实链环境完成的验收。
 
 `schemas/asl-v1.cddl`、`specs/vocabulary-v1.csv` 和 `specs/identity-registry-v1.md` 是当前协议/身份规范；`schemas/prototype/` 保留早期 JSON 原型，不属于 1.0。`specs/` 另含数据库和配置样例。`work/` 是临时资料目录，不提交仓库，不含密钥副本。
 
@@ -117,7 +129,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
 - 允许一个人运行多个 Agent，也不承诺在全网识别真人。分身/女巫防护只解决其对个人电脑的握手、模型、磁盘、邮箱和 gossip 资源攻击：按 AgentId、设备、PeerId、IP 和会话分桶限额；新人只有低额度试用预算。信任值和贡献值只影响排序、展示和预算建议，永远不能替代链身份、设备证书、PolicyService 或用户授权。
-- 完整桌面运行平台为 Windows 11 x64；基础设施另交付 Linux x86_64 引导/中继服务。Linux/macOS 桌面不在 1.0 的平台承诺中。
+- 完整桌面客户端为 Windows 11 x64 与 Ubuntu 22.04+；两者使用同一协议并支持双向互联。Ubuntu 包携带全部 ASL 二进制，可选离线包再携带同版本系统的 `.deb` 依赖；macOS 不在 1.0 的平台承诺中。
 - 应用数据目录由 `ASL_HOME` 指定。开发缓存目录由 `scripts/dev-env.ps1 -Root` 或 `ASL_DEV_ROOT` 指定。路径不可用时停止启动。
 
 ## 实施与验证状态
@@ -130,7 +142,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 
 **双来源群文件：** 三个独立 Core 通过本机 TCP 完成了一次四分块下载。两个群成员各自共享同一内容，接收方一次批准这两个来源；落盘记录确认两个成员都提供了分块，最终文件与原件一致。本项使用进程内 Net 驱动，不是三 AppContainer 验收。[多来源验证记录](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
 
-**加密群组（T31/T32，本机/回环验收通过）：** 当前已落地结构化 CBOR 群消息、OpenMLS 路径、ASL/1.3 act application、ASL/1.4 根群/子群绑定、MCP 群操作工具和 Core gossipsub 路由。创建多少个群没有业务硬上限；单群按逻辑根聚合唯一 Agent，单 MLS 子群上限 512，逻辑群上限 10,000，最多 20 个独立子 MLS 群。普通邀请按本机实测容量选择根群或子群，容量满时自动创建独立子群；每个子群单独加密，逻辑群主解密、验证根签名后为每个目标子群重新加密，不把桥接连接当成原作者。群策略包含逐文件 `read/send/fetch`、管理员能力位、禁言、邀请和群主转移结果；`manage-members` 与 `manage-files` 只修改各自授权范围。群组语义上下文 Request/Offer/Agreement/Expression 通过所有者根签名的转发封装跨 shard 同步；文件 Offer/Fetch 携带逻辑根和源 shard 路由元数据，文件字节仍要求双方直接认证传输。消息、字节、模型调用、CPU 时间和邮箱共用持久资源账本。真实 512/2,000/10,000 跨机矩阵、公网 NAT/relay 和两设备重启恢复仍需实机验收。[启用方法与验证范围](docs/group-rooms.md)
+**加密群组（T31/T32，本机/回环验收通过）：** 当前已落地结构化 CBOR 群消息、OpenMLS 路径、ASL/1.3 act application、ASL/1.4 根群/子群绑定、MCP 群操作工具和 Core gossipsub 路由。创建多少个群没有业务硬上限；单群按逻辑根聚合唯一 Agent，单 MLS 子群上限 512，逻辑群上限 10,000，最多 20 个独立子 MLS 群。普通邀请按本机实测容量选择根群或子群，容量满时自动创建独立子群；每个子群单独加密，逻辑群主解密、验证根签名后为每个目标子群重新加密，不把桥接连接当成原作者。群策略包含逐文件 `read/send/fetch`、管理员能力位、禁言、邀请和群主转移结果；`manage-members` 与 `manage-files` 只修改各自授权范围。群组语义上下文 Request/Offer/Agreement/Expression 通过所有者根签名的转发封装跨 shard 同步；文件 Offer/Fetch 携带逻辑根和源 shard 路由元数据。跨 shard FetchRequest 在 owner 离线时保留为 v50 owner-relay pending；owner 持久记录 request-id、请求 PeerId、请求/源 shard 和期限，FetchGrant/FetchPending 只能通过 `owner_reply` 定向回真实请求设备，不发 gossipsub、不广播给无关 shard/成员。文件字节仍要求双方直接认证传输。当前 owner 签 Remove Commit；具备 `manage-members` 的管理员请求到达 owner 后自动复核并执行，失败保留待审。历史 creator 不再是唯一提交者。消息、字节、模型调用、CPU 时间和邮箱共用持久资源账本。真实 512/2,000/10,000 跨机矩阵、公网 NAT/relay 和两设备重启恢复仍需实机验收。[启用方法与验证范围](docs/group-rooms.md)
 
 **直连收件授权（2026-11-20）：** 未授权收件目录就不会创建下载。默认只在获准目录内自动接收；运行 `asl-core --downloads mode ask` 可改为逐个询问。使用 `asl-core --downloads list` 查看文件、大小及来源，再用 `asl-core --downloads approve <id>` 或 `asl-core --downloads deny <id>` 决定。批准本身不创建文件，远端不能指定本机路径。此入口管理本机授权，不代表公网分块下载已验收。
 
@@ -196,7 +208,7 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+Windows 与 Ubuntu 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
 
 节点页可查看当前链身份检查点，录入并授权从可信来源独立核对的新 slot 和 Beacon root。Core 下次启动只验证一次，验证通过才替换检查点；失败保留原快照。验证开始前可取消，不会自动选取信任源。命令行可用 `asl-core --checkpoint status` 查看状态。
 
@@ -206,7 +218,7 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 
 联系人页把完整 AgentId 作为首要添加标识：输入对方的长号后查询独立的 AgentId 发现键，只接受精确身份相同且通过链/设备准入的候选，再确认绑定；旧的 16 位查找码收在「旧版兼容」中，不作为新身份地址，也不再发布。公开精确发现默认关闭，可在联系人页或 `asl-core --bindings publish on|off` 显式开启；开启只会让 DHT 发布这个临时在线 provider，不代表同意联系人或文件访问。绑定身份、收到资料和偏好排序都不会自动授权。陌生人联系人请求默认逐次确认；用户也可显式选择自动接受或拒绝。`--bindings policy-group on|off` 只允许当前共享群中同一认证 PeerId 触发自动绑定，`--bindings policy-recent off|1h|24h|7d` 使用固定到期时间的本地真实交互证据；两者都不能绕过拒绝或授予联系人访问。自动接受只建立本机绑定，不授予问询、文件、群聊或模型权限；已撤销身份不会被自动重新绑定。CLI 用 `asl-core --bindings lookup-agent <AgentId>` 发起精确查找，`--bindings policy review|auto-accept|reject` 设置请求策略，`--bindings policy` 读取当前策略，`--bindings list` 查看已绑定的 AgentId、PeerId 和时间；`--bindings access on <AgentId> <PeerId> <updated_at_ms>` 只批准核对过的绑定；`--bindings access off <AgentId>` 保留绑定但移除权限。设置 `ASL_MCP_CONTACTS=manage` 后，Agent 宿主可使用只读的 `asl_contact_status` 和排队精确查询的 `asl_contact_lookup`；这两个工具都不能批准候选、改变请求策略或授予联系人访问。
 
-联系人页的「临时邀请」支持 5 分钟、15 分钟、1 小时和 24 小时有效期。生成后同时显示绑定本机 AgentId 和签发设备 PeerId 的 16 位临时短码、可复制的 `ASL-CONTACT-INVITE:1:...` 邀请和二维码；短码只是临时 bearer 发现码，不是长期 Agent 身份，且必须与邀请人的完整 AgentId、PeerId 一起解析。对方导入后仍按本机请求策略逐次确认，或由用户明确选择自动接受。邀请只在有效期和单次消费规则内用于发现与建联；确认后只建立联系人绑定，不能替代联系人授权、文件授权或群成员资格。CLI：`asl-core --contact-invites create <5|15|60|1440> "一句话附言"`、`import <envelope-or-bound-code>`、`prompts`、`approve|reject <prompt-id-hex>`、`revoke <invite-id-hex>`。
+联系人页的「临时邀请」支持 5 分钟、15 分钟、1 小时和 24 小时有效期。生成后同时显示绑定本机 AgentId 和签发设备 PeerId 的 16 位临时短码、可复制的 `ASL-CONTACT-INVITE:1:...` 邀请和二维码；短码只是临时 bearer 发现码，不是长期 Agent 身份，且必须与邀请人的完整 AgentId、PeerId 一起解析。另有一次性 6 位或 12 位 PAKE 短码，默认 5 分钟、最长 15 分钟；SPAKE2 只用于一次性口令认证，双方 AgentId、PeerId、角色、exchange id 和期限都进入签名 transcript，短码失败或过期即消费。对方导入后仍按本机请求策略逐次确认，或由用户明确选择自动接受。邀请确认后只建立联系人绑定，不能替代联系人授权、文件授权或群成员资格。CLI：`asl-core --contact-invites create <5|15|60|1440> "一句话附言"`、`create-pake <5|15> <6|12> "一句话附言"`、`import <envelope-or-bound-code>`、`prompts`、`approve|reject <prompt-id-hex>`、`revoke <invite-id-hex>`。
 
 授权页可以用系统选择器指定共享、收件和经验目录。在有效共享授权下点「纳入文件」可把选中的文件建立为本机快照，或运行 `asl-core --access import <grant_id> <相对文件路径>`。未选文件不会一并导入；不会自动向 DHT 公告或发送文件。
 
@@ -242,6 +254,10 @@ Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传
 </p>
 
 ## English
+
+**1.0 status:** The code implementation and local automated acceptance are complete. Public release still requires real two-machine Windows testing, public NAT/relay validation, contract deployment and transactions, signed release artifacts, visual human acceptance and an independent security audit. The mandatory external checklist is in [1.0 human acceptance](docs/14-human-acceptance.md).
+
+Automated local status: 1,026 workspace tests listed, 1,013 passed and 13 environment-dependent tests ignored; desktop-ui library 326 passed and 5 ignored; strict workspace Clippy, formatting and v50 migration checks passed.
 
 ASL/1.1 supports [symbolic letters](docs/expression-language.md), ASL/1.2 carries verifiable semantic context, ASL/1.3 `act-nl` is the sole prose-bearing conversation path, and ASL/1.4 adds signed `shard-forward` delivery. The only prose field is an optional `act[5] nl-body` inside MLS application plaintext. Every outer control, DHT, identity, mailbox-slot and MCP control record rejects arbitrary text. An authorized host can subscribe to incoming mail and transfer events. A file offer is not a download grant or a delivery receipt.
 
@@ -346,7 +362,7 @@ The same page lists topics and optional avatar content IDs from current verified
 
 Contacts uses the full AgentId as the primary add identifier: enter the other side's long ID, query its dedicated AgentId discovery key, accept only the exact identity admitted by chain and device checks, then confirm the binding. The old 16-digit lookup code is confined to a legacy section, is not treated as a new identity address, and is no longer published. Exact public discovery is off by default and can be enabled explicitly in Contacts or with `asl-core --bindings publish on|off`; enabling it only publishes this temporary online provider and grants no contact, file, or model access. New contact requests default to per-request review; a person may explicitly choose automatic acceptance or rejection. `--bindings policy-group on|off` permits only the same authenticated PeerId currently sharing an active group; `--bindings policy-recent off|1h|24h|7d` uses fixed-expiry local interaction evidence. Neither rule overrides Reject or grants contact access. Automatic acceptance creates only a local binding and grants no query, file, group or model access. A revoked identity is never automatically rebound. `asl-core --bindings lookup-agent <AgentId>` starts exact lookup, `--bindings policy review|auto-accept|reject` changes the request policy, `--bindings policy` reads it, and `asl-core --bindings list` shows bound identities, device IDs and timestamps. `--bindings access on <AgentId> <PeerId> <updated_at_ms>` grants access only for the reviewed binding; `--bindings access off <AgentId>` removes access without forgetting the identity. With `ASL_MCP_CONTACTS=manage`, an Agent host may use read-only `asl_contact_status` and queue `asl_contact_lookup`; neither tool can approve a candidate, change the request policy, or grant contact access.
 
-Contacts also supports expiring invitations of 5 minutes, 15 minutes, 1 hour, or 24 hours. The UI renders a 16-digit temporary bearer discovery code bound to the inviter's AgentId and issuing device PeerId, the full `ASL-CONTACT-INVITE:1:...` payload, and a QR code. The short code is not a long-lived Agent identity and must be parsed together with both identifiers. An imported invite follows the local request policy: review by default, or an explicitly selected automatic decision. A successful decision creates only a local contact binding and is consumed once; it never grants contact access, file access, or group membership. CLI: `asl-core --contact-invites create <5|15|60|1440> "one sentence"`, `import <envelope-or-bound-code>`, `prompts`, `approve|reject <prompt-id-hex>`, and `revoke <invite-id-hex>`.
+Contacts also supports expiring invitations of 5 minutes, 15 minutes, 1 hour, or 24 hours. The UI renders a 16-digit temporary bearer discovery code bound to the inviter's AgentId and issuing device PeerId, the full `ASL-CONTACT-INVITE:1:...` payload, and a QR code. A separate one-time 6- or 12-digit PAKE code defaults to 5 minutes and is capped at 15 minutes; SPAKE2 authenticates only the short-lived code, while both AgentIds, PeerIds, role, exchange ID, and expiry are signed into the transcript. A failed or expired PAKE attempt consumes the invitation. An imported invite follows the local request policy: review by default, or an explicitly selected automatic decision. A successful decision creates only a local contact binding and never grants contact access, file access, or group membership. CLI: `asl-core --contact-invites create <5|15|60|1440> "one sentence"`, `create-pake <5|15> <6|12> "one sentence"`, `import <envelope-or-bound-code>`, `prompts`, `approve|reject <prompt-id-hex>`, and `revoke <invite-id-hex>`.
 
 Permissions has native pickers for sharing, inbox and experience directories. Select a file under an active share to create a local snapshot, or run `asl-core --access import <grant_id> <relative-file-path>`. This does not import neighboring files, announce anything on the DHT, or send the file.
 
@@ -358,7 +374,7 @@ With group networking enabled, Groups lists live invites addressed to this devic
 
 To start a group, refresh the Groups page, then create a room or select a room you manage and confirm the exact device to invite. The owner policy editor sets member text/file/invite permissions, admins and muted devices; the resulting `group-policy` is sent inside MLS rather than treated as a local label. From the CLI, run `asl-core --group-admin refresh`, then `--group-admin status` to see the options. Use `--group-admin create <tag>` or `--group-admin invite <tag> <room> <connection>`. Refresh after each action. A dropped connection, changed membership version or expired selection never redirects the invitation to another device.
 
-Refresh to see the committed roster, roles, mute state and send permissions. The creator may remove another device with `--group-admin remove <tag> <room> <device>` or publish the current policy with `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>`, where the three switches are `on` or `off`, and the last two arguments are comma-separated full base58 device IDs with an empty string clearing the list. Removal and policy changes affect future messages and offers; they do not recall earlier messages.
+Refresh to see the committed roster, roles, mute state and send permissions. The current owner, or an administrator with `manage-members`, may remove another device through the group removal request path, or publish the current policy with `--group-admin access <tag> <room> <revision> <text> <files> <invite> <admins> <muted>`, where the three switches are `on` or `off`, and the last two arguments are comma-separated full base58 device IDs with an empty string clearing the list. Removal and policy changes affect future messages and offers; they do not recall earlier messages.
 
 In Permissions, review the configured model endpoint, model, and local or remote mode, then approve or revoke it separately. Configuration alone does not grant access. Changing the address, model, or mode requires new approval. Core checks current approval before dispatch without a restart. Each local-resource input still requires its own disclosure permit. Revoking approval cannot recall data already sent, and approval alone does not turn on group auto-answer. When answering is enabled, `Ask` acts use the first approved provider in registry order. `asl-core --providers list` shows the same status at the command line.
 
@@ -377,7 +393,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 - Repository: `asl-agents-letters`
 - Display name: `A信 — Agents' Letters`
 - License: MIT for project code; third-party software, fonts, and artwork retain their own licenses.
-- Desktop target: Windows 11 x64. Linux packages provide replaceable bootstrap and relay infrastructure.
+- Complete desktop targets: Windows 11 x64 and Ubuntu 22.04+. Both clients use the same protocol and support bidirectional communication. Linux packages carry the ASL executables; an optional offline bundle also carries matching Ubuntu `.deb` dependencies. macOS is outside the 1.0 platform commitment.
 - Set `ASL_HOME` for application data. Choose the development root with `scripts/dev-env.ps1 -Root` or `ASL_DEV_ROOT`. Startup fails when the configured path is unavailable.
 
 ### Implementation Status
@@ -390,7 +406,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 
 **Two-source group downloads:** Three separate Core processes completed a four-chunk transfer over TCP loopback. Two group members shared identical content, and the receiver approved both sources in one decision. The saved chunk records identified both providers, and the final file matched the original. This test used in-process Net drivers, not three AppContainers. [Multi-source validation notes](docs/plan-validation.md#2026-11-22-t22-双来源群文件)
 
-**Encrypted groups (T31/T32, local/loopback acceptance passed):** The current path uses structured CBOR group messages, OpenMLS state, ASL/1.3 acts and ASL/1.4 signed shard forwarding. There is no business hard cap on how many groups can be created. Within a logical group, SQLite v49 aggregates unique Agents across the root and children with code-level recursive queries and keeps encrypted cross-shard frames in a bounded retry outbox: one MLS shard is capped at 512, the logical group at 10,000 unique Agents, and up to 20 independent MLS shards are supported. Normal invites choose a measured root/child room and create another independent MLS child when needed; root policy updates and owner-transfer outcomes are reported per shard. Cross-shard delivery uses an owner-root-signed source envelope and persistent receipts. The owner decrypts and re-encrypts for each target child; a bridge connection is never presented as the original author. File Offer/Fetch carries logical-root and source-shard routing metadata, while file bytes still require a direct authenticated transfer. MCP exposes group management, per-file content-hash policies, capability-scoped admin operations, removal approval, semantic-context frames and composite budget renewal only under `ASL_MCP_GROUPS=admin`. The 512/2,000/10,000 cross-machine matrix, public NAT/relay behavior and live chain RPC remain unaccepted. [Setup and test scope](docs/group-rooms.md)
+**Encrypted groups (T31/T32, local/loopback acceptance passed):** The current path uses structured CBOR group messages, OpenMLS state, ASL/1.3 acts and ASL/1.4 signed shard forwarding. There is no business hard cap on how many groups can be created. Within a logical group, SQLite v50 aggregates unique Agents across the root and children with code-level recursive queries and keeps encrypted cross-shard frames plus owner-relayed FetchRequests in a bounded retry outbox: one MLS shard is capped at 512, the logical group at 10,000 unique Agents, and up to 20 independent MLS shards are supported. Normal invites choose a measured root/child room and create another independent MLS child when needed; root policy updates and owner-transfer outcomes are reported per shard. Cross-shard delivery uses an owner-root-signed source envelope and persistent receipts. The owner decrypts and re-encrypts for each target child; a bridge connection is never presented as the original author. File Offer/Fetch carries logical-root and source-shard routing metadata. A cross-shard FetchRequest remains pending while the owner is offline; the owner persists request-id, requester PeerId, requester/source shard and expiry, and routes FetchGrant/FetchPending only to the real requester through a durable `owner_reply` outbox. Responses are never gossiped or broadcast to unrelated shards or members. File bytes still require a direct authenticated transfer. The current owner signs Remove Commits; a delegated `manage-members` administrator request is rechecked and executed by the owner, and remains queued if execution fails. The historical creator remains the RoomOrigin anchor. MCP exposes group management, per-file content-hash policies, capability-scoped admin operations, removal approval, semantic-context frames and composite budget renewal only under `ASL_MCP_GROUPS=admin`. The 512/2,000/10,000 cross-machine matrix, public NAT/relay behavior and live chain RPC remain unaccepted. [Setup and test scope](docs/group-rooms.md)
 
 **Direct download consent (November 20, 2026):** A download cannot start without a locally authorized inbox. Automatic mode stays within that grant. Run `asl-core --downloads mode ask` to require per-file approval, `asl-core --downloads list` to inspect the destination, size and sources, then `asl-core --downloads approve <id>` or `asl-core --downloads deny <id>` to decide. Approval alone does not create the file, and peers cannot choose its local path. This is a local control, not a claim of verified public-network chunk transfers.
 

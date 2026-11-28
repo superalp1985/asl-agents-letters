@@ -120,6 +120,10 @@ pub fn vector_cases() -> Vec<VectorCase> {
                 WireFrame::ContextOffer(_) => ("context-offer-v1", "context-offer"),
                 WireFrame::ContextAgreement(_) => ("context-agreement-v1", "context-agreement"),
                 WireFrame::ContextExpression(_) => ("context-expression-v1", "context-expression"),
+                WireFrame::PakeStart(_)
+                | WireFrame::PakeAnswer(_)
+                | WireFrame::PakeConfirm(_)
+                | WireFrame::PakeReceipt(_) => ("pake-v1", "pake"),
             };
             VectorCase {
                 name,
@@ -240,6 +244,10 @@ pub fn vector_cases() -> Vec<VectorCase> {
             RecordPayload::ShortCode(_) => {
                 ("signed-short-code-record-v1", "signed-short-code-record")
             }
+            RecordPayload::ContactPolicy(_) => (
+                "signed-contact-policy-record-v1",
+                "signed-contact-policy-record",
+            ),
         };
         cases.push(VectorCase {
             name,

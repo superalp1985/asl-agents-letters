@@ -1,19 +1,19 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[path = "../ui/mod.rs"]
 mod ui;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::{ffi::OsString, path::PathBuf};
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn main() -> eframe::Result {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     ui::run(data_home(&args, std::env::var_os("ASL_HOME")))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn data_home(args: &[OsString], configured_home: Option<OsString>) -> Option<PathBuf> {
     match args {
         [] => configured_home
@@ -24,12 +24,12 @@ fn data_home(args: &[OsString], configured_home: Option<OsString>) -> Option<Pat
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn main() {
-    eprintln!("The ASL desktop viewer requires Windows.");
+    eprintln!("The ASL desktop viewer requires Windows or Linux.");
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests {
     use super::*;
 

@@ -578,7 +578,11 @@ fn frame_info(frame: &WireFrame) -> Result<FrameInfo, AslError> {
         | WireFrame::ContextRequest(_)
         | WireFrame::ContextOffer(_)
         | WireFrame::ContextAgreement(_)
-        | WireFrame::ContextExpression(_) => return Err(AslError::InvalidMessage),
+        | WireFrame::ContextExpression(_)
+        | WireFrame::PakeStart(_)
+        | WireFrame::PakeAnswer(_)
+        | WireFrame::PakeConfirm(_)
+        | WireFrame::PakeReceipt(_) => return Err(AslError::InvalidMessage),
     };
     Ok(FrameInfo { message_id, kind })
 }

@@ -6,7 +6,8 @@ Windows 发布有两条独立信任链，不能互相替代：
 2. **ASL Ed25519 update manifest** 证明 ZIP、版本、长度和 SHA-256，并由已安装的 ASL 更新器独立验证。产品更新不依赖购买 Authenticode 证书。
 
 发布私钥必须位于仓库外。仓库和构建产物只能包含公钥。
-当前便携包布局为 `asl-windows-layout-v3`；Ed25519 更新清单格式仍为 v1。
+当前便携包布局为 `asl-windows-layout-v4`；Ed25519 更新清单格式仍为 v1。
+包内同时携带 Microsoft 签名的 `vcruntime140.dll`，用户不需要另装 VC++ 运行库。
 
 ## 构建和 Authenticode
 
@@ -22,7 +23,7 @@ $releaseRoot = Join-Path $env:ASL_HOME 'release'
   -Offline
 ```
 
-脚本只使用证书存储中的私钥，不接受 PFX 密码或仓库内私钥路径。时间戳服务没有内置默认值，必须由运营者显式提供。它会逐个签署六个运行时 EXE，执行 Authenticode 验证，然后才生成 `SHA256SUMS.txt`、`THIRD-PARTY.txt`、`MPL-SOURCES.zip` 和 `sbom.cdx.json`。未设置 `-AuthenticodeThumbprint` 的包只能作为内部测试包。
+脚本只使用证书存储中的私钥，不接受 PFX 密码或仓库内私钥路径。时间戳服务没有内置默认值，必须由运营者显式提供。它会逐个签署六个运行时 EXE，执行 Authenticode 验证，然后才生成 `SHA256SUMS.txt`、`THIRD-PARTY.txt`、`MPL-SOURCES.zip` 和 `sbom.cdx.json`。`vcruntime140.dll` 从 Visual Studio Build Tools 的可再发行目录复制，并先验证 Microsoft Authenticode。未设置 `-AuthenticodeThumbprint` 的包只能作为内部测试包。
 
 ## Ed25519 更新清单
 

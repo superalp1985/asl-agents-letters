@@ -252,7 +252,12 @@ impl ReconcileDriver {
                 .push((grant.identity().clone(), grant.directory_watch()?));
             Ok(())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let _ = grant;
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = grant;
             Err(AslError::PlatformUnavailable)

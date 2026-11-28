@@ -6,6 +6,7 @@ mod checkpoint;
 mod contact_invites;
 mod group_admin;
 mod locale;
+mod migration;
 mod model_endpoints;
 mod nav_icon;
 mod network_privacy;
@@ -41,6 +42,11 @@ use std::os::windows::process::CommandExt;
 use views::{AccessForm, Interaction, Page};
 
 const APP_TITLE: &str = "A\u{4fe1} ASL";
+const CORE_EXECUTABLE_NAME: &str = if cfg!(windows) {
+    "asl-core.exe"
+} else {
+    "asl-core"
+};
 use tokens::{ACCENT, MUTED, SURFACE};
 
 pub(super) fn run(home: Option<PathBuf>) -> eframe::Result {
@@ -73,6 +79,7 @@ struct Viewer {
     checkpoint_form: checkpoint::CheckpointForm,
     group_admin: group_admin::Form,
     contact_invites: contact_invites::Form,
+    migration: migration::Form,
     profile_form: profile_signing::ProfileForm,
     show_startup_settings: bool,
     code_input: String,
@@ -83,7 +90,7 @@ struct Viewer {
     avatar: avatar::Preview,
     remote_avatars: views::RemoteAvatars,
     last_notice_marker: Option<NoticeMarker>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     tray: Option<(asl_policy::TrayHandle, Receiver<asl_policy::TrayCommand>)>,
 }
 
@@ -110,9 +117,9 @@ impl Viewer {
         theme(ctx);
         let notification_settings = notification_settings::Editor::load(home.as_deref());
         let language = notification_settings.settings.language;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         asl_policy::set_tray_language(matches!(language, locale::Language::En));
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let tray = home
             .as_ref()
             .and_then(|_| asl_policy::start_tray(art::tray_icon()));
@@ -132,6 +139,7 @@ impl Viewer {
             checkpoint_form: checkpoint::CheckpointForm::default(),
             group_admin: group_admin::Form::default(),
             contact_invites: contact_invites::Form::default(),
+            migration: migration::Form::default(),
             profile_form: profile_signing::ProfileForm::default(),
             show_startup_settings: true,
             code_input: String::new(),
@@ -142,7 +150,7 @@ impl Viewer {
             avatar: avatar::Preview::default(),
             remote_avatars: views::RemoteAvatars::default(),
             last_notice_marker: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             tray,
         };
         viewer.refresh(ctx);
@@ -154,8 +162,8 @@ impl Viewer {
         let Some(home) = self.home.clone() else {
             self.error = Some(label(
                 self.language,
-                "未配置数据目录。请用 Start-ASL.ps1 -DataDirectory 启动，或用 asl-ui.exe --home 指定已有资料目录。",
-                "No data directory configured. Use Start-ASL.ps1 -DataDirectory or open an existing profile with asl-ui.exe --home.",
+                "未配置数据目录。请使用已安装的启动器，或用 asl-ui --home <绝对路径> 打开已有资料目录。",
+                "No data directory configured. Use the installed launcher, or open an existing profile with asl-ui --home <absolute-path>.",
             ));
             return;
         };
@@ -189,7 +197,7 @@ impl Viewer {
             return;
         };
         let executable = match std::env::current_exe() {
-            Ok(executable) => executable.with_file_name("asl-core.exe"),
+            Ok(executable) => executable.with_file_name(CORE_EXECUTABLE_NAME),
             Err(_) => {
                 self.error = Some(label(
                     self.language,
@@ -346,7 +354,7 @@ impl Viewer {
 
     fn play_notification_sound(&self) {
         if self.notification_settings.should_play_sound() {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             asl_policy::play_notification_sound();
         }
     }
@@ -392,7 +400,7 @@ impl Viewer {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn poll_tray(&mut self, ctx: &egui::Context) {
         let Some((_, commands)) = &self.tray else {
             return;
@@ -417,12 +425,12 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.poll_tray(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             let tray_available = self.tray.is_some();
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "linux")))]
             let tray_available = false;
             if tray_available
                 && self.notification_settings.settings.minimize_on_close
@@ -433,7 +441,7 @@ impl eframe::App for Viewer {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if self
             .tray
             .as_ref()
@@ -629,9 +637,9 @@ impl eframe::App for Viewer {
                         {
                             self.show_notification_settings = true;
                         }
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "linux"))]
                         let tray_available = self.tray.is_some();
-                        #[cfg(not(windows))]
+                        #[cfg(not(any(windows, target_os = "linux")))]
                         let tray_available = false;
                         if tray_available {
                             // Hiding keeps the agents running; only the tray menu exits.
@@ -698,6 +706,8 @@ impl eframe::App for Viewer {
                             checkpoint_form: &mut self.checkpoint_form,
                             group_admin: &mut self.group_admin,
                             contact_invites: &mut self.contact_invites,
+                            migration: &mut self.migration,
+                            home: self.home.as_deref(),
                             profile_form: &mut self.profile_form,
                             remote_avatars: &mut self.remote_avatars,
                             checkpoints: &snapshot.checkpoints,
@@ -740,7 +750,7 @@ impl eframe::App for Viewer {
                 notification_settings::Decision::Save => {
                     if self.notification_settings.persist(self.home.as_deref()) {
                         self.language = self.notification_settings.settings.language;
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "linux"))]
                         asl_policy::set_tray_language(matches!(
                             self.language,
                             locale::Language::En

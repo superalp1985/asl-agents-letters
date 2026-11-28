@@ -1,5 +1,4 @@
 pub mod act_history_export;
-#[cfg(windows)]
 mod agent_mail;
 pub mod avatar;
 pub mod capacity;
@@ -7,6 +6,7 @@ pub mod chain;
 mod chain_refresh;
 pub mod checkpoint_access;
 pub mod contact_invite;
+pub mod contact_policy_sync;
 pub mod diagnostics;
 mod direct_inbound;
 mod direct_outbound;
@@ -18,9 +18,7 @@ pub mod identity_registration;
 pub mod infrastructure;
 pub mod ipc;
 pub mod libraries;
-#[cfg(windows)]
 pub mod mcp;
-#[cfg(windows)]
 pub mod migration;
 pub mod model_endpoint_access;
 pub mod network;

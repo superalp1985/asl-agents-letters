@@ -563,10 +563,22 @@ pub(crate) fn ensure_local_identity(
 }
 
 fn default_data_directory() -> Result<PathBuf, AslError> {
-    let local_app_data = env::var_os("LOCALAPPDATA").ok_or(AslError::InvalidStorageRoot)?;
-    let root = PathBuf::from(local_app_data);
+    #[cfg(windows)]
+    let root = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("ASL").join("profile"));
+    #[cfg(not(windows))]
+    let root = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("share"))
+        })
+        .map(|root| root.join("asl").join("profile"));
+    let root = root.ok_or(AslError::InvalidStorageRoot)?;
     if !root.is_absolute() {
         return Err(AslError::InvalidStorageRoot);
     }
-    Ok(root.join("ASL").join("profile"))
+    Ok(root)
 }

@@ -10,7 +10,7 @@ use asl_types::error::AslError;
 const REPARSE_POINT: u32 = 0x400;
 const POINTER: &str = "active-release.txt";
 const LAYOUT: &str = "package-layout.txt";
-const VERSION: &str = "asl-windows-layout-v2";
+const VERSION: &str = "asl-windows-layout-v4";
 
 pub(super) fn active_agent() -> Result<Option<PathBuf>, AslError> {
     let current = std::env::current_exe()?;

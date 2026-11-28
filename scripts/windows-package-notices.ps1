@@ -1,5 +1,9 @@
 #requires -Version 7.0
-param([Parameter(Mandatory)][string]$OutputDirectory, [switch]$Offline)
+param(
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [Parameter(Mandatory)][string]$VcRuntimeVersion,
+    [switch]$Offline
+)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -59,6 +63,9 @@ try {
     $file.WriteLine("ASL source commit: $gitCommit")
     $file.WriteLine('ASL project code is licensed under the repository MIT license.')
     $file.WriteLine('MPL-SOURCES.zip contains the original .crate archives for the MPL-2.0 runtime components.')
+    $file.WriteLine()
+    $file.WriteLine("Microsoft Visual C++ 2015-2022 Runtime $VcRuntimeVersion | Microsoft redistributable runtime")
+    $file.WriteLine('vcruntime140.dll is included app-local so a clean Windows installation does not need a separate VC++ installer.')
     foreach ($package in ($seen.Keys | ForEach-Object { $packages[$_] } | Sort-Object name, version)) {
         if ($package.id -eq $application.id) { continue }
         $file.WriteLine()
@@ -97,6 +104,13 @@ try {
 }
 finally { $file.Dispose() }
 
+$components.Add([ordered]@{
+    type = 'framework'
+    group = 'Microsoft'
+    name = 'Microsoft Visual C++ Runtime'
+    version = $VcRuntimeVersion
+})
+
 $sourceZip = [IO.Compression.ZipFile]::Open((Join-Path $OutputDirectory 'MPL-SOURCES.zip'), 'Create')
 try {
     foreach ($source in $sourceArchives) {
@@ -121,7 +135,7 @@ $sbom = [ordered]@{
         }
         properties = @(
             @{ name = 'asl:git_commit'; value = $gitCommit }
-            @{ name = 'asl:package_layout'; value = 'asl-windows-layout-v2' }
+            @{ name = 'asl:package_layout'; value = 'asl-windows-layout-v4' }
         )
     }
     components = $components.ToArray()

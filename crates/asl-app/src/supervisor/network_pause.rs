@@ -44,11 +44,11 @@ impl Supervisor {
                 }
                 self.pending_disconnects = PendingDisconnects::default();
                 self.pending_pairing_prompts = pairing::PendingPairingPrompts::default();
-                #[cfg(windows)]
                 self.clear_group_transport();
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);
                 self.reset_binding_transport()?;
                 self.reset_contact_invite_transport()?;
+                self.reset_contact_policy_sync_transport();
             }
             (true, NetworkRuntimeState::ResumeFailed) => {
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);

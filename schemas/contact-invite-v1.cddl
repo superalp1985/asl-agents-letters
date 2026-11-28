@@ -12,7 +12,22 @@ contact-invite-v1 = {
   4: time-ms,
   5: time-ms,
   6: tstr .size (0..480),
-  7: signature65
+  7: signature65,
+  ? 8: contact-provenance
+}
+
+contact-provenance = shared-group-provenance / recent-interaction-provenance
+
+shared-group-provenance = {
+  0: 1,
+  1: hash32,
+  2: uint
+}
+
+recent-interaction-provenance = {
+  0: 2,
+  3: id128,
+  4: time-ms
 }
 
 id128 = bstr .size 16

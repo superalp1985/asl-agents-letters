@@ -178,6 +178,7 @@ impl Fixture {
             update,
             MlsRemoveAuthority {
                 source: &self.creator,
+                committer: &self.creator,
                 removed: &self.target,
                 survivors: std::slice::from_ref(creator),
                 chain_id: 1,

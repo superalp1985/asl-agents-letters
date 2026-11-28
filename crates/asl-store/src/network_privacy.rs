@@ -8,7 +8,7 @@ const FORCE_RELAY_ONLY: &str = "network.force_relay_only.v1";
 const PAUSE_REQUESTED: &str = "network.pause_requested.v1";
 const LAST_REPORT: &str = "ui.network_report.v1";
 
-#[derive(Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkRuntimeState {
     #[default]
@@ -18,7 +18,28 @@ pub enum NetworkRuntimeState {
     ResumeFailed,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkReachability {
+    #[default]
+    Unreported,
+    Unknown,
+    Private,
+    Public,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRouteFailure {
+    DirectUnavailable,
+    RelayUnavailable,
+    HolePunchFailed,
+    TimedOut,
+    PeerIdentityMismatch,
+    Disconnected,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkReport {
     #[serde(default)]
@@ -27,6 +48,26 @@ pub struct NetworkReport {
     pub configured_relays: usize,
     pub reserved_relays: usize,
     pub observed_at_ms: i64,
+    #[serde(default)]
+    pub reachability: NetworkReachability,
+    #[serde(default)]
+    pub reachability_confidence: u8,
+    #[serde(default)]
+    pub public_entry: bool,
+    #[serde(default)]
+    pub listening_endpoints: usize,
+    #[serde(default)]
+    pub direct_routes: usize,
+    #[serde(default)]
+    pub hole_punched_routes: usize,
+    #[serde(default)]
+    pub relayed_routes: usize,
+    #[serde(default)]
+    pub negotiating_routes: usize,
+    #[serde(default)]
+    pub failed_routes: usize,
+    #[serde(default)]
+    pub last_route_failure: Option<NetworkRouteFailure>,
 }
 
 impl Store {
@@ -61,15 +102,39 @@ impl Store {
         configured_relays: usize,
         reserved_relays: usize,
     ) -> Result<(), AslError> {
-        let now = current_time_ms();
-        let value = serde_json::to_string(&NetworkReport {
+        self.report_network_snapshot(NetworkReport {
             runtime,
             relay_only,
             configured_relays,
             reserved_relays,
-            observed_at_ms: now,
+            observed_at_ms: 0,
+            reachability: NetworkReachability::Unreported,
+            reachability_confidence: 0,
+            public_entry: false,
+            listening_endpoints: 0,
+            direct_routes: 0,
+            hole_punched_routes: 0,
+            relayed_routes: 0,
+            negotiating_routes: 0,
+            failed_routes: 0,
+            last_route_failure: None,
         })
-        .map_err(|_| AslError::InvalidDatabase)?;
+    }
+
+    pub fn report_network_snapshot(&self, mut report: NetworkReport) -> Result<(), AslError> {
+        if report.reachability_confidence > 100
+            || report.listening_endpoints > 1024
+            || report.direct_routes > 100_000
+            || report.hole_punched_routes > 100_000
+            || report.relayed_routes > 100_000
+            || report.negotiating_routes > 100_000
+            || report.failed_routes > 100_000
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        let now = current_time_ms();
+        report.observed_at_ms = now;
+        let value = serde_json::to_string(&report).map_err(|_| AslError::InvalidDatabase)?;
         self.set_setting(LAST_REPORT, &value, now)
     }
 }

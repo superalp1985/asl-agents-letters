@@ -12,15 +12,12 @@ mod checkpoint_control;
 mod contact_invite_control;
 #[path = "asl-core/download_control.rs"]
 mod download_control;
-#[cfg(windows)]
 #[path = "asl-core/group_admin.rs"]
 mod group_admin;
-#[cfg(windows)]
 #[path = "asl-core/group_control.rs"]
 mod group_control;
 #[path = "asl-core/identity_registration_control.rs"]
 mod identity_registration_control;
-#[cfg(windows)]
 #[path = "asl-core/migration_control.rs"]
 mod migration_control;
 #[path = "asl-core/network_control.rs"]
@@ -103,7 +100,6 @@ fn main() {
                     Ok(())
                 })
         }
-        #[cfg(windows)]
         [flag, args @ ..] if flag == "--migration" => migration_control::run(args),
         [flag, kind, days] if flag == "--retention" => retention_control::set_days(kind, days),
         [flag, key, mode] if flag == "--network" && key == "relay-only" => {
@@ -113,15 +109,11 @@ fn main() {
             network_control::set_pause(mode)
         }
         [flag, args @ ..] if flag == "--network" => network_control::configure(args),
-        #[cfg(windows)]
         [flag, field, value] if flag == "--group-inbound" => {
             group_control::set_inbound(field, value)
         }
-        #[cfg(windows)]
         [flag, args @ ..] if flag == "--group-admin" => group_admin::run(args),
-        #[cfg(windows)]
         [flag, args @ ..] if flag == "--group-invites" => group_control::review(args),
-        #[cfg(windows)]
         [flag] if flag == "--groups" => group_control::run(),
         _ => Err(asl_types::error::AslError::InvalidMessage),
     };

@@ -215,11 +215,8 @@ impl Supervisor {
                 if let Some(devices) =
                     store.rebind_verified_contact_device(&directory, unix_time_ms()?)?
                 {
-                    #[cfg(windows)]
                     self.mailbox
                         .observe_contact_device_change(*agent_id, &devices.0, &devices.1);
-                    #[cfg(not(windows))]
-                    let _ = devices;
                 }
             }
             AdmittedNetworkEvent::OperationAccepted { operation_id } => {

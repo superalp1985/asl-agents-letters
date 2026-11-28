@@ -7,6 +7,10 @@ use asl_types::error::AslError;
 use asl_types::manifest::Manifest;
 
 use crate::AuthorizedFile;
+#[cfg(target_os = "linux")]
+use crate::platform::linux::filesystem::PinnedDirectory;
+#[cfg(target_os = "linux")]
+use crate::platform::linux::handles::snapshot;
 #[cfg(windows)]
 use crate::platform::windows::handles::{PinnedDirectory, snapshot};
 
@@ -16,14 +20,18 @@ use crate::platform::windows::handles::{PinnedDirectory, snapshot};
 pub struct PinnedHome {
     #[cfg(windows)]
     state: PinnedDirectory,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    state: PinnedDirectory,
+    #[cfg(not(any(windows, target_os = "linux")))]
     _unavailable: std::convert::Infallible,
 }
 
 pub struct LegacyRootSeed {
     #[cfg(windows)]
     inner: crate::platform::windows::handles::LegacyRootSeed,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    inner: crate::platform::linux::handles::snapshot::LegacyRootSeed,
+    #[cfg(not(any(windows, target_os = "linux")))]
     _unavailable: std::convert::Infallible,
 }
 
@@ -33,7 +41,11 @@ impl LegacyRootSeed {
         {
             self.inner.read()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.read()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self._unavailable {}
         }
@@ -44,7 +56,11 @@ impl LegacyRootSeed {
         {
             self.inner.retire()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.retire()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self._unavailable {}
         }
@@ -58,7 +74,13 @@ pub fn open_legacy_root_seed(home: &Path) -> Result<LegacyRootSeed, AslError> {
             inner: crate::platform::windows::handles::open_legacy_root_seed(home)?,
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(LegacyRootSeed {
+            inner: crate::platform::linux::handles::snapshot::open_legacy_root_seed(home)?,
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = home;
         Err(AslError::PlatformUnavailable)
@@ -73,7 +95,13 @@ impl PinnedHome {
                 state: snapshot::pin_state(home)?,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                state: snapshot::pin_state(home)?,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = home;
             Err(AslError::PlatformUnavailable)
@@ -84,7 +112,7 @@ impl PinnedHome {
 /// Exclusive, cross-process ownership of a service for one home.
 #[must_use = "hold the owner for the lifetime of the service"]
 pub struct ProfileOwner {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     _marker: std::fs::File,
     _home: PinnedHome,
 }
@@ -110,7 +138,16 @@ impl ProfileOwner {
                 _home: home,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let home = PinnedHome::open(home)?;
+            let marker = snapshot::open_exclusive_marker(&home.state, marker)?;
+            Ok(Self {
+                _marker: marker,
+                _home: home,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (home, marker);
             Err(AslError::PlatformUnavailable)
@@ -123,7 +160,9 @@ impl ProfileOwner {
 pub struct SnapshotReader {
     #[cfg(windows)]
     reader: snapshot::SnapshotReader,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    reader: snapshot::SnapshotReader,
+    #[cfg(not(any(windows, target_os = "linux")))]
     _unavailable: std::convert::Infallible,
 }
 
@@ -135,7 +174,13 @@ impl SnapshotReader {
                 reader: snapshot::SnapshotReader::open(home, content_id)?,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                reader: snapshot::SnapshotReader::open(home, content_id)?,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (home, content_id);
             Err(AslError::PlatformUnavailable)
@@ -147,7 +192,11 @@ impl SnapshotReader {
         {
             self.reader.read_manifest()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.reader.read_manifest()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err(AslError::PlatformUnavailable)
         }
@@ -158,7 +207,11 @@ impl SnapshotReader {
         {
             Ok(self.reader.file_size())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(self.reader.file_size())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err(AslError::PlatformUnavailable)
         }
@@ -169,7 +222,11 @@ impl SnapshotReader {
         {
             self.reader.read_range(offset, length)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.reader.read_range(offset, length)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (offset, length);
             Err(AslError::PlatformUnavailable)
@@ -182,7 +239,9 @@ impl SnapshotReader {
 pub struct ImportOwner {
     #[cfg(windows)]
     owner: snapshot::Owner,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    owner: snapshot::Owner,
+    #[cfg(not(any(windows, target_os = "linux")))]
     _unavailable: std::convert::Infallible,
 }
 
@@ -194,7 +253,11 @@ impl ImportOwner {
         {
             Ok(snapshot::Owner::acquire(home, id)?.map(|owner| Self { owner }))
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(snapshot::Owner::acquire(home, id)?.map(|owner| Self { owner }))
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (home, id);
             Err(AslError::PlatformUnavailable)
@@ -209,7 +272,11 @@ impl ImportOwner {
         {
             self.owner.clean(content)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.owner.clean(content)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = content;
             Err(AslError::PlatformUnavailable)
@@ -224,7 +291,11 @@ impl ImportOwner {
         {
             self.owner.require_absent(content)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.owner.require_absent(content)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = content;
             Err(AslError::PlatformUnavailable)
@@ -238,7 +309,9 @@ pub struct StagedSnapshot {
     id: [u8; 32],
     #[cfg(windows)]
     files: Option<snapshot::ObjectFiles>,
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
+    files: Option<snapshot::ObjectFiles>,
+    #[cfg(any(windows, target_os = "linux"))]
     installed: bool,
 }
 
@@ -265,7 +338,27 @@ impl StagedSnapshot {
                 installed: false,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            use asl_types::manifest::{content_id, encode_manifest};
+            use std::io::Write;
+
+            let manifest = Manifest::from_bytes(bytes).map_err(|_| AslError::QuotaExceeded)?;
+            let encoded = encode_manifest(&manifest).map_err(|_| AslError::InvalidPolicyState)?;
+            let mut files = snapshot::ObjectFiles::stage(home)?;
+            let (blob, mnf) = files.writers();
+            blob.write_all(bytes)?;
+            mnf.write_all(&encoded)?;
+            blob.sync_all()?;
+            mnf.sync_all()?;
+            Ok(Self {
+                manifest,
+                id: content_id(&encoded),
+                files: Some(files),
+                installed: false,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (home, bytes);
             Err(AslError::PlatformUnavailable)
@@ -349,7 +442,51 @@ impl StagedSnapshot {
                 installed: false,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            use asl_types::manifest::{CHUNK_SIZE, content_id, encode_manifest};
+            use std::io::{Read, Write};
+            let mut progress = progress;
+            progress()?;
+            let mut files = snapshot::ObjectFiles::stage(home)?;
+            let (blob, mnf) = files.writers();
+            let file_size = source.len();
+            let mut remaining = file_size;
+            let mut whole = blake3::Hasher::new();
+            let mut chunk_hashes = Vec::new();
+            let mut buffer = vec![0; remaining.min(u64::from(CHUNK_SIZE)) as usize];
+            while remaining != 0 {
+                let len = remaining.min(u64::from(CHUNK_SIZE)) as usize;
+                let chunk = &mut buffer[..len];
+                source.read_exact(chunk)?;
+                blob.write_all(chunk)?;
+                whole.update(chunk);
+                chunk_hashes.push(*blake3::hash(chunk).as_bytes());
+                observe(chunk);
+                remaining -= len as u64;
+                progress()?;
+            }
+            if source.read(&mut [0])? != 0 {
+                return Err(AslError::InvalidPolicyState);
+            }
+            let manifest = Manifest {
+                file_size,
+                file_hash: *whole.finalize().as_bytes(),
+                chunk_hashes,
+            };
+            let encoded = encode_manifest(&manifest).map_err(|_| AslError::InvalidPolicyState)?;
+            mnf.write_all(&encoded)?;
+            blob.sync_all()?;
+            mnf.sync_all()?;
+            progress()?;
+            Ok(Self {
+                manifest,
+                id: content_id(&encoded),
+                files: Some(files),
+                installed: false,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (home, source, progress, observe);
             Err(AslError::PlatformUnavailable)
@@ -392,7 +529,18 @@ impl StagedSnapshot {
             self.installed = true;
             Ok(())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            if self.installed {
+                return Err(AslError::InvalidPolicyState);
+            }
+            let mut files = self.files.take().ok_or(AslError::InvalidPolicyState)?;
+            files.install(self.id, progress)?;
+            self.files = Some(files);
+            self.installed = true;
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = progress;
             Err(AslError::PlatformUnavailable)
@@ -403,7 +551,7 @@ impl StagedSnapshot {
     /// Drop instead on cancellation or known rollback, even if no transaction
     /// was opened. On indeterminate commit retain rather than risk a dangling row.
     pub fn retain_installed(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if self.installed
             && let Some(mut files) = self.files.take()
         {

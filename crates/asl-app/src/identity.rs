@@ -92,14 +92,12 @@ impl AgentIdentity {
         })
     }
 
-    #[cfg(windows)]
     pub(crate) fn migration_seed(&self) -> Zeroizing<[u8; 32]> {
         let mut seed = Zeroizing::new([0; 32]);
         seed.copy_from_slice(self.signing_key.to_bytes().as_ref());
         seed
     }
 
-    #[cfg(windows)]
     pub(crate) fn from_migration_seed(seed: &[u8]) -> Result<Self, AslError> {
         let signing_key = SigningKey::from_slice(seed).map_err(|_| AslError::InvalidIdentity)?;
         let initial_root_address = root_address(signing_key.verifying_key());
@@ -110,7 +108,6 @@ impl AgentIdentity {
         })
     }
 
-    #[cfg(windows)]
     pub(crate) fn migration_public_checksum(&self) -> [u8; 32] {
         *blake3::hash(
             self.signing_key

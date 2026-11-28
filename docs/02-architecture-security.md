@@ -55,7 +55,7 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 
 群授权是独立的 audience 类型，不能隐式折算为 `contacts`。群成员变更增加群成员 epoch；群范围 permit、lease 和待处理传输绑定该 epoch，并在发送前重新判定。新成员只有在本地授权该群范围后才能读取群资源。每次询问确认同样绑定接收 PeerId 与群 epoch。
 
-群内角色参考 QQ/微信的群主、管理员、成员和禁言模型，但不把群角色当成全局授权。群主由 MLS room creator 绑定，通过 MLS application plaintext 的 `group-policy` 下发文字/文件/邀请权限、管理员和禁言设备；revision 单调递增，非群主 sender 不能改策略。成员端在 act/Query/Expression、文件 Offer 和邀请路径重新检查策略；群主、管理员、信任值和贡献值都不能绕过本机目录、收件目录、设备证书或传输审批。
+群内角色参考 QQ/微信的群主、管理员、成员和禁言模型，但不把群角色当成全局授权。RoomOrigin 保留 MLS creator 作为历史锚点，当前群主由可转移的 `owner_peer_id` 映射到活动 MLS leaf，通过 MLS application plaintext 的 `group-policy` 下发文字/文件/邀请权限、管理员和禁言设备；revision 单调递增，非当前 owner sender 不能改策略。成员端在 act/Query/Expression、文件 Offer 和邀请路径重新检查策略；群主、管理员、信任值和贡献值都不能绕过本机目录、收件目录、设备证书或传输审批。
 
 ### 2.1 act、私聊与预算
 
@@ -79,9 +79,17 @@ gossipsub 只传播 MLS ciphertext 和受限路由元数据。主题与群/epoch
 
 act 附件只携带 `blob-ref`。文件继续走既有 `offer -> fetch -> chunk -> hash` 授权路径，读取每个块都重新检查共享 grant、接收 grant、成员资格、epoch、路径白名单和期限。文件字节、文件名和路径不嵌入 `nl-body`、gossip 主题或模型提示。
 
-## 3. Windows 隔离
+## 3. Windows 与 Ubuntu 隔离
 
-公开无人值守目标为 Windows 11 x64，数据卷要求本地 NTFS。程序检查系统能力、ACL 和隔离启动是否生效；失败进入 `SandboxUnavailable`，不能退回普通权限 worker 继续对外服务。
+完整桌面目标为 Windows 11 x64 和 Ubuntu 22.04+。Windows 使用 AppContainer
+和 Job Object；Ubuntu 使用独立 helper、Unix 管道、资源限制和降权边界。
+任何平台在隔离能力不满足当前任务时进入 `SandboxUnavailable`，不能静默
+退回无约束网络或文件访问继续对外服务。
+
+### 3.1 Windows
+
+Windows 数据卷要求本地 NTFS。程序检查系统能力、ACL 和隔离启动是否生效；
+失败进入 `SandboxUnavailable`，不能退回普通权限 worker 继续对外服务。
 
 - net 使用独立 AppContainer 身份，只授予确需的网络能力和 IPC，不授予用户资料目录。
 - worker/helper 不授予网络能力或用户目录；仅得到本次操作的输入和输出管道。
@@ -89,6 +97,20 @@ act 附件只携带 `blob-ref`。文件继续走既有 `offer -> fetch -> chunk 
 - IPC 使用匿名管道与进程创建时的明确句柄白名单；broker 管道端点默认不可继承，仅在受锁保护的创建调用中为白名单制作短暂可继承副本并立即清除标志。文件、密钥和数据库句柄不在列表中；启动环境由系统路径及已核验的已知文件夹重建，不复制父进程环境或 API Key。
 - 可执行文件通过已固定的 NTFS 文件句柄单独授予对应随机 sandbox SID 读取/执行 ACL，进程结束后撤销；同一文件的 DACL 读改写由进程内锁和按文件身份命名的跨进程 mutex 串行化。不把 `ASL_HOME` 根目录或父目录整体开放给它。OS 自身 AppContainer profile 目录由 Windows 管理。
 - Windows API 与 `unsafe` 集中在 `asl-policy/src/platform/windows/`。不能把低完整性令牌当成 AppContainer 等价替代。
+
+### 3.2 Ubuntu
+
+- 密钥文件使用 ChaCha20-Poly1305 本机保护，目录和文件权限分别限制为
+  `0700` 和 `0600`；拒绝符号链接、错误所有者、网络文件系统和不安全根目录。
+- 路径能力使用 `openat2` 的 `RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS`，
+  每次相对打开都受根目录能力约束。
+- Core 与 helper 使用 Unix domain socket 和 `SO_PEERCRED`，限制单连接，
+  断连后重新监听；消息沿用固定枚举、角色、方向和长度上限。
+- 子进程使用 `no_new_privs`、rlimit、文件描述符收敛、环境清理、独立进程组
+  和 wall deadline。当前尚未接入 seccomp/Landlock 和精确 CPU 百分比配额，
+  因此不能宣称它与 Windows AppContainer 等价。
+- D-Bus 通知、StatusNotifier 托盘和 XDG Portal 文件选择器由 Linux 平台层
+  提供，仍须在真实 GNOME/KDE 会话验收。
 
 T10 IPC v1 使用私有继承匿名管道、固定消息枚举、方向/角色校验、单向严格递增序号和 4 MiB 整帧上限；不包含 shell、路径或自由文本字段。Core 的 Net 事件队列有界为 8 帧，EOF/解码错误会结束读取线程，避免反复累积错误。Net 启动前导 `ASLK` v1 在同一私有管道承载一次性设备密钥 protobuf，正文上限 1 KiB，密钥缓冲区在 Core 和 Net 清零；它不是普通 IPC 消息，也不包含密钥文件句柄。Net 解码 Ed25519 密钥后发送专用 `NetReady(PeerId)`；Supervisor 必须与 DPAPI 本地设备身份的 PeerId 精确匹配，否则终止 Net 并拒绝启动。本机 Agent 根身份也已在启动时通过 DPAPI create-once 加载或生成，但这不代表已完成链锚定。T14 的 Net/Core IPC 已有传输 PeerId、连接关闭和身份证明请求/应答消息；帧头先校验角色、方向、序号和各类型长度上限，再读取正文。`PeerAuthenticated` 仅表示 Net 的 libp2p 传输认证结果，不表示 Agent 身份已验证；Core 仍须使用本机最终化检查点验证 MPT 证明、签名设备目录和证书 PeerId。connection/response handle 由 Net 绑定到具体活动连接，并在关闭后作废。`CoreAdmission` 已把这些身份核验接成收发门禁；Supervisor 启动时加载本地链状态 resolver 和签名设备目录，只在本机身份通过验证后持有准入状态。常驻网络事件泵自动推进身份握手，未准入事件不会交给应用；准入事件经本地 handler，handler 返回的控制/bulk 命令重新经过准入校验。命令行入口目前使用静默 handler，Agent 会话处理尚未接入；Worker 任务仍只携带待校验的 ASL 控制帧字节，原始 payload 不直接转发给 Agent。T24 另设 Extractor 入口：IPC kind 41/42 仅允许 Core 与 Extractor 交换固定 PDF/头像操作和有界字节；每次调用创建无网络、无用户目录的一次性子进程，PDF 输出最多 2 MiB，头像在进程内解码并重编码后最多 64 KiB。
 

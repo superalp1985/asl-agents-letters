@@ -50,6 +50,9 @@ pub struct Dashboard {
     pub contact_request_mode: crate::contact_policy::ContactRequestMode,
     pub contact_group_auto_accept: bool,
     pub contact_recent_interaction_ttl_ms: u64,
+    pub contact_policy_revision: u64,
+    pub contact_policy_revoked: bool,
+    pub contact_policy_sync_authorized: bool,
     pub contact_invites: Vec<crate::contact_invites::ContactInvite>,
     pub contact_invite_prompts: Vec<crate::contact_invites::ContactInvitePrompt>,
     pub groups: Vec<GroupRow>,
@@ -288,6 +291,11 @@ impl Dashboard {
             contact_request_mode: contact_request_policy.mode,
             contact_group_auto_accept: contact_request_policy.shared_group_auto_accept,
             contact_recent_interaction_ttl_ms: contact_request_policy.recent_interaction_ttl_ms,
+            contact_policy_revision: contact_request_policy.revision,
+            contact_policy_revoked: contact_request_policy.revoked,
+            contact_policy_sync_authorized: crate::contact_policy::contact_policy_sync_authorized(
+                database,
+            )?,
             contact_invites: crate::contact_invites::active_invites_for_dashboard(
                 database, now_i64,
             )?,

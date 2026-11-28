@@ -11,10 +11,12 @@ mod archive;
 
 const MAX_BODY_BYTES: usize = 32 * 1024;
 pub const MAX_ACT_HISTORY_ROWS: u32 = 1_000;
-const MAX_SEARCH_RESULTS: u32 = 100;
+const MAX_SEARCH_RESULTS: u32 = MAX_ACT_HISTORY_ROWS;
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_ARCHIVE_TOKENS: usize = 64;
-const DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
+const MAX_LIVE_BODY_TOKENS: usize = 4_096;
+const PROTECTED_PREFIX: &[u8] = b"ASL-ACT-BODY-PROTECTED-v1\0";
+const LEGACY_DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
 const UTF8_PREFIX: &[u8] = b"ASL-ACT-BODY-UTF8-v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +73,15 @@ pub struct ActHistoryRow {
     pub body: Option<String>,
     pub created_at_ms: i64,
     pub expires_at_ms: i64,
+    pub score: u32,
+    pub ranking: ActHistoryRanking,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ActHistoryRanking {
+    pub matched_terms: u16,
+    pub query_terms: u16,
+    pub term_weight: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +91,7 @@ pub struct ActHistoryArchiveRow {
     pub direction: ActDirection,
     pub act_kind: u16,
     pub score: u32,
+    pub ranking: ActHistoryRanking,
     pub received_at_ms: i64,
     pub expires_at_ms: i64,
 }
@@ -222,6 +234,8 @@ impl Store {
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     created_at_ms: row.get(8)?,
                     expires_at_ms: row.get(9)?,
+                    score: 0,
+                    ranking: ActHistoryRanking::default(),
                 })
             })
             .map_err(database_error)?
@@ -243,27 +257,36 @@ impl Store {
         {
             return Err(AslError::InvalidMessage);
         }
-        let query = query.to_lowercase();
+        let query_tokens = semantic_tokens_with_limit(query, MAX_ARCHIVE_TOKENS);
+        if query_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
         let rows = self.recent_act_history(now_ms, MAX_ACT_HISTORY_ROWS)?;
         let mut matches = rows
             .into_iter()
             .filter_map(|row| {
-                let body = row.body.as_ref()?.to_lowercase();
-                let score = body.matches(&query).count();
-                (score > 0).then_some((score, row))
+                let (score, ranking) = rank_live_body(row.body.as_deref()?, &query_tokens)?;
+                Some((score, ranking, row))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|(left_score, left), (right_score, right)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
-                .then_with(|| left.conversation_id.cmp(&right.conversation_id))
-                .then_with(|| left.act_id.cmp(&right.act_id))
-        });
+        matches.sort_by(
+            |(left_score, left_rank, left), (right_score, right_rank, right)| {
+                right_score
+                    .cmp(left_score)
+                    .then_with(|| right_rank.term_weight.cmp(&left_rank.term_weight))
+                    .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                    .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+                    .then_with(|| left.act_id.cmp(&right.act_id))
+            },
+        );
         Ok(matches
             .into_iter()
             .take(limit as usize)
-            .map(|(_, row)| row)
+            .map(|(score, ranking, mut row)| {
+                row.score = score;
+                row.ranking = ranking;
+                row
+            })
             .collect())
     }
 
@@ -303,26 +326,48 @@ impl Store {
         let Some(key) = archive::read_key(&self.connection)? else {
             return Ok(Vec::new());
         };
-        let tokens = semantic_tokens(query);
+        let tokens = semantic_tokens_with_limit(query, MAX_ARCHIVE_TOKENS);
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
-        let mut matches: BTreeMap<(String, [u8; 32]), ActHistoryArchiveRow> = BTreeMap::new();
-        for token in tokens {
-            let rows = archive_rows_for_token(&self.connection, &key, now_ms, &token)?;
-            for row in rows {
+        let query_terms = u16::try_from(tokens.len()).unwrap_or(u16::MAX);
+        let mut matches: BTreeMap<(String, [u8; 32]), ArchiveCandidate> = BTreeMap::new();
+        for token in &tokens {
+            let rows = archive_rows_for_token(&self.connection, &key, now_ms, token)?;
+            let token_weight = u64::from(token_specificity(token));
+            for mut row in rows {
                 let key = (row.conversation_id.clone(), row.act_id);
+                row.ranking.query_terms = query_terms;
+                row.ranking.term_weight = u32::try_from(token_weight).unwrap_or(u32::MAX);
                 matches
                     .entry(key)
-                    .and_modify(|entry| entry.score = entry.score.saturating_add(1))
-                    .or_insert(row);
+                    .and_modify(|entry| {
+                        entry.matched_terms = entry.matched_terms.saturating_add(1);
+                        entry.term_weight = entry.term_weight.saturating_add(token_weight);
+                    })
+                    .or_insert(ArchiveCandidate {
+                        row,
+                        matched_terms: 1,
+                        term_weight: token_weight,
+                    });
             }
         }
-        let mut rows = matches.into_values().collect::<Vec<_>>();
+        let mut rows = matches
+            .into_values()
+            .map(|mut candidate| {
+                candidate.row.ranking.matched_terms =
+                    u16::try_from(candidate.matched_terms).unwrap_or(u16::MAX);
+                candidate.row.ranking.term_weight =
+                    u32::try_from(candidate.term_weight).unwrap_or(u32::MAX);
+                candidate.row.score = lexical_score(candidate.row.ranking);
+                candidate.row
+            })
+            .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             right
                 .score
                 .cmp(&left.score)
+                .then_with(|| right.ranking.term_weight.cmp(&left.ranking.term_weight))
                 .then_with(|| right.received_at_ms.cmp(&left.received_at_ms))
                 .then_with(|| left.conversation_id.cmp(&right.conversation_id))
                 .then_with(|| left.act_id.cmp(&right.act_id))
@@ -497,7 +542,8 @@ fn archive_rows_for_token(
             act_id: act_id.try_into().map_err(|_| AslError::InvalidDatabase)?,
             direction,
             act_kind: u16::try_from(act_kind).map_err(|_| AslError::InvalidDatabase)?,
-            score: 1,
+            score: 0,
+            ranking: ActHistoryRanking::default(),
             received_at_ms,
             expires_at_ms,
         });
@@ -517,7 +563,52 @@ fn validate_search_query(query: &str, limit: u32) -> Result<(), AslError> {
     Ok(())
 }
 
-fn semantic_tokens(text: &str) -> Vec<String> {
+struct ArchiveCandidate {
+    row: ActHistoryArchiveRow,
+    matched_terms: u64,
+    term_weight: u64,
+}
+
+fn rank_live_body(body: &str, query_tokens: &[String]) -> Option<(u32, ActHistoryRanking)> {
+    let body_tokens = semantic_tokens_with_limit(&body.to_lowercase(), MAX_LIVE_BODY_TOKENS);
+    let mut matched_terms = 0_u64;
+    let mut term_weight = 0_u64;
+    for token in query_tokens {
+        if body_tokens.binary_search(token).is_err() {
+            continue;
+        }
+        matched_terms = matched_terms.saturating_add(1);
+        term_weight = term_weight.saturating_add(u64::from(token_specificity(token)));
+    }
+    if matched_terms == 0 {
+        return None;
+    }
+    let ranking = ActHistoryRanking {
+        matched_terms: u16::try_from(matched_terms).unwrap_or(u16::MAX),
+        query_terms: u16::try_from(query_tokens.len()).unwrap_or(u16::MAX),
+        term_weight: u32::try_from(term_weight).unwrap_or(u32::MAX),
+    };
+    Some((lexical_score(ranking), ranking))
+}
+
+fn lexical_score(ranking: ActHistoryRanking) -> u32 {
+    u32::from(ranking.matched_terms)
+        .saturating_mul(1_000_000)
+        .saturating_add(ranking.term_weight.min(999_999))
+}
+
+fn token_specificity(token: &str) -> u32 {
+    if token.is_ascii() {
+        u32::try_from(token.len()).unwrap_or(u32::MAX).clamp(1, 16)
+    } else {
+        u32::try_from(token.chars().count())
+            .unwrap_or(u32::MAX)
+            .saturating_mul(2)
+            .clamp(1, 16)
+    }
+}
+
+fn semantic_tokens_with_limit(text: &str, limit: usize) -> Vec<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
     for character in text.chars().chain(std::iter::once(' ')) {
@@ -528,7 +619,7 @@ fn semantic_tokens(text: &str) -> Vec<String> {
             current.clear();
         }
     }
-    tokens.into_iter().take(MAX_ARCHIVE_TOKENS).collect()
+    tokens.into_iter().take(limit).collect()
 }
 
 fn add_semantic_token(tokens: &mut BTreeSet<String>, token: &str) {
@@ -549,6 +640,10 @@ fn add_semantic_token(tokens: &mut BTreeSet<String>, token: &str) {
     if characters.len() <= 8 {
         tokens.insert(token.to_owned());
     }
+}
+
+fn semantic_tokens(text: &str) -> Vec<String> {
+    semantic_tokens_with_limit(text, MAX_ARCHIVE_TOKENS)
 }
 
 fn validate_record(record: ActHistoryRecord<'_>) -> Result<(), AslError> {
@@ -586,27 +681,17 @@ fn padded_size(length: usize) -> Result<u32, AslError> {
         .ok_or(AslError::QuotaExceeded)
 }
 
-#[cfg(windows)]
 fn protect_body(body: &[u8]) -> Result<Vec<u8>, AslError> {
     if body.is_empty() {
         return Ok(UTF8_PREFIX.to_vec());
     }
     let protected = asl_policy::protect_secret(body)?;
-    let mut value = Vec::with_capacity(DPAPI_PREFIX.len() + protected.len());
-    value.extend_from_slice(DPAPI_PREFIX);
+    let mut value = Vec::with_capacity(PROTECTED_PREFIX.len() + protected.len());
+    value.extend_from_slice(PROTECTED_PREFIX);
     value.extend_from_slice(&protected);
     Ok(value)
 }
 
-#[cfg(not(windows))]
-fn protect_body(body: &[u8]) -> Result<Vec<u8>, AslError> {
-    let mut value = Vec::with_capacity(UTF8_PREFIX.len() + body.len());
-    value.extend_from_slice(UTF8_PREFIX);
-    value.extend_from_slice(body);
-    Ok(value)
-}
-
-#[cfg(windows)]
 fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
     if let Some(body) = value.strip_prefix(UTF8_PREFIX) {
         return String::from_utf8(body.to_vec())
@@ -614,7 +699,8 @@ fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
             .map_err(|_| AslError::InvalidDatabase);
     }
     let protected = value
-        .strip_prefix(DPAPI_PREFIX)
+        .strip_prefix(PROTECTED_PREFIX)
+        .or_else(|| value.strip_prefix(LEGACY_DPAPI_PREFIX))
         .ok_or(AslError::InvalidDatabase)?;
     let body = asl_policy::unprotect_secret(protected)?;
     let body = String::from_utf8(body.to_vec()).map_err(|_| AslError::InvalidDatabase)?;
@@ -625,22 +711,15 @@ pub(crate) fn decode_stored_body(value: &[u8]) -> Result<Option<String>, AslErro
     unprotect_body(value)
 }
 
-#[cfg(not(windows))]
-fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
-    let body = value
-        .strip_prefix(UTF8_PREFIX)
-        .ok_or(AslError::InvalidDatabase)?;
-    let body = String::from_utf8(body.to_vec()).map_err(|_| AslError::InvalidDatabase)?;
-    Ok((!body.is_empty()).then_some(body))
-}
-
 #[cfg(test)]
 mod tests {
     use rusqlite::OptionalExtension;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{current_time_ms, open_store, open_store_read_only};
+    #[cfg(windows)]
+    use crate::open_store_read_only;
+    use crate::{current_time_ms, open_store};
     use asl_types::ids::Id128;
 
     fn fixture() -> (TempDir, Store) {
@@ -796,7 +875,77 @@ mod tests {
             .unwrap();
         assert_eq!(archive.len(), 1);
         assert_eq!(archive[0].act_kind, 1);
-        assert_eq!(archive[0].score, 1);
+        assert!(archive[0].score > 1);
+        assert_eq!(archive[0].ranking.matched_terms, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_ranking_is_weighted_and_stable_for_the_same_query() {
+        let (_directory, mut store) = fixture();
+        let now = current_time_ms() as u64;
+        for (index, body) in [
+            "rust ownership borrow checker",
+            "rust ownership lifetime",
+            "rust channels",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let received_at_ms = now + index as u64;
+            store
+                .record_act_history(ActHistoryRecord {
+                    conversation_id: match index {
+                        0 => "00000000000000000000000000000001",
+                        1 => "00000000000000000000000000000002",
+                        _ => "00000000000000000000000000000003",
+                    },
+                    message_id: Id128([21 + index as u8; 16]),
+                    mls_epoch: index as u64,
+                    direction: ActDirection::In,
+                    act_kind: 1,
+                    reply_to: None,
+                    causal_root: Id128([31 + index as u8; 16]),
+                    body: Some(body),
+                    now_ms: received_at_ms,
+                    expires_at_ms: received_at_ms + 1,
+                })
+                .unwrap();
+        }
+
+        let later = i64::try_from(now + 10).unwrap();
+        assert_eq!(store.prune_act_history(later).unwrap(), 3);
+        let first = store
+            .search_act_history_archive(later, "rust ownership", 10)
+            .unwrap();
+        let second = store
+            .search_act_history_archive(later, "rust ownership", 10)
+            .unwrap();
+
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| (row.conversation_id.as_str(), row.act_id))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|row| (row.conversation_id.as_str(), row.act_id))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.ranking.matched_terms)
+                .collect::<Vec<_>>(),
+            [2, 2, 1]
+        );
+        assert!(first.iter().all(|row| row.score > 1));
+        assert!(first[0].ranking.term_weight > 0);
+        assert_eq!(first[0].ranking.term_weight, first[1].ranking.term_weight);
+        assert!(first[0].score > first[2].score);
+        assert_eq!(first[0].conversation_id, "00000000000000000000000000000002");
+        assert_eq!(first[1].conversation_id, "00000000000000000000000000000001");
     }
 
     #[cfg(windows)]

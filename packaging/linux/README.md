@@ -1,4 +1,19 @@
-# A信 ASL Linux 基础设施包
+# A信 ASL Linux 发布包
+
+本目录包含两条独立发布链：
+
+| 包 | 内容 | 入口 |
+| --- | --- | --- |
+| `asl-client` 完整桌面客户端 | `asl`、`asl-core`、`asl-net`、`asl-worker`、`asl-extractor`、`asl-ui`、桌面文件、图标和用户服务 | `scripts/package-linux-client.sh` |
+| `asl-infra` 公网中继 | 仅 `asl-infra` 系统服务 | `scripts/package-linux-infra.sh` |
+
+完整客户端支持 Ubuntu 22.04 LTS 及更新版本，产出 `.tar.gz` 和 `.deb`。
+安装用户不需要 Rust、Cargo 或编译器；图形、Wayland/X11、OpenSSL 和 Python
+系统库通过 APT 声明。详细构建、安装、升级和离线边界见
+源码仓库中的 `packaging/linux/client/README.md` 与
+`docs/linux-client-release.md`。本基础设施包不会携带这两个客户端文档。
+
+## asl-infra 基础设施包
 
 该包只包含可替换的 bootstrap/relay 基础设施 `asl-infra`，不包含桌面 Agent、用户身份密钥、目录授权或模型配置。
 
@@ -98,7 +113,18 @@ sudo systemctl daemon-reload
 
 卸载不会删除 `/etc/asl-infra` 或 `/var/lib/asl-infra`。确认不再需要配置、身份和本地数据后，由管理员手动处理。
 
-# ASL Linux Infrastructure Package
+# ASL Linux Package Family
+
+`scripts/package-linux-client.sh` builds the complete Ubuntu desktop client
+as tar.gz and deb artifacts. The client bundle contains all six ASL
+executables, XDG desktop integration, icons, a user service and management
+scripts. Ubuntu 22.04 LTS or newer is supported. The `.deb` lets APT resolve
+system libraries online. A tar.gz built with `--apt-deps-dir` also carries the
+matching Ubuntu `.deb` dependency closure and can install without an APT
+source. Users do not install Rust or Cargo.
+
+`scripts/package-linux-infra.sh` remains the separate repairable relay package.
+The rest of this document describes that infrastructure package.
 
 This package contains only replaceable bootstrap/relay infrastructure. It does
 not contain a desktop Agent, user identity key, directory grant, or model

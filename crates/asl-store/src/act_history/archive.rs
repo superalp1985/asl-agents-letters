@@ -11,13 +11,11 @@ use super::ActDirection;
 const ARCHIVE_KEY_SETTING: &str = "activity.act_archive_key.v1";
 const SCRUB_PENDING_SETTING: &str = "activity.act_archive_scrub_pending.v1";
 const INDEX_SCRUBBED_SETTING: &str = "activity.act_archive_index_scrubbed.v1";
-#[cfg(windows)]
-const ARCHIVE_KEY_PREFIX: &[u8] = b"ASL-ACT-ARCHIVE-KEY-DPAPI-v1\0";
+const ARCHIVE_KEY_PREFIX: &[u8] = b"ASL-ACT-ARCHIVE-KEY-PROTECTED-v1\0";
+const LEGACY_ARCHIVE_KEY_PREFIX: &[u8] = b"ASL-ACT-ARCHIVE-KEY-DPAPI-v1\0";
 const ARCHIVE_RETENTION_MS: i64 = 365 * DAY_MS;
-#[cfg(windows)]
 const REBUILD_BATCH: i64 = 128;
 
-#[cfg(windows)]
 use super::{decode_stored_body, semantic_tokens};
 
 pub(super) struct ArchiveKey(Zeroizing<[u8; 32]>);
@@ -37,29 +35,18 @@ pub(super) fn initialize_index(
         return Ok(None);
     }
 
-    #[cfg(windows)]
+    if let Some(value_json) = read_setting(connection, ARCHIVE_KEY_SETTING)?
+        && let Ok(key) = decode_key_setting(&value_json)
     {
-        if let Some(value_json) = read_setting(connection, ARCHIVE_KEY_SETTING)?
-            && let Ok(key) = decode_key_setting(&value_json)
-        {
-            return Ok(Some(key));
-        }
-
-        let (key, value_json) = create_key_setting()?;
-        discard_index(connection)?;
-        mark_scrub_pending(connection)?;
-        rebuild_index(connection, now_ms, &key)?;
-        write_setting(connection, ARCHIVE_KEY_SETTING, &value_json, now_ms)?;
-        Ok(Some(key))
+        return Ok(Some(key));
     }
 
-    #[cfg(not(windows))]
-    {
-        if read_setting(connection, ARCHIVE_KEY_SETTING)?.is_none() {
-            discard_index(connection)?;
-        }
-        Ok(None)
-    }
+    let (key, value_json) = create_key_setting()?;
+    discard_index(connection)?;
+    mark_scrub_pending(connection)?;
+    rebuild_index(connection, now_ms, &key)?;
+    write_setting(connection, ARCHIVE_KEY_SETTING, &value_json, now_ms)?;
+    Ok(Some(key))
 }
 
 pub(super) fn read_key(
@@ -69,16 +56,7 @@ pub(super) fn read_key(
         return Ok(None);
     }
 
-    #[cfg(windows)]
-    {
-        read_key_setting(connection)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = connection;
-        Ok(None)
-    }
+    read_key_setting(connection)
 }
 
 pub(super) fn discard_index(connection: &Connection) -> Result<(), asl_types::error::AslError> {
@@ -205,7 +183,6 @@ pub(super) fn token_hash(key: &ArchiveKey, token: &str) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-#[cfg(windows)]
 fn create_key_setting() -> Result<(ArchiveKey, String), asl_types::error::AslError> {
     use rand::{TryRng, rngs::SysRng};
 
@@ -223,7 +200,6 @@ fn create_key_setting() -> Result<(ArchiveKey, String), asl_types::error::AslErr
     Ok((ArchiveKey(key), value_json))
 }
 
-#[cfg(windows)]
 fn read_key_setting(
     connection: &Connection,
 ) -> Result<Option<ArchiveKey>, asl_types::error::AslError> {
@@ -233,7 +209,6 @@ fn read_key_setting(
     decode_key_setting(&value_json).map(Some)
 }
 
-#[cfg(windows)]
 fn decode_key_setting(value_json: &str) -> Result<ArchiveKey, asl_types::error::AslError> {
     let protected_hex: String = serde_json::from_str(value_json)
         .map_err(|_| asl_types::error::AslError::InvalidDatabase)?;
@@ -242,6 +217,7 @@ fn decode_key_setting(value_json: &str) -> Result<ArchiveKey, asl_types::error::
     let plaintext = asl_policy::unprotect_secret(&protected)?;
     let key_bytes = plaintext
         .strip_prefix(ARCHIVE_KEY_PREFIX)
+        .or_else(|| plaintext.strip_prefix(LEGACY_ARCHIVE_KEY_PREFIX))
         .filter(|bytes| bytes.len() == 32)
         .ok_or(asl_types::error::AslError::InvalidDatabase)?;
     let key: [u8; 32] = key_bytes
@@ -250,7 +226,6 @@ fn decode_key_setting(value_json: &str) -> Result<ArchiveKey, asl_types::error::
     Ok(ArchiveKey(Zeroizing::new(key)))
 }
 
-#[cfg(windows)]
 fn rebuild_index(
     connection: &Connection,
     now_ms: i64,
@@ -326,7 +301,6 @@ fn rebuild_index(
     Ok(())
 }
 
-#[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn insert_tokens(
     connection: &Connection,
@@ -358,20 +332,5 @@ fn insert_tokens(
             )
             .map_err(database_error)?;
     }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn insert_tokens(
-    _: &Connection,
-    _: &ArchiveKey,
-    _: &str,
-    _: [u8; 32],
-    _: ActDirection,
-    _: u16,
-    _: i64,
-    _: i64,
-    _: &str,
-) -> Result<(), asl_types::error::AslError> {
     Ok(())
 }

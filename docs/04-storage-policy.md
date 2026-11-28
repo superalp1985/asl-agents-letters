@@ -36,7 +36,7 @@ Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重
 
 ## 2. 数据表
 
-当前版本为 SQLite v49。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影；v37 新增有期限联系人邀请和 Pairing 确认；v38 新增群加入/重入请求；v39 新增无 MLS 密钥迁移群线索；v40/v41 增加 DHT 持久缓存与群主设备字段；v42 增加逐文件权限、委派管理员能力和同 key 多 provider 缓存；v43 增加不保存正文的 Act token 哈希索引；v44 增加群移除请求和多 MLS 子群链接；v45 增加根群/子群签名绑定与跨 shard 转发 receipt；v46 增加联系人请求来源动作和固定期限交互证据；v47 曾增加逻辑群唯一 Agent/Peer 只读视图；v48 删除持久视图，改由代码内递归查询按逻辑根聚合根群和子群，避免旧迁移夹具删除依赖表后留下失效视图；v49 增加 `mls_shard_forward_outbox`，只保存已加密的 shard-forward 控制帧、路由元数据、尝试次数和期限。`group_file_policies` 只保存本地群 ID、内容 hash 和 `read/send/fetch` 位；`group_admin_capabilities` 只保存活动管理员 PeerId 与能力位。`manage-members` 和 `manage-files` 只能分别替换其授权切片，policy revision、权限、owner、管理员名单和能力位保持 owner-only。`mls_shard_bindings` 保存已验签的根/子群关系、owner、revision 和期限；`mls_shard_forward_receipts` 保存过期前去重键，不保存聊天正文。`conversation_act_semantic_index` 只保存域分离 token 哈希、room/act ID、方向和类型，默认保留 365 天；正文到期删除后仍可返回引用和命中分数，但不会恢复明文。DHT 邮箱投递、Core/Net 命令和轮换拉取已接通；真实公网/NAT/relay 和跨机重启验收尚未完成。
+当前版本为 SQLite v50。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影；v37 新增有期限联系人邀请和 Pairing 确认；v38 新增群加入/重入请求；v39 新增无 MLS 密钥迁移群线索；v40/v41 增加 DHT 持久缓存与群主设备字段；v42 增加逐文件权限、委派管理员能力和同 key 多 provider 缓存；v43 增加不保存正文的 Act token 哈希索引；v44 增加群移除请求和多 MLS 子群链接；v45 增加根群/子群签名绑定与跨 shard 转发 receipt；v46 增加联系人请求来源动作和固定期限交互证据；v47 曾增加逻辑群唯一 Agent/Peer 只读视图；v48 删除持久视图，改由代码内递归查询按逻辑根聚合根群和子群，避免旧迁移夹具删除依赖表后留下失效视图；v49 增加 `mls_shard_forward_outbox`，只保存已加密的 shard-forward 控制帧、路由元数据、尝试次数和期限；v50 增加 owner-relay 投递类型，仍只保存密文和路由元数据。`group_file_policies` 只保存本地群 ID、内容 hash 和 `read/send/fetch` 位；`group_admin_capabilities` 只保存活动管理员 PeerId 与能力位。`manage-members` 和 `manage-files` 只能分别替换其授权切片，policy revision、权限、owner、管理员名单和能力位保持 owner-only。`mls_shard_bindings` 保存已验签的根/子群关系、owner、revision 和期限；`mls_shard_forward_receipts` 保存过期前去重键，不保存聊天正文。`conversation_act_semantic_index` 只保存域分离 token 哈希、room/act ID、方向和类型，默认保留 365 天；正文到期删除后仍可返回引用和命中分数，但不会恢复明文。DHT 邮箱投递、Core/Net 命令和轮换拉取已接通；真实公网/NAT/relay 和跨机重启验收尚未完成。
 
 v22 增加 `observed_remote_profiles`，保存 Core 已验签的远端公开主题投影。每个 Agent 一条、总量最多 200 条，不保存头像或原始报文。只读面板按有效期、链观察与本机撤销状态过滤；该表不用于身份、权限或信任判定。
 
@@ -109,12 +109,15 @@ T29 将本机观察按 integrity/availability/evidence/promise 分开保存；�
 
 会话历史、预算、act 事件、附件引用、邮箱和容量表都必须引用当前已验证的 AgentId、设备证书和 MLS epoch。邮箱内容的持久化边界是密文；本机解密后的历史按本地保留策略另存，但必须带 conversation audience、来源和不可信数据标记。清理邮箱槽、密文分片和过期容量样本时，不删除仍有效的共享源文件或未发送的本地 outbox。
 
-## 2.1.1 v46/v49 联系人、群成员与迁移增量
+## 2.1.1 v46/v50 联系人、群成员与迁移增量
 
 - v46 重建 `contact_binding_actions` 的 kind 约束，加入请求策略和来源规则动作；新增 `contact_interaction_evidence`，只保存 AgentId、PeerId、根交互 ID、可选逻辑群/epoch、观察时间和固定到期时间，不保存问题、回答、文件或模型正文。来源规则只在动作执行时读取本机当前策略；证据到期时间在交互发生时固化。
 - v47 曾增加 `logical_group_agents` 和 `logical_group_peers` 只读视图；v48 删除这两个持久视图，改由代码内递归查询展开根群和子 MLS 群。唯一 Agent 数用于 10,000 逻辑群容量检查，群管理列表按逻辑根聚合，不把子 shard 当成用户可见的独立群。
 - v49 增加 `mls_shard_forward_outbox`：控制帧先随 MLS ratchet 提交持久化，再尝试定向或 gossipsub 发送；暂时不可达时按退避重试，成功进入本机 Net 队列后删除，过期、目标 epoch/binding 变化或 owner 不匹配时标记 terminal。该表不保存自然语言正文。
-- 联系人策略在 `Selection.contacts` 迁移包中随本机联系人表导出/恢复；策略不是授权，不携带 pending invite、候选或文件权限。真实多设备在线同步仍未实现。
+- v50 增加 `owner_relay`、`owner_reply` 投递类型、可选 `content_id` 和精确 `target_peer_id`；Fetch relay 表只保存 request-id、请求 PeerId、请求/源 shard、内容 ID 和期限，用于把 FetchGrant/FetchPending 定向回真实请求设备。文件字节仍要求源/接收设备直接认证传输。
+- 联系人策略在 `settings` 的 `contacts.request_policy.v1` 中保存，含单调 `revision` 和 `revoked`；修改通过本机动作推进 revision。`contacts.policy_sync_authorized.v1` 是独立的本地导入授权，默认关闭。
+- `asl-core --bindings policy-export/import <path>` 使用 kind 4 根签名封套和 root-derived age 密钥同步策略。外层只有 revision、nonce 和密文，联系人 ID/来源规则不进 DHT 明文；导入要求 owner、签名、期限、当前导入授权和 revision/哈希收敛。`Selection.contacts` 的加密迁移包也携带同一 revision/revoked 字段。策略不是授权，不携带 pending invite、候选、`authorized_contacts`、文件或群权限。
+- `settings.contacts.policy_publication.v1` 保存当前 ContactPolicy 的精确签名记录字节、revision、期限、尝试次数和下一次重试时间。Core 只在网络 Active 且同步授权开启时自动 Lookup/发布；失败重发同一字节串，记录临近/达到期限时才推进 policy revision 并生成新记录。
 
 秘密不进 settings、messages 或 security_events。日志中的 peer 可截断显示，完整身份只存业务表；lease、API Key、私钥和模型端点认证头不进入诊断。
 

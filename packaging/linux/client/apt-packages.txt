@@ -1,0 +1,29 @@
+# Ubuntu runtime packages required by the complete ASL desktop client.
+# Keep this ordered list as the single source for deb Depends, the online
+# dependency installer, and the optional offline dependency bundle.
+ca-certificates
+libc6
+libgcc-s1
+libssl3
+libx11-6
+libx11-xcb1
+libxcb1
+libxcb-render0
+libxcb-randr0
+libxcb-shape0
+libxcb-shm0
+libxcb-xfixes0
+libxcb-xkb1
+libxkbcommon0
+libxkbcommon-x11-0
+libxcursor1
+libxrandr2
+libxi6
+libxinerama1
+libwayland-client0
+libwayland-cursor0
+libwayland-egl1
+libegl1
+libgl1
+libfontconfig1
+python3

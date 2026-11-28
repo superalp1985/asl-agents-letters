@@ -27,9 +27,17 @@ fn viewer_only_opens_the_active_release_without_starting_core() {
         format!("{release_name}\n1.0.1"),
     )
     .unwrap();
-    fs::write(install.join("package-layout.txt"), "asl-windows-layout-v2").unwrap();
-    fs::write(release.join("package-layout.txt"), "asl-windows-layout-v2").unwrap();
+    fs::write(install.join("package-layout.txt"), "asl-windows-layout-v4").unwrap();
+    fs::write(release.join("package-layout.txt"), "asl-windows-layout-v4").unwrap();
     fs::write(release.join("active-release.txt"), "base").unwrap();
+    let windows_root = std::env::var_os("WINDIR").expect("WINDIR must be set on Windows");
+    fs::copy(
+        Path::new(&windows_root)
+            .join("System32")
+            .join("vcruntime140.dll"),
+        release.join("vcruntime140.dll"),
+    )
+    .unwrap();
 
     let viewer = release.join("asl-ui.exe");
     let marker = fixture.path().join("viewer-report");

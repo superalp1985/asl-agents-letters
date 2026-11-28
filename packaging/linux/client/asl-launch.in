@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+prefix='@PREFIX@'
+default_home="${XDG_DATA_HOME:-$HOME/.local/share}/asl"
+system_config='@CONFIG_FILE@'
+user_config="${XDG_CONFIG_HOME:-$HOME/.config}/asl/asl.env"
+
+source_env() {
+  local path="$1"
+  if [[ -f "$path" && ! -L "$path" ]]; then
+    # shellcheck disable=SC1090
+    . "$path"
+  fi
+}
+
+if [[ -z "${ASL_HOME:-}" ]]; then
+  source_env "$system_config"
+fi
+if [[ -z "${ASL_HOME:-}" ]]; then
+  source_env "$user_config"
+fi
+: "${ASL_HOME:=$default_home}"
+export ASL_HOME
+
+if [[ "$ASL_HOME" != /* ]]; then
+  printf 'ASL_HOME must be an absolute path: %s\n' "$ASL_HOME" >&2
+  exit 1
+fi
+mkdir -p "$ASL_HOME"
+
+if [[ ! -f "$ASL_HOME/state/asl.sqlite3" ]]; then
+  "$prefix/bin/asl-core" --initialize-profile --json >/dev/null
+fi
+
+user_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/asl-core.service"
+if command -v systemctl >/dev/null 2>&1 \
+  && { [[ -f "$user_unit" ]] || systemctl --user is-enabled --quiet asl-core.service 2>/dev/null; }; then
+  if ! systemctl --user is-active --quiet asl-core.service; then
+    systemctl --user start asl-core.service
+  fi
+else
+  mkdir -p "$ASL_HOME/logs"
+  nohup "$prefix/bin/asl-core" \
+    >>"$ASL_HOME/logs/core.log" 2>&1 </dev/null &
+fi
+
+exec "$prefix/bin/asl-ui" --home "$ASL_HOME"

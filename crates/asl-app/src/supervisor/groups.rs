@@ -23,7 +23,7 @@ use asl_store::{
     group_state::{
         GroupInboundPolicy, MAX_SHARD_FORWARD_OUTBOX_BATCH, MlsIncomingInvite,
         PendingShardForwardOutbox, SHARD_FORWARD_OUTBOX_RETRY_BASE_MS,
-        SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, open_mls_runtime_store,
+        SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, ShardForwardOutboxKind, open_mls_runtime_store,
     },
     group_topology::MAX_LAYERED_GROUP_MEMBERS,
     mailbox::{
@@ -75,6 +75,7 @@ const MAX_ACKED_ACTS: usize = 512;
 const ACK_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_ACK_ATTEMPTS: u8 = 5;
 const SHARD_FORWARD_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const LOCAL_GROUP_CONNECTION: [u8; 16] = [0; 16];
 
 pub enum LocalGroupAction {
     List,
@@ -187,6 +188,7 @@ struct PendingGroupTransfer {
     epoch: u64,
     envelope_id: Id128,
     sender: PeerId,
+    requester: Option<GroupRequester>,
     application: GroupApplication,
 }
 
@@ -817,13 +819,30 @@ impl Supervisor {
                 return;
             }
             if let GroupApplication::RemovalRequest(request) = application.as_ref() {
-                let _ = groups.store.record_group_removal_request(
-                    *wire_id,
-                    &self.device_peer_id,
-                    sender,
-                    request,
-                    now_ms,
-                );
+                if groups
+                    .store
+                    .record_group_removal_request(
+                        *wire_id,
+                        &self.device_peer_id,
+                        sender,
+                        request,
+                        now_ms,
+                    )
+                    .is_ok()
+                    && admission
+                        .remove_local_mls_member(
+                            &mut groups.store,
+                            *wire_id,
+                            &request.target,
+                            &HashMap::new(),
+                            now_ms,
+                        )
+                        .is_ok()
+                {
+                    let _ = groups
+                        .store
+                        .forget_group_removal(*wire_id, request.message_id);
+                }
                 return;
             }
             if let GroupApplication::ShardBinding(binding) = application.as_ref() {
@@ -860,6 +879,62 @@ impl Supervisor {
                     membership_epoch: snapshot.version.membership_epoch,
                 };
                 let mut forwarded_application = forwarded.application;
+                if matches!(
+                    forwarded_application,
+                    GroupApplication::FetchRequest(_)
+                        | GroupApplication::FetchGrant(_)
+                        | GroupApplication::FetchPending(_)
+                ) {
+                    let is_request =
+                        matches!(&forwarded_application, GroupApplication::FetchRequest(_));
+                    let (pending_connection, transfer_sender, requester) = if is_request {
+                        (
+                            *connection_id,
+                            forwarded.source_peer.clone(),
+                            groups
+                                .store
+                                .cached_group_requester(
+                                    forwarded.root,
+                                    forwarded.source_agent,
+                                    &forwarded.source_peer,
+                                    now_ms,
+                                )
+                                .ok()
+                                .flatten(),
+                        )
+                    } else {
+                        let Some((source_connection, source_requester)) =
+                            forwarded_source_requester(
+                                &groups.store,
+                                admission,
+                                *wire_id,
+                                forwarded.source_agent,
+                                &forwarded.source_peer,
+                                now_ms,
+                            )
+                        else {
+                            return;
+                        };
+                        (
+                            source_connection,
+                            forwarded.source_peer.clone(),
+                            Some(source_requester),
+                        )
+                    };
+                    if groups.pending_transfers.len() == MAX_PENDING_GROUP_TRANSFERS {
+                        groups.pending_transfers.pop_front();
+                    }
+                    groups.pending_transfers.push_back(PendingGroupTransfer {
+                        connection_id: pending_connection,
+                        wire_id: *wire_id,
+                        epoch: *epoch,
+                        envelope_id: forward.message_id,
+                        sender: transfer_sender,
+                        requester,
+                        application: forwarded_application,
+                    });
+                    return;
+                }
                 if let GroupApplication::Act(act) = &mut forwarded_application {
                     act.conversation_id = local_group_id.0;
                     let _ = groups.store.record_contact_interaction_evidence(
@@ -1141,6 +1216,7 @@ impl Supervisor {
                     epoch: *epoch,
                     envelope_id: *envelope_id,
                     sender: sender.clone(),
+                    requester: None,
                     application: application.as_ref().clone(),
                 });
             }
@@ -1174,19 +1250,41 @@ impl Supervisor {
                     .flatten()
                     .is_some()
             {
-                let _ = forward_application_to_logical_shards(
-                    &mut groups.store,
-                    admission,
-                    net,
-                    &self.agent_identity,
-                    &self.device_peer_id,
-                    *wire_id,
-                    &forward_application,
-                    source_agent,
-                    sender,
-                    *epoch,
-                    now_ms,
-                );
+                if matches!(
+                    forward_application.as_ref(),
+                    GroupApplication::FetchGrant(_) | GroupApplication::FetchPending(_)
+                ) {
+                    let _ = forward_fetch_response_to_requester(
+                        &mut groups.store,
+                        admission,
+                        net,
+                        &self.agent_identity,
+                        &self.device_peer_id,
+                        *wire_id,
+                        forward_application.as_ref(),
+                        *envelope_id,
+                        source_agent,
+                        sender,
+                        *epoch,
+                        *connection_id,
+                        now_ms,
+                        &mut groups.pending_transfers,
+                    );
+                } else {
+                    let _ = forward_application_to_logical_shards(
+                        &mut groups.store,
+                        admission,
+                        net,
+                        &self.agent_identity,
+                        &self.device_peer_id,
+                        *wire_id,
+                        &forward_application,
+                        source_agent,
+                        sender,
+                        *epoch,
+                        now_ms,
+                    );
+                }
             }
         }
         if matches!(&result, Ok(Some(MlsNetworkOutcome::Joined { .. })))
@@ -1282,6 +1380,18 @@ impl Supervisor {
                 request,
                 now_ms,
             )?;
+            if admission
+                .remove_local_mls_member(
+                    &mut groups.store,
+                    key,
+                    &request.target,
+                    &directories,
+                    now_ms,
+                )
+                .is_ok()
+            {
+                let _ = groups.store.forget_group_removal(key, request.message_id);
+            }
             return Ok(());
         }
         if let GroupApplication::ShardBinding(binding) = &application {
@@ -1304,6 +1414,60 @@ impl Supervisor {
                 membership_epoch: snapshot.version.membership_epoch,
             };
             let mut forwarded_application = forwarded.application;
+            if matches!(
+                forwarded_application,
+                GroupApplication::FetchRequest(_)
+                    | GroupApplication::FetchGrant(_)
+                    | GroupApplication::FetchPending(_)
+            ) {
+                let is_request =
+                    matches!(&forwarded_application, GroupApplication::FetchRequest(_));
+                let (pending_connection, transfer_sender, requester) = if is_request {
+                    (
+                        [0; 16],
+                        forwarded.source_peer.clone(),
+                        groups
+                            .store
+                            .cached_group_requester(
+                                forward.logical_root,
+                                forwarded.source_agent,
+                                &forwarded.source_peer,
+                                now_ms,
+                            )
+                            .ok()
+                            .flatten(),
+                    )
+                } else {
+                    let Some((source_connection, source_requester)) = forwarded_source_requester(
+                        &groups.store,
+                        admission,
+                        key,
+                        forwarded.source_agent,
+                        &forwarded.source_peer,
+                        now_ms,
+                    ) else {
+                        return Ok(());
+                    };
+                    (
+                        source_connection,
+                        forwarded.source_peer.clone(),
+                        Some(source_requester),
+                    )
+                };
+                if groups.pending_transfers.len() == MAX_PENDING_GROUP_TRANSFERS {
+                    groups.pending_transfers.pop_front();
+                }
+                groups.pending_transfers.push_back(PendingGroupTransfer {
+                    connection_id: pending_connection,
+                    wire_id: key,
+                    epoch: packet.epoch,
+                    envelope_id: forward.message_id,
+                    sender: transfer_sender,
+                    requester,
+                    application: forwarded_application,
+                });
+                return Ok(());
+            }
             if let GroupApplication::Act(act) = &mut forwarded_application {
                 act.conversation_id = local_group_id.0;
                 let _ = groups.store.record_contact_interaction_evidence(
@@ -1513,19 +1677,41 @@ impl Supervisor {
         if member_allowed
             && let Some(source_agent) = groups.store.mls_peer_agent(&peer).ok().flatten()
         {
-            let _ = forward_application_to_logical_shards(
-                &mut groups.store,
-                admission,
-                net,
-                &self.agent_identity,
-                &self.device_peer_id,
-                key,
+            if matches!(
                 &application,
-                source_agent,
-                &peer,
-                packet.epoch,
-                now_ms,
-            );
+                GroupApplication::FetchGrant(_) | GroupApplication::FetchPending(_)
+            ) {
+                let _ = forward_fetch_response_to_requester(
+                    &mut groups.store,
+                    admission,
+                    net,
+                    &self.agent_identity,
+                    &self.device_peer_id,
+                    key,
+                    &application,
+                    packet.message_id,
+                    source_agent,
+                    &peer,
+                    packet.epoch,
+                    [0; 16],
+                    now_ms,
+                    &mut groups.pending_transfers,
+                );
+            } else {
+                let _ = forward_application_to_logical_shards(
+                    &mut groups.store,
+                    admission,
+                    net,
+                    &self.agent_identity,
+                    &self.device_peer_id,
+                    key,
+                    &application,
+                    source_agent,
+                    &peer,
+                    packet.epoch,
+                    now_ms,
+                );
+            }
         }
         Ok(())
     }
@@ -1548,12 +1734,14 @@ impl Supervisor {
                 return Ok(());
             };
             let now_ms = unix_time_ms()?;
-            let Some(requester) = self.current_group_requester(
-                pending.connection_id,
-                &pending.sender,
-                pending.wire_id,
-                pending.epoch,
-            ) else {
+            let Some(requester) = pending.requester.clone().or_else(|| {
+                self.current_group_requester(
+                    pending.connection_id,
+                    &pending.sender,
+                    pending.wire_id,
+                    pending.epoch,
+                )
+            }) else {
                 continue;
             };
             match pending.application {
@@ -1652,10 +1840,28 @@ impl Supervisor {
                 reply @ (GroupApplication::FetchGrant(_)
                 | GroupApplication::FetchPending(_)
                 | GroupApplication::Error(_)) => {
+                    let mut reply_requester = requester.clone();
+                    if pending.requester.is_some()
+                        && let Some(source_agent) = self.groups.as_ref().and_then(|groups| {
+                            groups.store.mls_peer_agent(&pending.sender).ok().flatten()
+                        })
+                        && let Some(source_requester) =
+                            self.admission.as_ref().and_then(|admission| {
+                                admission.direct_requester(pending.connection_id, source_agent)
+                            })
+                    {
+                        reply_requester.direct = source_requester.clone();
+                        transfers.rebind_group_fetch_response(
+                            pending.envelope_id,
+                            pending.connection_id,
+                            &source_requester,
+                            now_ms,
+                        );
+                    }
                     if !transfers.matches_group_reply(
                         pending.envelope_id,
                         pending.connection_id,
-                        &requester,
+                        &reply_requester,
                         now_ms,
                     ) {
                         continue;
@@ -1668,7 +1874,7 @@ impl Supervisor {
                     };
                     let event = crate::profile::AdmittedNetworkEvent::ControlResponse {
                         connection_id: pending.connection_id,
-                        agent_id: requester.direct.agent,
+                        agent_id: reply_requester.direct.agent,
                         request_id: pending.envelope_id.0,
                         response,
                     };
@@ -1757,7 +1963,125 @@ impl Supervisor {
         )? {
             return Err(AslError::PolicyDenied);
         }
+        let cross_shard = request
+            .source_room_id
+            .is_some_and(|source_room| source_room != wire_id);
         let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let net = &self.net;
+        if cross_shard {
+            let source_room = request.source_room_id.ok_or(AslError::InvalidMessage)?;
+            if !admission
+                .admitted_connections(now_ms)
+                .into_iter()
+                .any(|(agent, _, peer)| agent == source.agent_id && peer == source.peer_id)
+            {
+                return Ok(None);
+            }
+            let logical_root = groups.store.mls_logical_root(wire_id)?;
+            let owner = groups
+                .store
+                .group_access_owner(wire_id)?
+                .ok_or(AslError::PolicyDenied)?;
+            if owner == self.device_peer_id {
+                let requester = groups
+                    .store
+                    .cached_group_requester(
+                        wire_id,
+                        self.agent_identity.agent_id(),
+                        &self.device_peer_id,
+                        now_ms,
+                    )?
+                    .ok_or(AslError::InvalidIdentity)?;
+                transfers.expect_group_fetch_response(
+                    LOCAL_GROUP_CONNECTION,
+                    &requester.direct,
+                    request,
+                    (wire_id, group.membership_epoch),
+                    now_ms,
+                )?;
+                let forwarded = forward_application_to_logical_shards(
+                    &mut groups.store,
+                    admission,
+                    net,
+                    &self.agent_identity,
+                    &self.device_peer_id,
+                    wire_id,
+                    &GroupApplication::FetchRequest(request.clone()),
+                    self.agent_identity.agent_id(),
+                    &self.device_peer_id,
+                    snapshot.version.mls_epoch,
+                    now_ms,
+                );
+                if forwarded.is_err() {
+                    transfers.fail_control_request(
+                        LOCAL_GROUP_CONNECTION,
+                        requester.direct.agent,
+                        &requester.direct.peer,
+                        request.message_id.0,
+                    );
+                    return Ok(None);
+                }
+                return Ok(Some(LOCAL_GROUP_CONNECTION));
+            }
+            let route = admission
+                .admitted_connections(now_ms)
+                .into_iter()
+                .find(|(_, _, peer)| peer == &owner);
+            if route.is_none()
+                && groups.store.has_pending_owner_relay(
+                    wire_id,
+                    source_room,
+                    request.content_id,
+                    now_ms,
+                )?
+            {
+                return Ok(None);
+            }
+            let (packet, outbox_id) = admission.prepare_mls_owner_relay_application(
+                &mut groups.store,
+                wire_id,
+                snapshot.version,
+                GroupApplication::FetchRequest(request.clone()),
+                logical_root,
+                source_room,
+                now_ms,
+            )?;
+            let Some((owner_agent, connection_id, _)) = route else {
+                return Ok(None);
+            };
+            let requester = admission
+                .direct_requester(connection_id, owner_agent)
+                .ok_or(AslError::InvalidIdentity)?;
+            transfers.expect_group_fetch_response(
+                connection_id,
+                &requester,
+                request,
+                (wire_id, group.membership_epoch),
+                now_ms,
+            )?;
+            let dispatched = match admission.dispatch_prepared_loopback_mls_shard_forward(
+                &mut groups.store,
+                &packet,
+                now_ms.saturating_add(MAX_SHARD_FORWARD_LIFETIME_MS),
+                now_ms,
+                |command| enqueue(net, command),
+            ) {
+                Ok(dispatched) => dispatched,
+                Err(_) => {
+                    transfers.fail_control_request(
+                        connection_id,
+                        requester.agent,
+                        &requester.peer,
+                        request.message_id.0,
+                    );
+                    return Ok(None);
+                }
+            };
+            if dispatched.queued > 0 {
+                let _ = groups.store.complete_shard_forward_outbox(outbox_id);
+            }
+            return Ok(Some(connection_id));
+        }
         let (agent_id, connection_id, _) = admission
             .admitted_connections(now_ms)
             .into_iter()
@@ -1773,36 +2097,20 @@ impl Supervisor {
             (wire_id, group.membership_epoch),
             now_ms,
         )?;
-        let net = &self.net;
-        let cross_shard = request
-            .source_room_id
-            .is_some_and(|source_room| source_room != wire_id);
-        let queued = if cross_shard {
-            admission
-                .send_loopback_mls_application_with_gossip(
-                    &mut groups.store,
+        match admission
+            .send_loopback_mls_application_to_connection(
+                &mut groups.store,
+                crate::profile::MlsApplicationSendToConnection {
                     wire_id,
-                    GroupApplication::FetchRequest(request.clone()),
+                    connection_id,
+                    envelope_id: request.message_id,
+                    application: GroupApplication::FetchRequest(request.clone()),
                     now_ms,
-                    |command| enqueue(net, command),
-                )
-                .map(|dispatched| dispatched.queued > 0)
-        } else {
-            admission
-                .send_loopback_mls_application_to_connection(
-                    &mut groups.store,
-                    crate::profile::MlsApplicationSendToConnection {
-                        wire_id,
-                        connection_id,
-                        envelope_id: request.message_id,
-                        application: GroupApplication::FetchRequest(request.clone()),
-                        now_ms,
-                    },
-                    |command| enqueue(net, command),
-                )
-                .map(|dispatched| dispatched.queued > 0)
-        };
-        match queued {
+                },
+                |command| enqueue(net, command),
+            )
+            .map(|dispatched| dispatched.queued > 0)
+        {
             Ok(true) => Ok(Some(connection_id)),
             Ok(false) | Err(_) => {
                 transfers.fail_control_request(
@@ -1838,6 +2146,7 @@ impl Supervisor {
                             .prune_expired_group_invite_requests(now_ms)
                             .map(|_| ())
                     })
+                    .and_then(|()| groups.store.prune_fetch_relays(now_ms).map(|_| ()))
                     .and_then(|()| groups.store.prune_shard_forward_outbox(now_ms).map(|_| ()))
                     .is_err();
             }
@@ -2469,7 +2778,10 @@ impl Supervisor {
                 }))
             }
             LocalGroupAction::Remove { room, peer } => {
-                if store.group_access_owner(room)?.as_ref() == Some(&peer) {
+                let owner = store
+                    .group_access_owner(room)?
+                    .ok_or(AslError::PolicyDenied)?;
+                if owner == peer || &owner != local_peer {
                     return Err(AslError::PolicyDenied);
                 }
                 let snapshot = store.mls_room_snapshot(room)?.ok_or(AslError::NotFound)?;
@@ -2493,14 +2805,14 @@ impl Supervisor {
                 }))
             }
             LocalGroupAction::ProposeRemove { room, peer } => {
-                let (creator, _, _) = store.check_group_removal_request(room, local_peer, &peer)?;
-                if &creator == local_peer {
+                let (owner, _, _) = store.check_group_removal_request(room, local_peer, &peer)?;
+                if &owner == local_peer {
                     return Err(AslError::PolicyDenied);
                 }
                 let connection_id = admission
                     .admitted_connections(now_ms)
                     .into_iter()
-                    .find_map(|(_, id, candidate)| (candidate == creator).then_some(id))
+                    .find_map(|(_, id, candidate)| (candidate == owner).then_some(id))
                     .ok_or(AslError::NotFound)?;
                 let request_id = Id128(fresh_id()?);
                 let dispatch = admission.send_loopback_mls_application_to_connection(
@@ -2772,6 +3084,31 @@ fn accept_shard_binding(
     store.store_shard_binding(binding, sender, now_ms)
 }
 
+fn forwarded_source_requester(
+    store: &Store,
+    admission: &CoreAdmission,
+    wire_id: Hash32,
+    source_agent: AgentId,
+    source_peer: &PeerId,
+    now_ms: u64,
+) -> Option<([u8; 16], GroupRequester)> {
+    let (_, connection_id, _) = admission
+        .admitted_connections(now_ms)
+        .into_iter()
+        .find(|(agent, _, peer)| *agent == source_agent && peer == source_peer)?;
+    let direct = admission.direct_requester(connection_id, source_agent)?;
+    let snapshot = store.mls_room_snapshot(wire_id).ok().flatten()?;
+    Some((
+        connection_id,
+        GroupRequester {
+            direct,
+            wire_id,
+            group_id: snapshot.local_id,
+            membership_epoch: snapshot.version.membership_epoch,
+        },
+    ))
+}
+
 fn accept_shard_forward(
     store: &mut Store,
     admission: &mut CoreAdmission,
@@ -2811,6 +3148,9 @@ fn accept_shard_forward(
             | GroupApplication::Query(_)
             | GroupApplication::Answer(_)
             | GroupApplication::Offer(_)
+            | GroupApplication::FetchRequest(_)
+            | GroupApplication::FetchGrant(_)
+            | GroupApplication::FetchPending(_)
             | GroupApplication::Expression(_)
             | GroupApplication::ContextRequest(_)
             | GroupApplication::ContextOffer(_)
@@ -2855,6 +3195,30 @@ fn shard_forward_allows(
                 GroupFileAccessKind::Send,
             )
             .unwrap_or(false),
+        GroupApplication::FetchRequest(request) => store
+            .group_can_access_file(
+                &snapshot.local_id,
+                source_peer,
+                &request.content_id,
+                GroupFileAccessKind::Fetch,
+            )
+            .unwrap_or(false),
+        GroupApplication::FetchGrant(grant) => store
+            .group_can_access_file(
+                &snapshot.local_id,
+                source_peer,
+                &grant.content_id,
+                GroupFileAccessKind::Read,
+            )
+            .unwrap_or(false),
+        GroupApplication::FetchPending(pending) => store
+            .group_can_access_file(
+                &snapshot.local_id,
+                source_peer,
+                &pending.content_id,
+                GroupFileAccessKind::Read,
+            )
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -2879,6 +3243,7 @@ pub(super) fn forward_application_to_logical_shards(
             | GroupApplication::Query(_)
             | GroupApplication::Answer(_)
             | GroupApplication::Offer(_)
+            | GroupApplication::FetchRequest(_)
             | GroupApplication::Expression(_)
             | GroupApplication::ContextRequest(_)
             | GroupApplication::ContextOffer(_)
@@ -2910,8 +3275,40 @@ pub(super) fn forward_application_to_logical_shards(
     if expires_at_ms <= now_ms {
         return Err(AslError::ExpiredMessage);
     }
-    let mut targets = shards;
-    targets.push(root);
+    let fetch_source = match application {
+        GroupApplication::FetchRequest(request) => {
+            let Some(target) = request.source_room_id else {
+                return Ok(json!({"state": "not_forwardable", "rooms": []}));
+            };
+            if request.logical_group_id != Some(root) || store.mls_logical_root(target)? != root {
+                return Err(AslError::PolicyDenied);
+            }
+            if target == source_room {
+                return Ok(json!({"state": "single_room", "rooms": []}));
+            }
+            store.record_fetch_relay(
+                request.message_id,
+                root,
+                source_room,
+                target,
+                source_agent,
+                source_peer,
+                request.content_id,
+                now_ms,
+                expires_at_ms,
+            )?;
+            Some(target)
+        }
+        _ => None,
+    };
+    let mut targets = fetch_source.map_or_else(
+        || {
+            let mut targets = shards;
+            targets.push(root);
+            targets
+        },
+        |target| vec![target],
+    );
     targets.retain(|target| *target != source_room);
     let mut outcomes = Vec::with_capacity(targets.len());
     for target in targets {
@@ -3026,6 +3423,168 @@ pub(super) fn forward_application_to_logical_shards(
     Ok(json!({"root": hex::encode(root.0), "rooms": outcomes}))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn forward_fetch_response_to_requester(
+    store: &mut Store,
+    admission: &mut CoreAdmission,
+    net: &NetRuntime,
+    identity: &AgentIdentity,
+    local_peer: &PeerId,
+    source_room: Hash32,
+    application: &GroupApplication,
+    request_id: Id128,
+    source_agent: AgentId,
+    source_peer: &PeerId,
+    source_epoch: u64,
+    source_connection: [u8; 16],
+    now_ms: u64,
+    pending_transfers: &mut VecDeque<PendingGroupTransfer>,
+) -> Result<(), AslError> {
+    if !matches!(
+        application,
+        GroupApplication::FetchGrant(_) | GroupApplication::FetchPending(_)
+    ) {
+        return Err(AslError::InvalidMessage);
+    }
+    let response_content_id = match application {
+        GroupApplication::FetchGrant(grant) => grant.content_id,
+        GroupApplication::FetchPending(pending) => pending.content_id,
+        _ => return Err(AslError::InvalidMessage),
+    };
+    let Some(relay) = store.fetch_relay(source_room, request_id, now_ms)? else {
+        return Ok(());
+    };
+    let root = store.mls_logical_root(source_room)?;
+    if relay.logical_root != root
+        || relay.source_room != source_room
+        || relay.content_id != response_content_id
+        || store.group_access_owner(root)?.as_ref() != Some(local_peer)
+        || store.mls_peer_agent(source_peer)? != Some(source_agent)
+        || store.mls_peer_agent(&relay.requester_peer)? != Some(relay.requester_agent)
+        || !shard_forward_allows(store, source_room, source_peer, application)
+        || !store.has_mls_sync_member(relay.requester_room, &relay.requester_peer)?
+    {
+        return Err(AslError::PolicyDenied);
+    }
+    let source = store
+        .mls_room_snapshot(source_room)?
+        .ok_or(AslError::NotFound)?;
+    let target = store
+        .mls_room_snapshot(relay.requester_room)?
+        .ok_or(AslError::NotFound)?;
+    if relay.requester_peer == *local_peer {
+        let requester = store
+            .cached_group_requester(
+                relay.requester_room,
+                relay.requester_agent,
+                &relay.requester_peer,
+                now_ms,
+            )?
+            .ok_or(AslError::PolicyDenied)?;
+        if pending_transfers.len() == MAX_PENDING_GROUP_TRANSFERS {
+            pending_transfers.pop_front();
+        }
+        pending_transfers.push_back(PendingGroupTransfer {
+            connection_id: source_connection,
+            wire_id: relay.requester_room,
+            epoch: target.version.mls_epoch,
+            envelope_id: request_id,
+            sender: source_peer.clone(),
+            requester: Some(requester),
+            application: application.clone(),
+        });
+        return Ok(());
+    }
+    let (_, source_expires) = application.time_bounds();
+    let expires_at_ms = source_expires.min(relay.expires_at_ms).min(
+        now_ms
+            .checked_add(MAX_SHARD_FORWARD_LIFETIME_MS)
+            .ok_or(AslError::InvalidMessage)?,
+    );
+    if expires_at_ms <= now_ms {
+        return Err(AslError::ExpiredMessage);
+    }
+    let target_binding = if relay.requester_room == root {
+        None
+    } else {
+        let (_, shard_index) = store
+            .mls_shard_parent(relay.requester_room)?
+            .ok_or(AslError::InvalidPolicyState)?;
+        Some(ensure_local_shard_binding(
+            store,
+            identity,
+            local_peer,
+            root,
+            shard_index,
+            relay.requester_room,
+            now_ms,
+        )?)
+    };
+    let payload = application.clone().encode()?;
+    let mut forward = ShardForward {
+        message_id: Id128(fresh_id()?),
+        logical_root: root,
+        source_child: source_room,
+        target_child: relay.requester_room,
+        source_agent,
+        source_peer: source_peer.clone(),
+        source_mls_epoch: source_epoch,
+        source_membership_epoch: source.version.membership_epoch,
+        source_message_id: application.message_id(),
+        hop: MAX_SHARD_FORWARD_HOP,
+        observed_at_ms: now_ms,
+        expires_at_ms,
+        payload,
+        target_binding,
+        attestor_agent: identity.agent_id(),
+        attestor_peer: local_peer.clone(),
+        signature: Signature65([0; 65]),
+    };
+    forward.signature = identity.sign_domain_message(&forward.signing_preimage()?)?;
+    let bytes = u64::try_from(forward.encode()?.len()).map_err(|_| AslError::InvalidMessage)?;
+    let reservation = store
+        .reserve_budget(
+            &hex::encode(target.local_id.0.0),
+            0,
+            &[(BudgetKind::MessageBytes, bytes)],
+            now_ms,
+        )?
+        .ok_or(AslError::QuotaExceeded)?;
+    let forward_id = forward.message_id;
+    let packet = match admission.prepare_mls_owner_reply_forward(
+        store,
+        relay.requester_room,
+        forward,
+        &relay.requester_peer,
+        relay.content_id,
+        now_ms,
+    ) {
+        Ok(packet) => packet,
+        Err(error) => {
+            let _ = store.refund_budget_reservation(reservation, now_ms);
+            return Err(error);
+        }
+    };
+    let dispatched = admission.dispatch_prepared_loopback_mls_shard_forward_to_peer(
+        store,
+        &packet,
+        &relay.requester_peer,
+        expires_at_ms,
+        now_ms,
+        |command| {
+            if net.try_send(&command.into_ipc()?)? {
+                Ok(())
+            } else {
+                Err(AslError::SandboxUnavailable)
+            }
+        },
+    );
+    if matches!(&dispatched, Ok(sent) if sent.queued > 0) {
+        let _ = store.complete_shard_forward_outbox(forward_id);
+    }
+    Ok(())
+}
+
 fn retry_shard_forward_outbox_entry(
     store: &mut Store,
     admission: &mut CoreAdmission,
@@ -3043,11 +3602,201 @@ fn retry_shard_forward_outbox_entry(
         _ => Err(AslError::InvalidMessage),
     };
     let packet = match packet {
-        Ok(packet) if packet.group_id == route.target_child => packet,
+        Ok(packet)
+            if (route.kind == ShardForwardOutboxKind::Forward
+                && packet.group_id == route.target_child)
+                || (route.kind == ShardForwardOutboxKind::OwnerRelay
+                    && packet.group_id == route.source_child)
+                || (route.kind == ShardForwardOutboxKind::OwnerReply
+                    && packet.group_id == route.target_child) =>
+        {
+            packet
+        }
         _ => {
             return store.terminate_shard_forward_outbox(route.forward_id, "invalid_frame", now_ms);
         }
     };
+    if route.kind == ShardForwardOutboxKind::OwnerReply {
+        let Some(target_peer) = route.target_peer.as_ref() else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "requester_missing",
+                now_ms,
+            );
+        };
+        let Some(target_snapshot) = store.mls_room_snapshot(route.target_child)? else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_missing",
+                now_ms,
+            );
+        };
+        let Some((target_state, _)) = store.mls_room_progress(route.target_child)? else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_missing",
+                now_ms,
+            );
+        };
+        if target_state != "active"
+            || packet.epoch != target_snapshot.version.mls_epoch
+            || !store.has_mls_sync_member(route.target_child, target_peer)?
+        {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "requester_not_member",
+                now_ms,
+            );
+        }
+        let source_root = store.mls_logical_root(route.source_child)?;
+        let target_root = store.mls_logical_root(route.target_child)?;
+        if source_root != route.logical_root || target_root != route.logical_root {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "logical_root_changed",
+                now_ms,
+            );
+        }
+        if store.group_access_owner(route.logical_root)?.as_ref() != Some(local_peer)
+            || !store.has_mls_sync_member(route.target_child, local_peer)?
+        {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "owner_not_available",
+                now_ms,
+            );
+        }
+        let direct = admission.dispatch_prepared_loopback_mls_shard_forward_to_peer(
+            store,
+            &packet,
+            target_peer,
+            route.expires_at_ms,
+            now_ms,
+            |command| {
+                if net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        );
+        if matches!(&direct, Ok(sent) if sent.queued > 0) {
+            return store.complete_shard_forward_outbox(route.forward_id);
+        }
+        let error = direct.err().unwrap_or(AslError::NotFound);
+        let terminal_reason = match &error {
+            AslError::ExpiredMessage => Some("expired"),
+            AslError::PolicyVersionConflict => Some("target_epoch_changed"),
+            AslError::PolicyDenied => Some("requester_not_member"),
+            AslError::InvalidMessage => Some("invalid_frame"),
+            AslError::IncompatibleVersion => Some("requester_incompatible"),
+            _ => None,
+        };
+        if let Some(reason) = terminal_reason {
+            return store.terminate_shard_forward_outbox(route.forward_id, reason, now_ms);
+        }
+        let attempts = entry.attempts.saturating_add(1);
+        let delay = SHARD_FORWARD_OUTBOX_RETRY_BASE_MS
+            .saturating_mul(1_u64 << attempts.min(7))
+            .min(SHARD_FORWARD_OUTBOX_RETRY_MAX_MS);
+        let next_attempt_ms = now_ms
+            .saturating_add(delay)
+            .min(route.expires_at_ms.saturating_sub(1));
+        if next_attempt_ms <= now_ms {
+            return store.terminate_shard_forward_outbox(route.forward_id, "expired", now_ms);
+        }
+        return store.reschedule_shard_forward_outbox(route, attempts, next_attempt_ms);
+    }
+    if route.kind == ShardForwardOutboxKind::OwnerRelay {
+        let Some(_target_snapshot) = store.mls_room_snapshot(route.target_child)? else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_missing",
+                now_ms,
+            );
+        };
+        let Some((target_state, _)) = store.mls_room_progress(route.target_child)? else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_missing",
+                now_ms,
+            );
+        };
+        let source_root = store.mls_logical_root(route.source_child)?;
+        let target_root = store.mls_logical_root(route.target_child)?;
+        if source_root != route.logical_root || target_root != route.logical_root {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "logical_root_changed",
+                now_ms,
+            );
+        }
+        if target_state != "active" {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_not_active",
+                now_ms,
+            );
+        }
+        let Some(owner) = store.group_access_owner(route.source_child)? else {
+            return store.terminate_shard_forward_outbox(route.forward_id, "owner_missing", now_ms);
+        };
+        if owner == *local_peer {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "owner_is_sender",
+                now_ms,
+            );
+        }
+        if !store.has_mls_sync_member(route.source_child, local_peer)?
+            || !store.has_mls_sync_member(route.source_child, &owner)?
+        {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "owner_not_available",
+                now_ms,
+            );
+        }
+        let direct = admission.dispatch_prepared_loopback_mls_shard_forward(
+            store,
+            &packet,
+            route.expires_at_ms,
+            now_ms,
+            |command| {
+                if net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        );
+        if matches!(&direct, Ok(sent) if sent.queued > 0) {
+            return store.complete_shard_forward_outbox(route.forward_id);
+        }
+        let error = direct.err().unwrap_or(AslError::NotFound);
+        let terminal_reason = match &error {
+            AslError::ExpiredMessage => Some("expired"),
+            AslError::PolicyVersionConflict => Some("epoch_changed"),
+            AslError::PolicyDenied => Some("policy_denied"),
+            AslError::InvalidMessage => Some("invalid_frame"),
+            AslError::IncompatibleVersion => Some("owner_incompatible"),
+            _ => None,
+        };
+        if let Some(reason) = terminal_reason {
+            return store.terminate_shard_forward_outbox(route.forward_id, reason, now_ms);
+        }
+        let attempts = entry.attempts.saturating_add(1);
+        let delay = SHARD_FORWARD_OUTBOX_RETRY_BASE_MS
+            .saturating_mul(1_u64 << attempts.min(7))
+            .min(SHARD_FORWARD_OUTBOX_RETRY_MAX_MS);
+        let next_attempt_ms = now_ms
+            .saturating_add(delay)
+            .min(route.expires_at_ms.saturating_sub(1));
+        if next_attempt_ms <= now_ms {
+            return store.terminate_shard_forward_outbox(route.forward_id, "expired", now_ms);
+        }
+        return store.reschedule_shard_forward_outbox(route, attempts, next_attempt_ms);
+    }
     let Some(target_snapshot) = store.mls_room_snapshot(route.target_child)? else {
         return store.terminate_shard_forward_outbox(route.forward_id, "target_missing", now_ms);
     };

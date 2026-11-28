@@ -34,6 +34,7 @@ impl Language {
             (Self::Zh, super::views::Page::Knowledge) => "资源与经验",
             (Self::Zh, super::views::Page::Trust) => "信任与贡献",
             (Self::Zh, super::views::Page::Access) => "授权",
+            (Self::Zh, super::views::Page::Migration) => "迁移",
             (Self::En, super::views::Page::Overview) => "Overview",
             (Self::En, super::views::Page::Activity) => "Activity",
             (Self::En, super::views::Page::Nodes) => "Nodes",
@@ -43,6 +44,7 @@ impl Language {
             (Self::En, super::views::Page::Knowledge) => "Resources",
             (Self::En, super::views::Page::Trust) => "Trust",
             (Self::En, super::views::Page::Access) => "Access",
+            (Self::En, super::views::Page::Migration) => "Migration",
         }
     }
 

@@ -10,11 +10,13 @@ fn rejects_relative_storage_root() {
 }
 
 #[test]
+#[cfg(windows)]
 fn rejects_unc_storage_root() {
     assert!(AppPaths::open(Path::new(r"\\server\share\asl")).is_err());
 }
 
 #[test]
+#[cfg(windows)]
 fn refuses_device_namespaces_even_for_an_existing_directory() {
     let verbatim = std::env::temp_dir().canonicalize().unwrap();
     assert!(AppPaths::open(&verbatim).is_err());
@@ -75,6 +77,7 @@ fn opening_existing_storage_does_not_create_missing_directories() {
 }
 
 #[test]
+#[cfg(windows)]
 fn rejects_unavailable_drive() {
     if !Path::new(r"Z:\").exists() {
         assert!(AppPaths::open(Path::new(r"Z:\asl-data")).is_err());

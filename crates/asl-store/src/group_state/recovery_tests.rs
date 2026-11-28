@@ -342,6 +342,7 @@ fn sync_requires_current_authority_and_rolls_back_an_expired_write() {
         wire_id,
         expected: committed,
         creator: &creator,
+        owner: &creator,
         requester: &forwarder,
         members: &roster,
         chain_id: 1,

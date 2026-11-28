@@ -93,6 +93,10 @@ IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup I
 
 PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode 字符的可选单句说明；拒绝换行、控制字符和句中多个句末标点，说明内容纳入身份根签名和 transcript。nonce 为 256-bit 随机值，不是低熵口令；身份通过已验证链状态下的身份根签名校验。邀请需本机用户明确批准才可接受，只建立 AgentId 本地 pin，不改变文件/目录授权。提示限额为每 AgentId 每 24 小时 1 次、本机每小时 20 次、最多 5 个同时待处理提示；超限邀请得到签名拒绝，不弹提示、不建立联系人。
 
+配对邀请可选携带整数键 9 的 `contact-provenance`，只允许共享群 `{0:1, 1:group-id, 2:membership-epoch}` 或近期真实交互 `{0:2, 3:interaction-id, 4:expires-at}`。来源声明纳入邀请身份根签名，但签名只证明发送者声称了这个来源，不证明来源事实；接收端仍必须用本机当前 MLS 成员/epoch 或本机固定到期交互证据复核。远端声明与本地证据不匹配时不能自动绑定。联系人临时邀请载荷可选携带同一结构的整数键 8，并在目标定向邀请中继续保留；旧的无来源载荷继续可解析。
+
+PAKE short-code pairing 使用同一控制连接上的独立整数键 CBOR 帧：`pake-start(20)`、`pake-answer(21)`、`pake-confirm(22)`、`pake-receipt(23)`。短码为一次性 6 位或 12 位数字，邀请有效期为 5 或 15 分钟；短码只作为 SPAKE2 的临时口令，不是 AgentId 或长期认证。双方把 exchange id、双 AgentId、双设备 PeerId、角色、有效期和 SPAKE2 share 绑定进 transcript，并用本机身份根签名；SPAKE2 后每个方向再做 key confirmation。邀请同一时间只允许一个 owner 会话，失败或超时会消费邀请，不能把短码拿去离线猜测或重复尝试。PAKE 成功后仍只建立本地联系人 binding，不授予文件、目录、模型或群权限。当前实现使用稳定版 `spake2 0.4.0`；该库没有独立安全审计，因此不把短码路径宣传为经过审计的认证协议。
+
 ### 群子流
 
 `group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，可包含既有结构帧、`act`、群主策略、移除请求、语义上下文或 ASL/1.4 shard 控制；除 act `nl-body` 外不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。
@@ -157,6 +161,7 @@ identity record key 使用下列域分离派生，禁止共用键或接受任意
 profile key = BLAKE3("ASL-PROFILE-v1\0" || agent_id_bytes)
 device directory key = BLAKE3("ASL-DEVICE-DIRECTORY-v1\0" || agent_id_bytes)
 short-code claim key = BLAKE3("ASL-SHORT-CODE-CLAIM-v1\0" || agent_id_bytes)
+contact policy key = BLAKE3("ASL-CONTACT-POLICY-v1\0" || agent_id_bytes)
 ```
 
 短码的多候选发现键只用于 provider 查询，不作单值 record key。Agent 完成直接身份验证后，短码声明使用其按 AgentId 隔离的短码记录键读取；因此短码碰撞不会发生单值覆盖。记录和 provider store 均有单值、数量、地址及总字节上限。DHT store 与防回滚观察当前为本进程内存状态，不能视为重启后的持久记录或高水位。
@@ -167,9 +172,13 @@ profile 最长 30 分钟、每 5 分钟重新发布；相同 sequence 只接受�
 
 本机 Core → Net IPC：kind 56（16 字节操作 ID、32 字节 AgentId）准备发布，查最近邻；57（同 ID、1 至 8192 字节签名记录）提交 PUT；58（原操作 ID、独立回执 ID，各 16 字节）取消。kind 59（16 字节操作 ID、32 字节目标 AgentId）按派生的资料键执行 GET。Net 复用 kind 19/20 回报操作结果；GET 启动不代表命中，候选记录仍须进入现有验签路径。PUT 应答不代表接收方已验签。线上记录 CBOR 不变。
 
+Core → Net 的 kind 74/75/76 是 ContactPolicy 的同一套 publication 状态机：74 准备本 AgentId 的 kind 4 DHT key，75 提交已由 Core 验证的精确签名记录，76 取消并返回独立 receipt。kind 64 的通用 `LookupDhtRecord` 用于周期 Lookup；候选仍经 `verify_record`、当前链 resolver、RecordHistory 和本地同步授权后才可解密应用。
+
 profile payload 严格遵循 CDDL 中的 profile 结构，只能包含概念 ID 和明确授权的头像 content ID。昵称、描述、地点及任意标签文本不发布。头像必须同时存在一条明确公开的应用管理资源引用，不能因 profile 中出现 hash 就绕过文件授权。
 
-T13 编码补全（2026-11-18）：之前规范只冻结了签名原文，缺少封装、设备目录和短码声明的 CDDL。新增 `signed-record` 定义，不改变已有控制帧或合约存储。封装采用确定性整数键 map：0=版本 1、1=kind、2=AgentId、3=publication sequence、4=issued、5=expires、6=规范载荷字节、7=65 字节签名；整个封装最多 8 KiB。载荷字节必须再次通过对应已知结构的严格解码，不能承载任意 blob 或文本。所有记录最长 30 分钟。身份根签名复用设备证书的 Keccak-256、secp256k1 low-S 及 v=27/28 格式。
+T13 编码补全（2026-11-18）：之前规范只冻结了签名原文，缺少封装、设备目录和短码声明的 CDDL。新增 `signed-record` 定义，不改变已有控制帧或合约存储。封装采用确定性整数键 map：0=版本 1、1=kind、2=AgentId、3=publication sequence、4=issued、5=expires、6=规范载荷字节、7=65 字节签名；整个封装最多 8 KiB。载荷字节必须再次通过对应已知结构的严格解码，不能承载任意 blob 或文本。kind 1/2/3 最长 30 分钟；kind 4 ContactPolicy 可延长到 24 小时。身份根签名复用设备证书的 Keccak-256、secp256k1 low-S 及 v=27/28 格式。
+
+`kind=4` 是联系策略密文封套，用于本机授权后的设备/加密迁移自动同步。载荷只含 AgentId、单调 policy revision、非零随机 nonce、非敏感 revoked 标志和根派生密钥加密的有限密文；外层 sequence 必须等于 policy revision，记录最长 24 小时。密文内才包含请求模式、共享群/近期交互来源规则和撤销细节。普通 DHT 节点只能看到封套、revision、revoked 和密文，不能读取联系人、来源规则或联系人历史；接收端在解密和写入前还要检查本机 `contacts.policy_sync_authorized.v1` 明确授权、根签名、当前 AgentId、期限、revision 和 revoked 一致性。同一 revision 的不同完整记录先按 revoked 优先，再按 BLAKE3 较小的字节串确定性胜出；记录过期后才推进 revision 续发，避免同 sequence 的随机重签冲突。撤销以更高 revision 的拒绝/revoked 快照传播，不能回滚到旧的允许状态。该记录不创建授权联系人、查询、文件、模型或群权限。
 
 profile 载荷直接复用现有 profile 控制对象，内部 owner/sequence 必须与封装相同。device directory 载荷为整数键 map：0=版本 1、1=AgentId、2=registry sequence、3=设备证书数组、4=撤销 serial 数组；设备至多 64 项，按原始 PeerId 字节严格排序，PeerId 和 serial 都不得重复。撤销 serial 至多 64 项，非零、递增，不能与活跃证书重叠；8 KiB 总上限仍优先于数量上限。`stateCommitment = BLAKE3("ASL-DEVICE-DIRECTORY-v1\0" || canonical_payload_bytes)`，同时验证载荷 registry sequence 等于当前最终化链状态序号。外层 publication sequence 与链序号独立，刷新外层时间不改变目录承诺，也不要求每次续发都上链。
 

@@ -122,13 +122,13 @@ impl EthereumLightClient {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn with_test_checkpoint(mut self, checkpoint: super::CheckpointV1) -> Self {
         self.config.checkpoint = checkpoint;
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(super) fn with_test_beacon_conflict(mut self) -> Self {
         let LightClientHeader::Capella(header) = &mut self.store.finalized_header else {
             panic!("test fixture requires capella");

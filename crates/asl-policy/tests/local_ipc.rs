@@ -1,13 +1,13 @@
-#![cfg(windows)]
-
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use asl_policy::{LocalPipeServer, connect_local_pipe};
+#[cfg(windows)]
 use asl_types::error::AslError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, timeout};
+#[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_BUSY};
 
 const CHILD_ROOT: &str = "ASL_TEST_LOCAL_PIPE_CHILD_ROOT";
@@ -84,10 +84,13 @@ async fn local_pipe_rejects_duplicate_bind_and_scopes_by_directory_identity() {
         .await
         .unwrap()
         .unwrap();
+    #[cfg(windows)]
     assert!(matches!(
         connect_local_pipe(&first),
         Err(AslError::Io(error)) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32)
     ));
+    #[cfg(not(windows))]
+    assert!(connect_local_pipe(&first).is_err());
     drop((connection, client, other));
 }
 
@@ -96,12 +99,23 @@ async fn local_pipe_can_accept_after_client_exits_before_accept() {
     let root = tempfile::tempdir().unwrap();
     let mut listener = LocalPipeServer::bind(root.path()).unwrap();
     drop(connect_local_pipe(root.path()).unwrap());
-    // Windows can report a departed client as a disconnected instance, or
-    // complete the connection and deliver EOF if I/O already owns a handle.
-    match timeout(TEST_TIMEOUT, listener.accept()).await.unwrap() {
-        Ok(connection) => drop(connection),
-        Err(AslError::Io(error)) => assert_eq!(error.raw_os_error(), Some(ERROR_NO_DATA.0 as i32)),
-        Err(error) => panic!("{error}"),
+    #[cfg(windows)]
+    {
+        // Windows can report a departed client as a disconnected instance, or
+        // complete the connection and deliver EOF if I/O already owns a handle.
+        match timeout(TEST_TIMEOUT, listener.accept()).await.unwrap() {
+            Ok(connection) => drop(connection),
+            Err(AslError::Io(error)) => {
+                assert_eq!(error.raw_os_error(), Some(ERROR_NO_DATA.0 as i32))
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(connection) = timeout(TEST_TIMEOUT, listener.accept()).await.unwrap() {
+            drop(connection);
+        }
     }
     // On a recycled instance, poll accept to make it listen before opening.
     let (connection, _client) = timeout(TEST_TIMEOUT, async {

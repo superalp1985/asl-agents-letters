@@ -9,6 +9,8 @@ use super::{LocalAction, MUTED, locale::Language, qr};
 pub(super) struct Form {
     note: String,
     minutes: u64,
+    pake_minutes: u64,
+    pake_digits: u8,
     import: String,
 }
 
@@ -39,6 +41,12 @@ impl Form {
         if self.minutes == 0 {
             self.minutes = 15;
         }
+        if self.pake_digits == 0 {
+            self.pake_digits = 6;
+        }
+        if self.pake_minutes == 0 {
+            self.pake_minutes = 5;
+        }
         let local_device = data.identity.peer_id.as_deref().and_then(|value| {
             let bytes = bs58::decode(value).into_vec().ok()?;
             asl_types::ids::PeerId::from_bytes(bytes).ok()
@@ -62,6 +70,35 @@ impl Form {
                         );
                     }
                 });
+            egui::ComboBox::from_id_salt("contact-pake-digits")
+                .selected_text(format!(
+                    "{} {}",
+                    self.pake_digits,
+                    label(language, "位", "digits")
+                ))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.pake_digits,
+                        6,
+                        label(language, "6 位", "6 digits"),
+                    );
+                    ui.selectable_value(
+                        &mut self.pake_digits,
+                        12,
+                        label(language, "12 位", "12 digits"),
+                    );
+                });
+            egui::ComboBox::from_id_salt("contact-pake-expiry")
+                .selected_text(expiry_label(self.pake_minutes, language))
+                .show_ui(ui, |ui| {
+                    for minutes in [5, 15] {
+                        ui.selectable_value(
+                            &mut self.pake_minutes,
+                            minutes,
+                            expiry_label(minutes, language),
+                        );
+                    }
+                });
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
@@ -74,6 +111,23 @@ impl Form {
                     [
                         OsString::from("create"),
                         OsString::from(self.minutes.to_string()),
+                        OsString::from(self.note.clone()),
+                    ],
+                ));
+            }
+            if ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(label(language, "生成 PAKE 短码", "Create PAKE code")),
+                )
+                .clicked()
+            {
+                *action = Some(LocalAction::new(
+                    "contact-invites",
+                    [
+                        OsString::from("create-pake"),
+                        OsString::from(self.pake_minutes.to_string()),
+                        OsString::from(self.pake_digits.to_string()),
                         OsString::from(self.note.clone()),
                     ],
                 ));
@@ -95,6 +149,10 @@ impl Form {
                     asl_app::contact_invite::short_code_envelope(model.inviter, device, &model)
                 })
                 .unwrap_or_else(|| asl_app::contact_invite::short_code(&model));
+            let pake_code = asl_app::contact_invite::pake_code(&model);
+            let pake_envelope = local_device.as_ref().and_then(|device| {
+                asl_app::contact_invite::pake_code_envelope(model.inviter, device, &model)
+            });
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(label(language, "待使用邀请", "Active invite")).strong());
@@ -119,6 +177,36 @@ impl Form {
                     ));
                 }
             });
+            if let Some(pake_code) = pake_code {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {pake_code}",
+                            label(language, "一次性 PAKE 短码", "One-time PAKE code")
+                        ))
+                        .monospace(),
+                    );
+                    if ui
+                        .small_button(label(language, "复制 PAKE 短码", "Copy PAKE code"))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(pake_code);
+                    }
+                });
+            }
+            if let Some(pake_envelope) = pake_envelope {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .small_button(label(language, "复制 PAKE 邀请", "Copy PAKE invite"))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(pake_envelope.clone());
+                    }
+                });
+                if let Err(error) = qr::show(ui, &pake_envelope, 180.0) {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("{error:?}"));
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
@@ -197,6 +285,9 @@ impl Form {
                         remaining(prompt.expires_at_ms, now_ms, language)
                     ));
                     ui.weak(bs58::encode(prompt.remote_agent.as_bytes()).into_string());
+                    if let Some(provenance) = prompt.provenance {
+                        ui.weak(provenance_label(provenance, language));
+                    }
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(
@@ -250,6 +341,7 @@ fn invite_model(
         created_at_ms: invite.created_at_ms,
         expires_at_ms: invite.expires_at_ms,
         note: invite.note.clone().unwrap_or_default(),
+        provenance: invite.provenance,
         signature: asl_types::ids::Signature65(invite.signature),
     })
 }
@@ -260,6 +352,36 @@ fn expiry_label(minutes: u64, language: Language) -> String {
         15 => label(language, "15 分钟", "15 minutes").into(),
         60 => label(language, "1 小时", "1 hour").into(),
         _ => label(language, "24 小时", "24 hours").into(),
+    }
+}
+
+fn provenance_label(
+    provenance: asl_types::protocol::ContactProvenance,
+    language: Language,
+) -> String {
+    match provenance {
+        asl_types::protocol::ContactProvenance::SharedGroup {
+            group_id,
+            membership_epoch,
+        } => format!(
+            "{} {} @ {}",
+            label(language, "签名来源：共享群", "Signed origin: shared group"),
+            alloy_primitives::hex::encode(group_id.0),
+            membership_epoch
+        ),
+        asl_types::protocol::ContactProvenance::RecentInteraction {
+            interaction_id,
+            expires_at_ms,
+        } => format!(
+            "{} {} ({})",
+            label(
+                language,
+                "签名来源：近期交互",
+                "Signed origin: recent interaction"
+            ),
+            alloy_primitives::hex::encode(interaction_id.0),
+            expires_at_ms
+        ),
     }
 }
 

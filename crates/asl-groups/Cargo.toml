@@ -7,14 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 asl-types = { path = "../asl-types" }
-blake3.workspace = true
-openmls.workspace = true
-openmls_basic_credential = "=0.6.0"
-
-[target.'cfg(windows)'.dependencies]
 asl-policy = { path = "../asl-policy" }
 asl-store = { path = "../asl-store" }
+blake3.workspace = true
 cbor2.workspace = true
+openmls.workspace = true
+openmls_basic_credential = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
 openmls_traits = "=0.6.0"
 serde.workspace = true

@@ -162,11 +162,8 @@ impl Supervisor {
                 let room = wire_id(&selected.room)?;
                 let peer =
                     PeerId::from_bytes(peer.to_bytes()).map_err(|_| AslError::InvalidDatabase)?;
-                let saved = groups
-                    .store
-                    .mls_room_for_reconciliation(room)?
-                    .ok_or(AslError::NotFound)?;
-                if saved.creator == self.device_peer_id {
+                let owner = groups.store.group_access_owner(room)?;
+                if owner.as_ref() == Some(&self.device_peer_id) {
                     (
                         LocalGroupAction::Remove { room, peer },
                         AdminOutcome::MemberRemoved,

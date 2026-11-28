@@ -63,6 +63,7 @@ pub(crate) enum MailCommand {
     ActHistorySearch {
         query: String,
         limit: u32,
+        cursor: Option<String>,
         reply: oneshot::Sender<Result<Value, AslError>>,
     },
     Send {
@@ -206,11 +207,13 @@ impl MailPort {
         &self,
         query: String,
         limit: u32,
+        cursor: Option<String>,
     ) -> Result<Value, AslError> {
         let (reply, result) = oneshot::channel();
         self.submit(MailCommand::ActHistorySearch {
             query,
             limit,
+            cursor,
             reply,
         })?;
         result.await.map_err(|_| AslError::SandboxUnavailable)?

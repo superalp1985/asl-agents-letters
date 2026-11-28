@@ -42,7 +42,7 @@ pub(crate) struct McpWorker {
 }
 
 impl McpWorker {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn spawn(
         root: PathBuf,
         grant: HostGrant,
@@ -658,8 +658,8 @@ async fn act_history_search(
     let mail = mail
         .filter(|_| grant.act_history)
         .ok_or(ErrorCode::PolicyDenied)?;
-    let (query, limit) = args.validate()?;
-    mail.act_history_search(query, limit)
+    let (query, limit, cursor) = args.validate()?;
+    mail.act_history_search(query, limit, cursor)
         .await
         .map_err(error_code)
 }

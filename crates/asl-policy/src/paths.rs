@@ -1,11 +1,17 @@
 use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, Write};
-use std::path::{Component, Path, Prefix};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::{Component, Prefix};
+#[cfg(target_os = "linux")]
+use std::{fs::File, os::unix::fs::MetadataExt, sync::Arc};
 #[cfg(windows)]
 use std::{fs::File, sync::Arc};
 
 use asl_types::error::AslError;
 
+#[cfg(target_os = "linux")]
+use crate::platform::linux::handles;
 #[cfg(windows)]
 use crate::platform::windows::handles;
 
@@ -22,7 +28,11 @@ pub fn read_local_selection(
     {
         handles::read_local_selection(path, protected_root, max_bytes)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        handles::read_local_selection(path, protected_root, max_bytes)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (path, protected_root, max_bytes);
         Err(AslError::PlatformUnavailable)
@@ -68,7 +78,9 @@ impl SourceRules {
 pub struct SourceGrant {
     #[cfg(windows)]
     root: handles::SourceRoot,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    root: handles::SourceRoot,
+    #[cfg(not(any(windows, target_os = "linux")))]
     unavailable: std::convert::Infallible,
     rules: SourceRules,
 }
@@ -84,7 +96,14 @@ impl SourceGrant {
                 rules,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                root: handles::SourceRoot::open(root, protected_root)?,
+                rules,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = rules;
             Err(AslError::PlatformUnavailable)
@@ -116,7 +135,11 @@ impl SourceGrant {
         {
             self.root.identity()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.root.identity()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -126,7 +149,9 @@ impl SourceGrant {
 pub struct AuthorizedFile {
     #[cfg(windows)]
     inner: handles::SourceFile,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    inner: handles::SourceFile,
+    #[cfg(not(any(windows, target_os = "linux")))]
     unavailable: std::convert::Infallible,
 }
 
@@ -134,7 +159,9 @@ pub struct AuthorizedFile {
 pub struct WriteGrant {
     #[cfg(windows)]
     root: handles::SourceRoot,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    root: Arc<handles::SourceRoot>,
+    #[cfg(not(any(windows, target_os = "linux")))]
     unavailable: std::convert::Infallible,
 }
 
@@ -147,7 +174,19 @@ pub struct AuthorizedWriteFile {
     root_identity: FileIdentity,
     #[cfg(windows)]
     retained: bool,
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    inner: File,
+    #[cfg(target_os = "linux")]
+    root: Arc<handles::SourceRoot>,
+    #[cfg(target_os = "linux")]
+    identity: FileIdentity,
+    #[cfg(target_os = "linux")]
+    root_identity: FileIdentity,
+    #[cfg(target_os = "linux")]
+    current_name: String,
+    #[cfg(target_os = "linux")]
+    retained: bool,
+    #[cfg(not(any(windows, target_os = "linux")))]
     unavailable: std::convert::Infallible,
 }
 
@@ -161,7 +200,13 @@ impl WriteGrant {
                 root: handles::SourceRoot::open(root, protected_root)?,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                root: Arc::new(handles::SourceRoot::open(root, protected_root)?),
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (root, protected_root);
             Err(AslError::PlatformUnavailable)
@@ -185,7 +230,11 @@ impl WriteGrant {
         {
             self.root.identity()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.root.identity()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -213,7 +262,21 @@ impl WriteGrant {
                 retained: false,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let file = self.root.create_new_file(&name)?;
+            let root_identity = self.identity().clone();
+            let identity = self.root.file_identity(&file)?;
+            Ok(AuthorizedWriteFile {
+                inner: file,
+                root: Arc::clone(&self.root),
+                root_identity,
+                current_name: name,
+                retained: false,
+                identity,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = name;
             Err(AslError::PlatformUnavailable)
@@ -242,7 +305,24 @@ impl WriteGrant {
                 retained: true,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let name = components.into_iter().next().ok_or(AslError::NotFound)?;
+            let file = self.root.open_existing_write_file(&name)?;
+            let identity = self.root.file_identity(&file)?;
+            if &identity != expected {
+                return Err(AslError::PolicyDenied);
+            }
+            Ok(AuthorizedWriteFile {
+                inner: file,
+                root: Arc::clone(&self.root),
+                root_identity: self.identity().clone(),
+                current_name: name,
+                retained: true,
+                identity,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = components;
             Err(AslError::PlatformUnavailable)
@@ -265,7 +345,19 @@ impl WriteGrant {
             file.retained = true;
             Ok(())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            if file.root_identity != *self.identity() {
+                return Err(AslError::PolicyDenied);
+            }
+            let target = components.into_iter().next().ok_or(AslError::NotFound)?;
+            file.root
+                .rename_new(&file.inner, &file.current_name, &target)?;
+            file.current_name = target;
+            file.retained = true;
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (file, components);
             Err(AslError::PlatformUnavailable)
@@ -283,7 +375,15 @@ impl AuthorizedWriteFile {
             }
             Ok(id)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let id = self.root.file_identity(&self.inner)?;
+            if id != self.identity || id.volume_serial != self.root_identity.volume_serial {
+                return Err(AslError::PolicyDenied);
+            }
+            Ok(id)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -294,7 +394,11 @@ impl AuthorizedWriteFile {
         {
             self.inner.set_len(length)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.set_len(length)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = length;
             match self.unavailable {}
@@ -306,7 +410,11 @@ impl AuthorizedWriteFile {
         {
             self.inner.metadata().map(|metadata| metadata.len())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.metadata().map(|metadata| metadata.len())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -324,7 +432,15 @@ impl AuthorizedWriteFile {
                 .metadata()
                 .map(|metadata| metadata.last_write_time())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.metadata().map(|metadata| {
+                (metadata.mtime() as u64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(metadata.mtime_nsec() as u64)
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -332,6 +448,10 @@ impl AuthorizedWriteFile {
 
     pub fn retain(&mut self) {
         #[cfg(windows)]
+        {
+            self.retained = true;
+        }
+        #[cfg(target_os = "linux")]
         {
             self.retained = true;
         }
@@ -344,7 +464,15 @@ impl AuthorizedWriteFile {
             self.retained = true;
             Ok(())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let identity = self.root.file_identity(&self.inner)?;
+            self.root
+                .unlink_if_identity(&self.current_name, &identity)?;
+            self.retained = true;
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -355,7 +483,11 @@ impl AuthorizedWriteFile {
         {
             self.inner.sync_all()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.sync_all()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -373,6 +505,12 @@ impl Drop for AuthorizedWriteFile {
         if !self.retained {
             let _ = handles::snapshot::mark_delete(&self.inner);
         }
+        #[cfg(target_os = "linux")]
+        if !self.retained
+            && let Ok(identity) = self.root.file_identity(&self.inner)
+        {
+            let _ = self.root.unlink_if_identity(&self.current_name, &identity);
+        }
     }
 }
 
@@ -382,7 +520,11 @@ impl Write for AuthorizedWriteFile {
         {
             self.inner.write(buffer)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.write(buffer)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = buffer;
             match self.unavailable {}
@@ -394,7 +536,11 @@ impl Write for AuthorizedWriteFile {
         {
             self.inner.flush()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.flush()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -407,7 +553,11 @@ impl AuthorizedFile {
         {
             self.inner.identity()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.identity()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -418,7 +568,11 @@ impl AuthorizedFile {
         {
             self.inner.len()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.len()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             match self.unavailable {}
         }
@@ -435,7 +589,11 @@ impl Read for AuthorizedFile {
         {
             self.inner.read(buffer)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.read(buffer)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = buffer;
             match self.unavailable {}
@@ -449,7 +607,11 @@ impl Read for AuthorizedWriteFile {
         {
             self.inner.read(buffer)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.read(buffer)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = buffer;
             match self.unavailable {}
@@ -463,7 +625,11 @@ impl Seek for AuthorizedWriteFile {
         {
             self.inner.seek(position)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.seek(position)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = position;
             match self.unavailable {}
@@ -495,13 +661,22 @@ pub fn open_authorized_source(
                 .open_file(&components, grant.rules.max_file_bytes)?,
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(AuthorizedFile {
+            inner: grant
+                .root
+                .open_file(&components, grant.rules.max_file_bytes)?,
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (components, grant.rules.max_file_bytes);
         Err(AslError::PlatformUnavailable)
     }
 }
 
+#[cfg(windows)]
 fn validate_absolute(path: &Path) -> Result<(), AslError> {
     let mut components = path.components();
     if !matches!(components.next(), Some(Component::Prefix(prefix))
@@ -519,6 +694,24 @@ fn validate_absolute(path: &Path) -> Result<(), AslError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn validate_absolute(path: &Path) -> Result<(), AslError> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(AslError::InvalidStorageRoot);
+    }
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| AslError::InvalidStorageRoot)?;
+    validated_relative(relative).map_err(|_| AslError::InvalidStorageRoot)?;
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn validate_absolute(_: &Path) -> Result<(), AslError> {
+    Err(AslError::PlatformUnavailable)
+}
+
+#[cfg(windows)]
 pub(crate) fn validated_relative(path: &Path) -> Result<Vec<String>, AslError> {
     let text = path.to_str().ok_or(AslError::NotFound)?;
     let mut result = Vec::new();
@@ -543,6 +736,37 @@ pub(crate) fn validated_relative(path: &Path) -> Result<Vec<String>, AslError> {
         }
     }
     Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn validated_relative(path: &Path) -> Result<Vec<String>, AslError> {
+    let text = path.to_str().ok_or(AslError::NotFound)?;
+    let mut result = Vec::new();
+    for part in text.split(['\\', '/']) {
+        if part.is_empty()
+            || part == "."
+            || part == ".."
+            || part.ends_with([' ', '.'])
+            || part.chars().any(|value| {
+                value.is_control() || matches!(value, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            })
+            || part.len() > 255
+            || part.encode_utf16().count() > 255
+            || is_device_name(part)
+        {
+            return Err(AslError::NotFound);
+        }
+        result.push(part.to_owned());
+        if result.len() > MAX_COMPONENTS {
+            return Err(AslError::NotFound);
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) fn validated_relative(_: &Path) -> Result<Vec<String>, AslError> {
+    Err(AslError::PlatformUnavailable)
 }
 
 fn is_device_name(name: &str) -> bool {

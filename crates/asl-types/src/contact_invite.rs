@@ -2,8 +2,10 @@ use cbor2::{Value, value::Integer};
 
 use crate::{
     error::AslError,
-    ids::{AgentId, Id128, Signature65},
-    protocol::{MAX_PAIRING_NOTE_BYTES, cbor::decode_canonical, validate_pairing_note},
+    ids::{AgentId, Hash32, Id128, Signature65},
+    protocol::{
+        ContactProvenance, MAX_PAIRING_NOTE_BYTES, cbor::decode_canonical, validate_pairing_note,
+    },
 };
 
 pub const CONTACT_INVITE_VERSION: u64 = 1;
@@ -15,7 +17,8 @@ pub const CONTACT_INVITE_ENVELOPE_SCHEME: &str = "ASL-CONTACT-INVITE:";
 
 const MAX_TIME_MS: u64 = i64::MAX as u64;
 const UNSIGNED_FIELDS: [u64; 7] = [0, 1, 2, 3, 4, 5, 6];
-const ALL_FIELDS: [u64; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+const ALL_FIELDS: [u64; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+const PROVENANCE_FIELD: u64 = 8;
 
 /// Versioned contact invitation payload. Authentication must verify
 /// `signature` over `signing_preimage` before the invitation is accepted.
@@ -28,6 +31,9 @@ pub struct ContactInviteV1 {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub note: String,
+    /// The outer record signature authenticates this provenance claim.
+    /// Receivers must still verify local evidence before using it for a bind.
+    pub provenance: Option<ContactProvenance>,
     pub signature: Signature65,
 }
 
@@ -52,12 +58,23 @@ impl ContactInviteV1 {
         if now_ms >= self.expires_at_ms {
             return Err(AslError::ExpiredMessage);
         }
+        if let Some(provenance) = &self.provenance {
+            provenance.validate(now_ms)?;
+        }
         validate_pairing_note(&self.note)
     }
 
     pub fn to_canonical_cbor(&self, now_ms: u64) -> Result<Vec<u8>, AslError> {
         self.validate(now_ms)?;
-        let bytes = cbor2::to_canonical_vec(&self.to_value(ALL_FIELDS))
+        let fields = if self.provenance.is_some() {
+            ALL_FIELDS.to_vec()
+        } else {
+            ALL_FIELDS
+                .into_iter()
+                .filter(|field| *field != PROVENANCE_FIELD)
+                .collect()
+        };
+        let bytes = cbor2::to_canonical_vec(&self.to_value(fields))
             .map_err(|_| AslError::InvalidMessage)?;
         if bytes.is_empty() || bytes.len() > MAX_CONTACT_INVITE_CBOR_BYTES {
             return Err(AslError::InvalidMessage);
@@ -83,11 +100,20 @@ impl ContactInviteV1 {
             created_at_ms: cbor_uint(take(&mut fields, 4)?)?,
             expires_at_ms: cbor_uint(take(&mut fields, 5)?)?,
             note: cbor_note(take(&mut fields, 6)?)?,
+            provenance: None,
             signature: Signature65(cbor_fixed::<65>(take(&mut fields, 7)?)?),
         };
+        let provenance = fields.remove(&PROVENANCE_FIELD);
+        let provenance = provenance
+            .map(|value| cbor_provenance(value, now_ms))
+            .transpose()?;
         if !fields.is_empty() {
             return Err(AslError::InvalidMessage);
         }
+        let invite = Self {
+            provenance,
+            ..invite
+        };
         invite.validate(now_ms)?;
         Ok(invite)
     }
@@ -96,7 +122,15 @@ impl ContactInviteV1 {
     /// encoding of every field except `signature`.
     pub fn signing_preimage(&self, now_ms: u64) -> Result<Vec<u8>, AslError> {
         self.validate(now_ms)?;
-        let unsigned = cbor2::to_canonical_vec(&self.to_value(UNSIGNED_FIELDS))
+        let fields = if self.provenance.is_some() {
+            UNSIGNED_FIELDS
+                .into_iter()
+                .chain([PROVENANCE_FIELD])
+                .collect()
+        } else {
+            UNSIGNED_FIELDS.to_vec()
+        };
+        let unsigned = cbor2::to_canonical_vec(&self.to_value(fields))
             .map_err(|_| AslError::InvalidMessage)?;
         let mut preimage = Vec::with_capacity(CONTACT_INVITE_SIGNING_DOMAIN.len() + unsigned.len());
         preimage.extend_from_slice(CONTACT_INVITE_SIGNING_DOMAIN);
@@ -149,6 +183,11 @@ impl ContactInviteV1 {
                         5 => cbor_uint_value(self.expires_at_ms),
                         6 => Value::Text(self.note.clone()),
                         7 => Value::Bytes(self.signature.0.to_vec()),
+                        8 => self
+                            .provenance
+                            .as_ref()
+                            .map(provenance_value)
+                            .unwrap_or(Value::Null),
                         _ => unreachable!("contact invite field set is fixed"),
                     };
                     (cbor_uint_value(key), value)
@@ -156,6 +195,22 @@ impl ContactInviteV1 {
                 .collect(),
         )
     }
+}
+
+pub fn encode_provenance(provenance: &ContactProvenance) -> Result<Vec<u8>, AslError> {
+    let bytes = cbor2::to_canonical_vec(&provenance_value(provenance))
+        .map_err(|_| AslError::InvalidMessage)?;
+    if bytes.is_empty() || bytes.len() > 128 {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok(bytes)
+}
+
+pub fn decode_provenance(bytes: &[u8], now_ms: u64) -> Result<ContactProvenance, AslError> {
+    if bytes.is_empty() || bytes.len() > 128 {
+        return Err(AslError::InvalidMessage);
+    }
+    cbor_provenance(decode_canonical(bytes)?, now_ms)
 }
 
 fn cbor_uint_value(value: u64) -> Value {
@@ -185,6 +240,64 @@ fn cbor_note(value: Value) -> Result<String, AslError> {
     }
     validate_pairing_note(&note)?;
     Ok(note)
+}
+
+fn provenance_value(provenance: &ContactProvenance) -> Value {
+    match provenance {
+        ContactProvenance::SharedGroup {
+            group_id,
+            membership_epoch,
+        } => cbor2::Value::Map(
+            [
+                (cbor_uint_value(0), cbor_uint_value(1)),
+                (cbor_uint_value(1), Value::Bytes(group_id.0.to_vec())),
+                (cbor_uint_value(2), cbor_uint_value(*membership_epoch)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        ContactProvenance::RecentInteraction {
+            interaction_id,
+            expires_at_ms,
+        } => cbor2::Value::Map(
+            [
+                (cbor_uint_value(0), cbor_uint_value(2)),
+                (cbor_uint_value(3), Value::Bytes(interaction_id.0.to_vec())),
+                (cbor_uint_value(4), cbor_uint_value(*expires_at_ms)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    }
+}
+
+fn cbor_provenance(value: Value, now_ms: u64) -> Result<ContactProvenance, AslError> {
+    let mut fields = cbor_fields(value)?;
+    let kind = cbor_uint(take(&mut fields, 0)?)?;
+    let provenance = match kind {
+        1 => {
+            let group_id = Hash32(cbor_fixed::<32>(take(&mut fields, 1)?)?);
+            let membership_epoch = cbor_uint(take(&mut fields, 2)?)?;
+            ContactProvenance::SharedGroup {
+                group_id,
+                membership_epoch,
+            }
+        }
+        2 => {
+            let interaction_id = Id128(cbor_fixed::<16>(take(&mut fields, 3)?)?);
+            let expires_at_ms = cbor_uint(take(&mut fields, 4)?)?;
+            ContactProvenance::RecentInteraction {
+                interaction_id,
+                expires_at_ms,
+            }
+        }
+        _ => return Err(AslError::InvalidMessage),
+    };
+    if !fields.is_empty() {
+        return Err(AslError::InvalidMessage);
+    }
+    provenance.validate(now_ms)?;
+    Ok(provenance)
 }
 
 fn cbor_fields(value: Value) -> Result<std::collections::BTreeMap<u64, Value>, AslError> {
@@ -229,12 +342,21 @@ mod tests {
             created_at_ms: NOW - 1_000,
             expires_at_ms: NOW + 60_000,
             note: "Codex, please add me".into(),
+            provenance: None,
             signature: Signature65([4; 65]),
         }
     }
 
     fn value(invite: &ContactInviteV1) -> Value {
-        invite.to_value(ALL_FIELDS)
+        let fields = if invite.provenance.is_some() {
+            ALL_FIELDS.to_vec()
+        } else {
+            ALL_FIELDS
+                .into_iter()
+                .filter(|field| *field != PROVENANCE_FIELD)
+                .collect()
+        };
+        invite.to_value(fields)
     }
 
     fn canonical(value: &Value) -> Vec<u8> {

@@ -1,30 +1,23 @@
-# ASL 实现状态（2026-11-28）
+# ASL 实现状态（2026-11-28，1.0 代码收尾）
 
-本表只记录仓库中可指认的代码和实际运行过的验证。计划项没有被列成完成项。
+本表区分仓库代码、自动化验收和外部真人/真实网络验收。代码完成不等于正式发布完成。
 
-## 2026-11-28 当前工作树
+## 当前结论
 
-以下项目已完成代码接线；2026-11-28 的统一本地/回环结果记录在下方“最近一次整体检查”：
+- 1.0 范围内的代码实现已收口。ASL/1.4 跨 shard 转发、v50 加密 owner-relay/owner-reply、联系人签名 provenance、自动多设备加密策略同步、当前群主 Remove Commit、实时网络快照、可解释语义排序、6/12 位一次性 PAKE、文档抽取、复合预算、迁移和发布基础设施均已接线。
+- workspace 共 1,026 项测试：**1,013 通过、0 失败、13 项按环境要求忽略**。
+- desktop-ui 库共 331 项：**326 通过、0 失败、5 忽略**。
+- 工作区严格 Clippy、格式、v50 幂等迁移、schema vectors、CDDL 和 release build 在收尾轮统一执行。
+- 1.0.0 Windows 离线测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v1.0.0.zip`，81,987,474 字节，SHA-256 `7F1B265B7F66637CE6C5DEB92D38231917BA7C9078716F73D1C5BCFF0723659E`。这是未签名 debug/test 包，不是生产签名发行包。
+- 尚未执行、且必须由真人或真实外部环境完成的验收，单独列在 [1.0 真人验收清单](14-human-acceptance.md) 和下方“待外部环境或验收”。未完成这些项目前，不把 Windows 测试包称为正式发布版。
 
-- ASL/1.4 `ShardBinding` / `ShardForward`、自动多子 MLS 邀请、根策略逐子群传播、所有者根签名、持久转发 receipt 和来源保留交付。
-- v49 加密 shard-forward outbox：控制帧与目标 shard ratchet 提交同事务入队，定向发送成功才清除，gossip-only 或暂时不可达继续退避，目标 epoch/binding 变化和过期明确终止。
-- PDF/DOCX/XLSX/PPTX 本机文本抽取：输入/输出、ZIP/XML 部件和 FTS 正文均有界，宏、加密、符号链接和越界 OOXML 关系拒绝；导入与重建索引已接线。
-- AutoNAT、relay reservation、direct-first dialing、DCUtR、relay fallback，以及 reachability/route IPC 事件和配置化超时/上限。
-- `asl setup` 单流程预检、签名 network seed、链身份 `--onboard/--status` 恢复、MCP bootstrap 状态摘要和外部前置条件报告。
-- 链上目录注册 → 最终性 → 目录安装 → DHT 发布编排；迁移 v2 的旧设备撤销授权、联系人设备重绑定和新设备重入请求。
-- Linux 离线发布验签/安装/升级/回滚、Windows 可复现打包/验证/回滚和外部部署检查脚本。
+## 本轮收口内容
 
-## 2026-11-28 统一验收
-
-- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：最终日志退出码 0；1006 个用例通过、0 失败、13 项按设计忽略。
-- `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：323 通过、0 失败、5 忽略。
-- `cargo +1.100.0 clippy --workspace --all-targets --features asl-app/desktop-ui --locked --offline -- -D warnings`：通过。
-- `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
-- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：36 个向量，26 接受、10 拒绝。
-- `scripts/validate-cddl.ps1`：两个 CDDL 文件语法通过，语料 26 接受、10 拒绝。
-- `cargo +1.100.0 build --workspace --release --locked --offline`：通过。
-- Windows 离线测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v49.zip`，80,952,123 字节，SHA-256 `A60E314973480E98FFE7536E6154D1DE887AE12C4229FB3307C09DB01D088789`。
-- 本轮代码与全量测试已覆盖 v49 schema、Office/PDF Extractor 编译路径、跨 shard outbox 事务路径和 desktop-ui 编译；真实公网、跨机、真实链 RPC、真实窗口/DPI 和独立安全审计仍未执行。
+- 跨 shard Fetch 改为精确请求方回程：`FetchGrant/FetchPending` 不再广播，必须匹配持久 request-id、源 shard、内容 ID 和目标 PeerId；owner 离线时复用原 MLS 密文重试。
+- 联系人策略在同一个 AgentId 的多设备间自动 DHT lookup/publish；签名密文记录稳定复用，同 revision 冲突按撤销优先和记录哈希确定性收敛。
+- 群主转移后，同步和成员移除以当前策略 owner 的 MLS leaf 为准；具备 `manage-members` 的管理员请求由当前 owner 复核执行。
+- GUI 节点页展示入口可达性、路由构成和报告新鲜度，不再把旧快照伪装成实时探测；语义历史排序返回词覆盖、词权重、稳定分页和游标。
+- PAKE 第一份有效 Start 会持久占用唯一尝试名额；猜错、丢包或重启都不能重复尝试同一短码。
 
 ## 已完成并验证
 
@@ -53,15 +46,15 @@
 | AutoNAT / DCUtR | AutoNAT、relay reservation、direct-first、DCUtR、relay fallback、reachability/route 事件和配置化 limits 已接线 | 最终本地编译/测试已通过；真实公网 NAT 矩阵、打洞成功率和 relay 降级验收 |
 | DHT 持久化 | SQLite provider 缓存支持同一 key 多 provider；验证后的 record/provider 观测落盘；启动和网络恢复时按可配置批次回灌 Net store，过期数据跳过 | 真实跨机 DHT 重启、NAT 后持久性和长时间 provider 重放尚未验收 |
 | Act 送达确认 | 已认证群成员收到非 Ack Act 后，按消息 ID 去重并生成带期限的结构化 `Act Ack`，复用 MLS、预算和 DHT 邮箱 | 真实双机送达时间、回执丢失/重试和 GUI 状态显示尚未验收 |
-| 群伸缩与网络 | 单 MLS 编译上限 512；SQLite v49 用代码内递归查询按逻辑根聚合唯一 Agent，邀请前检查 10,000 上限；自动创建/链接最多 19 个独立子 MLS；根/子群策略传播；ASL/1.4 所有者签名绑定、持久去重、逐子群重加密、加密 outbox 和来源保留转发 | 最终本地编译/测试已通过；真实 512/2,000/10,000 跨机矩阵、公网 NAT/relay 和多跳收敛 |
-| 群权限 | owner policy、能力分层管理员、文字/文件/邀请权限、群主策略转移、逐内容哈希文件权限、creator 移除审批和入站/出站检查 | 真实多设备策略同步；MLS creator 仍负责 Remove Commit，策略转移不迁移 creator 私钥 |
+| 群伸缩与网络 | 单 MLS 编译上限 512；SQLite v50 用代码内递归查询按逻辑根聚合唯一 Agent，邀请前检查 10,000 上限；自动创建/链接最多 19 个独立子 MLS；根/子群策略传播；ASL/1.4 所有者签名绑定、持久去重、逐子群重加密、加密 outbox 和来源保留转发 | 最终本地编译/测试已通过；真实 512/2,000/10,000 跨机矩阵、公网 NAT/relay 和多跳收敛 |
+| 群权限 | owner policy、能力分层管理员、文字/文件/邀请权限、群主策略转移、逐内容哈希文件权限、creator 移除审批和入站/出站检查 | 当前 owner 可提交 Remove Commit；具备 `manage-members` 的管理员请求到达 owner 后自动复核并执行，失败保留待审；自动化覆盖已通过，真实多设备管理员和双机流程仍待真人验收 |
 | 群加入/重入请求 | 经认证连接的结构化 `InviteRequest`、5 分钟期限、群主本机审批队列、设备/Agent 精确绑定、每群 32 条及每 Agent 每小时 5 条上限、在线连接复核后复用定向邀请、GUI/CLI/MCP 持久拒绝 | 真实双机审批和跨设备迁移全链路验收 |
-| 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file`、Offer 密文邮箱；ASL/1.4 跨 shard Offer/Fetch 增加逻辑根和源 shard 元数据，逻辑群主可把文档请求路由回源 shard | 新增代码统一验收、公网跨机、真实两设备大文件；跨 shard 文件字节仍要求双方建立直接认证连接，邮箱只保存 Offer/密文 |
+| 文件传输 | 群 offer/fetch/chunk/hash、双端审批、多来源基础、act attachment ref、`asl_send_file`、Offer 密文邮箱；ASL/1.4 跨 shard Offer/Fetch 增加逻辑根和源 shard 元数据，FetchRequest 经 v50 owner-relay outbox 持久重试，FetchGrant/FetchPending 通过持久 relay 映射定向回真实请求 PeerId | relay 持久化和查询单测通过；公网跨机、真实两设备大文件仍需实机验收；跨 shard 文件字节仍要求双方建立直接认证连接 |
 | 文档文本抽取 | PDF/DOCX/XLSX/PPTX 自动识别；输入 4 MiB、输出 2 MiB、FTS 正文 32 KiB；宏、加密、符号链接和越界 OOXML 关系拒绝；导入与重建索引已接入 | 独立 OOXML 夹具/恶意包压力矩阵；超大文档与真实 GUI 安装路径验收 |
-| 逻辑群 shard-forward outbox | v49 持久表保存已加密控制帧、路由、尝试次数和期限；与 ratchet 提交同事务，定向成功才清除，gossip-only 继续 pending，按退避重试并清理 terminal | 专门的崩溃/重启/并发重试测试和真实双机目标 shard 收敛验收 |
+| 逻辑群 shard 投递 outbox | v50 持久表保存已加密控制帧、路由、投递类型、目标 PeerId、尝试次数和期限；普通 forward、Fetch owner-relay、精确 owner-reply 共用事务和终态清理，定向成功才清除，按退避重试 | relay 重启单测通过；崩溃/并发重试和真实双机目标收敛验收 |
 | 预算 | 消息数 + 消息字节/模型调用/CPU/邮箱默认预算、续期、发送/模型/邮箱实际扣减；GUI 显示用量并续期 24h；MCP/CLI 可续期 | 真实跨机配额压力、CPU 外部进程计量精度和用户自定义策略验收 |
 | 浏览/回答 | 入站 act 主动通知；浏览关闭时不记录本地正文；回答开启时 `Ask` 可通过已批准模型生成严格结构化回复；在线连接及已认证 MLS mailbox/gossip 请求都从缓存链/设备证据重建群作用域，并自动选择当前 audience 内、双许可的本地证据；history 迁移包含 Act 预览 | 缓存链/设备证据过期时回退 data-free；GUI 会话操作和 MLS 群密钥随设备迁移 |
-| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；新请求默认逐次确认，可显式选择自动接受或拒绝；本地共享群要求同一认证 PeerId，近期交互使用固定到期证据，接受后只创建本机绑定，不授予联系人访问；`ASL_MCP_CONTACTS=manage` 下 Agent 可读取绑定/候选并排队精确查询，但不能批准候选或改策略；群列表和管理详情显示完整 Group ID 并可复制 | 远端签名的来源记录、多设备策略自动同步仍需实现/实机验收；旧 16 位码只保留兼容 |
+| 联系人与群定位 | Contacts 以完整 AgentId 为首要添加入口，公开精确发现使用专用 AgentId DHT provider 键；Lookup 动作保存完整目标并由 Core 精确过滤候选；有期限签名邀请、二维码、绑定 AgentId+设备的临时短码、DHT token 发现、单次消费和 Pairing 确认已接通；一次性 6/12 位 PAKE 短码使用 `spake2 0.4.0`，唯一尝试名额持久占用；邀请可携带根签名共享群/近期交互 provenance，接收端仍核对本机证据；请求策略保存单调 revision/revoked，并由 kind 4 根签名密文封套自动 DHT 同步；接受后只创建本机绑定，不授予联系人访问；`ASL_MCP_CONTACTS=manage` 下 Agent 只读状态/候选并排队精确查询，不能批准候选或改策略 | 真实双机来源竞态、60 秒收敛时延和并发冲突仍需外部验收；PAKE crate 无独立审计，旧 16 位码只保留兼容 |
 
 ## 目标对齐
 
@@ -78,15 +71,15 @@
 ## 待外部环境或验收
 
 - 远程密文邮箱的真实双机、公网 DHT/NAT/relay 验收、送达回执和多跳补收；当前是已知联系人或群成员按轮换键主动拉取，离线 Offer 需来源设备在 Offer 有效期内重新上线后才可进入在线分块传输。
-- MLS Remove Commit 仍由 creator 提交；管理员通过加密请求和 creator 审批闭环，不获得 creator 私钥。策略群主转移也不会迁移 MLS creator 私钥。
+- MLS Remove Commit 由当前策略 owner 提交；具有 `manage-members` 的活动管理员可发起移除请求，owner 自动复核后提交。仓库存储层也验证已交付的管理员签名 Remove。历史 creator 仍参与 RoomOrigin 和同步锚点，但不再独占提交权；管理员不能移除当前 owner，未获授权时也不能发起或提交。
 - 提示注入红队、跨 audience 外泄测试和分身资源压力测试。
 - 两台真实设备上的建群、迁移群线索、加入/重入请求、邀请、act、重启恢复、公网和真实链 RPC 全链路验收。
 - 自动多子 MLS 和跨 shard 转发的最终本地检查已通过；512/2,000/10,000 跨机容量仍待验收。
 
 ## 最近一次整体检查
 
-- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：最终日志退出码 0，1006 通过、0 失败、13 项按设计忽略。
-- `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：323 通过、0 失败、5 忽略。
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：最终日志退出码 0，1013 通过、0 失败、13 项按设计忽略。
+- `cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1`：326 通过、0 失败、5 忽略。
 - `cargo +1.100.0 clippy --workspace --all-targets --features asl-app/desktop-ui --locked --offline -- -D warnings`：通过。
 - `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
 - `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：通过，36 个向量中 26 接受、10 拒绝，签名是合成夹具。

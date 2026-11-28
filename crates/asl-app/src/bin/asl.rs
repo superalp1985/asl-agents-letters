@@ -1,5 +1,5 @@
-#[cfg(windows)]
 #[path = "asl/portable.rs"]
+#[cfg(windows)]
 mod portable;
 
 fn main() {
@@ -13,16 +13,7 @@ fn run() -> Result<(), asl_types::error::AslError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
         [] => asl_app::supervisor::run_from_environment(),
-        [command, setup_args @ ..] if command == "setup" => {
-            #[cfg(windows)]
-            {
-                asl_app::profile_setup::run(setup_args)
-            }
-            #[cfg(not(windows))]
-            {
-                Err(asl_types::error::AslError::PlatformUnavailable)
-            }
-        }
+        [command, setup_args @ ..] if command == "setup" => asl_app::profile_setup::run(setup_args),
         #[cfg(windows)]
         [command, flag, home] if command == "mcp" && flag == "--home" => {
             match portable::active_agent()? {
@@ -34,6 +25,10 @@ fn run() -> Result<(), asl_types::error::AslError> {
                 }
                 None => asl_app::mcp::run_stdio(home.into()),
             }
+        }
+        #[cfg(not(windows))]
+        [command, flag, home] if command == "mcp" && flag == "--home" => {
+            asl_app::mcp::run_stdio(home.into())
         }
         _ => Err(asl_types::error::AslError::InvalidMessage),
     }

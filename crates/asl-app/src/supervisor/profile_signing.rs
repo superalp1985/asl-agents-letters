@@ -263,15 +263,12 @@ impl Supervisor {
                 pending.phase = Phase::Cancelling;
                 return Ok(());
             }
-            #[cfg(windows)]
             let net_pid = self
                 .net
                 .child
                 .as_ref()
                 .map(|c| c.id())
                 .unwrap_or(std::process::id());
-            #[cfg(not(windows))]
-            let net_pid = std::process::id();
             if !runtime.store.reserve_profile_handoff(
                 &pending.approval,
                 ProfileHandoff {

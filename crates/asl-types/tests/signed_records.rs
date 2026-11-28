@@ -151,6 +151,14 @@ fn payload_value(payload: &RecordPayload) -> Value {
             (1, Value::Bytes(value.agent_id.0.to_vec())),
             (2, uint(value.code)),
         ]),
+        RecordPayload::ContactPolicy(value) => map([
+            (0, uint(1)),
+            (1, Value::Bytes(value.agent_id.0.to_vec())),
+            (2, uint(value.revision)),
+            (3, Value::Bytes(value.nonce.0.to_vec())),
+            (4, Value::Bytes(value.ciphertext.clone())),
+            (5, Value::Bool(value.revoked)),
+        ]),
     }
 }
 

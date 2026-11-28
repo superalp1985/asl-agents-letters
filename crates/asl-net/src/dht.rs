@@ -81,6 +81,7 @@ pub fn identity_record_key(agent: AgentId, kind: RecordKind) -> Result<RecordKey
         RecordKind::Profile => b"ASL-PROFILE-v1\0".as_slice(),
         RecordKind::DeviceDirectory => b"ASL-DEVICE-DIRECTORY-v1\0".as_slice(),
         RecordKind::ShortCode => b"ASL-SHORT-CODE-CLAIM-v1\0".as_slice(),
+        RecordKind::ContactPolicy => b"ASL-CONTACT-POLICY-v1\0".as_slice(),
     };
     Ok(domain_key(domain, agent.as_bytes()))
 }
@@ -200,8 +201,18 @@ impl RecordStore for BoundedRecordStore {
                         if previous_record.payload.agent_id() != candidate.payload.agent_id()
                             || previous_record.payload.kind() != candidate.payload.kind()
                             || candidate.sequence < previous_record.sequence
-                            || (candidate.sequence == previous_record.sequence
-                                && existing.value != record.value)
+                        {
+                            return Err(store::Error::ValueTooLarge);
+                        }
+                        if candidate.sequence == previous_record.sequence
+                            && existing.value != record.value
+                            && (candidate.payload.kind() != RecordKind::ContactPolicy
+                                || !contact_policy_record_precedes(
+                                    &record.value,
+                                    &existing.value,
+                                    &candidate.payload,
+                                    &previous_record.payload,
+                                ))
                         {
                             return Err(store::Error::ValueTooLarge);
                         }
@@ -301,6 +312,23 @@ impl RecordStore for BoundedRecordStore {
     }
 }
 
+fn contact_policy_record_precedes(
+    candidate_bytes: &[u8],
+    previous_bytes: &[u8],
+    candidate_payload: &RecordPayload,
+    previous_payload: &RecordPayload,
+) -> bool {
+    let (RecordPayload::ContactPolicy(candidate), RecordPayload::ContactPolicy(previous)) =
+        (candidate_payload, previous_payload)
+    else {
+        return false;
+    };
+    if candidate.revoked != previous.revoked {
+        return candidate.revoked;
+    }
+    blake3::hash(candidate_bytes).as_bytes() < blake3::hash(previous_bytes).as_bytes()
+}
+
 enum ValidatedRecord {
     Identity(SignedRecord),
     Mailbox(MailboxRecord),
@@ -318,6 +346,7 @@ fn validate_record_value(
             RecordPayload::Profile(_)
                 | RecordPayload::DeviceDirectory(_)
                 | RecordPayload::ShortCode(_)
+                | RecordPayload::ContactPolicy(_)
         ) && record_key_for_payload(payload).map_err(|_| store::Error::ValueTooLarge)? == *key
         {
             return Ok(ValidatedRecord::Identity(signed));

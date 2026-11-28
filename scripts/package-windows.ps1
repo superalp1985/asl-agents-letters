@@ -125,6 +125,32 @@ function Normalize-SourceArchive {
     [IO.File]::Move($temporary, $Path, $true)
 }
 
+function Get-VcRuntimeSource {
+    $candidates = [Collections.Generic.List[string]]::new()
+    if ($env:VCToolsRedistDir) {
+        $candidates.Add((Join-Path $env:VCToolsRedistDir 'x64\Microsoft.VC143.CRT\vcruntime140.dll'))
+    }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $discovered = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC\Redist\MSVC\**\x64\Microsoft.VC143.CRT\vcruntime140.dll'
+        foreach ($path in @($discovered)) {
+            if ($path) { $candidates.Add($path) }
+        }
+    }
+    foreach ($path in $candidates) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne 'Valid') {
+                throw "The Visual C++ runtime is not Authenticode-valid: $path"
+            }
+            return (Resolve-Path -LiteralPath $path).Path
+        }
+    }
+    throw 'VCRUNTIME140.dll was not found. Install the Visual C++ x64 build tools or set VCToolsRedistDir.'
+}
+
 function Write-ReproduciblePackageZip {
     param(
         [Parameter(Mandatory)][string]$SourceRoot,
@@ -218,6 +244,7 @@ $stagingZip = Join-Path $parent.FullName "$candidate.zip"
 $files = Get-PortablePackageMembers -IncludeNetworkSeeds:$hasNetworkSeeds
 try {
     & (Join-Path $PSScriptRoot 'prepare-desktop.ps1') -RunDir $package -Release:(-not $DebugBuild) -Offline:$Offline | Out-Null
+    [IO.File]::Copy((Get-VcRuntimeSource), (Join-Path $package 'vcruntime140.dll'))
     foreach ($name in @('Start-ASL.ps1', 'Set-ASLLogin.ps1', 'Portable-Layout.ps1', 'Update-ASL.ps1', 'Rollback-ASL.ps1')) {
         [IO.File]::Copy((Join-Path $repo "packaging\windows\$name"), (Join-Path $package $name))
     }
@@ -228,6 +255,7 @@ try {
         [IO.File]::Copy($seedPath, (Join-Path $assets.FullName 'network-seeds.json'))
         [IO.File]::Copy($seedKeyPath, (Join-Path $assets.FullName 'network-seeds.public-key.hex'))
     }
+    $runtimeVersion = (Get-Item -LiteralPath (Join-Path $package 'vcruntime140.dll')).VersionInfo.FileVersion
     [IO.File]::WriteAllText((Join-Path $package 'active-release.txt'), 'base', [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText((Join-Path $package 'package-layout.txt'), (Get-PortableLayoutVersion), [Text.Encoding]::ASCII)
 
@@ -261,7 +289,10 @@ try {
         }
     }
 
-    & (Join-Path $PSScriptRoot 'windows-package-notices.ps1') -OutputDirectory $package -Offline:$Offline
+    & (Join-Path $PSScriptRoot 'windows-package-notices.ps1') `
+        -OutputDirectory $package `
+        -VcRuntimeVersion $runtimeVersion `
+        -Offline:$Offline
     Normalize-JsonFile -Path (Join-Path $package 'sbom.cdx.json')
     Normalize-SourceArchive -Path (Join-Path $package 'MPL-SOURCES.zip') -Timestamp $zipTimestamp
     $hashes = foreach ($name in $files) {
@@ -270,7 +301,12 @@ try {
             '{0}  {1}' -f $digest.Hash.ToLowerInvariant(), $name
         }
     }
-    [IO.File]::WriteAllLines((Join-Path $package 'SHA256SUMS.txt'), $hashes, [Text.Encoding]::ASCII)
+    $hashManifest = (@($hashes) -join "`n") + "`n"
+    [IO.File]::WriteAllText(
+        (Join-Path $package 'SHA256SUMS.txt'),
+        $hashManifest,
+        [Text.Encoding]::ASCII
+    )
     Write-ReproduciblePackageZip `
         -SourceRoot $package `
         -Destination $stagingZip `

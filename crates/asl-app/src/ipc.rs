@@ -71,7 +71,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=71)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=71 | 74..=76)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -360,6 +360,18 @@ pub enum IpcMessage {
         value: Vec<u8>,
     },
     CancelDirectory {
+        operation_id: [u8; 16],
+        receipt_id: [u8; 16],
+    },
+    PrepareContactPolicy {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishContactPolicy {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
+    },
+    CancelContactPolicy {
         operation_id: [u8; 16],
         receipt_id: [u8; 16],
     },
@@ -1329,6 +1341,39 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(receipt_id);
             71
         }
+        IpcMessage::PrepareContactPolicy {
+            operation_id,
+            agent,
+        } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(agent.as_bytes());
+            74
+        }
+        IpcMessage::PublishContactPolicy {
+            operation_id,
+            value,
+        } => {
+            if *operation_id == [0; 16] || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(value);
+            75
+        }
+        IpcMessage::CancelContactPolicy {
+            operation_id,
+            receipt_id,
+        } => {
+            if *operation_id == [0; 16] || *receipt_id == [0; 16] || operation_id == receipt_id {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(receipt_id);
+            76
+        }
         IpcMessage::DhtProviders {
             lookup_id,
             status,
@@ -1909,6 +1954,26 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             && body[..16] != body[16..] =>
         {
             Ok(IpcMessage::CancelDirectory {
+                operation_id: body[..16].try_into().unwrap(),
+                receipt_id: body[16..].try_into().unwrap(),
+            })
+        }
+        74 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::PrepareContactPolicy {
+            operation_id: body[..16].try_into().unwrap(),
+            agent: AgentId(body[16..].try_into().unwrap()),
+        }),
+        75 if (17..=16 + MAX_DHT_VALUE_BYTES).contains(&body.len()) && body[..16] != [0; 16] => {
+            Ok(IpcMessage::PublishContactPolicy {
+                operation_id: body[..16].try_into().unwrap(),
+                value: body[16..].to_vec(),
+            })
+        }
+        76 if body.len() == 32
+            && body[..16] != [0; 16]
+            && body[16..] != [0; 16]
+            && body[..16] != body[16..] =>
+        {
+            Ok(IpcMessage::CancelContactPolicy {
                 operation_id: body[..16].try_into().unwrap(),
                 receipt_id: body[16..].try_into().unwrap(),
             })
@@ -2708,7 +2773,7 @@ pub fn run_net_child() -> Result<(), AslError> {
     run_child_for(&[IpcRole::Net])
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(crate) fn run_net_pipe_fixture(
     mut input: std::io::PipeReader,
     output: std::io::PipeWriter,
@@ -2971,6 +3036,7 @@ mod tests {
             expires_at_ms: 100_000,
             nonce: asl_types::ids::Hash32([43; 32]),
             note: "Please pair.".into(),
+            provenance: None,
             signature: asl_types::ids::Signature65([44; 65]),
         };
         let pair_exchange = PairingExchange {
@@ -3393,7 +3459,10 @@ mod tests {
                 | IpcMessage::ReplyPairing { .. }
                 | IpcMessage::PrepareDirectory { .. }
                 | IpcMessage::PublishDirectory { .. }
-                | IpcMessage::CancelDirectory { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::CancelDirectory { .. }
+                | IpcMessage::PrepareContactPolicy { .. }
+                | IpcMessage::PublishContactPolicy { .. }
+                | IpcMessage::CancelContactPolicy { .. } => (IpcRole::Core, IpcRole::Net),
             };
             let bytes = encode_frame(sender, receiver, 7, &message)
                 .unwrap_or_else(|error| panic!("failed to encode {message:?}: {error:?}"));

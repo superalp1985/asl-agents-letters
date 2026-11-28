@@ -25,7 +25,6 @@ pub enum SemanticValue {
     Definition(SemanticConcept, u8, Expression),
 }
 
-#[cfg(windows)]
 impl SemanticValue {
     #[allow(dead_code)]
     pub(crate) fn to_host_value(&self) -> Json {
@@ -178,7 +177,6 @@ pub enum SemanticEvaluation {
     Invalid,
 }
 
-#[cfg(windows)]
 impl SemanticEvaluation {
     pub(crate) fn to_host_value(&self) -> Json {
         match self {
@@ -244,7 +242,6 @@ pub fn check_context_conformance(
     })
 }
 
-#[cfg(windows)]
 #[allow(dead_code)]
 pub(crate) fn interpret_contextual_expression(
     expression: &Expression,

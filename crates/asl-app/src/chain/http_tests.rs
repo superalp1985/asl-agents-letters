@@ -10,11 +10,16 @@ use std::{
 };
 
 use super::*;
+#[cfg(windows)]
 use crate::chain::{
-    DurableResolverConfigV1, IdentityProofVerifier, IdentityResolution, IdentityResolver,
+    DurableResolverConfigV1, IdentityResolution, IdentityResolver,
+    test_support::{FINALITY_NOW, TestChainDatabase, synced},
+};
+use crate::chain::{
+    IdentityProofVerifier,
     test_support::{
-        BOOTSTRAP, BOOTSTRAP_TIME, FINALITY, FINALITY_NOW, TestChainDatabase, UPDATES,
-        bootstrapped, consensus_config, proof_fixture, registry_values, synced,
+        BOOTSTRAP, BOOTSTRAP_TIME, FINALITY, UPDATES, bootstrapped, consensus_config,
+        proof_fixture, registry_values,
     },
 };
 
@@ -153,6 +158,7 @@ fn client_config(
     }
 }
 
+#[cfg(windows)]
 fn durable_config() -> DurableResolverConfigV1 {
     let (deployment, _, _) = proof_fixture(registry_values(9, 1, 1), 8);
     DurableResolverConfigV1 {

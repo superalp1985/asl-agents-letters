@@ -17,6 +17,8 @@ use crate::{
 
 pub const MAX_RECORD_BYTES: usize = 8_192;
 pub const MAX_RECORD_LIFETIME_MS: u64 = 1_800_000;
+pub const MAX_CONTACT_POLICY_RECORD_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const MAX_CONTACT_POLICY_CIPHERTEXT_BYTES: usize = 4_096;
 
 const MAX_DIRECTORY_ENTRIES: usize = 64;
 const SHORT_CODE_MODULUS: u64 = 10_000_000_000_000_000;
@@ -28,6 +30,7 @@ pub enum RecordKind {
     Profile,
     DeviceDirectory,
     ShortCode,
+    ContactPolicy,
 }
 
 impl RecordKind {
@@ -36,6 +39,7 @@ impl RecordKind {
             Self::Profile => 1,
             Self::DeviceDirectory => 2,
             Self::ShortCode => 3,
+            Self::ContactPolicy => 4,
         }
     }
 }
@@ -54,11 +58,23 @@ pub struct ShortCodeClaim {
     pub code: u64,
 }
 
+/// A root-signed, encrypted local contact-policy snapshot. The ciphertext is
+/// intentionally opaque to DHT peers; the sequence is the policy revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContactPolicyEnvelope {
+    pub agent_id: AgentId,
+    pub revision: u64,
+    pub nonce: Hash32,
+    pub revoked: bool,
+    pub ciphertext: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordPayload {
     Profile(Profile),
     DeviceDirectory(DeviceDirectory),
     ShortCode(ShortCodeClaim),
+    ContactPolicy(ContactPolicyEnvelope),
 }
 
 impl RecordPayload {
@@ -67,6 +83,7 @@ impl RecordPayload {
             Self::Profile(_) => RecordKind::Profile,
             Self::DeviceDirectory(_) => RecordKind::DeviceDirectory,
             Self::ShortCode(_) => RecordKind::ShortCode,
+            Self::ContactPolicy(_) => RecordKind::ContactPolicy,
         }
     }
 
@@ -75,6 +92,7 @@ impl RecordPayload {
             Self::Profile(value) => value.agent_id,
             Self::DeviceDirectory(value) => value.agent_id,
             Self::ShortCode(value) => value.agent_id,
+            Self::ContactPolicy(value) => value.agent_id,
         }
     }
 }
@@ -144,6 +162,7 @@ fn decode_payload(kind: RecordKind, bytes: &[u8]) -> Result<RecordPayload, AslEr
         &fields,
         match kind {
             RecordKind::DeviceDirectory => &[0, 1, 2, 3, 4],
+            RecordKind::ContactPolicy => &[0, 1, 2, 3, 4, 5],
             _ => &[0, 1, 2],
         },
     )?;
@@ -175,6 +194,29 @@ fn decode_payload(kind: RecordKind, bytes: &[u8]) -> Result<RecordPayload, AslEr
             }
             RecordPayload::ShortCode(ShortCodeClaim { agent_id, code })
         }
+        RecordKind::ContactPolicy => {
+            let revision = as_u64(take(&mut fields, 2)?)?;
+            let nonce = Hash32(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+            let revoked = match take(&mut fields, 5)? {
+                Value::Bool(value) => value,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let ciphertext = byte_string(
+                take(&mut fields, 4)?,
+                1,
+                MAX_CONTACT_POLICY_CIPHERTEXT_BYTES,
+            )?;
+            if revision == 0 || nonce.0 == [0; 32] {
+                return Err(AslError::InvalidMessage);
+            }
+            RecordPayload::ContactPolicy(ContactPolicyEnvelope {
+                agent_id,
+                revision,
+                nonce,
+                revoked,
+                ciphertext,
+            })
+        }
         RecordKind::Profile => return Err(AslError::InvalidMessage),
     };
     finish(fields)?;
@@ -205,19 +247,44 @@ pub fn encode_record_payload(payload: &RecordPayload) -> Result<Vec<u8>, AslErro
             (1, Value::Bytes(value.agent_id.0.to_vec())),
             (2, uint(value.code)),
         ]))?,
+        RecordPayload::ContactPolicy(value) => {
+            if value.revision == 0
+                || value.nonce.0 == [0; 32]
+                || value.ciphertext.is_empty()
+                || value.ciphertext.len() > MAX_CONTACT_POLICY_CIPHERTEXT_BYTES
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            canonical_bytes(&map([
+                (0, uint(1)),
+                (1, Value::Bytes(value.agent_id.0.to_vec())),
+                (2, uint(value.revision)),
+                (3, Value::Bytes(value.nonce.0.to_vec())),
+                (4, Value::Bytes(value.ciphertext.clone())),
+                (5, Value::Bool(value.revoked)),
+            ]))?
+        }
     };
     decode_payload(payload.kind(), &bytes)?;
     Ok(bytes)
 }
 
 fn validate_record(record: &UnsignedRecord) -> Result<(), AslError> {
+    let max_lifetime = match &record.payload {
+        RecordPayload::ContactPolicy(_) => MAX_CONTACT_POLICY_RECORD_LIFETIME_MS,
+        _ => MAX_RECORD_LIFETIME_MS,
+    };
     if record.issued_at_ms > i64::MAX as u64
         || record.expires_at_ms > i64::MAX as u64
         || record.expires_at_ms <= record.issued_at_ms
-        || record.expires_at_ms - record.issued_at_ms > MAX_RECORD_LIFETIME_MS
+        || record.expires_at_ms - record.issued_at_ms > max_lifetime
         || matches!(
             &record.payload,
             RecordPayload::Profile(value) if value.sequence != record.sequence
+        )
+        || matches!(
+            &record.payload,
+            RecordPayload::ContactPolicy(value) if value.revision != record.sequence
         )
     {
         return Err(AslError::InvalidMessage);
@@ -276,6 +343,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<SignedRecord, AslError> {
         1 => RecordKind::Profile,
         2 => RecordKind::DeviceDirectory,
         3 => RecordKind::ShortCode,
+        4 => RecordKind::ContactPolicy,
         _ => return Err(AslError::InvalidMessage),
     };
     let agent_id = AgentId(fixed_bytes::<32>(take(&mut fields, 2)?)?);

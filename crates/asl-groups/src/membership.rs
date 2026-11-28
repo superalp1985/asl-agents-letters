@@ -3,7 +3,6 @@
 
 mod origin;
 pub use origin::RoomOrigin;
-#[cfg(windows)]
 pub(crate) use origin::{ORIGIN_CAPABILITY, room_leaf_capabilities};
 
 use asl_types::{

@@ -8,12 +8,13 @@ use crate::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         AccountProof, Ack, Answer, AnswerStatus, Claim, ConceptRef, Constraint, ConstraintOperator,
-        ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
-        DeviceCertificate, Expression, ExpressionLetter, Feature, FetchGrant, FetchPending,
-        FetchRequest, GroupEnvelope, GroupOperation, Hello, IdentityProof, IdentityProofRequest,
-        Intent, MAX_PAIRING_NOTE_BYTES, MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES,
-        MAX_SEMANTIC_CONTEXT_DEPENDENCIES, MediaKind, Offer, PairingExchange, PairingInvite,
-        Profile, ProtocolError, Query, ResultShape, ResultStatus, SemanticContextRef, StorageProof,
+        ContactProvenance, ContextAgreement, ContextAgreementStatus, ContextExpression,
+        ContextOffer, ContextRequest, DeviceCertificate, Expression, ExpressionLetter, Feature,
+        FetchGrant, FetchPending, FetchRequest, GroupEnvelope, GroupOperation, Hello,
+        IdentityProof, IdentityProofRequest, Intent, MAX_PAIRING_NOTE_BYTES,
+        MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES, MAX_SEMANTIC_CONTEXT_DEPENDENCIES, MediaKind, Offer,
+        PairingExchange, PairingInvite, PakeAnswer, PakeConfirm, PakeReceipt, PakeStart, Profile,
+        ProtocolError, Query, ResultShape, ResultStatus, SemanticContextRef, StorageProof,
         TypedValue, WireFrame, validate_pairing_note,
     },
 };
@@ -940,7 +941,7 @@ fn decode_identity_proof(mut fields: Fields) -> Result<WireFrame, AslError> {
 }
 
 fn decode_pairing_invite(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9])?;
     let invite_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let inviter = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
     let target = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
@@ -951,6 +952,9 @@ fn decode_pairing_invite(mut fields: Fields) -> Result<WireFrame, AslError> {
         Value::Text(note) if note.len() <= MAX_PAIRING_NOTE_BYTES => note,
         _ => return invalid(),
     };
+    let provenance = take_optional(&mut fields, 9)
+        .map(decode_contact_provenance)
+        .transpose()?;
     finish(fields)?;
     if expires_at_ms > MAX_TIME_MS
         || invite_id.0 == [0; 16]
@@ -967,8 +971,62 @@ fn decode_pairing_invite(mut fields: Fields) -> Result<WireFrame, AslError> {
         expires_at_ms,
         nonce,
         note,
+        provenance,
         signature,
     }))
+}
+
+fn decode_contact_provenance(value: Value) -> Result<ContactProvenance, AslError> {
+    let mut fields = fields(value)?;
+    let kind = as_u64(take(&mut fields, 0)?)?;
+    let provenance = match kind {
+        1 => {
+            check_keys(&fields, &[1, 2])?;
+            ContactProvenance::SharedGroup {
+                group_id: Hash32(fixed_bytes::<32>(take(&mut fields, 1)?)?),
+                membership_epoch: as_u64(take(&mut fields, 2)?)?,
+            }
+        }
+        2 => {
+            check_keys(&fields, &[3, 4])?;
+            ContactProvenance::RecentInteraction {
+                interaction_id: Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?),
+                expires_at_ms: as_u64(take(&mut fields, 4)?)?,
+            }
+        }
+        _ => return invalid(),
+    };
+    finish(fields)?;
+    Ok(provenance)
+}
+
+fn contact_provenance_value(provenance: &ContactProvenance) -> Value {
+    match provenance {
+        ContactProvenance::SharedGroup {
+            group_id,
+            membership_epoch,
+        } => Value::Map(
+            [
+                (uint(0), uint(1)),
+                (uint(1), Value::Bytes(group_id.0.to_vec())),
+                (uint(2), uint(*membership_epoch)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        ContactProvenance::RecentInteraction {
+            interaction_id,
+            expires_at_ms,
+        } => Value::Map(
+            [
+                (uint(0), uint(2)),
+                (uint(3), Value::Bytes(interaction_id.0.to_vec())),
+                (uint(4), uint(*expires_at_ms)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    }
 }
 
 fn decode_pairing_exchange(mut fields: Fields) -> Result<WireFrame, AslError> {
@@ -992,6 +1050,119 @@ fn decode_pairing_exchange(mut fields: Fields) -> Result<WireFrame, AslError> {
         accepted,
         signature,
         transcript_hash,
+    }))
+}
+
+fn decode_pake_start(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9, 10])?;
+    let exchange_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let owner = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+    let joiner = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
+    let owner_peer = peer_id(take(&mut fields, 5)?)?;
+    let joiner_peer = peer_id(take(&mut fields, 6)?)?;
+    let expires_at_ms = as_u64(take(&mut fields, 7)?)?;
+    let code_digits = bounded_uint::<u8>(take(&mut fields, 8)?, u64::from(u8::MAX))?;
+    let share = fixed_bytes::<{ super::PAKE_SHARE_BYTES }>(take(&mut fields, 9)?)?;
+    let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 10)?)?);
+    finish(fields)?;
+    if exchange_id.0 == [0; 16]
+        || owner == joiner
+        || expires_at_ms > MAX_TIME_MS
+        || !(super::MIN_PAKE_CODE_DIGITS..=super::MAX_PAKE_CODE_DIGITS).contains(&code_digits)
+        || signature.0 == [0; 65]
+    {
+        return invalid();
+    }
+    Ok(WireFrame::PakeStart(PakeStart {
+        exchange_id,
+        owner,
+        joiner,
+        owner_peer,
+        joiner_peer,
+        expires_at_ms,
+        code_digits,
+        share,
+        signature,
+    }))
+}
+
+fn decode_pake_answer(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9])?;
+    let exchange_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let owner = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+    let joiner = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
+    let owner_peer = peer_id(take(&mut fields, 5)?)?;
+    let joiner_peer = peer_id(take(&mut fields, 6)?)?;
+    let share = fixed_bytes::<{ super::PAKE_SHARE_BYTES }>(take(&mut fields, 7)?)?;
+    let confirmation = Hash32(fixed_bytes::<32>(take(&mut fields, 8)?)?);
+    let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 9)?)?);
+    finish(fields)?;
+    if exchange_id.0 == [0; 16]
+        || owner == joiner
+        || confirmation.0 == [0; 32]
+        || signature.0 == [0; 65]
+    {
+        return invalid();
+    }
+    Ok(WireFrame::PakeAnswer(PakeAnswer {
+        exchange_id,
+        owner,
+        joiner,
+        owner_peer,
+        joiner_peer,
+        share,
+        confirmation,
+        signature,
+    }))
+}
+
+fn decode_pake_confirm(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6])?;
+    let exchange_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let owner = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+    let joiner = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
+    let confirmation = Hash32(fixed_bytes::<32>(take(&mut fields, 5)?)?);
+    let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 6)?)?);
+    finish(fields)?;
+    if exchange_id.0 == [0; 16]
+        || owner == joiner
+        || confirmation.0 == [0; 32]
+        || signature.0 == [0; 65]
+    {
+        return invalid();
+    }
+    Ok(WireFrame::PakeConfirm(PakeConfirm {
+        exchange_id,
+        owner,
+        joiner,
+        confirmation,
+        signature,
+    }))
+}
+
+fn decode_pake_receipt(mut fields: Fields) -> Result<WireFrame, AslError> {
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7])?;
+    let exchange_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
+    let owner = AgentId(fixed_bytes::<32>(take(&mut fields, 3)?)?);
+    let joiner = AgentId(fixed_bytes::<32>(take(&mut fields, 4)?)?);
+    let accepted = as_bool(take(&mut fields, 5)?)?;
+    let confirmation = Hash32(fixed_bytes::<32>(take(&mut fields, 6)?)?);
+    let signature = Signature65(fixed_bytes::<65>(take(&mut fields, 7)?)?);
+    finish(fields)?;
+    if exchange_id.0 == [0; 16]
+        || owner == joiner
+        || confirmation.0 == [0; 32]
+        || signature.0 == [0; 65]
+    {
+        return invalid();
+    }
+    Ok(WireFrame::PakeReceipt(PakeReceipt {
+        exchange_id,
+        owner,
+        joiner,
+        accepted,
+        confirmation,
+        signature,
     }))
 }
 
@@ -1251,12 +1422,16 @@ fn frame_kind(frame: &WireFrame) -> u64 {
         WireFrame::ContextOffer(_) => 17,
         WireFrame::ContextAgreement(_) => 18,
         WireFrame::ContextExpression(_) => 19,
+        WireFrame::PakeStart(_) => 20,
+        WireFrame::PakeAnswer(_) => 21,
+        WireFrame::PakeConfirm(_) => 22,
+        WireFrame::PakeReceipt(_) => 23,
     }
 }
 
 fn frame_limit(kind: u64) -> usize {
     match kind {
-        0..=8 | 14..=19 => MAX_CONTROL_FRAME_BYTES,
+        0..=8 | 14..=23 => MAX_CONTROL_FRAME_BYTES,
         9..=10 | 13 => MAX_EXTENDED_FRAME_BYTES,
         11..=12 => MAX_PAIRING_FRAME_BYTES,
         _ => 0,
@@ -1271,7 +1446,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
     if version != 1 {
         return Err(AslError::IncompatibleVersion);
     }
-    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 19)?;
+    let kind = bounded_uint::<u8>(take(&mut fields, 1)?, 23)?;
     let frame = match kind {
         0 => decode_hello(fields)?,
         1 => decode_query(fields)?,
@@ -1293,6 +1468,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, AslError> {
         17 => decode_context_offer(fields)?,
         18 => decode_context_agreement(fields)?,
         19 => decode_context_expression(fields)?,
+        20 => decode_pake_start(fields)?,
+        21 => decode_pake_answer(fields)?,
+        22 => decode_pake_confirm(fields)?,
+        23 => decode_pake_receipt(fields)?,
         _ => return invalid(),
     };
     if bytes.len() > frame_limit(u64::from(kind)) {
@@ -1480,15 +1659,20 @@ fn encode_value(frame: &WireFrame) -> Value {
             ),
             (9, Value::Bytes(value.signed_directory.clone())),
         ]),
-        WireFrame::PairingInvite(value) => entries.extend([
-            (2, Value::Bytes(value.invite_id.0.to_vec())),
-            (3, Value::Bytes(value.inviter.0.to_vec())),
-            (4, Value::Bytes(value.target.0.to_vec())),
-            (5, uint(value.expires_at_ms)),
-            (6, Value::Bytes(value.nonce.0.to_vec())),
-            (7, Value::Bytes(value.signature.0.to_vec())),
-            (8, Value::Text(value.note.clone())),
-        ]),
+        WireFrame::PairingInvite(value) => {
+            entries.extend([
+                (2, Value::Bytes(value.invite_id.0.to_vec())),
+                (3, Value::Bytes(value.inviter.0.to_vec())),
+                (4, Value::Bytes(value.target.0.to_vec())),
+                (5, uint(value.expires_at_ms)),
+                (6, Value::Bytes(value.nonce.0.to_vec())),
+                (7, Value::Bytes(value.signature.0.to_vec())),
+                (8, Value::Text(value.note.clone())),
+            ]);
+            if let Some(provenance) = &value.provenance {
+                entries.push((9, contact_provenance_value(provenance)));
+            }
+        }
         WireFrame::PairingExchange(value) => entries.extend([
             (2, Value::Bytes(value.exchange_id.0.to_vec())),
             (3, Value::Bytes(value.agent_id.0.to_vec())),
@@ -1497,6 +1681,42 @@ fn encode_value(frame: &WireFrame) -> Value {
             (6, Value::Bytes(value.signature.0.to_vec())),
             (7, Value::Bytes(value.transcript_hash.0.to_vec())),
             (8, Value::Bool(value.accepted)),
+        ]),
+        WireFrame::PakeStart(value) => entries.extend([
+            (2, Value::Bytes(value.exchange_id.0.to_vec())),
+            (3, Value::Bytes(value.owner.0.to_vec())),
+            (4, Value::Bytes(value.joiner.0.to_vec())),
+            (5, Value::Bytes(value.owner_peer.as_bytes().to_vec())),
+            (6, Value::Bytes(value.joiner_peer.as_bytes().to_vec())),
+            (7, uint(value.expires_at_ms)),
+            (8, uint(u64::from(value.code_digits))),
+            (9, Value::Bytes(value.share.to_vec())),
+            (10, Value::Bytes(value.signature.0.to_vec())),
+        ]),
+        WireFrame::PakeAnswer(value) => entries.extend([
+            (2, Value::Bytes(value.exchange_id.0.to_vec())),
+            (3, Value::Bytes(value.owner.0.to_vec())),
+            (4, Value::Bytes(value.joiner.0.to_vec())),
+            (5, Value::Bytes(value.owner_peer.as_bytes().to_vec())),
+            (6, Value::Bytes(value.joiner_peer.as_bytes().to_vec())),
+            (7, Value::Bytes(value.share.to_vec())),
+            (8, Value::Bytes(value.confirmation.0.to_vec())),
+            (9, Value::Bytes(value.signature.0.to_vec())),
+        ]),
+        WireFrame::PakeConfirm(value) => entries.extend([
+            (2, Value::Bytes(value.exchange_id.0.to_vec())),
+            (3, Value::Bytes(value.owner.0.to_vec())),
+            (4, Value::Bytes(value.joiner.0.to_vec())),
+            (5, Value::Bytes(value.confirmation.0.to_vec())),
+            (6, Value::Bytes(value.signature.0.to_vec())),
+        ]),
+        WireFrame::PakeReceipt(value) => entries.extend([
+            (2, Value::Bytes(value.exchange_id.0.to_vec())),
+            (3, Value::Bytes(value.owner.0.to_vec())),
+            (4, Value::Bytes(value.joiner.0.to_vec())),
+            (5, Value::Bool(value.accepted)),
+            (6, Value::Bytes(value.confirmation.0.to_vec())),
+            (7, Value::Bytes(value.signature.0.to_vec())),
         ]),
         WireFrame::GroupEnvelope(value) => entries.extend([
             (2, Value::Bytes(value.message_id.0.to_vec())),

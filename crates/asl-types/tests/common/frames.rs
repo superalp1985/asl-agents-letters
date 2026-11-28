@@ -171,6 +171,7 @@ pub fn sample_frames() -> Vec<WireFrame> {
             expires_at_ms: 200,
             nonce: Hash32([13; 32]),
             note: "Pair.".into(),
+            provenance: None,
             signature: Signature65([14; 65]),
         }),
         WireFrame::PairingExchange(PairingExchange {

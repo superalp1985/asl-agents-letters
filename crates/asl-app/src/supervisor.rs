@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use asl_agent::gateway::{
     AuthorizedPrompt, HttpModelGateway, ModelGateway, ModelGatewayError, ModelText,
 };
-#[cfg(any(windows, test))]
 use asl_net::transport::TransportKind;
 use asl_policy::{
     PolicyService,
@@ -67,22 +66,18 @@ mod auto_reply_evidence;
 mod avatar_download;
 mod bindings;
 mod contact_invites;
+mod contact_policy_sync;
 mod dht_cache;
 mod directory;
-#[cfg(windows)]
 mod group_routing;
-#[cfg(windows)]
 mod groups;
-#[cfg(windows)]
 mod mail;
-#[cfg(windows)]
 mod mailbox_wire;
 mod network_pause;
 mod network_report;
 mod onboarding_publication;
 mod profile_signing;
 mod resource_providers;
-#[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -97,11 +92,8 @@ const ACTIVITY_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 const DIRECTORY_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct Supervisor {
-    #[cfg(windows)]
     auto_reply: auto_reply::AutoReplyRuntime,
-    #[cfg(windows)]
     mailbox: crate::agent_mail::Mailbox,
-    #[cfg(windows)]
     mailbox_wire: mailbox_wire::MailboxWireRuntime,
     agent_identity: AgentIdentity,
     device_peer_id: PeerId,
@@ -117,7 +109,6 @@ pub struct Supervisor {
     profile_signing: profile_signing::ProfileSigningRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
-    #[cfg(windows)]
     mcp_readiness: tokio::sync::watch::Sender<NetworkAdmissionStatus>,
     chain_refresh: Option<ChainRefreshWorker>,
     home: PathBuf,
@@ -127,12 +118,12 @@ pub struct Supervisor {
     directory_renewal_retry_at: Instant,
     contact_bindings: bindings::ContactBindingRuntime,
     contact_invites: contact_invites::ContactInviteRuntime,
+    contact_policy_sync: contact_policy_sync::ContactPolicySyncRuntime,
+    pake: pairing::PakeRuntime,
     resource_providers: resource_providers::ResourceProviderRuntime,
     dht_restore: dht_cache::DhtRestoreRuntime,
     pending_disconnects: PendingDisconnects,
-    #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
-    #[cfg(windows)]
     group_controls: Option<Receiver<LocalGroupCommand>>,
     pub(crate) pending_pairing_prompts: pairing::PendingPairingPrompts,
     _owner: ProfileOwner,
@@ -142,9 +133,9 @@ impl Supervisor {
     pub fn start(paths: AppPaths) -> Result<Self, AslError> {
         let directory = sibling_binary_directory()?;
         let launcher = SandboxLauncher::new(
-            directory.join("asl-net.exe"),
-            directory.join("asl-worker.exe"),
-            directory.join("asl-extractor.exe"),
+            packaged_binary(&directory, "asl-net"),
+            packaged_binary(&directory, "asl-worker"),
+            packaged_binary(&directory, "asl-extractor"),
         )?;
         Self::start_with_launcher(paths, launcher)
     }
@@ -166,7 +157,9 @@ impl Supervisor {
         let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
         let mut settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
-        let packaged_seeds = sibling_binary_directory()?
+        let packaged_seeds = launcher
+            .directory()
+            .ok_or(AslError::SandboxUnavailable)?
             .join("assets")
             .join("network-seeds.json");
         let profile_seeds = paths.network_seeds();
@@ -195,15 +188,10 @@ impl Supervisor {
             .as_ref()
             .map(|_| directory::DirectoryReader::spawn(paths.signed_device_directory()))
             .transpose()?;
-        #[cfg(windows)]
         let groups = network_settings
             .loopback_groups
             .then(|| groups::LoopbackGroups::open(&state_database, unix_time_ms()?))
             .transpose()?;
-        #[cfg(not(windows))]
-        if network_settings.loopback_groups {
-            return Err(AslError::PlatformUnavailable);
-        }
         let paused = network_store.network_pause_requested()?;
         let net = if paused {
             NetRuntime::default()
@@ -215,14 +203,10 @@ impl Supervisor {
                 network_settings.traversal.transport_config()?,
             )?
         };
-        #[cfg(windows)]
         let auto_reply = auto_reply::AutoReplyRuntime::spawn(&paths)?;
         let mut supervisor = Self {
-            #[cfg(windows)]
             auto_reply,
-            #[cfg(windows)]
             mailbox: Default::default(),
-            #[cfg(windows)]
             mailbox_wire: Default::default(),
             agent_identity,
             device_peer_id,
@@ -238,7 +222,6 @@ impl Supervisor {
             transport_connections: HashMap::new(),
             admission: network_admission.admission,
             network_admission_status: network_admission.status,
-            #[cfg(windows)]
             mcp_readiness: tokio::sync::watch::Sender::new(network_admission.status),
             chain_refresh: network_admission.refresh_worker,
             home: paths.dos_root().to_owned(),
@@ -248,18 +231,17 @@ impl Supervisor {
             directory_renewal_retry_at: Instant::now(),
             contact_bindings: bindings::ContactBindingRuntime::default(),
             contact_invites: contact_invites::ContactInviteRuntime::default(),
+            contact_policy_sync: contact_policy_sync::ContactPolicySyncRuntime::default(),
+            pake: pairing::PakeRuntime::default(),
             resource_providers: resource_providers::ResourceProviderRuntime::default(),
             dht_restore: dht_cache::DhtRestoreRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
-            #[cfg(windows)]
             groups,
-            #[cfg(windows)]
             group_controls: None,
             pending_pairing_prompts: pairing::PendingPairingPrompts::default(),
             _owner: owner,
         };
         supervisor.persist_local_identity_projection();
-        #[cfg(windows)]
         supervisor.configure_group_admission();
         if paused {
             supervisor
@@ -278,7 +260,7 @@ impl Supervisor {
         Ok(supervisor)
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     fn send_startup_network_operation(
         &mut self,
         command: impl FnOnce([u8; 16]) -> NetworkCommand,
@@ -380,7 +362,6 @@ impl Supervisor {
             now_ms,
         )?;
         self.admission = Some(admission);
-        #[cfg(windows)]
         self.configure_group_admission();
         self.set_network_admission_status(NetworkAdmissionStatus::Active);
         Ok(())
@@ -391,7 +372,6 @@ impl Supervisor {
             return;
         }
         self.network_admission_status = status;
-        #[cfg(windows)]
         self.mcp_readiness.send_replace(status);
         self.persist_local_identity_projection();
     }
@@ -557,13 +537,11 @@ impl Supervisor {
 
     pub fn run(self) -> Result<(), AslError> {
         let (port, runtime) = outgoing_query_channel();
-        #[cfg(windows)]
         let (grant, recovery) = {
             let grant = crate::mcp::HostGrant::from_environment()?;
             let recovery = crate::mcp::Recovery::configure(&self.state_database, grant.as_ref())?;
             (grant, recovery)
         };
-        #[cfg(windows)]
         if let Some(grant) = grant {
             let (download_port, downloads) = download_channel();
             let _mcp = crate::mcp::McpWorker::spawn_with_mail_and_readiness(
@@ -645,10 +623,8 @@ impl Supervisor {
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
             |supervisor, event| {
-                #[cfg(windows)]
                 supervisor.observe_mailbox_operation(&event);
                 match event {
-                    #[cfg(windows)]
                     AdmittedNetworkEvent::MailboxRecordAvailable(record) => {
                         supervisor.deliver_mailbox_record(&record, unix_time_ms()?)
                     }
@@ -656,7 +632,6 @@ impl Supervisor {
                         request: WireFrame::FetchRequest(_),
                         ..
                     } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
-                    #[cfg(windows)]
                     event @ AdmittedNetworkEvent::ControlRequest {
                         request: WireFrame::ContextRequest(_),
                         ..
@@ -682,7 +657,6 @@ impl Supervisor {
                         else {
                             return Ok(());
                         };
-                        #[cfg(windows)]
                         if matches!(
                             &event,
                             AdmittedNetworkEvent::ControlResponse {
@@ -719,14 +693,12 @@ impl Supervisor {
                 }
             },
             |supervisor| {
-                #[cfg(windows)]
                 supervisor.poll_mail();
                 supervisor.poll_direct_outbound(&mut outbound.borrow_mut())?;
                 let mut transfer = transfer.borrow_mut();
                 avatars
                     .borrow_mut()
                     .poll(supervisor, &mut transfer, unix_time_ms()?)?;
-                #[cfg(windows)]
                 supervisor.poll_group_transfers(&mut transfer, |supervisor, transfer, event| {
                     driver.borrow_mut()(supervisor, transfer, DownloadDriverEvent::Network(&event))
                 })?;
@@ -749,17 +721,7 @@ impl Supervisor {
                 source,
                 group: Some(group),
                 request,
-            } => {
-                #[cfg(windows)]
-                {
-                    return self.send_group_fetch(transfer, &source, &group, &request);
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = (source, group, request);
-                    return Ok(None);
-                }
-            }
+            } => return self.send_group_fetch(transfer, &source, &group, &request),
             WorkerRequest::Fetch {
                 source,
                 group: None,
@@ -939,7 +901,6 @@ impl Supervisor {
         inbound: &mut DirectInbound,
         event: AdmittedNetworkEvent,
     ) -> Result<(), AslError> {
-        #[cfg(windows)]
         self.observe_direct_mail(&event)?;
         let AdmittedNetworkEvent::ControlRequest {
             connection_id,
@@ -1417,16 +1378,14 @@ impl Supervisor {
             }
             let now = Instant::now();
             if now >= next_agent_tick {
-                #[cfg(windows)]
                 self.poll_local_groups()?;
-                #[cfg(windows)]
                 self.poll_auto_act_replies()?;
-                #[cfg(windows)]
                 self.poll_mailbox_wire()?;
                 self.poll_contact_bindings()?;
                 self.poll_contact_invites()?;
                 self.poll_resource_providers()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
+                self.poll_contact_policy_sync(now, unix_time_ms()?)?;
                 self.poll_onboarding_directory_publication(now);
                 self.pump_dht_restore()?;
                 tick(&mut self)?;
@@ -1474,6 +1433,24 @@ impl Supervisor {
             let event = match message {
                 IpcMessage::Pong { nonce } => {
                     self.net.acknowledge_pong(nonce)?;
+                    continue;
+                }
+                IpcMessage::OperationAccepted { operation_id }
+                    if self.handle_contact_policy_sync_response(
+                        operation_id,
+                        true,
+                        Instant::now(),
+                    ) =>
+                {
+                    continue;
+                }
+                IpcMessage::OperationFailed { operation_id, .. }
+                    if self.handle_contact_policy_sync_response(
+                        operation_id,
+                        false,
+                        Instant::now(),
+                    ) =>
+                {
                     continue;
                 }
                 IpcMessage::OperationAccepted { operation_id }
@@ -1536,7 +1513,6 @@ impl Supervisor {
         {
             return Ok(reject_unadmitted_event(event));
         }
-        #[cfg(windows)]
         if matches!(
             event,
             NetworkEvent::UnverifiedGroupRequest { .. }
@@ -1625,6 +1601,15 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
+            if let AdmittedNetworkEvent::DhtRecordAvailable {
+                agent_id,
+                kind,
+                record,
+                ..
+            } = &event
+            {
+                self.observe_contact_policy_record(*agent_id, *kind, record, unix_time_ms()?);
+            }
             if let Some((key, true)) = self
                 .resource_providers
                 .observe_resource_provider_event(&event)
@@ -1666,6 +1651,9 @@ impl Supervisor {
             self.observe_contact_invite_operation(&event);
             self.profile_signing
                 .observe_remote_record(self.agent_identity.agent_id(), &event);
+            if self.handle_pake_event(&event, unix_time_ms()?)? {
+                continue;
+            }
             match self.handle_contact_invite_event(&event, unix_time_ms()?) {
                 Ok(Some(command)) => self.send_network_command(command)?,
                 Ok(None) => {}
@@ -2479,9 +2467,9 @@ fn run_worker_validation_with(
 pub(crate) fn sanitize_local_avatar(input: &[u8]) -> Result<Vec<u8>, AslError> {
     let executable = env::current_exe()?;
     let launcher = SandboxLauncher::new(
-        executable.with_file_name("asl-net.exe"),
-        executable.with_file_name("asl-worker.exe"),
-        executable.with_file_name("asl-extractor.exe"),
+        executable.with_file_name(packaged_binary_name("asl-net")),
+        executable.with_file_name(packaged_binary_name("asl-worker")),
+        executable.with_file_name(packaged_binary_name("asl-extractor")),
     )?;
     sanitize_avatar_with(&launcher, input)
 }
@@ -2496,9 +2484,9 @@ pub(crate) fn sanitize_avatar_with(
 pub(crate) fn extract_document_text_once(document: &[u8]) -> Result<String, AslError> {
     let directory = sibling_binary_directory()?;
     let launcher = SandboxLauncher::new(
-        directory.join("asl-net.exe"),
-        directory.join("asl-worker.exe"),
-        directory.join("asl-extractor.exe"),
+        packaged_binary(&directory, "asl-net"),
+        packaged_binary(&directory, "asl-worker"),
+        packaged_binary(&directory, "asl-extractor"),
     )?;
     let output = run_extractor_task(
         &launcher,
@@ -2574,15 +2562,30 @@ fn sibling_binary_directory() -> Result<PathBuf, AslError> {
         .ok_or(AslError::SandboxUnavailable)?
         .to_path_buf();
     loop {
-        if directory.join("asl-net.exe").is_file()
-            && directory.join("asl-worker.exe").is_file()
-            && directory.join("asl-extractor.exe").is_file()
+        if packaged_binary(&directory, "asl-net").is_file()
+            && packaged_binary(&directory, "asl-worker").is_file()
+            && packaged_binary(&directory, "asl-extractor").is_file()
         {
             return Ok(directory);
         }
         if !directory.pop() {
             return Err(AslError::SandboxUnavailable);
         }
+    }
+}
+
+fn packaged_binary(directory: &Path, stem: &str) -> PathBuf {
+    directory.join(packaged_binary_name(stem))
+}
+
+fn packaged_binary_name(stem: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("{stem}.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        stem.to_owned()
     }
 }
 
@@ -2885,8 +2888,8 @@ mod tests {
     fn cargo_test_binary_directory_resolves_to_target_directory() {
         let path = sibling_binary_directory().unwrap();
         assert!(path.is_absolute());
-        assert!(path.join("asl-net.exe").is_file());
-        assert!(path.join("asl-worker.exe").is_file());
+        assert!(packaged_binary(&path, "asl-net").is_file());
+        assert!(packaged_binary(&path, "asl-worker").is_file());
     }
 
     #[test]

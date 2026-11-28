@@ -6,14 +6,14 @@
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
 - ASL/1.4 增加 `ShardBinding` 和 `ShardForward`。普通邀请按容量选择根群/子群，满时自动创建独立 MLS 子群；根群策略更新逐子群提交并返回部分结果。跨 shard 内容由逻辑群主根签名证明来源，每个目标子群重新加密，持久 receipt 阻止重放。桥接节点不会把原消息冒充成自己发送。
-- 文件 Offer/Fetch 可选携带逻辑根和源 shard 元数据；接收方在非源 shard 发起 Fetch 时，由逻辑群主转发到源 shard，文件字节仍只允许源设备与接收设备建立直接认证传输。没有这两个字段的旧 Offer 仍走单 shard/直连路径。
+- 文件 Offer/Fetch 可选携带逻辑根和源 shard 元数据；接收方在非源 shard 发起 Fetch 时，先把已加密的 FetchRequest 写入 v50 owner-relay outbox，只尝试发往 owner 的已认证连接，不在请求 shard 做 gossipsub 广播；owner 恢复后重发同一密文帧。owner 同时持久记录 request-id、请求方 PeerId、请求 shard、源 shard、内容 ID 和期限，并只把请求转发到指定源 shard。FetchGrant/FetchPending 只能按该记录构造单个 `owner_reply` ShardForward，并只发往真实请求设备的已认证连接；不会通过 gossipsub 广播给其他 shard 或同 shard 其他成员。请求方离线时保留同一 MLS 密文帧并按退避重试，目标设备移除、目标 epoch/room 或逻辑根变化会写明确 terminal。FetchRequest/FetchGrant/FetchPending 均属于逻辑群 shard-forward 接受范围。文件字节仍只允许源设备与接收设备建立直接认证传输；没有逻辑根字段的旧 Offer 仍走单 shard/直连路径。
 - `ASL_MCP_GROUPS=admin` 时，MCP 暴露群列表/创建/成员/访问策略/邀请/加入请求、两人会话、消息预算和复合资源预算续期工具；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
 - 群创建/加入时生成消息数、消息字节、模型调用、CPU 和邮箱预算。群管理页显示用量并允许按 24 小时续期；MCP 和 `asl-core --group-admin budget` 也提供精确续期入口。预算耗尽后 fail closed。
-- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。`manage-members` 只可提交 muted 切片，`manage-files` 只可提交逐文件策略切片；policy revision、permissions、owner、管理员名单和能力位保持 owner-only。MLS 的 Remove Commit 仍只能由 creator 提交。
+- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。`manage-members` 可提交 muted 切片并发起成员移除，`manage-files` 只可提交逐文件策略切片；policy revision、permissions、owner、管理员名单和能力位保持 owner-only。有效管理员请求到达当前 owner 后自动复核能力、epoch 和策略 revision，并由 owner 的 MLS leaf 提交 Remove；失败时保留待审记录，不会静默卡住。MLS 层也接受当前 owner 或已授权活动管理员签名的 Remove Commit；历史 MLS creator 继续作为 RoomOrigin 锚点，但不再独占提交权。
 - 群语义 `ContextExpression/ContextRequest/ContextOffer/ContextAgreement` 已进入 MLS application 路径，确认时绑定 request ID、room 和 sender。
 - 单 MLS 群编译硬上限为 512。Core 可自动创建最多 19 个独立子 MLS 群，并连同根群覆盖约 10,000 成员；每个子群单独加密，ASL/1.4 转发封装保留来源、epoch、消息 ID 和期限。跨机 512/2,000/10,000 容量矩阵仍需验收。
-- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引，v44 增加移除请求/子群链接，v45 增加签名 shard 绑定和转发 receipt，v46 增加联系人来源证据，v48 用代码内递归查询在逻辑群根上聚合唯一 Agent，v49 增加只保存已加密控制帧的 shard-forward outbox。真实两设备重启补收和公网 NAT/relay 仍未验收。
+- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引，v44 增加移除请求/子群链接，v45 增加签名 shard 绑定和转发 receipt，v46 增加联系人来源证据，v48 用代码内递归查询在逻辑群根上聚合唯一 Agent，v49 增加只保存已加密控制帧的 shard-forward outbox，v50 增加 `forward`/`owner_relay`/`owner_reply` 投递类型、目标 PeerId 和 Fetch relay 映射。真实两设备重启补收和公网 NAT/relay 仍未验收。
 
 ## 已实现：群消息编解码
 
@@ -152,9 +152,9 @@ Core 在独立候选中收发准备，要求调用方指定精确房间版本；
 
 SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标写入 grant、grant epoch、内容、文件名、大小及来源集合。v17 为上传同意保存认证目标设备、文件名和大小。群成员增删推进成员 epoch 并关闭旧授权，因此旧同意、旧 lease、旧块请求和重启前未完成的群传输都会失效。上传模式为 `ask` 时，FetchRequest 只得到结构化 `FetchPending`，不创建 lease；本机批准后，相同设备、内容、授权 epoch 和群 epoch 的重试才可签发一次性 FetchGrant。服务端在 FetchGrant 签发、manifest/chunk 分配、写块和完成前继续重验精确群 epoch；群 Bulk lease 不依赖消息内的群 ID，而是由服务端内存中的 lease 绑定确定，进程重启后不会沿用。
 
-房间状态机保持两条路径：创建者只有在本地 MLS 状态、成员投影和当前设备证据一致时，才能把房间推进为 `active`；成员侧只接受创建者设备通过已验证群子流回复给出的 `AtHead`。成员变化先推进 membership epoch 并关闭旧授权。创建者可在已提交并重新核验自己的本地成员变更后激活；其他成员在 `active` 状态也会周期性向当前已认证的创建者连接核对 head，收到提交后回到 `needs_sync`，追到创建者 head 后才重新激活。不会用其他普通成员的旧视图激活房间。信任值和贡献值只参与软排序，不能替代房间成员、epoch、设备证书或本地授权。
+房间状态机保持两条路径：当前策略 owner 只有在本地 MLS 状态、成员投影和当前设备证据一致时，才能把房间推进为 `active`；成员侧只接受当前 owner 设备通过已验证群子流回复给出的 `AtHead`。成员变化先推进 membership epoch 并关闭旧授权。owner 可在已提交并重新核验自己的本地成员变更后激活；具备 `manage-members` 的管理员提交移除后，房间保持 `needs_sync`，由 owner 的下一轮同步确认。不会用其他普通成员的旧视图激活房间。信任值和贡献值只参与软排序，不能替代房间成员、epoch、设备证书或本地授权。
 
-成员侧的 head 轮询只选择已连接的房间创建者，并轮转处理房间；创建者离线时不向其他成员询问或猜测最新状态，现有群应用和群文件授权仍受本地活动状态及精确 epoch 限制。
+成员侧的 head 轮询只选择已连接的当前策略 owner，并轮转处理房间；owner 离线时不向其他成员询问或猜测最新状态，现有群应用和群文件授权仍受本地活动状态及精确 epoch 限制。
 
 ### 跨进程验收状态
 

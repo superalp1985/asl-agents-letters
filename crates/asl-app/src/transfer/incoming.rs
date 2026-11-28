@@ -180,7 +180,25 @@ impl IncomingFetchTracker {
         self.pending.get(&id)?.group
     }
 
-    #[cfg(windows)]
+    pub(super) fn rebind(
+        &mut self,
+        id: [u8; 16],
+        connection: [u8; 16],
+        requester: &DirectRequester,
+        now: u64,
+    ) -> bool {
+        let Some(fetch) = self.pending.get_mut(&id) else {
+            return false;
+        };
+        if fetch.group.is_none() || fetch.expires_at_ms <= now {
+            return false;
+        }
+        fetch.connection_id = connection;
+        fetch.agent_id = requester.agent;
+        fetch.peer_id = requester.peer.clone();
+        true
+    }
+
     pub(super) fn matches_group_reply(
         &self,
         id: [u8; 16],

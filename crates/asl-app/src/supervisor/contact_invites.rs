@@ -12,7 +12,10 @@ use asl_types::{
     contact_invite::ContactInviteV1,
     error::AslError,
     ids::{Hash32, Id128, PeerId},
-    protocol::{PairingExchange, PairingInvite},
+    protocol::{
+        ContactProvenance, PairingExchange, PairingInvite, PakeAnswer, PakeConfirm, PakeReceipt,
+        PakeStart, WireFrame,
+    },
     record::short_code,
 };
 
@@ -55,6 +58,14 @@ enum ImportSource {
         expected_inviter: asl_types::ids::AgentId,
         expected_peer: PeerId,
     },
+    PakeCode {
+        token: Id128,
+        expected_inviter: asl_types::ids::AgentId,
+        expected_peer: PeerId,
+        invite_id: Id128,
+        code_digits: u8,
+        expires_at_ms: u64,
+    },
 }
 
 struct DialAttempt {
@@ -89,6 +100,7 @@ enum RequestSource {
         interaction_id: Id128,
         expires_at_ms: u64,
     },
+    SignedRemote(ContactProvenance),
 }
 
 impl RequestSource {
@@ -107,7 +119,11 @@ impl RequestSource {
             } => Ok(store
                 .shared_active_group_evidence(agent_id, peer_id)?
                 .is_some_and(|(current_group, current_epoch)| {
-                    current_group == group_id && current_epoch >= membership_epoch
+                    current_epoch >= membership_epoch
+                        && (current_group == group_id
+                            || store
+                                .mls_logical_root(group_id)
+                                .is_ok_and(|root| root == current_group))
                 })),
             Self::RecentInteraction {
                 interaction_id,
@@ -117,12 +133,40 @@ impl RequestSource {
                 Ok(policy.recent_interaction_ttl_ms > 0
                     && now_ms < expires_at_ms
                     && store
-                        .recent_contact_interaction_evidence(agent_id, now_ms)?
+                        .recent_contact_interaction_evidence(agent_id, peer_id, now_ms)?
                         .is_some_and(|evidence| {
                             evidence.interaction_id == interaction_id
                                 && evidence.expires_at_ms > now_ms
                         }))
             }
+            Self::SignedRemote(provenance) => match provenance {
+                ContactProvenance::SharedGroup {
+                    group_id,
+                    membership_epoch,
+                } => Ok(store
+                    .shared_active_group_evidence(agent_id, peer_id)?
+                    .is_some_and(|(current_group, current_epoch)| {
+                        current_epoch >= membership_epoch
+                            && (current_group == group_id
+                                || store
+                                    .mls_logical_root(group_id)
+                                    .is_ok_and(|root| root == current_group))
+                    })),
+                ContactProvenance::RecentInteraction {
+                    interaction_id,
+                    expires_at_ms,
+                } => {
+                    let policy = store.contact_request_policy()?;
+                    Ok(policy.recent_interaction_ttl_ms > 0
+                        && now_ms < expires_at_ms
+                        && store
+                            .recent_contact_interaction_evidence(agent_id, peer_id, now_ms)?
+                            .is_some_and(|evidence| {
+                                evidence.interaction_id == interaction_id
+                                    && evidence.expires_at_ms > now_ms
+                            }))
+                }
+            },
         }
     }
 }
@@ -143,6 +187,7 @@ impl Supervisor {
             }
         }
         self.contact_invites = ContactInviteRuntime::default();
+        self.pake = crate::pairing::PakeRuntime::default();
         Ok(())
     }
 
@@ -155,6 +200,15 @@ impl Supervisor {
                 let _ = store.decide_contact_invite_prompt(prompt.prompt_id, now_ms, false);
             }
             self.contact_invites.initialized = true;
+        }
+        for expired in self.pake.expire(now_ms) {
+            let (connection_id, exchange_id) = expired;
+            if let Some(exchange_id) = exchange_id {
+                let mut store = open_store(&self.state_database)?;
+                let _ = store.consume_contact_invite(exchange_id, now_ms, false);
+                self.pake.clear_connection(connection_id);
+            }
+            self.queue_disconnect(connection_id)?;
         }
         let expired_lookups = self
             .contact_invites
@@ -217,6 +271,7 @@ impl Supervisor {
             }
             if match &lookup.source {
                 ImportSource::ShortCode { expected_peer, .. } => *expected_peer != provider.peer_id,
+                ImportSource::PakeCode { expected_peer, .. } => *expected_peer != provider.peer_id,
                 ImportSource::Discovery(_) => false,
             } {
                 continue;
@@ -268,6 +323,271 @@ impl Supervisor {
         }
     }
 
+    pub(super) fn handle_pake_event(
+        &mut self,
+        event: &AdmittedNetworkEvent,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        let connection_id = match event {
+            AdmittedNetworkEvent::ControlRequest {
+                connection_id,
+                request: WireFrame::PakeStart(_) | WireFrame::PakeConfirm(_),
+                ..
+            }
+            | AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                response: WireFrame::PakeAnswer(_) | WireFrame::PakeReceipt(_),
+                ..
+            } => Some(*connection_id),
+            _ => None,
+        };
+        let Some(connection_id) = connection_id else {
+            return Ok(false);
+        };
+        let result = match event {
+            AdmittedNetworkEvent::ControlRequest {
+                connection_id,
+                agent_id,
+                response_id,
+                request: WireFrame::PakeStart(start),
+            } => self.accept_pake_start(*connection_id, *agent_id, *response_id, start, now_ms),
+            AdmittedNetworkEvent::ControlRequest {
+                connection_id,
+                agent_id,
+                response_id,
+                request: WireFrame::PakeConfirm(confirm),
+            } => self.accept_pake_confirm(*connection_id, *agent_id, *response_id, confirm, now_ms),
+            AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                agent_id,
+                request_id,
+                response: WireFrame::PakeAnswer(answer),
+            } => self.accept_pake_answer(*connection_id, *agent_id, *request_id, answer, now_ms),
+            AdmittedNetworkEvent::ControlResponse {
+                connection_id,
+                agent_id,
+                request_id,
+                response: WireFrame::PakeReceipt(receipt),
+            } => self.accept_pake_receipt(*connection_id, *agent_id, *request_id, receipt, now_ms),
+            _ => Ok(()),
+        };
+        if result.is_err() {
+            if let AdmittedNetworkEvent::ControlRequest {
+                request: WireFrame::PakeConfirm(confirm),
+                ..
+            } = event
+            {
+                let mut store = open_store(&self.state_database)?;
+                let _ = store.consume_contact_invite(confirm.exchange_id, now_ms, false);
+            }
+            self.queue_disconnect(connection_id)?;
+        }
+        Ok(true)
+    }
+
+    fn accept_pake_start(
+        &mut self,
+        connection_id: [u8; 16],
+        agent_id: asl_types::ids::AgentId,
+        response_id: [u8; 16],
+        start: &PakeStart,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        if start.owner != self.agent_identity.agent_id()
+            || start.joiner != agent_id
+            || start.owner_peer != self.device_peer_id
+            || start.expires_at_ms <= now_ms
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let mut store = open_store(&self.state_database)?;
+        let invite = store
+            .find_active_contact_invite_by_id(start.exchange_id, now_ms)?
+            .ok_or(AslError::InvalidMessage)?;
+        if invite.agent_id != self.agent_identity.agent_id()
+            || invite.expires_at_ms != start.expires_at_ms
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        let (digits, code) = contact_invite::pake_token_parts(invite.token)?;
+        if digits != start.code_digits {
+            return Err(AslError::InvalidMessage);
+        }
+        let (remote_agent, remote_peer) = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .admitted_peer_identity(connection_id, now_ms)?;
+        if remote_agent != agent_id || remote_peer != start.joiner_peer {
+            return Err(AslError::InvalidIdentity);
+        }
+        if !store.claim_contact_invite_attempt(start.exchange_id, now_ms)? {
+            return Err(AslError::PolicyDenied);
+        }
+        let controller = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .verified_controller(agent_id, now_ms)?;
+        let code = format!("{:0width$}", code, width = usize::from(digits));
+        let (session, answer) = crate::pairing::PakeOwner::start(
+            &self.agent_identity,
+            start,
+            &code,
+            controller,
+            now_ms,
+        )?;
+        self.pake.insert_owner(
+            start.exchange_id,
+            crate::pairing::OwnerAttempt {
+                connection_id,
+                response_id,
+                session,
+            },
+        )?;
+        if let Err(error) = self.send_admitted_network_command(
+            NetworkCommand::ReplyControl {
+                connection_id,
+                response_id,
+                response: WireFrame::PakeAnswer(answer),
+            },
+            now_ms,
+        ) {
+            self.pake.take_owner(start.exchange_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn accept_pake_confirm(
+        &mut self,
+        connection_id: [u8; 16],
+        agent_id: asl_types::ids::AgentId,
+        response_id: [u8; 16],
+        confirm: &PakeConfirm,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let attempt = self
+            .pake
+            .take_owner(confirm.exchange_id)
+            .ok_or(AslError::InvalidMessage)?;
+        if attempt.connection_id != connection_id
+            || attempt.session.binding().joiner != agent_id
+            || confirm.owner != self.agent_identity.agent_id()
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let controller = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .verified_controller(agent_id, now_ms)?;
+        attempt
+            .session
+            .finish_confirm(confirm, controller, now_ms)?;
+        let (_, remote_peer) = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .admitted_peer_identity(connection_id, now_ms)?;
+        let mut store = open_store(&self.state_database)?;
+        let accepted = !store.is_contact_binding_revoked(agent_id)?;
+        if accepted {
+            if !store.consume_contact_invite(confirm.exchange_id, now_ms, true)? {
+                return Err(AslError::InvalidMessage);
+            }
+            bind_verified_contact(&mut store, agent_id, &remote_peer, now_ms)?;
+        } else {
+            if !store.consume_contact_invite(confirm.exchange_id, now_ms, false)? {
+                return Err(AslError::InvalidMessage);
+            }
+        }
+        let receipt = attempt.session.receipt(&self.agent_identity, accepted)?;
+        self.send_admitted_network_command(
+            NetworkCommand::ReplyControl {
+                connection_id,
+                response_id,
+                response: WireFrame::PakeReceipt(receipt),
+            },
+            now_ms,
+        )
+    }
+
+    fn accept_pake_answer(
+        &mut self,
+        connection_id: [u8; 16],
+        agent_id: asl_types::ids::AgentId,
+        request_id: [u8; 16],
+        answer: &PakeAnswer,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let mut attempt = self
+            .pake
+            .take_joiner(request_id)
+            .ok_or(AslError::InvalidMessage)?;
+        if attempt.connection_id != connection_id || attempt.session.binding().owner != agent_id {
+            return Err(AslError::InvalidIdentity);
+        }
+        let controller = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .verified_controller(agent_id, now_ms)?;
+        let confirm =
+            attempt
+                .session
+                .finish_answer(&self.agent_identity, answer, controller, now_ms)?;
+        let next_request_id = fresh_id()?;
+        let connection_id = attempt.connection_id;
+        self.pake
+            .insert_joiner(next_request_id, connection_id, attempt.session)?;
+        self.send_admitted_network_command(
+            NetworkCommand::SendControl {
+                connection_id,
+                request_id: next_request_id,
+                request: WireFrame::PakeConfirm(confirm),
+            },
+            now_ms,
+        )
+    }
+
+    fn accept_pake_receipt(
+        &mut self,
+        connection_id: [u8; 16],
+        agent_id: asl_types::ids::AgentId,
+        request_id: [u8; 16],
+        receipt: &PakeReceipt,
+        now_ms: u64,
+    ) -> Result<(), AslError> {
+        let attempt = self
+            .pake
+            .take_joiner(request_id)
+            .ok_or(AslError::InvalidMessage)?;
+        if attempt.connection_id != connection_id || attempt.session.binding().owner != agent_id {
+            return Err(AslError::InvalidIdentity);
+        }
+        let controller = self
+            .admission
+            .as_mut()
+            .ok_or(AslError::InvalidIdentity)?
+            .verified_controller(agent_id, now_ms)?;
+        if attempt.session.finish_receipt(receipt, controller)? {
+            let (_, remote_peer) = self
+                .admission
+                .as_mut()
+                .ok_or(AslError::InvalidIdentity)?
+                .admitted_peer_identity(connection_id, now_ms)?;
+            let mut store = open_store(&self.state_database)?;
+            bind_verified_contact(
+                &mut store,
+                attempt.session.binding().owner,
+                &remote_peer,
+                now_ms,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn handle_contact_invite_event(
         &mut self,
         event: &AdmittedNetworkEvent,
@@ -283,6 +603,52 @@ impl Supervisor {
                     return Ok(None);
                 };
                 let source = attempt.source;
+                if let ImportSource::PakeCode {
+                    token,
+                    expected_inviter,
+                    expected_peer,
+                    invite_id,
+                    code_digits,
+                    expires_at_ms,
+                } = &source
+                {
+                    if *agent_id != *expected_inviter
+                        || *peer_id != *expected_peer
+                        || *expires_at_ms <= now_ms
+                    {
+                        return Ok(Some(NetworkCommand::CloseConnection {
+                            connection_id: *connection_id,
+                        }));
+                    }
+                    let code = contact_invite::pake_token_parts(*token)
+                        .and_then(|(digits, code)| {
+                            if digits != *code_digits {
+                                return Err(AslError::InvalidMessage);
+                            }
+                            Ok(format!("{:0width$}", code, width = usize::from(digits)))
+                        })
+                        .map_err(|_| AslError::InvalidMessage)?;
+                    let (joiner, start) = crate::pairing::PakeJoiner::start(
+                        &self.agent_identity,
+                        *invite_id,
+                        *agent_id,
+                        self.agent_identity.agent_id(),
+                        peer_id.clone(),
+                        self.device_peer_id.clone(),
+                        *expires_at_ms,
+                        *code_digits,
+                        &code,
+                        now_ms,
+                    )?;
+                    let request_id = fresh_id()?;
+                    self.pake
+                        .insert_joiner(request_id, *connection_id, joiner)?;
+                    return Ok(Some(NetworkCommand::SendControl {
+                        connection_id: *connection_id,
+                        request_id,
+                        request: WireFrame::PakeStart(start),
+                    }));
+                }
                 let controller = self
                     .admission
                     .as_mut()
@@ -322,6 +688,7 @@ impl Supervisor {
                             now_ms,
                         )?
                     }
+                    ImportSource::PakeCode { .. } => unreachable!("handled above"),
                 };
                 let request_id = fresh_id()?;
                 self.contact_invites.outgoing.insert(
@@ -392,7 +759,30 @@ impl Supervisor {
                 let source = if request_policy.mode == ContactRequestMode::AutoAccept {
                     Some(RequestSource::Manual)
                 } else if request_policy.mode == ContactRequestMode::Review {
-                    let mut source = if request_policy.shared_group_auto_accept {
+                    let remote_source = invite.provenance.and_then(|provenance| match provenance {
+                        ContactProvenance::SharedGroup { .. }
+                            if request_policy.shared_group_auto_accept =>
+                        {
+                            Some(RequestSource::SignedRemote(provenance))
+                        }
+                        ContactProvenance::RecentInteraction { .. }
+                            if request_policy.recent_interaction_ttl_ms > 0 =>
+                        {
+                            Some(RequestSource::SignedRemote(provenance))
+                        }
+                        _ => None,
+                    });
+                    let remote_source = match remote_source {
+                        Some(source)
+                            if source.allows(&store, remote_agent, &remote_peer, now_ms)? =>
+                        {
+                            Some(source)
+                        }
+                        _ => None,
+                    };
+                    let mut source = if let Some(source) = remote_source {
+                        Some(source)
+                    } else if request_policy.shared_group_auto_accept {
                         store
                             .shared_active_group_evidence(remote_agent, &remote_peer)?
                             .map(|(group_id, membership_epoch)| RequestSource::SharedGroup {
@@ -402,14 +792,27 @@ impl Supervisor {
                     } else {
                         None
                     };
-                    if source.is_none() && request_policy.recent_interaction_ttl_ms > 0 {
-                        source = store
-                            .recent_contact_interaction_evidence(remote_agent, now_ms)?
-                            .map(|evidence| RequestSource::RecentInteraction {
-                                interaction_id: evidence.interaction_id,
-                                expires_at_ms: evidence.expires_at_ms,
-                            });
+                    if source.is_none() {
+                        source = if request_policy.recent_interaction_ttl_ms > 0 {
+                            store
+                                .recent_contact_interaction_evidence(
+                                    remote_agent,
+                                    &remote_peer,
+                                    now_ms,
+                                )?
+                                .map(|evidence| RequestSource::RecentInteraction {
+                                    interaction_id: evidence.interaction_id,
+                                    expires_at_ms: evidence.expires_at_ms,
+                                })
+                        } else {
+                            None
+                        };
                     }
+                    /*
+                     * A remote provenance claim is signed by the inviter but
+                     * is not proof by itself. `SignedRemote::allows` still
+                     * rechecks the local group/epoch or interaction evidence.
+                     */
                     source
                 } else {
                     None
@@ -437,13 +840,14 @@ impl Supervisor {
                     invite.note.as_str()
                 };
                 let note = note.chars().take(80).collect::<String>();
-                store.upsert_contact_invite_prompt(
+                store.upsert_contact_invite_prompt_with_provenance(
                     prompt_id,
                     &tag,
                     invite.invite_id,
                     *agent_id,
                     &note,
                     invite.expires_at_ms,
+                    invite.provenance,
                     now_ms,
                 )?;
                 if !self.pending_pairing_prompts.insert(
@@ -494,6 +898,7 @@ impl Supervisor {
                 peer_id,
                 ..
             } => {
+                self.pake.clear_connection(*connection_id);
                 if let Some(peer_id) = peer_id {
                     self.contact_invites.dialing.remove(peer_id);
                 }
@@ -636,7 +1041,22 @@ impl Supervisor {
         let envelope = envelope
             .and_then(|value| std::str::from_utf8(value).ok())
             .ok_or("invalid_envelope")?;
-        let source = if let Ok(invite) = ContactInviteV1::from_envelope(envelope, now_ms) {
+        let source = if let Ok(pake) = contact_invite::parse_pake_code_envelope(envelope) {
+            if pake.inviter == self.agent_identity.agent_id() {
+                return Err("self_invite");
+            }
+            if pake.expires_at_ms <= now_ms {
+                return Err("expired");
+            }
+            ImportSource::PakeCode {
+                token: pake.token,
+                expected_inviter: pake.inviter,
+                expected_peer: pake.inviter_peer,
+                invite_id: pake.invite_id,
+                code_digits: pake.code_digits,
+                expires_at_ms: pake.expires_at_ms,
+            }
+        } else if let Ok(invite) = ContactInviteV1::from_envelope(envelope, now_ms) {
             if invite.inviter == self.agent_identity.agent_id() {
                 return Err("self_invite");
             }
@@ -661,6 +1081,7 @@ impl Supervisor {
         let token = match &source {
             ImportSource::Discovery(invite) => invite.token,
             ImportSource::ShortCode { token, .. } => *token,
+            ImportSource::PakeCode { token, .. } => *token,
         };
         let lookup_id = fresh_id().map_err(|_| "unavailable")?;
         let key: [u8; 32] = contact_invite_key(token)

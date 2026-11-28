@@ -15,6 +15,7 @@ use super::{VerifiedRecord, verify_record};
 struct ObservedRecord {
     sequence: u64,
     hash: blake3::Hash,
+    policy_revoked: Option<bool>,
 }
 
 /// One owner's bounded, in-memory observations. The DHT/store adapter must
@@ -62,11 +63,25 @@ impl RecordHistory {
         }
         let kind = record.payload.kind();
         let hash = blake3::hash(verified.bytes());
-        if let Some(previous) = self.records.get(&kind)
-            && (record.sequence < previous.sequence
-                || (record.sequence == previous.sequence && hash != previous.hash))
-        {
-            return Err(AslError::PolicyVersionConflict);
+        if let Some(previous) = self.records.get(&kind) {
+            if record.sequence < previous.sequence {
+                return Err(AslError::PolicyVersionConflict);
+            }
+            if record.sequence == previous.sequence && hash != previous.hash {
+                let contact_policy_tie_break = match &record.payload {
+                    RecordPayload::ContactPolicy(candidate) => {
+                        match (candidate.revoked, previous.policy_revoked) {
+                            (true, Some(false)) => true,
+                            (false, Some(true)) => false,
+                            _ => hash.as_bytes() < previous.hash.as_bytes(),
+                        }
+                    }
+                    _ => false,
+                };
+                if !contact_policy_tie_break {
+                    return Err(AslError::PolicyVersionConflict);
+                }
+            }
         }
 
         if let RecordPayload::DeviceDirectory(directory) = &record.payload {
@@ -104,6 +119,10 @@ impl RecordHistory {
             ObservedRecord {
                 sequence: record.sequence,
                 hash,
+                policy_revoked: match &record.payload {
+                    RecordPayload::ContactPolicy(value) => Some(value.revoked),
+                    _ => None,
+                },
             },
         );
         Ok(())

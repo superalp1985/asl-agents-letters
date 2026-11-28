@@ -10,13 +10,16 @@ use asl_store::{
     Store,
     group_state::{
         MlsApplicationAuthority, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
-        RoomVersion, ShardForwardOutboxRecord, ShardForwardOutboxRoute,
+        RoomVersion, ShardForwardOutboxKind, ShardForwardOutboxRecord, ShardForwardOutboxRoute,
     },
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    protocol::{GroupBody, GroupPacket, ShardForward, WireFrame, encode_frame},
+    protocol::{
+        GroupBody, GroupPacket, MAX_SHARD_FORWARD_LIFETIME_MS, ShardForward, WireFrame,
+        encode_frame,
+    },
 };
 use openmls::prelude::CredentialWithKey;
 
@@ -103,6 +106,48 @@ impl CoreAdmission {
         forward: ShardForward,
         now_ms: u64,
     ) -> Result<GroupPacket, AslError> {
+        self.prepare_mls_routed_shard_forward(
+            store,
+            wire_id,
+            forward,
+            ShardForwardOutboxKind::Forward,
+            None,
+            None,
+            now_ms,
+        )
+    }
+
+    pub fn prepare_mls_owner_reply_forward(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        forward: ShardForward,
+        target_peer: &PeerId,
+        content_id: Hash32,
+        now_ms: u64,
+    ) -> Result<GroupPacket, AslError> {
+        self.prepare_mls_routed_shard_forward(
+            store,
+            wire_id,
+            forward,
+            ShardForwardOutboxKind::OwnerReply,
+            Some(content_id),
+            Some(target_peer),
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_mls_routed_shard_forward(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        forward: ShardForward,
+        kind: ShardForwardOutboxKind,
+        content_id: Option<Hash32>,
+        target_peer: Option<&PeerId>,
+        now_ms: u64,
+    ) -> Result<GroupPacket, AslError> {
         if forward.target_child != wire_id {
             return Err(AslError::InvalidMessage);
         }
@@ -136,6 +181,9 @@ impl CoreAdmission {
             return Err(AslError::InvalidMessage);
         }
         let route = ShardForwardOutboxRoute {
+            kind,
+            content_id,
+            target_peer: target_peer.cloned(),
             forward_id: forward.message_id,
             source_message_id: forward.source_message_id,
             logical_root: forward.logical_root,
@@ -159,6 +207,73 @@ impl CoreAdmission {
             Some(&route),
         )
         .map(|(packet, _)| packet)
+    }
+
+    /// Prepare a Fetch control frame that must first reach the current logical
+    /// owner. The exact encrypted frame is persisted before any transport I/O,
+    /// so a temporary owner outage can be retried without advancing the MLS
+    /// sender ratchet again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_mls_owner_relay_application(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        expected: RoomVersion,
+        application: GroupApplication,
+        logical_root: Hash32,
+        target_child: Hash32,
+        now_ms: u64,
+    ) -> Result<(GroupPacket, Id128), AslError> {
+        if !matches!(application, GroupApplication::FetchRequest(_)) || target_child == wire_id {
+            return Err(AslError::InvalidMessage);
+        }
+        let saved = store
+            .mls_room_snapshot(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        let (state, _) = store
+            .mls_room_progress(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        if state != "active" || saved.version != expected {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        if store.mls_logical_root(wire_id)? != logical_root
+            || store.mls_logical_root(target_child)? != logical_root
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let content_id = match &application {
+            GroupApplication::FetchRequest(request) => request.content_id,
+            _ => return Err(AslError::InvalidMessage),
+        };
+        let expires_at_ms = now_ms
+            .checked_add(MAX_SHARD_FORWARD_LIFETIME_MS)
+            .ok_or(AslError::InvalidMessage)?;
+        let route = ShardForwardOutboxRoute {
+            kind: ShardForwardOutboxKind::OwnerRelay,
+            content_id: Some(content_id),
+            target_peer: None,
+            forward_id: Id128(fresh_id()?),
+            source_message_id: application.message_id(),
+            logical_root,
+            source_child: wire_id,
+            target_child,
+            target_binding_revision: 0,
+            observed_at_ms: now_ms,
+            expires_at_ms,
+        };
+        let clock = SyncClock::inbound(now_ms, expires_at_ms);
+        let mut candidate =
+            self.load_mls_application_base(store, wire_id, expected, &HashMap::new(), now_ms)?;
+        let outbox_id = route.forward_id;
+        self.prepare_mls_application_inner(
+            store,
+            &mut candidate,
+            Id128(fresh_id()?),
+            application,
+            &clock,
+            Some(&route),
+        )
+        .map(|(packet, _)| (packet, outbox_id))
     }
 
     pub(super) fn prepare_mls_application(

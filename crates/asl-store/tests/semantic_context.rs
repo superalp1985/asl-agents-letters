@@ -202,7 +202,7 @@ fn schema_v32_upgrades_additively_without_creating_share_or_inbox_grants() {
     drop(connection);
 
     let store = open_store(&path).unwrap();
-    assert_eq!(store.schema_version(), 49);
+    assert_eq!(store.schema_version(), 50);
     assert_eq!(
         store.get_setting("test.preserved").unwrap().as_deref(),
         Some("\"yes\"")
