@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` when available. Without those skills, use `prompts/implement-one-task.md` and execute one ready task at a time. No external skill is a runtime dependency.
 
+> **Historical implementation record:** This document retains task-level history and older “not implemented” checkpoints. It is not the current readiness source. Use `docs/implementation-status.md` for the current code and validation state.
+
 **Goal:** 完整实现 R01–R33，发布可无人值守运行的 A信 1.0。
 
 **Architecture:** Rust workspace 分层实现；确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。确定性 CBOR/CDDL 控制面、身份根/公共链校验、策略服务、SQLite、OpenMLS 两人/群会话、加密邮箱和纯传输调度器分别测试；ASL/1.3 `nl-body` 只在 MLS 解密后作为不可信数据进入模型数据区。GUI 只观察与授权。
