@@ -14,6 +14,7 @@
 - 包内提供 `SHA256SUMS`、`THIRD-PARTY`、CycloneDX SBOM、适用时的 MPL 源码包和 `BUILD-INFO`。
 - Windows EXE 使用 Authenticode；Windows 更新另需严格 Ed25519 manifest、detached signature 和可独立公布的公钥。
 - Linux 包使用独立 Ed25519 domain-separated detached signature。
+- GitHub RC/测试发布统一使用 RSA-4096 签名 `asl-release-manifest.json`；平台引导器在校验签名和 SHA-256 前不得执行包内容。
 - 包内散列清单只使用相对路径和固定顺序；Linux tar/gzip、MPL 源码包及 Windows ZIP 使用 `SOURCE_DATE_EPOCH` 归一化时间。
 - 发布私钥位于仓库外；仓库、日志、ZIP、SBOM 和文档不得包含私钥。
 - 发布密钥不复用 Agent identity root、libp2p peer key、TLS key 或链上 controller key。
@@ -38,6 +39,13 @@ $releaseRoot = Join-Path $env:ASL_HOME 'release'
 Windows 更新清单字段、签名原文和失败条件见 `packaging/windows/RELEASE.md`。没有有效 Authenticode 和旧版 Core 复验的包不得标记为正式发行。
 Windows 便携包自带 Microsoft 签名的 `vcruntime140.dll`，并把该 DLL 纳入
 `SHA256SUMS.txt`、SBOM 和离线更新成员集，干净系统不需要另装 VC++ 运行库。
+
+没有 Authenticode 证书时，RC 发布应使用 PowerShell 引导脚本：它校验 RSA
+发布清单和客户端 ZIP，清除解压文件的 Mark-of-the-Web，再调用现有客户端。
+不要另发一个未签名 PyInstaller EXE 作为 Windows 主引导器。
+
+RSA 清单、密钥指纹、引导器生成和验签命令见
+`packaging/release/README.md`。
 
 ## Ubuntu 完整客户端
 
@@ -72,6 +80,20 @@ systemd `--user` 单元以及安装/升级/卸载/验证脚本。使用 `--apt-d
 
 构建时需要 Rust、Python 3、GNU tar、gzip、strip 和 `dpkg-deb`。正式包应在
 干净工作树构建；`--allow-dirty` 只用于本地测试包。
+
+Linux 平台自适应引导器：
+
+```bash
+bash ./scripts/build-bootstrap.sh \
+  "$PWD/target/asl-bootstrap-linux"
+```
+
+Windows 引导器：
+
+```powershell
+.\scripts\build-windows-bootstrap.ps1 `
+  -OutputDirectory (Join-Path $PWD 'target\asl-bootstrap-windows')
+```
 
 ## asl-infra
 

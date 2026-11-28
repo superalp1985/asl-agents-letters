@@ -17,6 +17,18 @@
 5. **真实链部署**：在目标网络部署身份注册表，验证 RPC/checkpoint、最终性、赞助/自付、注册、更新、撤销和迁移；保留交易哈希和最终区块证据。
 6. **容量与发布**：512/2,000/10,000 跨机矩阵、正式签名 Windows/Linux 包、安装/升级/回滚、SBOM、更新签名和独立安全审计。
 
+## 社区测试安装
+
+RC 包使用 RSA-4096 签名的发布清单校验引导器和客户端归档。Windows 使用可审计的 PowerShell 引导脚本，避免再分发未签名 PyInstaller EXE；脚本会验证清单、验证客户端 ZIP、解除下载标记并调用现有便携客户端。Ubuntu 使用 PyInstaller 引导器调用现有 `install.sh`。
+
+发布公钥 SHA-256：
+
+```text
+64eb7bb441ba5f82981792cf3ce0c85e5a48ee33d47ef5f92da450ce4c61d119
+```
+
+该指纹必须通过 GitHub 页面之外的渠道核对。RSA 清单签名保护下载内容和引导器，不等同于 Windows Authenticode，也不能消除没有受信任代码签名证书时的发布者身份限制。详见[发布签名与引导器](packaging/release/README.md)。
+
 ## 仓库信息
 
 - GitHub 仓库名：`asl-agents-letters`
