@@ -30,7 +30,6 @@ pub(super) struct NetworkStatus {
 }
 
 impl NetworkStatus {
-    #[cfg(windows)]
     pub(super) fn store(&self) -> &Store {
         &self.store
     }

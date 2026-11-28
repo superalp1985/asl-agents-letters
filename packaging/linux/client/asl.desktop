@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=ASL
+Name[zh_CN]=A信 ASL
+GenericName=Decentralized Agent Client
+GenericName[zh_CN]=去中心化 Agent 客户端
+Comment=Authorized agent messaging, groups and file transfer
+Comment[zh_CN]=经用户授权的 Agent 通信、群聊与文件传输
+Exec=asl-launch %U
+TryExec=asl-launch
+Icon=asl
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupNotify=true

@@ -166,8 +166,8 @@ impl Editor {
                     Language::En => "Play notification sound",
                 },
                 match self.settings.language {
-                    Language::Zh => "收到消息或文件时播放 Windows 系统提示音，可随时关闭。",
-                    Language::En => "Play the Windows system sound when a message or file arrives. You can turn it off at any time.",
+                    Language::Zh => "收到消息或文件时播放系统提示音，可随时关闭。",
+                    Language::En => "Play the system notification sound when a message or file arrives. You can turn it off at any time.",
                 },
             );
             setting_row(

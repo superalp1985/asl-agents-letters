@@ -180,7 +180,6 @@ impl IncomingFetchTracker {
         self.pending.get(&id)?.group
     }
 
-    #[cfg(windows)]
     pub(super) fn rebind(
         &mut self,
         id: [u8; 16],
@@ -200,7 +199,6 @@ impl IncomingFetchTracker {
         true
     }
 
-    #[cfg(windows)]
     pub(super) fn matches_group_reply(
         &self,
         id: [u8; 16],

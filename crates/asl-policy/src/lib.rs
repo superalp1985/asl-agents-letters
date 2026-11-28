@@ -19,6 +19,21 @@ pub use paths::{
     AuthorizedFile, AuthorizedWriteFile, FileIdentity, SourceGrant, SourceRules, WriteGrant,
     open_authorized_source,
 };
+#[cfg(target_os = "linux")]
+pub use platform::linux::file_dialog::{
+    choose_avatar_file, choose_local_directory, choose_local_file,
+};
+#[cfg(target_os = "linux")]
+pub use platform::linux::local_ipc::{
+    LocalPipeClient, LocalPipeConnection, LocalPipeServer, connect_local_pipe,
+    connect_recovery_pipe,
+};
+#[cfg(target_os = "linux")]
+pub use platform::linux::notification::{play_notification_sound, send_notification};
+#[cfg(target_os = "linux")]
+pub use platform::linux::resources::{ResourceSample, local_resource_sample, thread_cpu_time};
+#[cfg(target_os = "linux")]
+pub use platform::linux::tray::{TrayCommand, TrayHandle, set_tray_language, start_tray};
 #[cfg(windows)]
 pub use platform::windows::file_dialog::{
     choose_avatar_file, choose_local_directory, choose_local_file,

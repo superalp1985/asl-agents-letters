@@ -68,6 +68,8 @@ pub(super) struct Interaction<'a> {
     pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
     pub(super) contact_invites: &'a mut super::contact_invites::Form,
     pub(super) group_admin: &'a mut super::group_admin::Form,
+    pub(super) migration: &'a mut super::migration::Form,
+    pub(super) home: Option<&'a Path>,
     pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
     pub(super) remote_avatars: &'a mut RemoteAvatars,
     pub(super) checkpoints: &'a Result<
@@ -101,10 +103,11 @@ pub(super) enum Page {
     Knowledge,
     Trust,
     Access,
+    Migration,
 }
 
 impl Page {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Overview,
         Self::Activity,
         Self::Nodes,
@@ -114,6 +117,7 @@ impl Page {
         Self::Knowledge,
         Self::Trust,
         Self::Access,
+        Self::Migration,
     ];
 
     pub fn show(
@@ -133,6 +137,8 @@ impl Page {
             checkpoint_form,
             contact_invites,
             group_admin,
+            migration,
+            home,
             profile_form,
             remote_avatars,
             checkpoints,
@@ -443,6 +449,7 @@ impl Page {
                     ui.separator();
                     access(ui, data, access_form, *language, *actions_enabled, action);
                 }
+                Self::Migration => migration.show(ui, *home, *language, *actions_enabled),
             });
     }
 }

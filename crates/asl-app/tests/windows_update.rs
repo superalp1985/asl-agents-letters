@@ -27,7 +27,7 @@ fn offline_update_switches_only_after_core_preflight() {
     fs::copy(env!("CARGO_BIN_EXE_asl-core"), dist.join("asl-core.exe")).unwrap();
     let host = dist.join("asl.exe");
     fs::copy(env!("CARGO_BIN_EXE_asl"), &host).unwrap();
-    fs::write(dist.join("package-layout.txt"), "asl-windows-layout-v2").unwrap();
+    fs::write(dist.join("package-layout.txt"), "asl-windows-layout-v4").unwrap();
     fs::write(dist.join("active-release.txt"), BASELINE).unwrap();
     for name in ["Portable-Layout.ps1", "Update-ASL.ps1"] {
         fs::copy(sources.join(name), dist.join(name)).unwrap();
@@ -107,10 +107,42 @@ fn offline_update_switches_only_after_core_preflight() {
         . $env:TEST_LAYOUT
         foreach ($member in (Get-PortablePackageMembers)) {
             $path = Join-Path $env:TEST_STAGING $member
-            if (-not [IO.File]::Exists($path)) { [IO.File]::WriteAllText($path, $member) }
+            if (-not [IO.File]::Exists($path)) {
+                if ($member -eq 'vcruntime140.dll') {
+                    [IO.File]::Copy((Join-Path $env:WINDIR 'System32\vcruntime140.dll'), $path)
+                } else {
+                    [IO.File]::WriteAllText($path, $member)
+                }
+            }
         }
         [IO.File]::WriteAllText((Join-Path $env:TEST_STAGING 'package-layout.txt'), (Get-PortableLayoutVersion))
         [IO.File]::WriteAllText((Join-Path $env:TEST_STAGING 'active-release.txt'), 'base')
+        $sbom = [ordered]@{
+            bomFormat = 'CycloneDX'
+            specVersion = '1.6'
+            version = 1
+            metadata = [ordered]@{
+                component = [ordered]@{ type = 'application'; name = 'ASL'; version = '1.0.1' }
+                properties = @([ordered]@{ name = 'asl:package_layout'; value = (Get-PortableLayoutVersion) })
+            }
+            components = @()
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $env:TEST_STAGING 'sbom.cdx.json'),
+            (($sbom | ConvertTo-Json -Depth 8 -Compress) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $hashLines = foreach ($member in (Get-PortablePackageMembers)) {
+            if ($member -ne 'SHA256SUMS.txt') {
+                $hash = (Get-FileHash -LiteralPath (Join-Path $env:TEST_STAGING $member) -Algorithm SHA256).Hash.ToLowerInvariant()
+                '{0}  {1}' -f $hash, $member
+            }
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $env:TEST_STAGING 'SHA256SUMS.txt'),
+            (($hashLines -join "`n") + "`n"),
+            [Text.Encoding]::ASCII
+        )
         [IO.Compression.ZipFile]::CreateFromDirectory($env:TEST_STAGING, $env:TEST_ZIP)
     "#,
                 ])

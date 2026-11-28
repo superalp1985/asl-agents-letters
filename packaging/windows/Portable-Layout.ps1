@@ -71,6 +71,7 @@ function Get-PortablePackageMembers {
 
     $members = @(
         'asl.exe', 'asl-core.exe', 'asl-net.exe', 'asl-worker.exe', 'asl-extractor.exe', 'asl-ui.exe',
+        'vcruntime140.dll',
         'Start-ASL.ps1', 'Set-ASLLogin.ps1', 'Update-ASL.ps1', 'Rollback-ASL.ps1', 'Portable-Layout.ps1',
         'LICENSE', 'README.md', 'THIRD-PARTY.txt', 'sbom.cdx.json', 'SHA256SUMS.txt',
         'MPL-SOURCES.zip', 'active-release.txt', 'package-layout.txt'
@@ -84,7 +85,7 @@ function Get-PortablePackageMembers {
     return $members
 }
 
-function Get-PortableLayoutVersion { 'asl-windows-layout-v3' }
+function Get-PortableLayoutVersion { 'asl-windows-layout-v4' }
 
 function Assert-PortableLayoutVersion {
     param([string]$Root)

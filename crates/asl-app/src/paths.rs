@@ -1,5 +1,7 @@
 use std::fs::{self, Metadata};
-use std::path::{Component, Path, PathBuf, Prefix};
+#[cfg(windows)]
+use std::path::Prefix;
+use std::path::{Component, Path, PathBuf};
 
 use asl_policy::validate_storage_root;
 use asl_types::error::AslError;
@@ -26,7 +28,7 @@ impl AppPaths {
 
     fn open_with(root: &Path, create: bool) -> Result<Self, AslError> {
         if !root.is_absolute()
-            || !is_local_drive(root)
+            || !is_local_storage_path(root)
             || root
                 .components()
                 .any(|component| matches!(component, Component::ParentDir))
@@ -101,11 +103,25 @@ impl AppPaths {
     }
 
     pub fn device_key(&self) -> PathBuf {
-        self.identity.join("device-key.dpapi")
+        #[cfg(windows)]
+        {
+            self.identity.join("device-key.dpapi")
+        }
+        #[cfg(not(windows))]
+        {
+            self.identity.join("device-key.protected")
+        }
     }
 
     pub fn agent_root_key(&self) -> PathBuf {
-        self.identity.join("agent-root.dpapi")
+        #[cfg(windows)]
+        {
+            self.identity.join("agent-root.dpapi")
+        }
+        #[cfg(not(windows))]
+        {
+            self.identity.join("agent-root.protected")
+        }
     }
 
     pub fn signed_device_directory(&self) -> PathBuf {
@@ -153,11 +169,18 @@ impl AppPaths {
     }
 }
 
-fn is_local_drive(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
-    )
+fn is_local_storage_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(path.components().next(), Some(Component::RootDir))
+    }
 }
 
 fn create_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
@@ -182,7 +205,7 @@ fn existing_child(root: &Path, name: &str) -> Result<PathBuf, AslError> {
 
 pub(crate) fn validate_local_absolute_path(path: &Path) -> Result<(), AslError> {
     if !path.is_absolute()
-        || (cfg!(windows) && !is_local_drive(path))
+        || !is_local_storage_path(path)
         || path
             .components()
             .any(|component| matches!(component, Component::ParentDir))

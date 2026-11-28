@@ -15,7 +15,8 @@ const MAX_SEARCH_RESULTS: u32 = MAX_ACT_HISTORY_ROWS;
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_ARCHIVE_TOKENS: usize = 64;
 const MAX_LIVE_BODY_TOKENS: usize = 4_096;
-const DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
+const PROTECTED_PREFIX: &[u8] = b"ASL-ACT-BODY-PROTECTED-v1\0";
+const LEGACY_DPAPI_PREFIX: &[u8] = b"ASL-ACT-BODY-DPAPI-v1\0";
 const UTF8_PREFIX: &[u8] = b"ASL-ACT-BODY-UTF8-v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,10 +608,6 @@ fn token_specificity(token: &str) -> u32 {
     }
 }
 
-fn semantic_tokens(text: &str) -> Vec<String> {
-    semantic_tokens_with_limit(text, MAX_ARCHIVE_TOKENS)
-}
-
 fn semantic_tokens_with_limit(text: &str, limit: usize) -> Vec<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
@@ -643,6 +640,10 @@ fn add_semantic_token(tokens: &mut BTreeSet<String>, token: &str) {
     if characters.len() <= 8 {
         tokens.insert(token.to_owned());
     }
+}
+
+fn semantic_tokens(text: &str) -> Vec<String> {
+    semantic_tokens_with_limit(text, MAX_ARCHIVE_TOKENS)
 }
 
 fn validate_record(record: ActHistoryRecord<'_>) -> Result<(), AslError> {
@@ -680,27 +681,17 @@ fn padded_size(length: usize) -> Result<u32, AslError> {
         .ok_or(AslError::QuotaExceeded)
 }
 
-#[cfg(windows)]
 fn protect_body(body: &[u8]) -> Result<Vec<u8>, AslError> {
     if body.is_empty() {
         return Ok(UTF8_PREFIX.to_vec());
     }
     let protected = asl_policy::protect_secret(body)?;
-    let mut value = Vec::with_capacity(DPAPI_PREFIX.len() + protected.len());
-    value.extend_from_slice(DPAPI_PREFIX);
+    let mut value = Vec::with_capacity(PROTECTED_PREFIX.len() + protected.len());
+    value.extend_from_slice(PROTECTED_PREFIX);
     value.extend_from_slice(&protected);
     Ok(value)
 }
 
-#[cfg(not(windows))]
-fn protect_body(body: &[u8]) -> Result<Vec<u8>, AslError> {
-    let mut value = Vec::with_capacity(UTF8_PREFIX.len() + body.len());
-    value.extend_from_slice(UTF8_PREFIX);
-    value.extend_from_slice(body);
-    Ok(value)
-}
-
-#[cfg(windows)]
 fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
     if let Some(body) = value.strip_prefix(UTF8_PREFIX) {
         return String::from_utf8(body.to_vec())
@@ -708,7 +699,8 @@ fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
             .map_err(|_| AslError::InvalidDatabase);
     }
     let protected = value
-        .strip_prefix(DPAPI_PREFIX)
+        .strip_prefix(PROTECTED_PREFIX)
+        .or_else(|| value.strip_prefix(LEGACY_DPAPI_PREFIX))
         .ok_or(AslError::InvalidDatabase)?;
     let body = asl_policy::unprotect_secret(protected)?;
     let body = String::from_utf8(body.to_vec()).map_err(|_| AslError::InvalidDatabase)?;
@@ -719,22 +711,15 @@ pub(crate) fn decode_stored_body(value: &[u8]) -> Result<Option<String>, AslErro
     unprotect_body(value)
 }
 
-#[cfg(not(windows))]
-fn unprotect_body(value: &[u8]) -> Result<Option<String>, AslError> {
-    let body = value
-        .strip_prefix(UTF8_PREFIX)
-        .ok_or(AslError::InvalidDatabase)?;
-    let body = String::from_utf8(body.to_vec()).map_err(|_| AslError::InvalidDatabase)?;
-    Ok((!body.is_empty()).then_some(body))
-}
-
 #[cfg(test)]
 mod tests {
     use rusqlite::OptionalExtension;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{current_time_ms, open_store, open_store_read_only};
+    #[cfg(windows)]
+    use crate::open_store_read_only;
+    use crate::{current_time_ms, open_store};
     use asl_types::ids::Id128;
 
     fn fixture() -> (TempDir, Store) {

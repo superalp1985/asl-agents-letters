@@ -2,6 +2,8 @@
 
 解压到本地 NTFS 目录。安装目录及其上级路径必须防止不受信任的账户修改或替换安装文件；不要在其他账户可写的共享目录运行。脚本不会替你配置或审核 ACL。保留包内的 `active-release.txt`。打开 PowerShell，在解压目录下执行：
 
+包内带有 Microsoft 签名的 `vcruntime140.dll`，不需要预先安装 Visual C++ Build Tools 或 VC++ 运行库。
+
 ```powershell
 .\Start-ASL.ps1 -DataDirectory '<absolute-local-data-directory>'
 ```
@@ -50,7 +52,7 @@
 
 独立发布验收脚本 `scripts/verify-windows-release.ps1` 可通过 `-TrustedInstallRoot` 使用受保护安装中的固定公钥和旧版 Core，并严格复核相对路径清单、SBOM 与包内散列。正式包加 `-RequireAuthenticode`；证书链和吊销状态来自验收机，仍需单独留存证据。
 
-根目录的启动脚本、验签器、Agent 入口、回切器及固定公钥属于引导层，普通更新不替换它们。当前 ZIP 布局为 v3，签名清单仍为 v1。此前的 v1/v2 布局缺少当前引导和回切契约，不能原地更新到 v3；请在核验全包后解压到新的受保护安装目录，复用数据目录，并重新配置宿主与登录启动。不要覆盖旧的安装目录。
+根目录的启动脚本、验签器、Agent 入口、回切器及固定公钥属于引导层，普通更新不替换它们。当前 ZIP 布局为 v4，签名清单仍为 v1。v4 把 `vcruntime140.dll` 纳入签名清单和包内散列。此前的 v1/v2/v3 布局不能原地更新到 v4；请在核验全包后解压到新的受保护安装目录，复用数据目录，并重新配置宿主与登录启动。不要覆盖旧的安装目录。
 
 # ASL for Windows
 
@@ -60,6 +62,8 @@ Do not run from a shared-writable directory. The scripts do not configure or
 audit ACLs. Keep the bundled `active-release.txt`. In PowerShell, run
 `.\Start-ASL.ps1 -DataDirectory '<absolute data directory>'` from the extracted
 directory. Use the same data directory to reopen an existing profile.
+The package includes Microsoft-signed `vcruntime140.dll`; users do not need a
+separate Visual C++ Build Tools or VC++ Runtime installation.
 Do not double-click `asl-ui.exe`; it does not automatically select a profile.
 When Core is already running for that profile, use
 `.\Start-ASL.ps1 -ViewerOnly -DataDirectory '<absolute data directory>'`
@@ -94,8 +98,9 @@ rollback never restores data. Do not reopen migrated data with an incompatible
 older binary after the new release has started.
 
 The root launchers, verifier, rollback tool, and pinned key are not replaced by ordinary updates.
-The ZIP uses layout v3; the signed manifest remains v1. Older v1/v2-layout
-packages do not have the current bootstrap and rollback contract and cannot update in place to v3.
+The ZIP uses layout v4; the signed manifest remains v1. Layout v4 includes
+`vcruntime140.dll` in the signed member set. Older v1/v2/v3-layout packages
+cannot update in place to v4.
 Independently authenticate the new distribution, extract it into a new protected
 directory, keep your separate data directory, and update the host and login
 startup configuration. Do not overwrite the existing installation directory.

@@ -14,7 +14,7 @@ pub enum SandboxRole {
 }
 
 impl SandboxRole {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     pub(crate) fn argument(self) -> &'static str {
         match self {
             Self::Net => "--asl-role=net",
@@ -89,8 +89,17 @@ pub struct SandboxLauncher {
 impl SandboxLauncher {
     pub fn new(net: PathBuf, worker: PathBuf, extractor: PathBuf) -> Result<Self, AslError> {
         for path in [&net, &worker, &extractor] {
+            #[cfg(windows)]
+            let invalid_extension = path.extension().is_none_or(|value| value != "exe");
+            #[cfg(target_os = "linux")]
+            let invalid_extension = path.metadata().map_or(true, |metadata| {
+                use std::os::unix::fs::PermissionsExt;
+                !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0
+            });
+            #[cfg(not(any(windows, target_os = "linux")))]
+            let invalid_extension = true;
             if !path.is_absolute()
-                || path.extension().is_none_or(|value| value != "exe")
+                || invalid_extension
                 || path
                     .to_str()
                     .is_none_or(|value| value.contains('\0') || value.contains('"'))
@@ -113,6 +122,12 @@ impl SandboxLauncher {
         }
     }
 
+    pub fn directory(&self) -> Option<&Path> {
+        let directory = self.net.parent()?;
+        (self.worker.parent() == Some(directory) && self.extractor.parent() == Some(directory))
+            .then_some(directory)
+    }
+
     #[cfg(windows)]
     pub fn spawn_sandbox(
         &self,
@@ -130,7 +145,19 @@ impl SandboxLauncher {
         .map(|inner| SandboxChild { inner })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    pub fn spawn_sandbox(
+        &self,
+        role: SandboxRole,
+        inherited_handles: InheritedPipes,
+        limits: SandboxLimits,
+    ) -> Result<SandboxChild, AslError> {
+        limits.validate(role)?;
+        crate::platform::linux::sandbox::spawn(self.program(role), role, inherited_handles, limits)
+            .map(|inner| SandboxChild { inner })
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn spawn_sandbox(
         &self,
         role: SandboxRole,
@@ -153,10 +180,13 @@ pub struct BrokerPipes {
 #[cfg(windows)]
 pub use crate::platform::windows::appcontainer::InheritedPipes;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub use crate::platform::linux::sandbox::InheritedPipes;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub struct InheritedPipes(());
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl InheritedPipes {
     pub fn new() -> Result<(BrokerPipes, Self), AslError> {
         Err(AslError::PlatformUnavailable)
@@ -166,6 +196,8 @@ impl InheritedPipes {
 pub struct SandboxChild {
     #[cfg(windows)]
     inner: crate::platform::windows::appcontainer::Child,
+    #[cfg(target_os = "linux")]
+    inner: crate::platform::linux::sandbox::Child,
 }
 
 /// A missing or signalled PID proves the previous helper cannot run a queued
@@ -175,14 +207,18 @@ pub fn confirmed_process_exit(pid: u32) -> bool {
     {
         crate::platform::windows::appcontainer::confirmed_process_exit(pid)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::linux::sandbox::confirmed_process_exit(pid)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = pid;
         false
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl SandboxChild {
     pub fn wait_timeout(&mut self, _: Duration) -> Result<Option<u32>, AslError> {
         Err(AslError::PlatformUnavailable)
@@ -190,6 +226,21 @@ impl SandboxChild {
 
     pub fn terminate(&mut self) -> Result<(), AslError> {
         Err(AslError::PlatformUnavailable)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SandboxChild {
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    pub fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<u32>, AslError> {
+        self.inner.wait_timeout(timeout)
+    }
+
+    pub fn terminate(&mut self) -> Result<(), AslError> {
+        self.inner.terminate()
     }
 }
 

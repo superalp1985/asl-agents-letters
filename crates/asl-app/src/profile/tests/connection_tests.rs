@@ -12,7 +12,9 @@ use crate::profile::{
     AdmittedNetworkEvent, CoreAdmission, DeviceAdmissionError, serve_local_identity_proof,
 };
 use asl_net::transport::{LocalTransport, TransportEvent, TransportKind};
-use asl_types::protocol::{Feature, Hello, WireFrame};
+#[cfg(windows)]
+use asl_types::protocol::WireFrame;
+use asl_types::protocol::{Feature, Hello};
 use libp2p_identity::Keypair;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;

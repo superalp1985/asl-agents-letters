@@ -390,7 +390,6 @@ impl TransferService {
             .register(connection_id, requester, request_id, request, None, now_ms)
     }
 
-    #[cfg(windows)]
     pub(crate) fn expect_group_fetch_response(
         &mut self,
         connection: [u8; 16],
@@ -413,7 +412,6 @@ impl TransferService {
         self.incoming_fetches.group(id)
     }
 
-    #[cfg(windows)]
     pub(crate) fn rebind_group_fetch_response(
         &mut self,
         request: Id128,
@@ -425,7 +423,6 @@ impl TransferService {
             .rebind(request.0, connection, requester, now_ms)
     }
 
-    #[cfg(windows)]
     pub(crate) fn matches_group_reply(
         &self,
         request: Id128,
@@ -1407,7 +1404,6 @@ mod bulk_response_tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn group_fetch_reply_matches_only_its_live_room_epoch_and_source() {
         let (_, _, fetch, _) = fetch_fixture();
         let id = fetch.message_id.0;
@@ -1438,7 +1434,6 @@ mod bulk_response_tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn owner_local_group_fetch_rebinds_to_the_real_source_connection() {
         let (_, _, fetch, _) = fetch_fixture();
         let id = fetch.message_id.0;
@@ -1842,7 +1837,7 @@ mod bulk_response_tests {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(crate) mod tests {
     mod avatar_permissions;
 

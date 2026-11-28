@@ -1,5 +1,6 @@
 mod avatars;
 mod files;
+#[cfg(windows)]
 mod firewall;
 mod letters;
 
@@ -26,6 +27,8 @@ use asl_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[cfg(windows)]
+use crate::supervisor::sibling_binary_directory;
 use crate::{
     chain::{
         DurableIdentityResolver, DurableResolverConfigV1,
@@ -36,7 +39,7 @@ use crate::{
     network::NetworkCommand,
     network_settings::NetworkSettingsV1,
     profile::{AdmittedNetworkEvent, fresh_id, sign_record},
-    supervisor::{NetRuntime, sibling_binary_directory, unix_time_ms},
+    supervisor::{NetRuntime, unix_time_ms},
     transfer::tests::Fixture,
 };
 
@@ -53,6 +56,7 @@ type RegistryClaim = (AgentId, [[u8; 32]; 3]);
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 enum Verification {
     Protocol,
+    #[cfg(windows)]
     AppContainer,
 }
 
@@ -150,6 +154,7 @@ fn expression_hosts_exchange_a_definition_across_core_processes() {
 }
 
 #[test]
+#[cfg(windows)]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_messages_cross_sandboxed_net_processes() {
     verify_group_delivery(Verification::AppContainer, Scenario::Messages);
@@ -161,6 +166,7 @@ fn group_file_crosses_core_processes_with_two_approvals() {
 }
 
 #[test]
+#[cfg(windows)]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn group_file_crosses_sandboxed_net_processes_with_two_approvals() {
     verify_group_delivery(Verification::AppContainer, Scenario::SingleSource);
@@ -172,6 +178,7 @@ fn two_group_sources_deliver_distinct_chunks_over_tcp() {
 }
 
 #[test]
+#[cfg(windows)]
 #[ignore = "requires an elevated shell for temporary AppContainer loopback exemptions"]
 fn two_group_sources_deliver_distinct_chunks_across_sandboxed_net_processes() {
     verify_group_delivery(Verification::AppContainer, Scenario::TwoSources);
@@ -179,6 +186,7 @@ fn two_group_sources_deliver_distinct_chunks_across_sandboxed_net_processes() {
 
 fn verify_group_delivery(verification: Verification, scenario: Scenario) {
     let fixture = Fixture::new();
+    #[cfg(windows)]
     if verification == Verification::AppContainer {
         let bin = fixture.path().join("bin");
         fs::create_dir(&bin).unwrap();
@@ -229,7 +237,10 @@ fn verify_group_delivery(verification: Verification, scenario: Scenario) {
         avatars::verify(&registry_path, &nodes);
         return;
     }
+    #[cfg(windows)]
     let loopback_fixture = verification == Verification::AppContainer;
+    #[cfg(not(windows))]
+    let loopback_fixture = false;
     let (mut creator, creator_ready) =
         CoreProcess::start(creator_home, &registry_path, loopback_fixture);
     let (mut first, first_ready) = CoreProcess::start(first_home, &registry_path, loopback_fixture);
@@ -591,14 +602,27 @@ fn group_core_child() {
     }
     let signed = fs::read(paths.signed_device_directory()).unwrap();
     let bin = Path::new(&home).parent().unwrap().join("bin");
+    #[cfg(windows)]
     let launcher = asl_policy::sandbox::SandboxLauncher::new(
         bin.join("asl-net.exe"),
         bin.join("asl-worker.exe"),
         bin.join("asl-extractor.exe"),
     )
     .unwrap();
+    #[cfg(target_os = "linux")]
+    let launcher = {
+        let _ = bin;
+        let executable = std::env::current_exe().unwrap();
+        asl_policy::sandbox::SandboxLauncher::new(
+            executable.clone(),
+            executable.clone(),
+            executable,
+        )
+        .unwrap()
+    };
     let mut net_thread = None;
     let mut supervisor = match registry.verification {
+        #[cfg(windows)]
         Verification::AppContainer => Supervisor::start_with_launcher(paths, launcher)
             .expect("starting the Core and its isolated Net process"),
         Verification::Protocol => {
@@ -669,6 +693,7 @@ fn group_core_child() {
     });
     let tick = |core: &mut Supervisor| {
         if let Ok((enable, reply)) = receiver.try_recv() {
+            #[cfg(windows)]
             let result = core
                 .net
                 .child
@@ -676,6 +701,11 @@ fn group_core_child() {
                 .ok_or(AslError::SandboxUnavailable)
                 .and_then(|child| child.fixture_inbound(enable))
                 .map(|sid| json!({"sid": sid}));
+            #[cfg(not(windows))]
+            let result = {
+                let _ = enable;
+                Err(AslError::PlatformUnavailable)
+            };
             let _ = reply.send(result);
         }
         if core.group_controls.is_none() {
@@ -821,7 +851,9 @@ fn run_group_admin(
 
 struct CoreProcess {
     node: String,
+    #[cfg(windows)]
     net_program: Option<PathBuf>,
+    #[cfg(windows)]
     receiver_rule: Option<firewall::ReceiverRule>,
     child: Child,
     input: Option<ChildStdin>,
@@ -903,8 +935,10 @@ impl CoreProcess {
         thread::spawn(move || forward_replies(BufReader::new(stdout), output));
         let mut core = Self {
             node: home.file_name().unwrap().to_string_lossy().into_owned(),
+            #[cfg(windows)]
             net_program: loopback_fixture
                 .then(|| home.parent().unwrap().join("bin").join("asl-net.exe")),
+            #[cfg(windows)]
             receiver_rule: None,
             child,
             input,
@@ -945,6 +979,7 @@ impl CoreProcess {
         self.receive(stage)
     }
 
+    #[cfg(windows)]
     fn inbound(&mut self, enable: bool, ready: &Value) {
         let Some(program) = self.net_program.clone() else {
             return;
@@ -971,6 +1006,11 @@ impl CoreProcess {
                 }),
             );
         }
+    }
+
+    #[cfg(not(windows))]
+    fn inbound(&mut self, enable: bool, ready: &Value) {
+        let _ = (enable, ready);
     }
 
     fn ok(&mut self, action: Action) -> Value {
@@ -1078,6 +1118,7 @@ impl CoreProcess {
                 return reply;
             }
             if Instant::now() >= deadline {
+                #[cfg(windows)]
                 if let Some(program) = &self.net_program {
                     report_loopback_filters(program);
                 }
@@ -1098,6 +1139,7 @@ impl CoreProcess {
 }
 
 // Capture while the executable and its temporary per-profile filters still exist.
+#[cfg(windows)]
 fn report_loopback_filters(program: &Path) {
     let Some(windows) = std::env::var_os("SystemRoot") else {
         eprintln!("WFP diagnostics unavailable: missing SystemRoot");
@@ -1132,6 +1174,7 @@ fn report_loopback_filters(program: &Path) {
     }
 }
 
+#[cfg(windows)]
 fn wait_for_receiver_rule(
     program: &Path,
     endpoint: SocketAddr,
@@ -1185,6 +1228,7 @@ fn wait_for_receiver_rule(
     }
 }
 
+#[cfg(windows)]
 fn wait_for_report(mut child: Child) -> io::Result<std::process::ExitStatus> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

@@ -35,7 +35,7 @@ blake3.workspace = true
 image.workspace = true
 alloy-rpc-types-eth.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 toml_edit = { version = "=0.25.19", default-features = false, features = ["parse", "serde"] }
 pdf-extract = "=0.12.1"
 quick-xml = { version = "=0.41.0", features = ["encoding"] }
@@ -44,14 +44,11 @@ openmls.workspace = true
 openmls_basic_credential = "=0.6.0"
 curve25519-dalek = { version = "=4.1.3", default-features = false }
 qrcodegen = { workspace = true, optional = true }
-
-[target.'cfg(windows)'.dependencies]
 age = { version = "=0.11.4", default-features = false }
 rpassword = "=7.5.4"
 tempfile = "=3.27.0"
 rmcp.workspace = true
 snow = "=0.10.0"
-tokio = { workspace = true, features = ["net", "io-util"] }
 
 [dev-dependencies]
 asl-policy = { path = "../asl-policy", features = ["appcontainer-loopback-fixture"] }
@@ -63,7 +60,7 @@ openmls_rust_crypto = "=0.6.0"
 [features]
 desktop-ui = ["dep:eframe", "dep:qrcodegen"]
 
-[target.'cfg(windows)'.dependencies.eframe]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies.eframe]
 workspace = true
 optional = true
 

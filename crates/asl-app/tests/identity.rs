@@ -230,13 +230,13 @@ fn corrupt_agent_root_identity_is_not_replaced() {
     assert_eq!(fs::read(&path).unwrap(), damaged);
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 #[test]
-fn protected_identity_storage_is_unavailable_outside_windows() {
+fn protected_identity_storage_is_available_on_linux() {
+    let directory = TestDirectory::new();
     let identity = AgentIdentity::generate().unwrap();
-    let path = Path::new("identity.dpapi");
-    assert!(matches!(
-        identity.save_protected_new(path),
-        Err(AslError::PlatformUnavailable)
-    ));
+    let path = directory.0.join("identity.protected");
+    identity.save_protected_new(&path).unwrap();
+    let loaded = AgentIdentity::load_protected(&path).unwrap();
+    assert_eq!(loaded.agent_id(), identity.agent_id());
 }

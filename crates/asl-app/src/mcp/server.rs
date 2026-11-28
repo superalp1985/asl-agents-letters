@@ -42,7 +42,7 @@ pub(crate) struct McpWorker {
 }
 
 impl McpWorker {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn spawn(
         root: PathBuf,
         grant: HostGrant,

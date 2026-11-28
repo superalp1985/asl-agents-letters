@@ -10,7 +10,7 @@
 
 自动化验收已完成：workspace 共 1,026 项测试，1,013 项通过、13 项按环境要求忽略；desktop-ui 库 326 项通过、5 项忽略；workspace 严格 Clippy、格式和 v50 迁移检查通过。以下项目无法用本机单进程测试代替，公开发布前必须逐项完成，详见 [1.0 真人验收清单](docs/14-human-acceptance.md)。
 
-1. **两台干净的 Windows 11 x64 真机**：首次语言选择、身份/链状态、联系人全号/二维码/PAKE、错误短码一次即失效、收发文件、托盘/提示音/真正退出，以及 100%–200% DPI。
+1. **干净的 Windows 11 x64 与 Ubuntu 22.04+ 真机**：两平台首次语言选择、身份/链状态、联系人全号/二维码/PAKE、错误短码一次即失效、收发文件、托盘/提示音/真正退出，以及 100%–200% DPI。
 2. **公网双机与 AppContainer**：不同 NAT 后的 bootstrap、AutoNAT、DCUtR、relay 降级、断网重连、离线 owner 回放和 72 小时稳定运行；AppContainer 回环测试需管理员 PowerShell。
 3. **多设备同一 Agent**：加密联系人策略自动 DHT 同步、同 revision 冲突收敛、撤销传播、新设备恢复和旧设备移除。
 4. **群与跨 shard 真人流程**：3 台以上真机建群、邀请、管理员、禁言、逐文件权限、群主转移后移除、管理员代管、跨 shard Fetch 精确回程。
@@ -129,7 +129,7 @@ Agent 通信不再限于固定问答模板。ASL/1.1 的[表达式信件](docs/e
 - 联系人授权与 Agent 的偏好列表分开；信任、贡献不进入授权计算。
 - 不收费、不交易、不代币；本地信任/贡献只影响柔性调度。链上 gas 由志愿赞助者或选择自付的用户承担，赞助并非无成本或永久保证。
 - 允许一个人运行多个 Agent，也不承诺在全网识别真人。分身/女巫防护只解决其对个人电脑的握手、模型、磁盘、邮箱和 gossip 资源攻击：按 AgentId、设备、PeerId、IP 和会话分桶限额；新人只有低额度试用预算。信任值和贡献值只影响排序、展示和预算建议，永远不能替代链身份、设备证书、PolicyService 或用户授权。
-- 完整桌面运行平台为 Windows 11 x64；基础设施另交付 Linux x86_64 引导/中继服务。Linux/macOS 桌面不在 1.0 的平台承诺中。
+- 完整桌面客户端为 Windows 11 x64 与 Ubuntu 22.04+；两者使用同一协议并支持双向互联。Ubuntu 包携带全部 ASL 二进制，可选离线包再携带同版本系统的 `.deb` 依赖；macOS 不在 1.0 的平台承诺中。
 - 应用数据目录由 `ASL_HOME` 指定。开发缓存目录由 `scripts/dev-env.ps1 -Root` 或 `ASL_DEV_ROOT` 指定。路径不可用时停止启动。
 
 ## 实施与验证状态
@@ -208,7 +208,7 @@ flowchart LR
   BACKUP --> POLICY
 ```
 
-Windows 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
+Windows 与 Ubuntu 桌面仪表盘有九个视图，包括联系人、群组、活动、传输和授权。GUI 读取本机只读快照，权限变更交给 `asl-core`。共享、收件、经验目录可分别建立与撤销。完整身份迁移，以及不同窗口尺寸和 DPI 的验收仍在计划中。见[实施计划](docs/06-implementation-plan.md)与[验证记录](docs/plan-validation.md)。
 
 节点页可查看当前链身份检查点，录入并授权从可信来源独立核对的新 slot 和 Beacon root。Core 下次启动只验证一次，验证通过才替换检查点；失败保留原快照。验证开始前可取消，不会自动选取信任源。命令行可用 `asl-core --checkpoint status` 查看状态。
 
@@ -393,7 +393,7 @@ Direct requests are disabled by default. In joined groups, browsing is enabled b
 - Repository: `asl-agents-letters`
 - Display name: `A信 — Agents' Letters`
 - License: MIT for project code; third-party software, fonts, and artwork retain their own licenses.
-- Desktop target: Windows 11 x64. Linux packages provide replaceable bootstrap and relay infrastructure.
+- Complete desktop targets: Windows 11 x64 and Ubuntu 22.04+. Both clients use the same protocol and support bidirectional communication. Linux packages carry the ASL executables; an optional offline bundle also carries matching Ubuntu `.deb` dependencies. macOS is outside the 1.0 platform commitment.
 - Set `ASL_HOME` for application data. Choose the development root with `scripts/dev-env.ps1 -Root` or `ASL_DEV_ROOT`. Startup fails when the configured path is unavailable.
 
 ### Implementation Status

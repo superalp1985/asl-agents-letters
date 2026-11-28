@@ -206,10 +206,20 @@ mod tests {
     #[test]
     fn parses_local_share_scopes_and_revocations() {
         let agent = bs58::encode([7; 32]).into_string();
+        let shared = if cfg!(windows) {
+            "C:\\shared"
+        } else {
+            "/shared"
+        };
+        let experience = if cfg!(windows) {
+            "C:\\experience"
+        } else {
+            "/experience"
+        };
         assert!(matches!(
             parse(&[
                 "share",
-                "C:\\shared",
+                shared,
                 "md,pdf,docx,xlsx,pptx",
                 "public",
                 "-",
@@ -222,7 +232,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            parse(&["derived", "C:\\experience", "2097152"]),
+            parse(&["derived", experience, "2097152"]),
             Ok(Command::Derived {
                 max_bytes: 2_097_152,
                 ..
@@ -231,7 +241,7 @@ mod tests {
         assert!(matches!(
             parse(&[
                 "share",
-                "C:\\shared",
+                shared,
                 "md,pdf,docx,xlsx,pptx",
                 "contacts",
                 "-",
@@ -246,7 +256,7 @@ mod tests {
         assert!(matches!(
             parse(&[
                 "share",
-                "C:\\shared",
+                shared,
                 "md,pdf,docx,xlsx,pptx",
                 "agent",
                 &agent,
@@ -260,15 +270,7 @@ mod tests {
         ));
         let group = "ef".repeat(16);
         assert!(matches!(
-            parse(&[
-                "share",
-                "C:\\shared",
-                "md",
-                "group",
-                &group,
-                "1048576",
-                "yes"
-            ]),
+            parse(&["share", shared, "md", "group", &group, "1048576", "yes"]),
             Ok(Command::Share {
                 audience: Audience::Group(_),
                 allow_derived_disclosure: true,
@@ -285,16 +287,26 @@ mod tests {
     #[test]
     fn rejects_ambiguous_or_unbounded_local_share_requests() {
         let grant = "ab".repeat(16);
+        let shared = if cfg!(windows) {
+            "C:\\shared"
+        } else {
+            "/shared"
+        };
+        let experience = if cfg!(windows) {
+            "C:\\experience"
+        } else {
+            "/experience"
+        };
         for args in [
             &["share", "relative", "md", "public", "-", "10", "no"][..],
-            &["share", "C:\\shared", "", "public", "-", "10", "no"],
-            &["share", "C:\\shared", "md", "public", "target", "10", "no"],
-            &["share", "C:\\shared", "md", "agent", "bad-id", "10", "no"],
-            &["share", "C:\\shared", "md", "group", "short", "10", "no"],
-            &["share", "C:\\shared", "md", "public", "-", "0", "no"],
-            &["share", "C:\\shared", "md", "public", "-", "10", "true"],
+            &["share", shared, "", "public", "-", "10", "no"],
+            &["share", shared, "md", "public", "target", "10", "no"],
+            &["share", shared, "md", "agent", "bad-id", "10", "no"],
+            &["share", shared, "md", "group", "short", "10", "no"],
+            &["share", shared, "md", "public", "-", "0", "no"],
+            &["share", shared, "md", "public", "-", "10", "true"],
             &["derived", "relative", "1024"],
-            &["derived", "C:\\experience", "0"],
+            &["derived", experience, "0"],
             &["revoke", "unknown", grant.as_str()],
         ] {
             assert!(Command::parse(&args.iter().map(OsString::from).collect::<Vec<_>>()).is_err());

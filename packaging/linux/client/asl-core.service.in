@@ -1,0 +1,17 @@
+[Unit]
+Description=ASL background core
+Documentation=file:@PREFIX@/share/doc/asl/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@SERVICE_EXEC@
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=true
+LimitNOFILE=8192
+
+[Install]
+WantedBy=default.target

@@ -2773,7 +2773,7 @@ pub fn run_net_child() -> Result<(), AslError> {
     run_child_for(&[IpcRole::Net])
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(crate) fn run_net_pipe_fixture(
     mut input: std::io::PipeReader,
     output: std::io::PipeWriter,

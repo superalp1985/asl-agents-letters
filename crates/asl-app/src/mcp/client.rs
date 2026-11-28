@@ -4,11 +4,15 @@ use asl_policy::{connect_local_pipe, connect_recovery_pipe};
 use asl_types::error::{AslError, ErrorCode};
 use serde_json::Value;
 use tokio::{
-    net::windows::named_pipe::NamedPipeClient,
     sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
+
+#[cfg(windows)]
+type LocalPipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(unix)]
+type LocalPipeClient = tokio::net::UnixStream;
 
 use super::{
     contract::{Request, ServerFrame},
@@ -174,7 +178,7 @@ impl Client {
         Ok(Connection::new(pipe, self.events.clone()))
     }
 
-    async fn open(&self) -> Result<NamedPipeClient, ErrorCode> {
+    async fn open(&self) -> Result<LocalPipeClient, ErrorCode> {
         let permit = Arc::clone(&self.opening)
             .try_acquire_owned()
             .map_err(|_| ErrorCode::Busy)?;
@@ -220,7 +224,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(pipe: SecurePipe<NamedPipeClient>, events: watch::Sender<Inbox>) -> Self {
+    fn new(pipe: SecurePipe<LocalPipeClient>, events: watch::Sender<Inbox>) -> Self {
         let (calls, pending) = mpsc::channel(1);
         Self {
             calls,
@@ -244,7 +248,7 @@ impl Connection {
     }
 
     async fn drive(
-        mut pipe: SecurePipe<NamedPipeClient>,
+        mut pipe: SecurePipe<LocalPipeClient>,
         mut calls: mpsc::Receiver<Call>,
         events: watch::Sender<Inbox>,
     ) -> Result<(), AslError> {

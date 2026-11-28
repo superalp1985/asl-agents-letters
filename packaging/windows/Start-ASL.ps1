@@ -14,8 +14,10 @@ $dataRoot = [IO.Path]::GetFullPath($DataDirectory)
 $release = (Get-PortableRelease $PSScriptRoot).Directory
 $core = Join-Path $release 'asl-core.exe'
 $viewer = Join-Path $release 'asl-ui.exe'
+$runtime = Join-Path $release 'vcruntime140.dll'
 if (-not $ViewerOnly) { Assert-PortablePath $core }
 if (-not $Background) { Assert-PortablePath $viewer }
+if ((-not $ViewerOnly) -or (-not $Background)) { Assert-PortablePath $runtime }
 $previousRoot = $env:ASL_HOME
 try {
     $env:ASL_HOME = $dataRoot

@@ -8,7 +8,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{OutgoingQueryPort, agent_mail::Target, downloads::DownloadPort};
+use crate::agent_mail::Target;
+#[cfg(windows)]
+use crate::{OutgoingQueryPort, downloads::DownloadPort};
 
 use super::{HostGrant, McpWorker, client::Client, grant::Key, stdio};
 
@@ -21,6 +23,7 @@ pub(crate) struct Host {
 }
 
 impl Host {
+    #[cfg(windows)]
     pub(crate) async fn connect(
         home: PathBuf,
         inbox: Id128,

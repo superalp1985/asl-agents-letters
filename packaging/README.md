@@ -5,6 +5,7 @@
 | 目标 | 构建入口 | 发布说明 |
 | --- | --- | --- |
 | Windows x64 桌面/Agent 便携包 | `scripts/package-windows.ps1` | `packaging/windows/README.md`、`packaging/windows/RELEASE.md` |
+| Ubuntu x86_64/aarch64 完整桌面客户端 | `scripts/package-linux-client.sh` | `packaging/linux/client/README.md`、`docs/linux-client-release.md` |
 | Linux x86_64/aarch64 `asl-infra` | `scripts/package-linux-infra.sh` | `packaging/linux/README.md` |
 
 正式发布共同要求：
@@ -35,8 +36,44 @@ $releaseRoot = Join-Path $env:ASL_HOME 'release'
 ```
 
 Windows 更新清单字段、签名原文和失败条件见 `packaging/windows/RELEASE.md`。没有有效 Authenticode 和旧版 Core 复验的包不得标记为正式发行。
+Windows 便携包自带 Microsoft 签名的 `vcruntime140.dll`，并把该 DLL 纳入
+`SHA256SUMS.txt`、SBOM 和离线更新成员集，干净系统不需要另装 VC++ 运行库。
 
-## Linux
+## Ubuntu 完整客户端
+
+在 Ubuntu 22.04 构建机（推荐作为 glibc 基线）执行：
+
+```bash
+sudo bash ./scripts/prepare-linux-client-deps.sh \
+  --output-dir "$PWD/target/ubuntu-22.04-amd64-deps"
+
+bash ./scripts/package-linux-client.sh \
+  --apt-deps-dir "$PWD/target/ubuntu-22.04-amd64-deps" \
+  --output-dir "$PWD/target/linux-client-release" \
+  --offline
+```
+
+默认同时产出：
+
+```text
+asl-client-linux-x86_64-<version>.tar.gz
+asl-client-linux-x86_64-<version>.tar.gz.sha256
+asl-client_<version>_amd64.deb
+asl-client_<version>_amd64.deb.sha256
+```
+
+tar 包包含全部六个客户端可执行文件、桌面文件、图标、默认环境示例、
+systemd `--user` 单元以及安装/升级/卸载/验证脚本。使用 `--apt-deps-dir`
+时还包含同版本 Ubuntu 和 CPU 架构的完整 `.deb` 依赖闭包，安装命令为
+`./install.sh --install-system-dependencies`。安装用户不需要 Rust 或 Cargo。
+不打包系统依赖时，deb 和 tar 都可通过 APT 在线安装同一份包清单。tar 安装
+支持自定义前缀和 `ASL_HOME`，deb 固定安装到 `/opt/asl` 并由 `apt/dpkg`
+管理。
+
+构建时需要 Rust、Python 3、GNU tar、gzip、strip 和 `dpkg-deb`。正式包应在
+干净工作树构建；`--allow-dirty` 只用于本地测试包。
+
+## asl-infra
 
 ```bash
 ASL_INFRA_TARGET=x86_64-unknown-linux-gnu ./scripts/package-linux-infra.sh <release-output-directory>

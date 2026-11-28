@@ -44,7 +44,6 @@ impl Supervisor {
                 }
                 self.pending_disconnects = PendingDisconnects::default();
                 self.pending_pairing_prompts = pairing::PendingPairingPrompts::default();
-                #[cfg(windows)]
                 self.clear_group_transport();
                 self.network_report.set_runtime(NetworkRuntimeState::Paused);
                 self.reset_binding_transport()?;

@@ -98,7 +98,6 @@ pub fn fixture_execution_at(
     head
 }
 
-#[cfg(windows)]
 pub fn process_fixture_client(
     mut finalized: FinalizedExecution,
     now_secs: u64,
