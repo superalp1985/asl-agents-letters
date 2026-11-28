@@ -1,7 +1,7 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$Tag = 'v1.0.0-rc.2',
+    [string]$Tag = 'v1.0.0-rc.3',
     [string]$ReleaseUrl,
     [string]$InstallRoot,
     [string]$DataDirectory,

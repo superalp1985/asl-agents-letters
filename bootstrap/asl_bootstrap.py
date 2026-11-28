@@ -26,7 +26,7 @@ from release_tools.manifest import (  # noqa: E402
 )
 from release_tools.release_key import PUBLIC_KEY  # noqa: E402
 
-DEFAULT_TAG = "v1.0.0-rc.2"
+DEFAULT_TAG = "v1.0.0-rc.3"
 REPOSITORY_RELEASE_URL = (
     "https://github.com/superalp1985/asl-agents-letters/releases/download"
 )

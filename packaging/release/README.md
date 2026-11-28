@@ -21,7 +21,7 @@ they belong together, not who published them.
 python scripts/release_manifest.py create `
   --private-key '<external-private-key.pem>' `
   --public-key packaging/release/release-public-key.json `
-  --tag v1.0.0-rc.2 `
+  --tag v1.0.0-rc.3 `
   --version 1.0.0 `
   --commit '<40-character-commit>' `
   --output '<external-release-directory>/asl-release-manifest.json' `

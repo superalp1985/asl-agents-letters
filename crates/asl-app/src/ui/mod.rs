@@ -548,10 +548,14 @@ impl eframe::App for Viewer {
                 | Page::Access
         ) {
             ctx.request_repaint_after(Duration::from_secs(1));
-            if self.snapshot.is_some()
-                && self.loading.is_none()
+            let refresh_interval = if self.snapshot.is_some() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(2)
+            };
+            if self.loading.is_none()
                 && self.action.is_none()
-                && self.last_refresh.elapsed() >= Duration::from_secs(5)
+                && self.last_refresh.elapsed() >= refresh_interval
             {
                 self.refresh(ctx);
             }
