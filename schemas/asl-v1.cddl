@@ -152,7 +152,9 @@ offer = {
   5: uint .le 68719476736,
   6: media-kind,
   7: topic-refs,
-  8: time-ms
+  8: time-ms,
+  ? 9: hash32,
+  ? 10: hash32
 }
 
 fetch-request = {
@@ -160,7 +162,9 @@ fetch-request = {
   1: 4,
   2: id128,
   3: id128,
-  4: hash32
+  4: hash32,
+  ? 5: hash32,
+  ? 6: hash32
 }
 
 fetch-grant = {

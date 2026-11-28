@@ -2549,9 +2549,7 @@ pub(crate) fn run_extractor_task(
         _ => return Err(AslError::InvalidMessage),
     };
     let maximum_output_bytes = match operation {
-        ExtractorOperation::PdfText | ExtractorOperation::DocumentText => {
-            MAX_DOCUMENT_TEXT_BYTES
-        }
+        ExtractorOperation::PdfText | ExtractorOperation::DocumentText => MAX_DOCUMENT_TEXT_BYTES,
         ExtractorOperation::Avatar => MAX_AVATAR_BYTES,
     };
     let invalid_output = output.len() > maximum_output_bytes

@@ -245,6 +245,8 @@ impl Receiver {
                     message_id: id,
                     root_task_id: session.intent.id,
                     content_id: session.intent.content,
+                    logical_group_id: None,
+                    source_room_id: None,
                 }),
             };
             if send(

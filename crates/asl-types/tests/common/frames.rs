@@ -106,11 +106,15 @@ pub fn sample_frames() -> Vec<WireFrame> {
             media_kind: MediaKind::Image,
             concepts: vec![concept(100), concept(101)],
             expires_at_ms: 200,
+            logical_group_id: None,
+            source_room_id: None,
         }),
         WireFrame::FetchRequest(FetchRequest {
             message_id: id,
             root_task_id: Id128([4; 16]),
             content_id: hash,
+            logical_group_id: None,
+            source_room_id: None,
         }),
         WireFrame::FetchGrant(FetchGrant {
             message_id: id,

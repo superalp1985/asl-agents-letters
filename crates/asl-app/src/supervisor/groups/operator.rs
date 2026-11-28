@@ -3,7 +3,7 @@ use crate::agent_mail::GroupAccessUpdate;
 use alloy_primitives::hex;
 use asl_store::group_state::operator::{
     AdminCapacity, AdminJoinRequest, AdminOutcome, AdminPeer, AdminRequest, AdminRoom,
-    AdminSnapshot, SNAPSHOT_WINDOW_MS, VIEW_LIMIT,
+    AdminSnapshot, SNAPSHOT_WINDOW_MS,
 };
 use asl_types::{
     error::AslError,
@@ -12,6 +12,7 @@ use asl_types::{
 };
 
 const JOIN_REQUEST_VIEW_LIMIT: u32 = 100;
+const PEER_VIEW_LIMIT: usize = 200;
 
 impl Supervisor {
     pub(super) fn poll_group_operator(&mut self, now: u64) {
@@ -75,7 +76,7 @@ impl Supervisor {
         }
         if request == &AdminRequest::Refresh {
             let rooms = groups.store.managed_mls_rooms(&self.device_peer_id)?;
-            let peers = peers().take(VIEW_LIMIT).collect::<Vec<_>>();
+            let peers = peers().take(PEER_VIEW_LIMIT).collect::<Vec<_>>();
             let profile = crate::capacity::latest_local_capacity(&groups.store)?;
             let report = crate::capacity::report_capacity_observations(profile.as_ref(), now);
             let resources = asl_policy::local_resource_sample(&self.home).ok();

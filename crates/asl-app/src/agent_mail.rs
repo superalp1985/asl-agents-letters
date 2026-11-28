@@ -479,6 +479,8 @@ pub(crate) struct HeldOffer {
     pub(crate) room: Option<(Hash32, u64, GroupTransferBinding)>,
     content: Hash32,
     expires: u64,
+    logical_group_id: Option<Hash32>,
+    source_room_id: Option<Hash32>,
     context_ref: Option<SemanticContextRef>,
 }
 
@@ -495,6 +497,8 @@ impl HeldOffer {
             filename: format!("asl-{}.{}", hex::encode(self.content.0), extension),
             sources: vec![self.source],
             group: self.room.map(|(_, _, binding)| binding),
+            group_logical_id: self.logical_group_id,
+            group_source_room_id: self.source_room_id,
             context_ref: self.context_ref,
         }
     }
@@ -743,6 +747,8 @@ impl Mailbox {
                 room: None,
                 content: offer.content_id,
                 expires: offer.expires_at_ms.min(now.saturating_add(MAIL_TTL_MS)),
+                logical_group_id: None,
+                source_room_id: None,
                 context_ref: Some(offer.reference),
             },
         );
@@ -843,6 +849,8 @@ impl Mailbox {
                 room: Some(room.clone()),
                 content: offer.content_id,
                 expires: offer.expires_at_ms.min(now.saturating_add(MAIL_TTL_MS)),
+                logical_group_id: None,
+                source_room_id: None,
                 context_ref: Some(offer.reference),
             },
         );
@@ -1132,6 +1140,8 @@ impl Mailbox {
             WireFrame::Offer(Offer {
                 content_id,
                 file_size,
+                logical_group_id,
+                source_room_id,
                 ..
             }) => {
                 self.offers.retain(|_, offer| offer.expires > now);
@@ -1152,6 +1162,8 @@ impl Mailbox {
                         room,
                         content: *content_id,
                         expires: expiry.min(now.saturating_add(MAIL_TTL_MS)),
+                        logical_group_id: *logical_group_id,
+                        source_room_id: *source_room_id,
                         context_ref: None,
                     },
                 );

@@ -400,6 +400,8 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
                 media_kind: MediaKind::Other,
                 concepts: vec![],
                 expires_at_ms: 100,
+                logical_group_id: None,
+                source_room_id: None,
             });
             assert!(mailbox.observe(source.clone(), [1; 16], None, &offer, 3));
         }

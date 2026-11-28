@@ -24,6 +24,7 @@ pub(super) struct ActiveJob {
     content: Hash32,
     sources: Vec<Source>,
     group: Option<asl_store::transfers::GroupTransferBinding>,
+    group_route: Option<(Hash32, Hash32)>,
     state: State,
     events: SyncSender<DownloadEvent>,
     context_ref: Option<asl_types::protocol::SemanticContextRef>,
@@ -117,6 +118,12 @@ impl ActiveJob {
                     .and_then(|schedule| schedule.group.clone()),
                 DownloadJob::ResumeForHost { .. } => unreachable!("resolved host job"),
             };
+            let group_route = match &job {
+                DownloadJob::Fetch(selection) => selection
+                    .group_logical_id
+                    .zip(selection.group_source_room_id),
+                DownloadJob::Resume { .. } | DownloadJob::ResumeForHost { .. } => None,
+            };
             let selected = match &job {
                 DownloadJob::Fetch(selection) => {
                     local.broker.ensure_retry_allowed(
@@ -181,6 +188,7 @@ impl ActiveJob {
                 content,
                 sources,
                 group,
+                group_route,
                 state,
                 events: queued.events.clone(),
                 context_ref,
@@ -275,7 +283,14 @@ impl ActiveJob {
                 return Ok(None);
             }
             for source in &mut self.sources {
-                source.ensure_manifest(self.root, self.content, group.as_ref(), now, send)?;
+                source.ensure_manifest(
+                    self.root,
+                    self.content,
+                    group.as_ref(),
+                    self.group_route,
+                    now,
+                    send,
+                )?;
             }
             let manifest = self
                 .sources
@@ -368,6 +383,7 @@ impl ActiveJob {
                             self.root,
                             self.content,
                             group.as_ref(),
+                            self.group_route,
                             now,
                             send,
                         )?;
@@ -426,6 +442,7 @@ impl ActiveJob {
                             self.root,
                             self.content,
                             group.as_ref(),
+                            self.group_route,
                             now,
                             send,
                         )?;
@@ -704,6 +721,7 @@ impl Source {
         root: Id128,
         content: Hash32,
         group: Option<&asl_store::transfers::GroupTransferBinding>,
+        group_route: Option<(Hash32, Hash32)>,
         now: u64,
         send: &impl Fn(WorkerRequest) -> Receipt,
     ) -> Result<(), AslError> {
@@ -719,6 +737,8 @@ impl Source {
             message_id: id,
             root_task_id: root,
             content_id: content,
+            logical_group_id: group_route.map(|(logical, _)| logical),
+            source_room_id: group_route.map(|(_, source)| source),
         };
         match send(WorkerRequest::Fetch {
             source: self.identity.clone(),
@@ -805,14 +825,14 @@ mod tests {
 
         let sends = Cell::new(0);
         source
-            .ensure_manifest(root, content, None, 6_999, &|_| {
+            .ensure_manifest(root, content, None, None, 6_999, &|_| {
                 sends.set(sends.get() + 1);
                 Ok(Some(connection))
             })
             .unwrap();
         assert_eq!(sends.get(), 0);
         source
-            .ensure_manifest(root, content, None, 7_000, &|request| {
+            .ensure_manifest(root, content, None, None, 7_000, &|request| {
                 sends.set(sends.get() + 1);
                 let WorkerRequest::Fetch { request, .. } = request else {
                     panic!("expected a Fetch retry")
@@ -850,7 +870,7 @@ mod tests {
 
         let sends = Cell::new(0);
         source
-            .ensure_manifest(root, content, None, 12_000, &|_| {
+            .ensure_manifest(root, content, None, None, 12_000, &|_| {
                 sends.set(sends.get() + 1);
                 Ok(Some(connection))
             })

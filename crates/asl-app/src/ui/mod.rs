@@ -230,6 +230,18 @@ impl Viewer {
                 "联系人请求策略已排队",
                 "Contact request policy update queued",
             ),
+            "bindings"
+                if action
+                    .args
+                    .first()
+                    .is_some_and(|v| v == "policy-group" || v == "policy-recent") =>
+            {
+                label(
+                    language,
+                    "联系人来源规则已排队",
+                    "Contact source rule update queued",
+                )
+            }
             "access" if action.args.first().is_some_and(|v| v == "import") => {
                 label(language, "文件已纳入本机索引", "File added to local index")
             }

@@ -13,7 +13,6 @@ const KEY: &str = "mls.local_operator.v1";
 const VIEW_KEY: &str = "mls.local_operator_view.v1";
 const REQUEST_WINDOW_MS: u64 = 30_000;
 pub const SNAPSHOT_WINDOW_MS: u64 = 120_000;
-pub const VIEW_LIMIT: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -409,42 +408,47 @@ impl Store {
     }
 
     pub fn managed_mls_rooms(&self, device: &PeerId) -> Result<Vec<AdminRoom>, AslError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "WITH owned AS (
+        let sql = format!(
+            "{}{}",
+            crate::group_topology::LOGICAL_GROUP_PEERS_CTE,
+            r#", owned AS (
                SELECT g.group_id,g.local_name,g.mls_epoch,g.membership_epoch,g.created_at_ms,
                       coalesce(gp.permissions,3) AS permissions,
                       coalesce(gp.revision,0) AS revision,s.wire_group_id,
                       coalesce(gp.owner_peer_id,g.creator_peer_id) AS owner
                FROM asl_groups g JOIN mls_room_states s ON s.local_group_id=g.group_id
                LEFT JOIN group_access_policies gp ON gp.group_id=g.group_id
-               WHERE g.state='active' AND (coalesce(gp.owner_peer_id,g.creator_peer_id)=?1
+               WHERE g.state='active'
+                 AND NOT EXISTS(
+                    SELECT 1 FROM mls_room_shards child
+                    WHERE child.shard_wire_id=s.wire_group_id
+                 )
+                 AND (coalesce(gp.owner_peer_id,g.creator_peer_id)=?1
                  OR g.creator_peer_id=?1
                  OR EXISTS(SELECT 1 FROM group_access_members a
                     JOIN group_members m ON m.group_id=a.group_id AND m.peer_id=a.peer_id
                     LEFT JOIN group_admin_capabilities c ON c.group_id=a.group_id AND c.peer_id=a.peer_id
                     WHERE a.group_id=g.group_id AND a.peer_id=?1 AND a.role='admin'
                       AND a.muted=0 AND m.state='active' AND (coalesce(c.capabilities,7) & 7)<>0))
-               ORDER BY g.created_at_ms DESC,g.group_id LIMIT ?2
+               ORDER BY g.created_at_ms DESC,g.group_id
              )
              SELECT lower(hex(o.wire_group_id)),o.local_name,o.mls_epoch,o.membership_epoch,
                     o.permissions,o.revision,
                     p.agent_id,m.peer_id,m.role='creator',
                     coalesce(r.role,'member'),coalesce(r.muted,0),
                     coalesce(gp.permissions,3),m.peer_id=o.owner
-             FROM owned o JOIN group_members m ON m.group_id=o.group_id AND m.state='active'
+             FROM owned o
+             JOIN logical_group_peers m ON m.root_wire_id=o.wire_group_id
              JOIN peers p ON p.peer_id=m.peer_id
              LEFT JOIN group_access_members r
-               ON r.group_id=o.group_id AND r.peer_id=m.peer_id
+               ON r.group_id=m.local_group_id AND r.peer_id=m.peer_id
              LEFT JOIN group_access_policies gp ON gp.group_id=o.group_id
-             ORDER BY o.created_at_ms DESC,o.group_id,m.role,m.peer_id",
-            )
-            .map_err(database_error)?;
+             ORDER BY o.created_at_ms DESC,o.group_id,m.role,m.peer_id"#
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(database_error)?;
         let mut rows = statement
             .query(rusqlite::params![
-                bs58::encode(device.as_bytes()).into_string(),
-                VIEW_LIMIT as i64
+                bs58::encode(device.as_bytes()).into_string()
             ])
             .map_err(database_error)?;
         let mut rooms: Vec<AdminRoom> = Vec::new();
@@ -468,7 +472,7 @@ impl Store {
                 });
             }
             let members = &mut rooms.last_mut().ok_or(AslError::InvalidDatabase)?.members;
-            if members.len() >= asl_types::protocol::MAX_GROUP_MEMBERS {
+            if members.len() >= crate::group_topology::MAX_LAYERED_GROUP_MEMBERS {
                 return Err(AslError::InvalidDatabase);
             }
             let creator: bool = row.get(8).map_err(database_error)?;

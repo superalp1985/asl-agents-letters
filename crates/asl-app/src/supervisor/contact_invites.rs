@@ -11,7 +11,7 @@ use asl_store::{
 use asl_types::{
     contact_invite::ContactInviteV1,
     error::AslError,
-    ids::{Id128, PeerId},
+    ids::{Hash32, Id128, PeerId},
     protocol::{PairingExchange, PairingInvite},
     record::short_code,
 };
@@ -76,6 +76,55 @@ struct PendingPrompt {
     pairing: PairingInvite,
     discovery_invite_id: Id128,
     expires_at_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+enum RequestSource {
+    Manual,
+    SharedGroup {
+        group_id: Hash32,
+        membership_epoch: u64,
+    },
+    RecentInteraction {
+        interaction_id: Id128,
+        expires_at_ms: u64,
+    },
+}
+
+impl RequestSource {
+    fn allows(
+        self,
+        store: &asl_store::Store,
+        agent_id: asl_types::ids::AgentId,
+        peer_id: &PeerId,
+        now_ms: u64,
+    ) -> Result<bool, AslError> {
+        match self {
+            Self::Manual => Ok(true),
+            Self::SharedGroup {
+                group_id,
+                membership_epoch,
+            } => Ok(store
+                .shared_active_group_evidence(agent_id, peer_id)?
+                .is_some_and(|(current_group, current_epoch)| {
+                    current_group == group_id && current_epoch >= membership_epoch
+                })),
+            Self::RecentInteraction {
+                interaction_id,
+                expires_at_ms,
+            } => {
+                let policy = store.contact_request_policy()?;
+                Ok(policy.recent_interaction_ttl_ms > 0
+                    && now_ms < expires_at_ms
+                    && store
+                        .recent_contact_interaction_evidence(agent_id, now_ms)?
+                        .is_some_and(|evidence| {
+                            evidence.interaction_id == interaction_id
+                                && evidence.expires_at_ms > now_ms
+                        }))
+            }
+        }
+    }
 }
 
 impl Supervisor {
@@ -319,8 +368,8 @@ impl Supervisor {
                     controller,
                     Some(invite.nonce),
                 )?;
-                let request_mode = store.contact_request_mode()?;
-                if request_mode == ContactRequestMode::Reject {
+                let request_policy = store.contact_request_policy()?;
+                if request_policy.mode == ContactRequestMode::Reject {
                     return Ok(Some(NetworkCommand::CloseConnection {
                         connection_id: *connection_id,
                     }));
@@ -330,19 +379,42 @@ impl Supervisor {
                         connection_id: *connection_id,
                     }));
                 }
-                if request_mode == ContactRequestMode::AutoAccept {
-                    let (remote_agent, remote_peer) = self
-                        .admission
-                        .as_mut()
-                        .ok_or(AslError::InvalidIdentity)?
-                        .admitted_peer_identity(*connection_id, now_ms)?;
-                    if remote_agent != *agent_id
-                        || store.is_contact_binding_revoked(remote_agent)?
-                    {
-                        return Ok(Some(NetworkCommand::CloseConnection {
-                            connection_id: *connection_id,
-                        }));
+                let (remote_agent, remote_peer) = self
+                    .admission
+                    .as_mut()
+                    .ok_or(AslError::InvalidIdentity)?
+                    .admitted_peer_identity(*connection_id, now_ms)?;
+                if remote_agent != *agent_id || store.is_contact_binding_revoked(remote_agent)? {
+                    return Ok(Some(NetworkCommand::CloseConnection {
+                        connection_id: *connection_id,
+                    }));
+                }
+                let source = if request_policy.mode == ContactRequestMode::AutoAccept {
+                    Some(RequestSource::Manual)
+                } else if request_policy.mode == ContactRequestMode::Review {
+                    let mut source = if request_policy.shared_group_auto_accept {
+                        store
+                            .shared_active_group_evidence(remote_agent, &remote_peer)?
+                            .map(|(group_id, membership_epoch)| RequestSource::SharedGroup {
+                                group_id,
+                                membership_epoch,
+                            })
+                    } else {
+                        None
+                    };
+                    if source.is_none() && request_policy.recent_interaction_ttl_ms > 0 {
+                        source = store
+                            .recent_contact_interaction_evidence(remote_agent, now_ms)?
+                            .map(|evidence| RequestSource::RecentInteraction {
+                                interaction_id: evidence.interaction_id,
+                                expires_at_ms: evidence.expires_at_ms,
+                            });
                     }
+                    source
+                } else {
+                    None
+                };
+                if let Some(source) = source {
                     self.answer_pairing_invite(
                         *connection_id,
                         *response_id,
@@ -350,6 +422,9 @@ impl Supervisor {
                         PairingAuthorization::Approve,
                         now_ms,
                     )?;
+                    if !source.allows(&store, remote_agent, &remote_peer, now_ms)? {
+                        return Err(AslError::PolicyVersionConflict);
+                    }
                     store.consume_contact_invite(discovery.invite_id, now_ms, true)?;
                     bind_verified_contact(&mut store, remote_agent, &remote_peer, now_ms)?;
                     return Ok(None);

@@ -36,7 +36,7 @@ impl Default for AccessForm {
     fn default() -> Self {
         Self {
             share_path: String::new(),
-            extensions: "md,pdf,rs".into(),
+            extensions: "md,txt,pdf,docx,xlsx,pptx,rs,json,csv".into(),
             audience: ShareAudience::default(),
             audience_target: String::new(),
             selected_group: None,
@@ -328,7 +328,13 @@ impl Page {
                         }
                     });
                     ui.add_space(12.0);
-                    empty_glyph(ui, data.groups.is_empty(), Glyph::EmptyGroup);
+                    group_admin.group_filter_ui(ui, *language);
+                    let groups = data
+                        .groups
+                        .iter()
+                        .filter(|group| group_admin.group_filter_matches(group))
+                        .collect::<Vec<_>>();
+                    empty_glyph(ui, groups.is_empty(), Glyph::EmptyGroup);
                     table(
                         ui,
                         [
@@ -339,7 +345,7 @@ impl Page {
                             "Group ID",
                         ],
                         [2.2, 1.1, 0.7, 1.6, 1.4],
-                        &data.groups,
+                        &groups,
                         ui_text(*language, "暂无群组", "No groups"),
                         |row| {
                             [
@@ -1003,6 +1009,89 @@ fn contacts(
         ))
         .color(MUTED),
     );
+    ui.horizontal_wrapped(|ui| {
+        let mut group_auto_accept = data.contact_group_auto_accept;
+        if ui
+            .add_enabled(
+                actions_enabled && action.is_none(),
+                egui::Checkbox::new(
+                    &mut group_auto_accept,
+                    ui_text(
+                        language,
+                        "当前群成员可自动建立联系",
+                        "Auto-bind current group members",
+                    ),
+                ),
+            )
+            .on_hover_text(ui_text(
+                language,
+                "只对本机当前有效 MLS 群成员生效；不会授予联系人访问，也不会绕过拒绝策略。",
+                "Applies only to current active MLS group members. It grants no contact access and never overrides Reject.",
+            ))
+            .changed()
+            && action.is_none()
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [
+                    OsString::from("policy-group"),
+                    OsString::from(if group_auto_accept { "on" } else { "off" }),
+                ],
+            ));
+        }
+
+        ui.separator();
+        ui.label(ui_text(
+            language,
+            "近期真实交互",
+            "Recent verified interaction",
+        ));
+        let mut ttl_ms = data.contact_recent_interaction_ttl_ms;
+        let label = |ttl_ms| match ttl_ms {
+            0 => ui_text(language, "关闭", "Off"),
+            3_600_000 => ui_text(language, "1 小时", "1 hour"),
+            86_400_000 => ui_text(language, "24 小时", "24 hours"),
+            asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS => {
+                ui_text(language, "7 天", "7 days")
+            }
+            _ => ui_text(language, "未知", "Unknown"),
+        };
+        egui::ComboBox::from_id_salt("contact-recent-interaction")
+            .selected_text(label(ttl_ms))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut ttl_ms, 0, ui_text(language, "关闭", "Off"));
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    3_600_000,
+                    ui_text(language, "1 小时", "1 hour"),
+                );
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    86_400_000,
+                    ui_text(language, "24 小时", "24 hours"),
+                );
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS,
+                    ui_text(language, "7 天", "7 days"),
+                );
+            });
+        if ttl_ms != data.contact_recent_interaction_ttl_ms
+            && action.is_none()
+            && let Some(ttl) = match ttl_ms {
+                0 => Some("off"),
+                3_600_000 => Some("1h"),
+                86_400_000 => Some("24h"),
+                asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS => Some("7d"),
+                _ => None,
+            }
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy-recent"), OsString::from(ttl)],
+            ));
+        }
+    });
     ui.label(
         RichText::new(ui_text(
             language,
@@ -1279,7 +1368,7 @@ fn access(
         ui.label(ui_text(language, "文件类型", "File types"));
         ui.add(
             egui::TextEdit::singleline(&mut form.extensions)
-                .hint_text("md,pdf,rs")
+                .hint_text("md,pdf,docx,xlsx,pptx")
                 .desired_width(220.0),
         );
         ui.label(ui_text(language, "单文件上限 MiB", "Per-file limit MiB"));

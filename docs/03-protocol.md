@@ -64,16 +64,16 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
 | `/asl/identity-proof/1.1.0` | 按需交换链上身份状态与设备目录证明 | 请求为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀；不兼容的 1.0.0 不协商 |
 | `/asl/blob/1.0.0` | manifest、块、inline 拉取 | request-response 一请求一响应；请求固定 91 字节，响应最多 2,097,237 字节（不含外层 u32 BE 前缀），manifest 最多 2,097,210 字节，数据块最多 1 MiB |
-| `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL；大群 gossipsub/分层尚未接入 |
+| `/asl/group/1.0.0` | 定向群邀请/加入、有界 MLS 状态同步和签名 shard 转发 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL；gossipsub 已按 shard/backbone topic 承载密文，512/2,000/10,000 跨机容量仍需实机验收 |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
 
 IPC/1 的 T14 类型消息使用 16 字节不透明 connection handle 和已认证设备 PeerId；连接事件只能由 Net 角色发送，PeerId 仅代表 Noise/libp2p 设备传输认证，不代表 AgentId 已验证。Net 启动时先从私有输入管道读取 `ASLK` v2 前导：4 字节 magic、u16 BE 版本、u32 BE 密钥长度、1 字节回环群开关（`0` 关闭，`1` 开启），随后是最多 1 KiB Ed25519 libp2p protobuf 密钥。该前导不是 IPC 帧；未知版本、格式错误或超限在分配正文前拒绝。Net 解码密钥后以 IPC kind 16 `NetReady` 返回 PeerId，Supervisor 将其与 DPAPI 本地设备身份比较，不匹配则终止子进程。本机 Agent 根身份也由当前用户 DPAPI 在启动时 create-once 加载或生成，但不等于链上身份状态已验证。身份证明请求/应答复用 `/asl/identity-proof/1.1.0` 的规范 CBOR 帧，额外绑定 connection handle；入站请求另带不透明 response handle，Core 回答时必须原样带回。每种 IPC 消息在读取 body 前执行自身长度上限。运行时将 handle 绑定活动连接、将 response handle 绑定原请求，并在断开后使旧句柄失效。Net 子进程连接表、传输事件/命令、身份证明转发和 `CoreAdmission` 身份闸门现已实现；Supervisor 启动时加载本地链状态 resolver 和签名设备目录，并只对通过链身份验证的本机 Agent 建立准入状态。常驻事件泵只向本地 handler 交付通过身份准入的 peer 事件，回调生成的控制/bulk 出站命令再次校验；缺少本机准入状态时关闭远端连接。默认命令行入口不接入 Agent 会话处理，不代表应用会自动回答消息。
 
-T24 增加本机 IPC kind 41 `RunExtractorTask`（仅 Core -> Extractor）与 kind 42 `ExtractorResult`（仅 Extractor -> Core）。请求固定为 task ID、`PdfText`/`Avatar` 枚举、u32 BE 长度和输入字节；单帧上限 4 MiB。结果固定为 task ID、`Completed`/`Rejected` 枚举、u32 BE 长度和输出字节；PDF 文本最多 2 MiB，头像最多 64 KiB。拒绝结果不含正文。Extractor 没有文件路径、网络或可继承文件句柄；Core 只提交已在内存中的文档并按 task ID 关联一次性响应。
+T24 增加本机 IPC kind 41 `RunExtractorTask`（仅 Core -> Extractor）与 kind 42 `ExtractorResult`（仅 Extractor -> Core）。请求固定为 task ID、`PdfText`/`DocumentText`/`Avatar` 枚举、u32 BE 长度和输入字节；单帧上限 4 MiB。`DocumentText` 在隔离进程内按 magic 识别 PDF 或 OOXML，并拒绝宏启用、加密、符号链接和越界关系部件；DOCX/XLSX/PPTX 只读取包声明的已知部件。结果固定为 task ID、`Completed`/`Rejected` 枚举、u32 BE 长度和输出字节；文档文本最多 2 MiB，头像最多 64 KiB。拒绝结果不含正文。Extractor 没有文件路径、网络或可继承文件句柄；Core 只提交已在内存中的文档并按 task ID 关联一次性响应。
 
-后续接线状态（2026-11-19）：Net 子进程连接表、传输命令/事件及身份证明转发已接通；`CoreAdmission` 在同一 IPC connection handle 上协调 Hello、身份链证明和设备目录核验，并在核验前拦截控制/bulk 业务事件及出站业务命令。准入失败通过 IPC kind 32 `CloseConnection` 关闭对应传输连接。Supervisor 从本机严格版本化信任配置、有效链状态和签名设备目录构造绑定自身根 AgentId 与实际 Net PeerId 的 Hello/准入状态；缺少配置、目录或链上 Active 身份时不开放业务消息。常驻事件泵将已准入事件交给本地 handler 并校验其出站命令；Agent 会话处理尚未接入，默认命令行 handler 静默。启动后的周期同步和首次注册仍未实现；传输目前限 loopback，公网策略与完整 T14 尚未验收。
+当前接线状态（2026-11-28）：Net 子进程连接表、传输命令/事件及身份证明转发已接通；`CoreAdmission` 在同一 IPC connection handle 上协调 Hello、身份链证明和设备目录核验，并在核验前拦截控制/bulk 业务事件及出站业务命令。准入失败通过 IPC kind 32 `CloseConnection` 关闭对应传输连接。Supervisor 从本机严格版本化信任配置、有效链状态和签名设备目录构造绑定自身根 AgentId 与实际 Net PeerId 的 Hello/准入状态；缺少配置、目录或链上 Active 身份时不开放业务消息。常驻事件泵将已准入事件交给本地 handler 并校验其出站命令；Agent 回复路径已接入，默认仍只在用户开启回答后运行。启动恢复、链注册/DHT 发布编排和 AutoNAT/DCUtR/relay 已有代码，但真实合约、公网双机和完整 T14 仍以外部验收为准。
 
 T27 直连集成（2026-11-20）更新了上面的历史接线状态：常驻命令行入口现在可以在用户本机允许回答后处理已准入的直接 query，缺省仍静默。检索只用结构化词表，回复沿用已定义的 `Answer` 或 `Offer`，不新增公网线字段、文本消息、文件读取或传输能力。本机 IPC kind 43 `ReplyDirect` 仅 Core -> Net，携带原 connection handle、原 response handle、u64 BE 有效期限（毫秒）和既有控制帧；Net 在送交传输前核对期限、回复类型及单次句柄。已通过 Core 授权并交接的回复不会延长有效期。
 
@@ -227,9 +227,9 @@ answer、offer、error 和 ack 不创建新的入站问答任务。只有本机�
 
 ## 6. Offer 与 lease
 
-offer 包含 `offer_id/content_id/concept_ids/file_size/media_kind/expires`，不含源路径、文件名、标题、摘要或自由文本标签。每个概念 ID 按协商的词表版本解释。文件名在本机接收后生成；本地索引仍可存标题/摘要，但不得随 offer 发出。
+offer 包含 `offer_id/content_id/concept_ids/file_size/media_kind/expires`，不含源路径、文件名、标题、摘要或自由文本标签。可选 key 9/10 分别是逻辑根和源 shard 的 hash32，两者必须同时存在；旧 offer 不带这两个字段，仍按单 shard/直连路径处理。每个概念 ID 按协商的词表版本解释。文件名在本机接收后生成；本地索引仍可存标题/摘要，但不得随 offer 发出。
 
-接收者接受 offer 后发送 `fetch_request`；提供者重新检查当前授权，回复 `fetch_grant`，签发 60 秒随机 lease，再请求 manifest。经 DHT 发现的公共资源和公开头像允许 offer_id=null，但仍按 content_id 找到可访问资源并验证 grant，不能跳过授权。不存在和无权限对远端统一返回 not_found。
+接收者接受 offer 后发送 `fetch_request`；可选 key 5/6 必须成对携带同一逻辑根和源 shard，接收方通过逻辑群主转发到源 shard，但文件字节仍只走源端与接收端的直接认证传输。提供者重新检查当前授权，回复 `fetch_grant`，签发 60 秒随机 lease，再请求 manifest。经 DHT 发现的公共资源和公开头像允许 offer_id=null，但仍按 content_id 找到可访问资源并验证 grant，不能跳过授权。不存在和无权限对远端统一返回 not_found。
 
 lease 绑定连接身份、内容、grant epoch 与 policy revision。revision 变化触发重判而不是无条件撤销，见架构文档。重连或重启后重新申请，不能仅凭 content_id 下载。fetch_grant 的 lease 不进入聊天记录、outbox 或普通日志。
 

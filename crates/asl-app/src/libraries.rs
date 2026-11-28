@@ -12,7 +12,7 @@ use asl_policy::{
     Audience,
     reconcile::{RECONCILE_INTERVAL, ReconcileDriver, ReconcileHints},
 };
-use asl_store::resources::{SnapshotBroker, StoredSnapshotReader};
+use asl_store::resources::{DocumentTextExtractor, SnapshotBroker, StoredSnapshotReader};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128},
@@ -31,8 +31,10 @@ pub struct LocalLibraries {
 
 impl LocalLibraries {
     pub fn open(paths: &AppPaths) -> Result<Self, AslError> {
-        let broker = SnapshotBroker::open(paths.dos_root())?;
-        let worker = ReconcileWorker::start(paths.dos_root())?;
+        let extractor = Arc::new(SandboxedDocumentExtractor);
+        let mut broker = SnapshotBroker::open(paths.dos_root())?;
+        broker.set_document_text_extractor(extractor.clone());
+        let worker = ReconcileWorker::start(paths.dos_root(), extractor)?;
         Ok(Self { worker, broker })
     }
 
@@ -82,9 +84,23 @@ impl LocalLibraries {
         self.broker.authorize_inbox_directory(root, max_bytes)
     }
 
+    pub fn authorize_derived_directory(
+        &mut self,
+        root: &Path,
+        max_bytes: u64,
+    ) -> Result<Id128, AslError> {
+        self.check_health()?;
+        self.broker.authorize_derived_directory(root, max_bytes)
+    }
+
     pub fn revoke_inbox_directory(&mut self, grant: Id128) -> Result<(), AslError> {
         self.check_health()?;
         self.broker.revoke_inbox_directory(grant)
+    }
+
+    pub fn revoke_derived_directory(&mut self, grant: Id128) -> Result<(), AslError> {
+        self.check_health()?;
+        self.broker.revoke_derived_directory(grant)
     }
 
     /// Import only through a stored grant. A resource key is not a read permit.
@@ -130,8 +146,12 @@ struct ReconcileWorker {
 }
 
 impl ReconcileWorker {
-    fn start(home: &Path) -> Result<Self, AslError> {
+    fn start(
+        home: &Path,
+        document_text_extractor: Arc<dyn DocumentTextExtractor>,
+    ) -> Result<Self, AslError> {
         let mut broker = SnapshotBroker::open(home)?;
+        broker.set_document_text_extractor(document_text_extractor);
         let cancel = Arc::new(AtomicBool::new(false));
         broker.set_reconcile_stop(Arc::clone(&cancel));
         let mut last_periodic = Instant::now();
@@ -193,6 +213,34 @@ impl ReconcileWorker {
             .ok_or(AslError::InvalidPolicyState)?
             .join()
             .map_err(|_| AslError::InvalidPolicyState)?
+    }
+}
+
+struct SandboxedDocumentExtractor;
+
+impl DocumentTextExtractor for SandboxedDocumentExtractor {
+    fn max_input_bytes(&self) -> u64 {
+        crate::ipc::MAX_IPC_EXTRACTOR_INPUT_BYTES as u64
+    }
+
+    fn supports(&self, relative: &Path, length: u64) -> bool {
+        length <= self.max_input_bytes()
+            && relative
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "pdf" | "docx" | "xlsx" | "pptx"
+                    )
+                })
+    }
+
+    fn extract(&self, bytes: &[u8]) -> Result<Option<String>, AslError> {
+        match crate::supervisor::extract_document_text_once(bytes) {
+            Ok(text) if !text.is_empty() => Ok(Some(text)),
+            Ok(_) | Err(_) => Ok(None),
+        }
     }
 }
 

@@ -108,13 +108,12 @@ fn detect_archive_format<R: Read + Seek>(
                     if lowered.contains("macroenabled") || lowered.contains("vbaproject") {
                         return Err(AslError::InvalidMessage);
                     }
-                    if let Some(format) = content_type_format(&content_type, &part) {
-                        if selected
+                    if let Some(format) = content_type_format(&content_type, &part)
+                        && selected
                             .replace(format)
                             .is_some_and(|previous| previous != format)
-                        {
-                            return Err(AslError::InvalidMessage);
-                        }
+                    {
+                        return Err(AslError::InvalidMessage);
                     }
                 }
             }

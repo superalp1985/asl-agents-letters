@@ -37,6 +37,16 @@ pub struct SnapshotBroker {
     home: PathBuf,
     _pin: PinnedHome,
     reconcile_stop: Option<Arc<AtomicBool>>,
+    document_text_extractor: Option<Arc<dyn DocumentTextExtractor>>,
+}
+
+/// Optional trusted-local document enrichment used while importing a granted
+/// source. Implementations run outside the database transaction and must keep
+/// their own input/output bounds.
+pub trait DocumentTextExtractor: Send + Sync {
+    fn max_input_bytes(&self) -> u64;
+    fn supports(&self, relative: &Path, length: u64) -> bool;
+    fn extract(&self, bytes: &[u8]) -> Result<Option<String>, AslError>;
 }
 
 pub struct StoredSnapshotReader {
@@ -69,9 +79,14 @@ impl SnapshotBroker {
             home: home.to_owned(),
             _pin: pin,
             reconcile_stop: None,
+            document_text_extractor: None,
         };
         broker.recover_expired_imports()?;
         Ok(broker)
+    }
+
+    pub fn set_document_text_extractor(&mut self, extractor: Arc<dyn DocumentTextExtractor>) {
+        self.document_text_extractor = Some(extractor);
     }
 
     pub fn set_reconcile_stop(&mut self, stop: Arc<AtomicBool>) {
@@ -146,7 +161,15 @@ impl SnapshotBroker {
             .ok_or(AslError::NotFound)?
             .replace('/', "\\");
         let hold = self.reserve(&authority, source.len())?;
-        let result = self.copy_and_commit(&authority, &hold, &relative, &mut source, progress);
+        let extractor = self.document_text_extractor.clone();
+        let result = self.copy_and_commit(
+            &authority,
+            &hold,
+            &relative,
+            &mut source,
+            extractor.as_deref(),
+            progress,
+        );
         if result.is_err() && !matches!(result, Err(AslError::SnapshotRecoveryRequired)) {
             self.release(&hold)?;
         }
@@ -159,6 +182,7 @@ impl SnapshotBroker {
         hold: &Hold,
         relative: &str,
         source: &mut AuthorizedFile,
+        document_text_extractor: Option<&dyn DocumentTextExtractor>,
         mut observer: impl FnMut() -> Result<(), AslError>,
     ) -> Result<ResourceKey, AslError> {
         let mut last_progress = Instant::now();
@@ -177,6 +201,7 @@ impl SnapshotBroker {
                 source,
                 Path::new(relative),
                 source_is_context_package(relative),
+                document_text_extractor,
                 || progress(db),
             )?
         };

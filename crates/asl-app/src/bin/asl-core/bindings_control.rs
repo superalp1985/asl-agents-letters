@@ -3,8 +3,9 @@ use std::{env, ffi::OsString, path::PathBuf};
 use asl_app::paths::AppPaths;
 use asl_policy::snapshot_files::PinnedHome;
 use asl_store::{
-    contact_bindings::ContactBindingActionKind, contact_policy::ContactRequestMode, open_store,
-    open_store_read_only,
+    contact_bindings::ContactBindingActionKind,
+    contact_policy::{ContactRequestMode, MAX_RECENT_INTERACTION_TTL_MS},
+    open_store, open_store_read_only,
 };
 use asl_types::{
     error::AslError,
@@ -24,6 +25,8 @@ enum Command {
     Forget(AgentId),
     Publish(bool),
     SetRequestPolicy(ContactRequestMode),
+    SetSharedGroupAutoAccept(bool),
+    SetRecentInteractionTtl(u64),
 }
 
 impl Command {
@@ -52,6 +55,9 @@ impl Command {
             ["policy", "review"] => Ok(Self::SetRequestPolicy(ContactRequestMode::Review)),
             ["policy", "auto-accept"] => Ok(Self::SetRequestPolicy(ContactRequestMode::AutoAccept)),
             ["policy", "reject"] => Ok(Self::SetRequestPolicy(ContactRequestMode::Reject)),
+            ["policy-group", "on"] => Ok(Self::SetSharedGroupAutoAccept(true)),
+            ["policy-group", "off"] => Ok(Self::SetSharedGroupAutoAccept(false)),
+            ["policy-recent", ttl] => Ok(Self::SetRecentInteractionTtl(parse_recent_ttl(ttl)?)),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -101,6 +107,22 @@ impl Command {
                 None,
                 None,
             ),
+            Self::SetSharedGroupAutoAccept(enabled) => (
+                if enabled {
+                    ContactBindingActionKind::EnableSharedGroupAutoAccept
+                } else {
+                    ContactBindingActionKind::DisableSharedGroupAutoAccept
+                },
+                None,
+                None,
+                None,
+            ),
+            Self::SetRecentInteractionTtl(ttl_ms) => (
+                ContactBindingActionKind::SetRecentInteractionTtl,
+                Some(ttl_ms),
+                None,
+                None,
+            ),
         };
         store.enqueue_contact_binding_action(kind, code, agent_id, peer_id.as_ref(), now_ms)
     }
@@ -120,8 +142,15 @@ pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
             println!("{}", json!({"bindings": rows}));
         }
         [command] if command == "policy" => {
-            let mode = open_store_read_only(&database)?.contact_request_mode()?;
-            println!("{}", json!({"request_mode": mode.as_str()}));
+            let policy = open_store_read_only(&database)?.contact_request_policy()?;
+            println!(
+                "{}",
+                json!({
+                    "request_mode": policy.mode.as_str(),
+                    "shared_group_auto_accept": policy.shared_group_auto_accept,
+                    "recent_interaction_ttl_ms": policy.recent_interaction_ttl_ms,
+                })
+            );
         }
         [command, mode, agent, peer, at] if command == "access" && mode == "on" => {
             let agent = parse_agent(text(agent)?)?;
@@ -156,6 +185,19 @@ fn parse_code(text: &str) -> Result<u64, AslError> {
     let code = text.parse::<u64>().map_err(|_| AslError::InvalidMessage)?;
     (code < SHORT_CODE_LIMIT)
         .then_some(code)
+        .ok_or(AslError::InvalidMessage)
+}
+
+fn parse_recent_ttl(value: &str) -> Result<u64, AslError> {
+    let ttl = match value {
+        "off" => 0,
+        "1h" => 60 * 60 * 1_000,
+        "24h" => 24 * 60 * 60 * 1_000,
+        "7d" => MAX_RECENT_INTERACTION_TTL_MS,
+        _ => return Err(AslError::InvalidMessage),
+    };
+    (ttl <= MAX_RECENT_INTERACTION_TTL_MS)
+        .then_some(ttl)
         .ok_or(AslError::InvalidMessage)
 }
 
@@ -222,12 +264,22 @@ mod tests {
             parse(&["policy", "auto-accept"]),
             Ok(Command::SetRequestPolicy(ContactRequestMode::AutoAccept))
         ));
+        assert!(matches!(
+            parse(&["policy-group", "on"]),
+            Ok(Command::SetSharedGroupAutoAccept(true))
+        ));
+        assert!(matches!(
+            parse(&["policy-recent", "24h"]),
+            Ok(Command::SetRecentInteractionTtl(86_400_000))
+        ));
         for args in [
             &["lookup", "42"][..],
             &["lookup", "10000000000000000"],
             &["lookup-agent", "not-an-agent"],
             &["publish", "true"],
             &["policy", "accept-everything"],
+            &["policy-group", "true"],
+            &["policy-recent", "30d"],
             &["revoke", "not-an-agent"],
             &["dismiss", &agent, &peer, "0000000000000042", "extra"],
         ] {

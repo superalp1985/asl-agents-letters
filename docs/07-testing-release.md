@@ -17,8 +17,8 @@
 | Windows AppContainer/Job Object | T09 实现与真实负向探针已完成首轮；任务验收部分完成 | 本机真实测试覆盖读文件/Worker 联网与子进程拒绝、ACL/继承句柄、资源限制、清理、Net 外网 TCP 连接和多播 membership；公网 TCP 只证连接握手，外部 UDP echo、libp2p QUIC 与 mDNS query/response 未验收。执行文件 ACL DACL 更新有真实跨进程 mutex 串行化测试。最后一次独立复核发现的并发问题已修；不是独立安全审计 |
 | Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入和完整公网互通仍待验收 |
 | 默认后台收件与续传 | T23 工作线程已接入，验证见[实施计划](06-implementation-plan.md) | 真实认证 TCP 回环从 Fetch 到 NTFS 发布，链准入为夹具；续传用真实 NTFS/SQLite 和模拟网络事件。未验收生产跨进程下载全链路、公网重连或 GUI |
-| Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
-| 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
+| Inline 与文档/头像 Extractor | T24 已扩展为 PDF、DOCX、XLSX、PPTX、头像隔离处理，导入/重建索引路径已接线 | inline 仅回传已请求且 hash 匹配的有界内存内容；文档输入 4 MiB、输出 2 MiB、FTS 正文 32 KiB，宏/加密/越界 OOXML 拒绝。最终统一测试和完整 GUI/跨机验收待执行 |
+| 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理；PDF/OOXML 解析结果只留在本机索引 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页和事务恢复有本机测试；Office/PDF 解析需最终统一验证，不代表模型访问或远端全文搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；T31 本机目录续签已接入 | 严格 CBOR、当前链控制者签名、目录承诺、目录续签序号持久化；Profile 的 DHT 发布、远端记录历史持久化与真实公开投递仍待接入 |
 | T14 传输与身份握手 | Core 身份闸门、地址策略、DHT、mDNS、relay 与 TCP/QUIC 路径已有实现和局部测试，整项仍未公网验收 | TCP/QUIC loopback、真实双节点 DHT、relay v2 和 AppContainer 网络有定向证据；真实 LAN、NAT 打洞、双机重启补收、多运营商链 RPC 和完整公网互测仍待完成 |
 | T27 Agent 查询 | 入站授权直答、出站联系人直询、公开 DHT provider、ASL/1.3 act、自动回复和密文邮箱已接入 | act 控制面/数据面、audience 裁剪、双许可本地证据、持久预算和邮箱补收有局部测试；提示注入红队、缓存证据过期恢复、真实双机与公网互通仍未验收 |
@@ -28,7 +28,7 @@
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
 | ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复、双许可本地证据、CLI/MCP Act 历史搜索、CLI 导出和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无缓存证据过期恢复、真实两设备重启补收、跨机多跳/规模验收 |
 | 两人 MLS 私聊（G00） | 已走两人 MLS 房间工具，真实双机验收未完成 | 与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v45、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主策略转移、能力分层、逐文件权限、加入/重入请求、DHT 持久回灌、自动多子 MLS 邀请、ASL/1.4 根/子群绑定与持久去重转发已实现 | 统一验收、真实多设备策略同步、真实双机邮箱/群请求、公网 NAT/relay、512/2,000/10,000 容量矩阵待执行；不设固定 64 人业务上限 |
+| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v49、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主策略转移、能力分层、逐文件权限、加入/重入请求、DHT 持久回灌、自动多子 MLS 邀请、ASL/1.4 根/子群绑定、持久去重转发与加密 shard-forward outbox、跨 shard 文件路由元数据已实现 | 最终本地编译/测试已通过；真实多设备策略同步、真实双机邮箱/群请求、公网 NAT/relay、512/2,000/10,000 容量矩阵待执行；不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
 
 2026-11-27 高级闭环集中验证（Windows x64，Rust 1.100.0，Cargo/target/临时目录位于 E 盘，离线）：

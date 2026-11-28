@@ -412,6 +412,19 @@ impl Supervisor {
                 store.set_contact_request_mode(ContactRequestMode::Reject, now_ms)?;
                 Ok("reject")
             }
+            ContactBindingActionKind::EnableSharedGroupAutoAccept => {
+                store.set_shared_group_auto_accept(true, now_ms)?;
+                Ok("enabled")
+            }
+            ContactBindingActionKind::DisableSharedGroupAutoAccept => {
+                store.set_shared_group_auto_accept(false, now_ms)?;
+                Ok("disabled")
+            }
+            ContactBindingActionKind::SetRecentInteractionTtl => {
+                let ttl_ms = action.code.ok_or(AslError::InvalidMessage)?;
+                store.set_recent_interaction_ttl(ttl_ms, now_ms)?;
+                Ok("updated")
+            }
         };
 
         store.finish_contact_binding_action(action.id, result)

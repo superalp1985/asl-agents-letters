@@ -8,6 +8,7 @@ pub mod invite_review;
 #[cfg(test)]
 mod invite_tests;
 pub mod operator;
+mod outbox;
 mod outgoing;
 #[cfg(test)]
 mod outgoing_tests;
@@ -26,6 +27,11 @@ pub use application::MlsApplicationAuthority;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
 pub use invite_request::{
     GROUP_INVITE_REQUEST_TTL_MS, GroupInviteRequest, GroupInviteRequestInput,
+};
+pub use outbox::{
+    MAX_SHARD_FORWARD_OUTBOX_BATCH, PendingShardForwardOutbox, SHARD_FORWARD_OUTBOX_RETRY_BASE_MS,
+    SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, SHARD_FORWARD_OUTBOX_TERMINAL_RETENTION_MS,
+    ShardForwardOutboxRecord, ShardForwardOutboxRoute,
 };
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use policy::{GroupInboundPolicy, GroupInboundSwitch};

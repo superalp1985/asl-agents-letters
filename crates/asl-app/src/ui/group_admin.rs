@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asl_app::network_settings::NetworkSettingsV1;
 use asl_store::{
-    dashboard::Dashboard,
+    dashboard::{Dashboard, GroupRow},
     group_state::operator::{
         AdminAccessDetails, AdminCapability, AdminFilePolicy, AdminJoinRequest, AdminMember,
         AdminOutcome, AdminPeer, AdminRoom, AdminSnapshot,
@@ -21,6 +21,7 @@ pub(super) struct Form {
     confirmation: Option<Confirmation>,
     selection_reset: bool,
     access: Option<AccessDraft>,
+    group_filter: String,
 }
 
 struct AccessDraft {
@@ -104,6 +105,25 @@ pub(super) fn enabled(config: &Result<NetworkSettingsV1, AslError>, _data: &Dash
 }
 
 impl Form {
+    pub(super) fn group_filter_ui(&mut self, ui: &mut egui::Ui, language: Language) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.group_filter)
+                .hint_text(label(
+                    language,
+                    "按群名或完整 Group ID 筛选",
+                    "Filter by name or full Group ID",
+                ))
+                .desired_width(360.0),
+        );
+    }
+
+    pub(super) fn group_filter_matches(&self, group: &GroupRow) -> bool {
+        let filter = self.group_filter.trim().to_ascii_lowercase();
+        filter.is_empty()
+            || group.name.to_ascii_lowercase().contains(&filter)
+            || group.group_id.to_ascii_lowercase().contains(&filter)
+    }
+
     pub(super) fn observe(&mut self, snapshot: Option<&AdminSnapshot>) {
         let tag = snapshot.map(|snapshot| snapshot.tag.as_str());
         let selection_missing = snapshot.is_some_and(|snapshot| {

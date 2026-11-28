@@ -1381,6 +1381,8 @@ mod bulk_response_tests {
             message_id: Id128([7; 16]),
             root_task_id: Id128([8; 16]),
             content_id: Hash32(content_id(&encoded)),
+            logical_group_id: None,
+            source_room_id: None,
         };
         let grant = FetchGrant {
             message_id: Id128([9; 16]),
@@ -1945,6 +1947,8 @@ pub(crate) mod tests {
             message_id: Id128([1; 16]),
             root_task_id: Id128([2; 16]),
             content_id: content,
+            logical_group_id: None,
+            source_room_id: None,
         };
         let mut service = TransferService::open(&database_path).unwrap();
         service
@@ -2191,6 +2195,8 @@ pub(crate) mod tests {
             message_id: Id128([4; 16]),
             root_task_id: Id128([5; 16]),
             content_id: content,
+            logical_group_id: None,
+            source_room_id: None,
         };
         service
             .store

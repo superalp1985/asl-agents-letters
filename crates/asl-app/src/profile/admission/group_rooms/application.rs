@@ -10,13 +10,13 @@ use asl_store::{
     Store,
     group_state::{
         MlsApplicationAuthority, MlsJournalEntry, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate,
-        RoomVersion,
+        RoomVersion, ShardForwardOutboxRecord, ShardForwardOutboxRoute,
     },
 };
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
-    protocol::{GroupBody, GroupPacket},
+    protocol::{GroupBody, GroupPacket, ShardForward, WireFrame, encode_frame},
 };
 use openmls::prelude::CredentialWithKey;
 
@@ -93,6 +93,74 @@ impl CoreAdmission {
         .map(|(packet, _)| packet)
     }
 
+    /// Prepare and durably enqueue one already-signed shard forward in the
+    /// same transaction that advances the target shard ratchet. The outbox
+    /// contains only the encoded MLS control frame and routing metadata.
+    pub fn prepare_mls_shard_forward(
+        &mut self,
+        store: &mut Store,
+        wire_id: Hash32,
+        forward: ShardForward,
+        now_ms: u64,
+    ) -> Result<GroupPacket, AslError> {
+        if forward.target_child != wire_id {
+            return Err(AslError::InvalidMessage);
+        }
+        let (created, expires) = (Some(forward.observed_at_ms), forward.expires_at_ms);
+        let clock = SyncClock::inbound(
+            now_ms,
+            expires.min(now_ms.saturating_add(REQUEST_TIMEOUT.as_millis() as u64)),
+        );
+        let now = clock.now_ms()?;
+        check_application_creation(created, now)?;
+        forward.validate_at(now)?;
+        let saved = store
+            .mls_room_snapshot(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        let (state, _) = store
+            .mls_room_progress(wire_id)?
+            .ok_or(AslError::NotFound)?;
+        if state != "active" {
+            return Err(AslError::PolicyDenied);
+        }
+        if wire_id != forward.logical_root {
+            let binding = store
+                .shard_binding(wire_id, now)?
+                .ok_or(AslError::PolicyDenied)?;
+            if forward.target_binding.as_ref() != Some(&binding)
+                || binding.logical_root != forward.logical_root
+            {
+                return Err(AslError::PolicyVersionConflict);
+            }
+        } else if forward.target_binding.is_some() || store.mls_shard_parent(wire_id)?.is_some() {
+            return Err(AslError::InvalidMessage);
+        }
+        let route = ShardForwardOutboxRoute {
+            forward_id: forward.message_id,
+            source_message_id: forward.source_message_id,
+            logical_root: forward.logical_root,
+            source_child: forward.source_child,
+            target_child: forward.target_child,
+            target_binding_revision: forward
+                .target_binding
+                .as_ref()
+                .map_or(0, |binding| binding.revision),
+            observed_at_ms: forward.observed_at_ms,
+            expires_at_ms: forward.expires_at_ms,
+        };
+        let mut candidate =
+            self.load_mls_application_base(store, wire_id, saved.version, &HashMap::new(), now)?;
+        self.prepare_mls_application_inner(
+            store,
+            &mut candidate,
+            Id128(fresh_id()?),
+            GroupApplication::ShardForward(Box::new(forward)),
+            &clock,
+            Some(&route),
+        )
+        .map(|(packet, _)| packet)
+    }
+
     pub(super) fn prepare_mls_application(
         &mut self,
         store: &mut Store,
@@ -100,6 +168,18 @@ impl CoreAdmission {
         envelope_id: Id128,
         application: GroupApplication,
         clock: &SyncClock,
+    ) -> Result<(GroupPacket, RoomVersion), AslError> {
+        self.prepare_mls_application_inner(store, candidate, envelope_id, application, clock, None)
+    }
+
+    fn prepare_mls_application_inner(
+        &mut self,
+        store: &mut Store,
+        candidate: &mut LocalRoomCandidate,
+        envelope_id: Id128,
+        application: GroupApplication,
+        clock: &SyncClock,
+        outbox_route: Option<&ShardForwardOutboxRoute>,
     ) -> Result<(GroupPacket, RoomVersion), AslError> {
         let (created, _) = application_times(&application);
         check_application_creation(created, clock.now_ms()?)?;
@@ -111,10 +191,22 @@ impl CoreAdmission {
             envelope_id,
             application,
         )?;
-        let (version, _) =
-            self.persist_mls_application(store, candidate, &packet, message_id, None, || {
-                clock.now_ms()
-            })?;
+        let outbox = match outbox_route {
+            Some(route) => Some(ShardForwardOutboxRecord {
+                route: route.clone(),
+                frame: encode_frame(&WireFrame::GroupEnvelope(packet.clone().into_envelope()?))?,
+            }),
+            None => None,
+        };
+        let (version, _) = self.persist_mls_application(
+            store,
+            candidate,
+            &packet,
+            message_id,
+            None,
+            outbox.as_ref(),
+            || clock.now_ms(),
+        )?;
         Ok((packet, version))
     }
 
@@ -200,6 +292,7 @@ impl CoreAdmission {
                 key: &sender_key,
                 device: &peer,
             })),
+            None,
             || {
                 let now = clock.now_ms()?;
                 if now >= expires {
@@ -286,6 +379,7 @@ impl CoreAdmission {
                 key: &sender_key,
                 member,
             }),
+            None,
             || Ok(now),
         )?;
         let visible = browse_enabled
@@ -321,6 +415,7 @@ impl CoreAdmission {
         Ok(candidate)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_mls_application(
         &mut self,
         store: &mut Store,
@@ -328,6 +423,7 @@ impl CoreAdmission {
         packet: &GroupPacket,
         message_id: Id128,
         incoming: Option<ApplicationOrigin<'_>>,
+        outbox: Option<&ShardForwardOutboxRecord>,
         current_time: impl Fn() -> Result<u64, AslError>,
     ) -> Result<(RoomVersion, bool), AslError> {
         let GroupBody::Application(ciphertext) = &packet.body else {
@@ -381,6 +477,7 @@ impl CoreAdmission {
                 members: &roster.members,
                 chain_id,
             },
+            outbox,
             || {
                 // Chain freshness is evaluated in whole seconds. If a check
                 // spans that boundary, retry at the new time rather than use a

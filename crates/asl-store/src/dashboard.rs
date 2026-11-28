@@ -48,6 +48,8 @@ pub struct Dashboard {
     pub binding_actions: Vec<BindingActionRow>,
     pub binding_code_public: bool,
     pub contact_request_mode: crate::contact_policy::ContactRequestMode,
+    pub contact_group_auto_accept: bool,
+    pub contact_recent_interaction_ttl_ms: u64,
     pub contact_invites: Vec<crate::contact_invites::ContactInvite>,
     pub contact_invite_prompts: Vec<crate::contact_invites::ContactInvitePrompt>,
     pub groups: Vec<GroupRow>,
@@ -261,6 +263,7 @@ impl Dashboard {
             _ => Vec::new(),
         };
         let now_i64 = i64::try_from(now).map_err(|_| AslError::InvalidMessage)?;
+        let contact_request_policy = crate::contact_policy::contact_request_policy(database)?;
         Ok(Self {
             identity,
             group_admin_snapshot,
@@ -282,7 +285,9 @@ impl Dashboard {
             binding_candidates: read_binding_candidates(database)?,
             binding_actions: read_binding_actions(database)?,
             binding_code_public: read_binding_code_public(database)?,
-            contact_request_mode: crate::contact_policy::contact_request_mode(database)?,
+            contact_request_mode: contact_request_policy.mode,
+            contact_group_auto_accept: contact_request_policy.shared_group_auto_accept,
+            contact_recent_interaction_ttl_ms: contact_request_policy.recent_interaction_ttl_ms,
             contact_invites: crate::contact_invites::active_invites_for_dashboard(
                 database, now_i64,
             )?,
@@ -648,14 +653,22 @@ fn read_nodes(database: &Connection) -> Result<Vec<NodeRow>, AslError> {
 }
 
 fn read_groups(database: &Connection) -> Result<Vec<GroupRow>, AslError> {
-    let mut statement = database
-        .prepare(
-            "SELECT g.group_id,g.local_name,g.state,g.mls_epoch,g.membership_epoch,
-                    (SELECT COUNT(*) FROM group_members m
-                     WHERE m.group_id=g.group_id AND m.state='active')
-             FROM asl_groups g ORDER BY g.updated_at_ms DESC,g.group_id LIMIT 100",
-        )
-        .map_err(database_error)?;
+    let sql = format!(
+        "{} SELECT lower(hex(state.wire_group_id)),g.local_name,g.state,
+                g.mls_epoch,g.membership_epoch,
+                (SELECT COUNT(DISTINCT member.agent_id)
+                 FROM logical_group_peers member
+                 WHERE member.root_wire_id=state.wire_group_id)
+         FROM mls_room_states state
+         JOIN asl_groups g ON g.group_id=state.local_group_id
+         WHERE NOT EXISTS(
+             SELECT 1 FROM mls_room_shards shard
+             WHERE shard.shard_wire_id=state.wire_group_id
+         )
+         ORDER BY g.updated_at_ms DESC,state.wire_group_id",
+        crate::group_topology::LOGICAL_GROUP_PEERS_CTE
+    );
+    let mut statement = database.prepare(&sql).map_err(database_error)?;
     statement
         .query_map([], |row| {
             Ok(GroupRow {

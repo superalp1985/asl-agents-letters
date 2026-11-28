@@ -74,7 +74,7 @@ impl Session<'_> {
         let context_ref = selection.context_ref;
         let ticket = self
             .downloads
-            .submit(DownloadJob::Fetch(selection))
+            .submit(DownloadJob::Fetch(Box::new(selection)))
             .map_err(error_code)?;
         let download = Download {
             content_id,

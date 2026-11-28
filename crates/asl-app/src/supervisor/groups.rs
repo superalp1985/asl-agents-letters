@@ -20,7 +20,12 @@ use asl_store::{
     group_access::{
         GroupAccessKind, GroupAdminCapabilityKind, GroupFileAccessKind, GroupMemberAccess,
     },
-    group_state::{GroupInboundPolicy, MlsIncomingInvite, open_mls_runtime_store},
+    group_state::{
+        GroupInboundPolicy, MAX_SHARD_FORWARD_OUTBOX_BATCH, MlsIncomingInvite,
+        PendingShardForwardOutbox, SHARD_FORWARD_OUTBOX_RETRY_BASE_MS,
+        SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, open_mls_runtime_store,
+    },
+    group_topology::MAX_LAYERED_GROUP_MEMBERS,
     mailbox::{
         ConversationBudgetGrant, MAX_BUDGET_MESSAGES, MAX_BUDGET_RENEWALS, MAX_BUDGET_WINDOW_MS,
         MailboxPut,
@@ -32,9 +37,10 @@ use asl_types::{
     ids::{AgentId, Hash32, Id128, PeerId, Signature65},
     protocol::{
         Act, ActType, GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
-        GROUP_REMOVAL_REQUEST_TTL_MS, GroupControl, GroupRemovalRequest, Intent, MAX_GROUP_MEMBERS,
-        MAX_SHARD_BINDING_LIFETIME_MS, MAX_SHARD_FORWARD_HOP, MAX_SHARD_FORWARD_LIFETIME_MS,
-        MediaKind, ResultShape, ShardBinding, ShardForward, WireFrame,
+        GROUP_REMOVAL_REQUEST_TTL_MS, GroupControl, GroupPacket, GroupRemovalRequest, Intent,
+        MAX_GROUP_MEMBERS, MAX_SHARD_BINDING_LIFETIME_MS, MAX_SHARD_FORWARD_HOP,
+        MAX_SHARD_FORWARD_LIFETIME_MS, MediaKind, ResultShape, ShardBinding, ShardForward,
+        WireFrame, decode_frame,
     },
     task::GroupId,
 };
@@ -68,6 +74,7 @@ const MAX_PENDING_ACKS: usize = 128;
 const MAX_ACKED_ACTS: usize = 512;
 const ACK_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_ACK_ATTEMPTS: u8 = 5;
+const SHARD_FORWARD_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum LocalGroupAction {
     List,
@@ -150,6 +157,7 @@ pub(super) struct LoopbackGroups {
     recent_applications: VecDeque<ReceivedApplication>,
     next_sync_probe: Instant,
     next_migration_rejoin: Instant,
+    next_shard_forward_retry: Instant,
     sync_cursor: Option<(Hash32, PeerId)>,
     pending_transfers: VecDeque<PendingGroupTransfer>,
     gossip_subscriptions: HashSet<Hash32>,
@@ -238,6 +246,7 @@ impl LoopbackGroups {
             recent_applications: VecDeque::new(),
             next_sync_probe: Instant::now() + SYNC_PROBE_INTERVAL,
             next_migration_rejoin: Instant::now(),
+            next_shard_forward_retry: Instant::now(),
             sync_cursor: None,
             pending_transfers: VecDeque::new(),
             gossip_subscriptions: HashSet::new(),
@@ -853,6 +862,13 @@ impl Supervisor {
                 let mut forwarded_application = forwarded.application;
                 if let GroupApplication::Act(act) = &mut forwarded_application {
                     act.conversation_id = local_group_id.0;
+                    let _ = groups.store.record_contact_interaction_evidence(
+                        forwarded.source_agent,
+                        &forwarded.source_peer,
+                        act.message_id,
+                        Some((*wire_id, *epoch)),
+                        now_ms,
+                    );
                     if GroupInboundPolicy::load(&groups.store)
                         .is_ok_and(|policy| policy.browse_enabled || policy.answer_enabled)
                     {
@@ -1011,6 +1027,15 @@ impl Supervisor {
                         _ => true,
                     });
             if member_allowed && let GroupApplication::Act(act) = application.as_ref() {
+                if let Some(member) = requester.as_ref() {
+                    let _ = groups.store.record_contact_interaction_evidence(
+                        member.direct.agent,
+                        &member.direct.peer,
+                        act.message_id,
+                        Some((*wire_id, member.membership_epoch)),
+                        now_ms,
+                    );
+                }
                 if GroupInboundPolicy::load(&groups.store)
                     .is_ok_and(|policy| policy.browse_enabled || policy.answer_enabled)
                 {
@@ -1281,6 +1306,13 @@ impl Supervisor {
             let mut forwarded_application = forwarded.application;
             if let GroupApplication::Act(act) = &mut forwarded_application {
                 act.conversation_id = local_group_id.0;
+                let _ = groups.store.record_contact_interaction_evidence(
+                    forwarded.source_agent,
+                    &forwarded.source_peer,
+                    act.message_id,
+                    Some((key, packet.epoch)),
+                    now_ms,
+                );
                 if GroupInboundPolicy::load(&groups.store)
                     .is_ok_and(|policy| policy.browse_enabled || policy.answer_enabled)
                 {
@@ -1385,6 +1417,15 @@ impl Supervisor {
         };
         if !member_allowed {
             return Ok(());
+        }
+        if let GroupApplication::Act(act) = &application {
+            let _ = groups.store.record_contact_interaction_evidence(
+                agent,
+                &peer,
+                act.message_id,
+                Some((key, packet.epoch)),
+                now_ms,
+            );
         }
         if let GroupApplication::Act(act) = &application
             && GroupInboundPolicy::load(&groups.store)
@@ -1517,6 +1558,20 @@ impl Supervisor {
             };
             match pending.application {
                 GroupApplication::FetchRequest(request) => {
+                    if let (Some(logical), Some(source_room)) =
+                        (request.logical_group_id, request.source_room_id)
+                    {
+                        let current_root =
+                            match self.groups.as_ref().and_then(|groups| {
+                                groups.store.mls_logical_root(pending.wire_id).ok()
+                            }) {
+                                Some(root) => root,
+                                None => continue,
+                            };
+                        if source_room != pending.wire_id || logical != current_root {
+                            continue;
+                        }
+                    }
                     let file_allowed = self.groups.as_ref().is_some_and(|groups| {
                         groups
                             .store
@@ -1719,20 +1774,37 @@ impl Supervisor {
             now_ms,
         )?;
         let net = &self.net;
-        let sent = admission.send_loopback_mls_application_to_connection(
-            &mut groups.store,
-            crate::profile::MlsApplicationSendToConnection {
-                wire_id,
-                connection_id,
-                envelope_id: request.message_id,
-                application: GroupApplication::FetchRequest(request.clone()),
-                now_ms,
-            },
-            |command| enqueue(net, command),
-        );
-        match sent {
-            Ok(dispatched) if dispatched.queued > 0 => Ok(Some(connection_id)),
-            Ok(_) | Err(_) => {
+        let cross_shard = request
+            .source_room_id
+            .is_some_and(|source_room| source_room != wire_id);
+        let queued = if cross_shard {
+            admission
+                .send_loopback_mls_application_with_gossip(
+                    &mut groups.store,
+                    wire_id,
+                    GroupApplication::FetchRequest(request.clone()),
+                    now_ms,
+                    |command| enqueue(net, command),
+                )
+                .map(|dispatched| dispatched.queued > 0)
+        } else {
+            admission
+                .send_loopback_mls_application_to_connection(
+                    &mut groups.store,
+                    crate::profile::MlsApplicationSendToConnection {
+                        wire_id,
+                        connection_id,
+                        envelope_id: request.message_id,
+                        application: GroupApplication::FetchRequest(request.clone()),
+                        now_ms,
+                    },
+                    |command| enqueue(net, command),
+                )
+                .map(|dispatched| dispatched.queued > 0)
+        };
+        match queued {
+            Ok(true) => Ok(Some(connection_id)),
+            Ok(false) | Err(_) => {
                 transfers.fail_control_request(
                     connection_id,
                     requester.agent,
@@ -1760,7 +1832,13 @@ impl Supervisor {
                 groups.cleanup_failed = groups
                     .store
                     .prune_mls_expired(now_ms)
-                    .and_then(|()| groups.store.prune_expired_group_invite_requests(now_ms))
+                    .and_then(|()| {
+                        groups
+                            .store
+                            .prune_expired_group_invite_requests(now_ms)
+                            .map(|_| ())
+                    })
+                    .and_then(|()| groups.store.prune_shard_forward_outbox(now_ms).map(|_| ()))
                     .is_err();
             }
             if self.net.is_running()
@@ -1795,6 +1873,15 @@ impl Supervisor {
                 groups.poll_sync(admission, &self.net, now, unix_time_ms()?);
             }
         }
+        if self.net.is_running()
+            && self.network_admission_status == NetworkAdmissionStatus::Active
+            && self
+                .groups
+                .as_ref()
+                .is_some_and(|groups| !groups.cleanup_failed)
+        {
+            self.poll_shard_forward_outbox(unix_time_ms()?)?;
+        }
         let acks = self
             .groups
             .as_mut()
@@ -1821,6 +1908,40 @@ impl Supervisor {
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => self.group_controls = None,
+        }
+        Ok(())
+    }
+
+    fn poll_shard_forward_outbox(&mut self, now_ms: u64) -> Result<(), AslError> {
+        let Some(groups) = self.groups.as_mut() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now < groups.next_shard_forward_retry {
+            return Ok(());
+        }
+        groups.next_shard_forward_retry = now + SHARD_FORWARD_RETRY_INTERVAL;
+        let due = groups
+            .store
+            .due_shard_forward_outbox(now_ms, MAX_SHARD_FORWARD_OUTBOX_BATCH)?;
+        if due.is_empty() {
+            return Ok(());
+        }
+        let Some(admission) = self.admission.as_mut() else {
+            return Ok(());
+        };
+        let Some(groups) = self.groups.as_mut() else {
+            return Ok(());
+        };
+        for entry in due {
+            retry_shard_forward_outbox_entry(
+                &mut groups.store,
+                admission,
+                &self.net,
+                &self.device_peer_id,
+                entry,
+                now_ms,
+            )?;
         }
         Ok(())
     }
@@ -2232,7 +2353,7 @@ impl Supervisor {
                 connection_id,
             } => {
                 let root = store.mls_logical_root(room)?;
-                let (_, device) = admission.admitted_peer_identity(connection_id, now_ms)?;
+                let (agent, device) = admission.admitted_peer_identity(connection_id, now_ms)?;
                 let owner = store.group_access_owner(root)?.ok_or(AslError::NotFound)?;
                 if owner != *local_peer {
                     return Ok(json!({
@@ -2242,6 +2363,17 @@ impl Supervisor {
                         "owner_peer": peer_text(&owner),
                         "queued": false,
                     }));
+                }
+                if store.logical_group_has_agent(root, agent)? {
+                    return Ok(json!({
+                        "root": hex::encode(root.0),
+                        "state": "already_member",
+                        "created_shard": false,
+                        "queued": false,
+                    }));
+                }
+                if store.logical_group_member_count(root)? >= MAX_LAYERED_GROUP_MEMBERS {
+                    return Err(AslError::QuotaExceeded);
                 }
                 let (room, created_shard) = choose_or_create_mls_shard(
                     admission,
@@ -2286,7 +2418,18 @@ impl Supervisor {
                 connection_id,
             } => {
                 let root = store.mls_logical_root(root)?;
-                let (_, device) = admission.admitted_peer_identity(connection_id, now_ms)?;
+                let (agent, device) = admission.admitted_peer_identity(connection_id, now_ms)?;
+                if store.logical_group_has_agent(root, agent)? {
+                    return Ok(json!({
+                        "root": hex::encode(root.0),
+                        "state": "already_member",
+                        "created_shard": false,
+                        "queued": false,
+                    }));
+                }
+                if store.logical_group_member_count(root)? >= MAX_LAYERED_GROUP_MEMBERS {
+                    return Err(AslError::QuotaExceeded);
+                }
                 let (room, created_shard) = choose_or_create_mls_shard(
                     admission,
                     store,
@@ -2826,41 +2969,52 @@ pub(super) fn forward_application_to_logical_shards(
                 now_ms,
             )?
             .ok_or(AslError::QuotaExceeded)?;
-        let mut dispatched = false;
-        let result = admission.send_loopback_mls_application_with_gossip(
-            store,
-            target,
-            GroupApplication::ShardForward(Box::new(forward)),
-            now_ms,
-            |command| {
-                if net.try_send(&command.into_ipc()?)? {
-                    dispatched = true;
-                    Ok(())
-                } else {
-                    Err(AslError::SandboxUnavailable)
-                }
-            },
-        );
-        match result {
-            Ok(sent) => {
-                let _ = super::group_routing::publish_packet(
-                    net,
+        let forward_id = forward.message_id;
+        let prepared = admission.prepare_mls_shard_forward(store, target, forward, now_ms);
+        match prepared {
+            Ok(packet) => {
+                let direct = admission.dispatch_prepared_loopback_mls_shard_forward(
                     store,
-                    target,
-                    local_peer,
-                    &sent.packet,
+                    &packet,
+                    expires_at_ms,
+                    now_ms,
+                    |command| {
+                        if net.try_send(&command.into_ipc()?)? {
+                            Ok(())
+                        } else {
+                            Err(AslError::SandboxUnavailable)
+                        }
+                    },
                 );
-                outcomes.push(json!({
-                    "room": hex::encode(target.0),
-                    "state": "queued",
-                    "queued": sent.queued,
-                    "available": sent.available,
-                }));
+                let (queued, available, error_code) = match &direct {
+                    Ok(sent) => (sent.queued, sent.available, None),
+                    Err(error) => (0, 0, Some(group_operation_error_code(error))),
+                };
+                let published =
+                    super::group_routing::publish_packet(net, store, target, local_peer, &packet)
+                        .is_ok();
+                if queued > 0 && store.complete_shard_forward_outbox(forward_id).is_ok() {
+                    outcomes.push(json!({
+                        "room": hex::encode(target.0),
+                        "state": "queued",
+                        "queued": queued,
+                        "available": available,
+                        "published": published,
+                    }));
+                } else {
+                    outcomes.push(json!({
+                        "room": hex::encode(target.0),
+                        "state": "pending",
+                        "persisted": true,
+                        "queued": queued,
+                        "available": available,
+                        "published": published,
+                        "error_code": error_code.unwrap_or("retry_pending"),
+                    }));
+                }
             }
             Err(error) => {
-                if !dispatched {
-                    let _ = store.refund_budget_reservation(reservation, now_ms);
-                }
+                let _ = store.refund_budget_reservation(reservation, now_ms);
                 outcomes.push(json!({
                     "room": hex::encode(target.0),
                     "state": "failed",
@@ -2870,6 +3024,138 @@ pub(super) fn forward_application_to_logical_shards(
         }
     }
     Ok(json!({"root": hex::encode(root.0), "rooms": outcomes}))
+}
+
+fn retry_shard_forward_outbox_entry(
+    store: &mut Store,
+    admission: &mut CoreAdmission,
+    net: &NetRuntime,
+    local_peer: &PeerId,
+    entry: PendingShardForwardOutbox,
+    now_ms: u64,
+) -> Result<(), AslError> {
+    let route = &entry.route;
+    if now_ms >= route.expires_at_ms {
+        return store.terminate_shard_forward_outbox(route.forward_id, "expired", now_ms);
+    }
+    let packet = match decode_frame(&entry.frame) {
+        Ok(WireFrame::GroupEnvelope(envelope)) => GroupPacket::from_envelope(envelope),
+        _ => Err(AslError::InvalidMessage),
+    };
+    let packet = match packet {
+        Ok(packet) if packet.group_id == route.target_child => packet,
+        _ => {
+            return store.terminate_shard_forward_outbox(route.forward_id, "invalid_frame", now_ms);
+        }
+    };
+    let Some(target_snapshot) = store.mls_room_snapshot(route.target_child)? else {
+        return store.terminate_shard_forward_outbox(route.forward_id, "target_missing", now_ms);
+    };
+    let Some((state, _)) = store.mls_room_progress(route.target_child)? else {
+        return store.terminate_shard_forward_outbox(route.forward_id, "target_missing", now_ms);
+    };
+    if state != "active" || packet.epoch != target_snapshot.version.mls_epoch {
+        return store.terminate_shard_forward_outbox(
+            route.forward_id,
+            "target_epoch_changed",
+            now_ms,
+        );
+    }
+    let logical_root = match (
+        store.mls_logical_root(route.source_child),
+        store.mls_logical_root(route.target_child),
+    ) {
+        (Ok(source_root), Ok(target_root))
+            if source_root == route.logical_root && target_root == route.logical_root =>
+        {
+            target_root
+        }
+        _ => {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "logical_root_changed",
+                now_ms,
+            );
+        }
+    };
+    if route.target_child == logical_root {
+        if route.target_binding_revision != 0
+            || store.mls_shard_parent(route.target_child)?.is_some()
+        {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_binding_changed",
+                now_ms,
+            );
+        }
+    } else {
+        let Some(binding) = store.shard_binding(route.target_child, now_ms)? else {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_binding_missing",
+                now_ms,
+            );
+        };
+        if binding.logical_root != route.logical_root
+            || binding.revision != route.target_binding_revision
+        {
+            return store.terminate_shard_forward_outbox(
+                route.forward_id,
+                "target_binding_changed",
+                now_ms,
+            );
+        }
+    }
+    if store.group_access_owner(logical_root)?.as_ref() != Some(local_peer)
+        || !store.has_mls_sync_member(route.target_child, local_peer)?
+    {
+        return store.terminate_shard_forward_outbox(
+            route.forward_id,
+            "owner_not_available",
+            now_ms,
+        );
+    }
+    let direct = admission.dispatch_prepared_loopback_mls_shard_forward(
+        store,
+        &packet,
+        route.expires_at_ms,
+        now_ms,
+        |command| {
+            if net.try_send(&command.into_ipc()?)? {
+                Ok(())
+            } else {
+                Err(AslError::SandboxUnavailable)
+            }
+        },
+    );
+    let _ =
+        super::group_routing::publish_packet(net, store, route.target_child, local_peer, &packet);
+    if matches!(&direct, Ok(sent) if sent.queued > 0) {
+        return store.complete_shard_forward_outbox(route.forward_id);
+    }
+    let error = direct.err().unwrap_or(AslError::NotFound);
+    let terminal_reason = match &error {
+        AslError::ExpiredMessage => Some("expired"),
+        AslError::PolicyVersionConflict => Some("target_epoch_changed"),
+        AslError::PolicyDenied => Some("policy_denied"),
+        AslError::InvalidMessage => Some("invalid_frame"),
+        AslError::IncompatibleVersion => Some("target_incompatible"),
+        _ => None,
+    };
+    if let Some(reason) = terminal_reason {
+        return store.terminate_shard_forward_outbox(route.forward_id, reason, now_ms);
+    }
+    let attempts = entry.attempts.saturating_add(1);
+    let delay = SHARD_FORWARD_OUTBOX_RETRY_BASE_MS
+        .saturating_mul(1_u64 << attempts.min(7))
+        .min(SHARD_FORWARD_OUTBOX_RETRY_MAX_MS);
+    let next_attempt_ms = now_ms
+        .saturating_add(delay)
+        .min(route.expires_at_ms.saturating_sub(1));
+    if next_attempt_ms <= now_ms {
+        return store.terminate_shard_forward_outbox(route.forward_id, "expired", now_ms);
+    }
+    store.reschedule_shard_forward_outbox(route, attempts, next_attempt_ms)
 }
 
 fn local_mls_member_limit(store: &Store, now_ms: u64) -> Result<usize, AslError> {
@@ -2887,8 +3173,8 @@ fn local_mls_member_limit(store: &Store, now_ms: u64) -> Result<usize, AslError>
                 .or(range.direct_budget)
                 .map(|range| range.max)
         })
-        .unwrap_or(64);
-    Ok(measured.clamp(64, MAX_GROUP_MEMBERS))
+        .unwrap_or(MAX_GROUP_MEMBERS);
+    Ok(measured.clamp(1, MAX_GROUP_MEMBERS))
 }
 
 fn ensure_local_shard_binding(

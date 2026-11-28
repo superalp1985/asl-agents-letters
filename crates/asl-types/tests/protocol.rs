@@ -231,6 +231,8 @@ fn rejects_wrong_versions_bounds_and_invalid_peer_ids() {
         media_kind: MediaKind::Document,
         concepts: vec![],
         expires_at_ms: 200,
+        logical_group_id: None,
+        source_room_id: None,
     });
     assert!(encode_frame(&oversized).is_err());
 

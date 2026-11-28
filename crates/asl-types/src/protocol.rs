@@ -352,6 +352,8 @@ pub struct Offer {
     pub media_kind: MediaKind,
     pub concepts: Vec<ConceptRef>,
     pub expires_at_ms: u64,
+    pub logical_group_id: Option<Hash32>,
+    pub source_room_id: Option<Hash32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -359,6 +361,8 @@ pub struct FetchRequest {
     pub message_id: Id128,
     pub root_task_id: Id128,
     pub content_id: Hash32,
+    pub logical_group_id: Option<Hash32>,
+    pub source_room_id: Option<Hash32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -51,14 +51,16 @@ impl Task {
             sources.push(entry.source.clone());
         }
         let ticket = port
-            .submit(DownloadJob::Fetch(DownloadSelection {
+            .submit(DownloadJob::Fetch(Box::new(DownloadSelection {
                 content_id,
                 inbox_grant,
                 filename: format!("asl-{}.bin", hex::encode(content_id.0)),
                 sources,
                 group: None,
+                group_logical_id: None,
+                group_source_room_id: None,
                 context_ref: None,
-            }))
+            })))
             .map_err(error_code)?;
         Ok(self.downloads.push_mut(Download {
             notices: VecDeque::new(),

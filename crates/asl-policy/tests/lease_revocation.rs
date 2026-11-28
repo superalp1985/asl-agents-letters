@@ -136,6 +136,8 @@ fn fetch_grant_is_bound_to_the_authenticated_peer_and_requested_content() {
         message_id: [5; 16].into(),
         root_task_id: [6; 16].into(),
         content_id: Hash32([4; 32]),
+        logical_group_id: None,
+        source_room_id: None,
     };
     let grant = issue_fetch_grant(&scope, &leases, &peer(), &request, &permit, 100, NOW).unwrap();
     assert_eq!(

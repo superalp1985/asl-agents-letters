@@ -68,6 +68,8 @@ fn approved_avatar_reference_does_not_authorize_direct_fetch_or_bare_bulk() {
         message_id: Id128([1; 16]),
         root_task_id: Id128([2; 16]),
         content_id: avatar.content_id,
+        logical_group_id: None,
+        source_room_id: None,
     };
     assert!(matches!(
         transfer.prepare_fetch(requester.clone(), &fetch, now, |_, _| Ok(())),

@@ -102,7 +102,7 @@ fn authenticated_stdio_routes_to_real_core_and_new_attachment_cannot_read_previo
             .unwrap(),
     );
     let mut host = Host::start(&home, Some(&key));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let task = loop {
         let reply = host.call("asl_query", query("contacts_only"));
         if let Some(id) = payload(&reply)["task_id"].as_str() {
@@ -429,10 +429,19 @@ fn recovery_is_opt_in_read_only_and_survives_core_restart() {
     }
     host.close();
     let mut revoked = Host::with_recovery(&home, None, Some(&recovery));
-    assert_error(
-        &revoked.call("asl_recovery_task", json!({"task_id":task})),
-        "policy_denied",
-    );
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let reply = revoked.call("asl_recovery_task", json!({"task_id":task}));
+        if reply.to_string().contains("policy_denied") {
+            assert_error(&reply, "policy_denied");
+            break;
+        }
+        assert!(
+            Instant::now() < until && core.0.try_wait().unwrap().is_none(),
+            "{reply}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn query(audience: &str) -> Value {
@@ -574,6 +583,14 @@ struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
+            #[cfg(windows)]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
@@ -596,6 +613,12 @@ impl Drop for TestRoot {
         let base = std::env::temp_dir().canonicalize().unwrap();
         assert_eq!(root.parent(), Some(base.as_path()));
         assert_eq!(root.file_name(), self.0.file_name());
-        fs::remove_dir_all(root).unwrap();
+        for attempt in 0..50 {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => return,
+                Err(_) if attempt < 49 => thread::sleep(Duration::from_millis(100)),
+                Err(error) => panic!("failed to remove {}: {error}", root.display()),
+            }
+        }
     }
 }

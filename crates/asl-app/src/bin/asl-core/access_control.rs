@@ -1,9 +1,9 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
 use alloy_primitives::hex;
+use asl_app::libraries::LocalLibraries;
 use asl_app::paths::AppPaths;
 use asl_policy::Audience;
-use asl_store::resources::SnapshotBroker;
 use asl_types::{
     error::AslError,
     ids::{AgentId, Id128},
@@ -101,10 +101,10 @@ impl Command {
         }
     }
 
-    fn apply(self, broker: &mut SnapshotBroker) -> Result<Value, AslError> {
+    fn apply(self, libraries: &mut LocalLibraries) -> Result<Value, AslError> {
         match self {
             Self::Import { grant, relative } => {
-                let key = broker.import_source(&grant, &relative)?;
+                let key = libraries.import_source(&grant, &relative)?;
                 Ok(json!({"resource_key":hex::encode(key.0.0), "state":"indexed"}))
             }
             Self::Share {
@@ -114,7 +114,7 @@ impl Command {
                 max_bytes,
                 allow_derived_disclosure,
             } => {
-                let id = broker.authorize_directory_with_derivation(
+                let id = libraries.authorize_directory_with_derivation(
                     &root,
                     &extensions,
                     &audience,
@@ -124,14 +124,14 @@ impl Command {
                 Ok(json!({"grant_id": hex::encode(id.0.0), "state": "active"}))
             }
             Self::Derived { root, max_bytes } => {
-                let id = broker.authorize_derived_directory(&root, max_bytes)?;
+                let id = libraries.authorize_derived_directory(&root, max_bytes)?;
                 Ok(json!({"grant_id": hex::encode(id.0), "state": "active"}))
             }
             Self::Revoke { kind, id } => {
                 match kind.as_str() {
-                    "share" => broker.revoke_directory(&GrantId(id))?,
-                    "inbox" => broker.revoke_inbox_directory(id)?,
-                    "derived" => broker.revoke_derived_directory(id)?,
+                    "share" => libraries.revoke_directory(&GrantId(id))?,
+                    "inbox" => libraries.revoke_inbox_directory(id)?,
+                    "derived" => libraries.revoke_derived_directory(id)?,
                     _ => return Err(AslError::InvalidMessage),
                 }
                 Ok(json!({"grant_id": hex::encode(id.0), "state": "revoked"}))
@@ -142,9 +142,9 @@ impl Command {
 
 pub(super) fn run(args: &[OsString]) -> Result<(), AslError> {
     let root = PathBuf::from(env::var_os("ASL_HOME").ok_or(AslError::InvalidStorageRoot)?);
-    AppPaths::open(&root)?;
-    let mut broker = SnapshotBroker::open(&root)?;
-    println!("{}", Command::parse(args)?.apply(&mut broker)?);
+    let paths = AppPaths::open(&root)?;
+    let mut libraries = LocalLibraries::open(&paths)?;
+    println!("{}", Command::parse(args)?.apply(&mut libraries)?);
     Ok(())
 }
 
@@ -210,7 +210,7 @@ mod tests {
             parse(&[
                 "share",
                 "C:\\shared",
-                "md,pdf",
+                "md,pdf,docx,xlsx,pptx",
                 "public",
                 "-",
                 "1048576",
@@ -232,7 +232,7 @@ mod tests {
             parse(&[
                 "share",
                 "C:\\shared",
-                "md,pdf",
+                "md,pdf,docx,xlsx,pptx",
                 "contacts",
                 "-",
                 "1048576",
@@ -247,7 +247,7 @@ mod tests {
             parse(&[
                 "share",
                 "C:\\shared",
-                "md,pdf",
+                "md,pdf,docx,xlsx,pptx",
                 "agent",
                 &agent,
                 "1048576",

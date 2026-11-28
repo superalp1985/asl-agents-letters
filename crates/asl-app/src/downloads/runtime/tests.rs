@@ -56,14 +56,16 @@ impl Harness {
             })
             .collect();
         self.port
-            .submit(DownloadJob::Fetch(DownloadSelection {
+            .submit(DownloadJob::Fetch(Box::new(DownloadSelection {
                 content_id: self.source.content_id,
                 inbox_grant: grant,
                 filename: "received.bin".into(),
                 sources,
                 group,
+                group_logical_id: None,
+                group_source_room_id: None,
                 context_ref: None,
-            }))
+            })))
             .unwrap()
     }
 
@@ -379,7 +381,7 @@ fn revoked_inbox_never_sends_initial_fetch() {
 fn download_port_is_bounded_and_rejects_non_filename_destinations() {
     let (port, _runtime) = download_channel();
     let make = |filename: &str| {
-        DownloadJob::Fetch(DownloadSelection {
+        DownloadJob::Fetch(Box::new(DownloadSelection {
             content_id: Hash32([1; 32]),
             inbox_grant: Id128([2; 16]),
             filename: filename.into(),
@@ -390,8 +392,10 @@ fn download_port_is_bounded_and_rejects_non_filename_destinations() {
                     .peer_id(),
             }],
             group: None,
+            group_logical_id: None,
+            group_source_room_id: None,
             context_ref: None,
-        })
+        }))
     };
     assert!(port.submit(make("outside/item.bin")).is_err());
     for _ in 0..LOCAL_QUEUE {

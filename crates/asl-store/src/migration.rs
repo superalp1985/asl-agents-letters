@@ -6,8 +6,13 @@ use rusqlite::{Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Store, act_history::ActDirection, act_history::StoredActHistory, chain::agent_text,
-    database_error, inbound_observations::DAY_MS,
+    Store,
+    act_history::ActDirection,
+    act_history::StoredActHistory,
+    chain::agent_text,
+    contact_policy::{ContactRequestMode, ContactRequestPolicy, MAX_RECENT_INTERACTION_TTL_MS},
+    database_error,
+    inbound_observations::DAY_MS,
 };
 
 const CONTACT_LIMIT: usize = 10_000;
@@ -30,6 +35,8 @@ pub struct PortableRecords {
     contacts: Vec<Contact>,
     trust: Vec<Trust>,
     history: Vec<Observation>,
+    #[serde(default)]
+    contact_policy: Option<PortableContactPolicy>,
     #[serde(default)]
     acts: Vec<PortableAct>,
     #[serde(default)]
@@ -101,6 +108,14 @@ struct PortableGroup {
     last_epoch: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PortableContactPolicy {
+    mode: ContactRequestMode,
+    shared_group_auto_accept: bool,
+    recent_interaction_ttl_ms: u64,
+}
+
 impl Store {
     pub fn portable_records(
         &mut self,
@@ -124,6 +139,12 @@ impl Store {
                 .map_err(database_error)?
                 .collect::<Result<_, _>>()
                 .map_err(database_error)?;
+            let policy = crate::contact_policy::contact_request_policy(&tx)?;
+            records.contact_policy = Some(PortableContactPolicy {
+                mode: policy.mode,
+                shared_group_auto_accept: policy.shared_group_auto_accept,
+                recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+            });
         }
         if selection.trust {
             let mut statement = tx
@@ -309,6 +330,20 @@ impl Store {
                 ],
             )
             .map_err(database_error)?;
+        }
+        if let Some(policy) = records.contact_policy {
+            if policy.recent_interaction_ttl_ms > MAX_RECENT_INTERACTION_TTL_MS {
+                return Err(AslError::InvalidMessage);
+            }
+            crate::contact_policy::write_contact_request_policy(
+                &tx,
+                ContactRequestPolicy {
+                    mode: policy.mode,
+                    shared_group_auto_accept: policy.shared_group_auto_accept,
+                    recent_interaction_ttl_ms: policy.recent_interaction_ttl_ms,
+                },
+                u64::try_from(now).map_err(|_| AslError::InvalidMessage)?,
+            )?;
         }
         for event in records.trust {
             if event.agent == [0; 32] || !(0..=now).contains(&event.created_at_ms) {

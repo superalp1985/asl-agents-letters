@@ -6,7 +6,7 @@ use asl_store::{Store, group_state::MlsApplicationAuthority};
 use asl_types::{
     error::AslError,
     ids::{Hash32, Id128, PeerId},
-    protocol::GroupPacket,
+    protocol::{GroupBody, GroupPacket},
 };
 use openmls::prelude::CredentialWithKey;
 
@@ -91,6 +91,128 @@ impl CoreAdmission {
             },
             false,
             enqueue,
+        )
+    }
+
+    /// Dispatch an already committed and encrypted ShardForward without
+    /// advancing the room ratchet again. The frame may come from the durable
+    /// shard-forward outbox after reconnect or restart.
+    pub fn dispatch_prepared_loopback_mls_shard_forward(
+        &mut self,
+        store: &mut Store,
+        packet: &GroupPacket,
+        expires_at_ms: u64,
+        now_ms: u64,
+        mut enqueue: impl FnMut(NetworkCommand) -> Result<(), AslError>,
+    ) -> Result<MlsApplicationDispatch, AslError> {
+        packet.validate_request()?;
+        if !matches!(packet.body, GroupBody::Application(_)) {
+            return Err(AslError::InvalidMessage);
+        }
+        let saved = store
+            .mls_room_snapshot(packet.group_id)?
+            .ok_or(AslError::NotFound)?;
+        let (state, _) = store
+            .mls_room_progress(packet.group_id)?
+            .ok_or(AslError::NotFound)?;
+        if state != "active" || packet.epoch != saved.version.mls_epoch {
+            return Err(AslError::PolicyVersionConflict);
+        }
+        if self.group_directories.is_none() {
+            return Err(AslError::PolicyDenied);
+        }
+        let deadline_ms =
+            expires_at_ms.min(now_ms.saturating_add(REQUEST_TIMEOUT.as_millis() as u64));
+        let clock = SyncClock::inbound(now_ms, deadline_ms);
+        let candidate = self.load_mls_application_base(
+            store,
+            packet.group_id,
+            saved.version,
+            &HashMap::new(),
+            clock.now_ms()?,
+        )?;
+        let local = self.local_hello.peer_id.clone();
+        let mut routes = Vec::new();
+        let mut incompatible = false;
+        for (agent, connection, peer) in self.admitted_connections(clock.now_ms()?) {
+            if peer == local
+                || !creator_edge(&local, &peer, &candidate.creator)
+                || routes.iter().any(|(device, _, _)| *device == peer)
+            {
+                continue;
+            }
+            let Some(leaf) = candidate.leaves.iter().find(|leaf| {
+                leaf.certificate.peer_id == peer && leaf.certificate.agent_id == agent
+            }) else {
+                continue;
+            };
+            let key = CredentialWithKey::from(&leaf.member);
+            if self
+                .verify_group_route_leaf(connection, packet.group_id, &key, clock.now_ms()?)
+                .is_err()
+            {
+                continue;
+            }
+            if !self.peer_supports_shard_forward(connection) {
+                incompatible = true;
+                continue;
+            }
+            routes.push((peer, connection, key));
+        }
+        if routes.is_empty() {
+            return Err(if incompatible {
+                AslError::IncompatibleVersion
+            } else {
+                AslError::NotFound
+            });
+        }
+        let chain_id = self.resolver.deployment().chain_id;
+        let mut result = MlsApplicationDispatch {
+            message_id: packet.message_id,
+            queued: 0,
+            available: routes.len(),
+            packet: packet.clone(),
+        };
+        store.with_mls_application_dispatch(
+            packet.group_id,
+            saved.version,
+            MlsApplicationAuthority {
+                creator: &candidate.creator,
+                members: &candidate.roster.members,
+                chain_id,
+            },
+            clock.now_ms()?,
+            false,
+            || {
+                for (_, connection, leaf) in routes {
+                    let Ok(current) = clock.now_ms() else {
+                        break;
+                    };
+                    if self
+                        .verify_group_route_leaf(connection, packet.group_id, &leaf, current)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let Ok(request_handle) = fresh_id() else {
+                        break;
+                    };
+                    if clock.now_ms().is_err() {
+                        break;
+                    }
+                    if enqueue(NetworkCommand::SendGroup {
+                        connection_id: connection,
+                        request_handle,
+                        deadline_ms,
+                        request: packet.clone(),
+                    })
+                    .is_ok()
+                    {
+                        result.queued += 1;
+                    }
+                }
+                result
+            },
         )
     }
 

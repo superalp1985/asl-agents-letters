@@ -1214,6 +1214,8 @@ fn only_a_matched_fetch_manifest_registers_its_admitted_device() {
         message_id: Id128([53; 16]),
         root_task_id: Id128([54; 16]),
         content_id: Hash32(content_id(&payload)),
+        logical_group_id: None,
+        source_room_id: None,
     };
     let control_id = [55; 16];
     let grant = FetchGrant {

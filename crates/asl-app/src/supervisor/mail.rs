@@ -1230,6 +1230,8 @@ impl Supervisor {
             media_kind,
             concepts,
             expires_at_ms,
+            logical_group_id: Some(groups.store.mls_logical_root(room)?),
+            source_room_id: Some(room),
         };
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
         let sent = admission.send_loopback_mls_application_with_gossip(
@@ -1450,6 +1452,7 @@ impl Supervisor {
 
     fn contact_status(&self) -> Result<Value, AslError> {
         let store = asl_store::open_store_read_only(&self.state_database)?;
+        let policy = store.contact_request_policy()?;
         let candidates = store
             .contact_binding_candidates()?
             .into_iter()
@@ -1464,7 +1467,9 @@ impl Supervisor {
             })
             .collect::<Vec<_>>();
         Ok(json!({
-            "request_mode": store.contact_request_mode()?.as_str(),
+            "request_mode": policy.mode.as_str(),
+            "shared_group_auto_accept": policy.shared_group_auto_accept,
+            "recent_interaction_ttl_ms": policy.recent_interaction_ttl_ms,
             "bindings": store.recent_contact_bindings()?,
             "candidates": candidates,
         }))

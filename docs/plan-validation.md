@@ -1098,3 +1098,11 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 尚未执行两台真实设备上的自动接受、并发邀请、策略变更竞态和 GUI 人工点击验收。群来源、近期交互来源的独立规则仍需要签名 provenance 字段，当前没有把这两类来源冒充为已实现。
 - 本功能组的统一验证：workspace/all-targets 测试退出码 0、0 失败、13 项环境门槛忽略；`asl-app` desktop-ui 库 323 通过、0 失败、5 忽略；workspace 严格 Clippy、desktop-ui 严格 Clippy、格式、36 个 schema 向量、CDDL 和 `git diff --check` 均通过。
 - 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-contacts.zip`，79,259,397 字节，SHA-256 `072DFD232A470B56DBAFB3BB7359A2D7E8CF37A87E404FD1F12ED4C25F5A60E1`。这是未签名 debug/test 包，不是生产签名发行包。
+
+### 2026-11-28 群规模、文档路由和来源证据增量
+
+- v46 重建联系人动作表，新增固定期限交互证据表；v47 曾增加逻辑群唯一 Agent/Peer 只读视图；v48 删除持久视图，改为代码内递归查询；v49 增加只保存已加密控制帧、路由和期限的 shard-forward outbox。来源规则只使用本机当前共享群的同一认证 PeerId 或已固化的近期交互证据，不保存正文。
+- Dashboard 和管理快照按逻辑根聚合，创建群没有业务数量上限；单群邀请前按唯一 Agent 检查 10,000 上限，单 MLS shard 上限 512。
+- `Offer`/`FetchRequest` 增加可选逻辑根和源 shard 元数据；群文件请求可经逻辑群主转发回源 shard，文件字节仍要求直接认证传输。
+- 本轮最终集中验收：workspace/all-targets 退出码 0，1006 通过、0 失败、13 忽略；`asl-app` desktop-ui 库 323 通过、5 忽略；严格 Clippy、格式、schema 36 向量、CDDL 和 `git diff --check` 通过；release build 通过。
+- 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v49.zip`，80,952,123 字节，SHA-256 `A60E314973480E98FFE7536E6154D1DE887AE12C4229FB3307C09DB01D088789`。这是未签名 debug/test 包，不是生产签名发行包。

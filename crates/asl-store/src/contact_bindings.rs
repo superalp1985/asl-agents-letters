@@ -87,6 +87,9 @@ pub enum ContactBindingActionKind {
     SetRequestReview,
     SetRequestAutoAccept,
     SetRequestReject,
+    EnableSharedGroupAutoAccept,
+    DisableSharedGroupAutoAccept,
+    SetRecentInteractionTtl,
 }
 
 impl ContactBindingActionKind {
@@ -102,6 +105,9 @@ impl ContactBindingActionKind {
             Self::SetRequestReview => "set_request_review",
             Self::SetRequestAutoAccept => "set_request_auto_accept",
             Self::SetRequestReject => "set_request_reject",
+            Self::EnableSharedGroupAutoAccept => "enable_shared_group_auto_accept",
+            Self::DisableSharedGroupAutoAccept => "disable_shared_group_auto_accept",
+            Self::SetRecentInteractionTtl => "set_recent_interaction_ttl",
         }
     }
 }
@@ -682,6 +688,13 @@ fn valid_action(
         | ContactBindingActionKind::SetRequestReject => {
             code.is_none() && agent_id.is_none() && !has_peer
         }
+        ContactBindingActionKind::EnableSharedGroupAutoAccept
+        | ContactBindingActionKind::DisableSharedGroupAutoAccept => {
+            code.is_none() && agent_id.is_none() && !has_peer
+        }
+        ContactBindingActionKind::SetRecentInteractionTtl => {
+            code.is_some() && agent_id.is_none() && !has_peer
+        }
     }
 }
 
@@ -697,6 +710,13 @@ fn parse_action_kind(value: &str) -> Result<ContactBindingActionKind, AslError> 
         "set_request_review" => Ok(ContactBindingActionKind::SetRequestReview),
         "set_request_auto_accept" => Ok(ContactBindingActionKind::SetRequestAutoAccept),
         "set_request_reject" => Ok(ContactBindingActionKind::SetRequestReject),
+        "enable_shared_group_auto_accept" => {
+            Ok(ContactBindingActionKind::EnableSharedGroupAutoAccept)
+        }
+        "disable_shared_group_auto_accept" => {
+            Ok(ContactBindingActionKind::DisableSharedGroupAutoAccept)
+        }
+        "set_recent_interaction_ttl" => Ok(ContactBindingActionKind::SetRecentInteractionTtl),
         _ => Err(AslError::InvalidDatabase),
     }
 }

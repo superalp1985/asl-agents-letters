@@ -81,6 +81,13 @@ impl DirectInbound {
             WireFrame::Query(query.clone()),
             now_ms,
         )?;
+        self.store.record_contact_interaction_evidence(
+            requester.agent,
+            &requester.peer,
+            query.root_task_id,
+            None,
+            now_ms,
+        )?;
         let work = match ingress {
             Ingress::Observed if mode == InboundMode::BrowseOnly => {
                 self.store.record_direct_inbound_observation(
