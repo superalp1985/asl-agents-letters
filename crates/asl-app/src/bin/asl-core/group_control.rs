@@ -68,9 +68,12 @@ pub(super) fn review(args: &[std::ffi::OsString]) -> Result<(), AslError> {
 const MAX_REPLY: usize = 64 * 1024;
 const HELP: &str = "\
 list | peers | create | room <room-id>
+create-shard <root-room-id> | invite-shard <root-room-id> <connection-id>
 approve <invite-id> | retry <invite-id> | reject <invite-id>
 invite <room-id> <connection-id> | dial <ip:port> <base58-peer-id>
 remove <room-id> <base58-peer-id>
+propose-remove <room-id> <base58-peer-id>
+approve-remove <room-id> <request-id> | reject-remove <room-id> <request-id>
 inbound <on|off> <on|off>
 Room, connection and invite IDs are hex. Dial uses TCP.
 Approve saves the decision and tries once; use retry if needed.";
@@ -161,6 +164,11 @@ fn parse(line: &str) -> Result<LocalGroupAction, AslError> {
         ["list"] => LocalGroupAction::List,
         ["peers"] => LocalGroupAction::Peers,
         ["create"] => LocalGroupAction::Create,
+        ["create-shard", root] => LocalGroupAction::CreateShard(Hash32(fixed_hex(root)?)),
+        ["invite-shard", root, connection] => LocalGroupAction::InviteShard {
+            root: Hash32(fixed_hex(root)?),
+            connection_id: fixed_hex(connection)?,
+        },
         ["room", id] => LocalGroupAction::Room(Hash32(fixed_hex(id)?)),
         ["approve", id] => LocalGroupAction::Approve(Id128(fixed_hex(id)?)),
         ["retry", id] => LocalGroupAction::Retry(Id128(fixed_hex(id)?)),
@@ -173,6 +181,17 @@ fn parse(line: &str) -> Result<LocalGroupAction, AslError> {
             room: Hash32(fixed_hex(room)?),
             peer: parse_peer(peer)?,
         },
+        ["propose-remove", room, peer] => LocalGroupAction::ProposeRemove {
+            room: Hash32(fixed_hex(room)?),
+            peer: parse_peer(peer)?,
+        },
+        [op @ ("approve-remove" | "reject-remove"), room, request] => {
+            LocalGroupAction::ReviewRemoval {
+                room: Hash32(fixed_hex(room)?),
+                request: Id128(fixed_hex(request)?),
+                approve: *op == "approve-remove",
+            }
+        }
         ["inbound", browse, answer] => LocalGroupAction::ConfigureInbound {
             browse_enabled: parse_switch(browse)?,
             answer_enabled: parse_switch(answer)?,
@@ -273,7 +292,7 @@ mod tests {
             .unwrap()
             .public()
             .to_peer_id();
-        let address = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 12345));
+        let address = SocketAddr::from(([203, 0, 113, 7], 12345));
         assert!(matches!(
             parse(&format!("dial {address} {peer}")),
             Ok(LocalGroupAction::Dial { address: got, peer: id }) if got == address && id.as_bytes() == peer.to_bytes()

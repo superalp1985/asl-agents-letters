@@ -93,14 +93,32 @@ impl Client {
             Request::SendAct(_) if connection.capabilities["send_act"] != true => {
                 Err(ErrorCode::PolicyDenied)
             }
+            Request::SendShardAnnouncement(_)
+                if connection.capabilities["send_shard_announcement"] != true =>
+            {
+                Err(ErrorCode::IncompatibleVersion)
+            }
             Request::SendFile(_) if connection.capabilities["send_file"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::ActHistorySearch(_) if connection.capabilities["act_history"] != true => {
+                Err(ErrorCode::PolicyDenied)
+            }
+            Request::ContactLookup(_) | Request::ContactStatus
+                if connection.capabilities["contacts_manage"] != true =>
+            {
                 Err(ErrorCode::PolicyDenied)
             }
             Request::GroupList
             | Request::GroupCreate
+            | Request::GroupMembers(_)
+            | Request::GroupSetAccess(_)
             | Request::GroupInvite(_)
+            | Request::GroupInviteRequest(_)
+            | Request::GroupRejectJoinRequest(_)
             | Request::DirectOpen(_)
             | Request::RenewActBudget(_)
+            | Request::RenewResourceBudget(_)
                 if connection.capabilities["groups_admin"] != true =>
             {
                 Err(ErrorCode::PolicyDenied)

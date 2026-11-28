@@ -35,6 +35,8 @@ fn received_answer_survives_reopen_but_not_disabling_retention() {
         agent_push: false,
         expressions: false,
         groups_admin: false,
+        act_history: false,
+        contacts_manage: false,
     };
     let recovery = Recovery::configure(&path, Some(&grant)).unwrap().unwrap();
     let (queries, _query_runtime) = outgoing_query_channel();
@@ -118,6 +120,8 @@ fn offer_response(task_id: TaskId, root: Id128) -> OutgoingQueryEvent {
             media_kind: MediaKind::Document,
             concepts: vec![ConceptRef::RUST],
             expires_at_ms: unix_time_ms().unwrap() + QUERY_WINDOW_MS,
+            logical_group_id: None,
+            source_room_id: None,
         })),
     }
 }

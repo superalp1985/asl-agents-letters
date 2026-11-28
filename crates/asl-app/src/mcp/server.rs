@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -131,9 +131,9 @@ impl McpWorker {
                         tokio::select! {
                             _ = stopped => {}
                             _ = async {
-                                let legacy = listen(&mut listener, &grant, &queries, &downloads, mail.as_ref(), None, readiness.as_ref());
+                                let legacy = listen(&root, &mut listener, &grant, &queries, &downloads, mail.as_ref(), None, readiness.as_ref());
                                 if let (Some(listener), Some(recovery)) = (&mut recovery_listener, recovery.as_ref()) {
-                                    let recovery = listen(listener, &grant, &queries, &downloads, None, Some(recovery), readiness.as_ref());
+                                    let recovery = listen(&root, listener, &grant, &queries, &downloads, None, Some(recovery), readiness.as_ref());
                                     tokio::join!(legacy, recovery);
                                 } else {
                                     legacy.await;
@@ -163,7 +163,9 @@ impl Drop for McpWorker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn listen(
+    root: &Path,
     listener: &mut LocalPipeServer,
     grant: &HostGrant,
     queries: &OutgoingQueryPort,
@@ -176,6 +178,7 @@ async fn listen(
         match listener.accept().await {
             Ok(mut connection) => {
                 let _ = serve(
+                    root,
                     connection.stream(),
                     grant,
                     queries,
@@ -192,7 +195,9 @@ async fn listen(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve(
+    root: &Path,
     stream: impl AsyncRead + AsyncWrite + Unpin,
     grant: &HostGrant,
     queries: &OutgoingQueryPort,
@@ -215,11 +220,15 @@ async fn serve(
     let inbox = if is_recovery { None } else { grant.inbox };
     let capabilities = json!({
         "bootstrap_v1": readiness.is_some(),
+        "guided_setup_v1": readiness.is_some() && !is_recovery,
         "send_expression": !is_recovery && grant.expressions && mail.is_some(),
         "send_context_expression": !is_recovery && grant.expressions && mail.is_some(),
         "send_act": !is_recovery && grant.expressions && mail.is_some(),
+        "send_shard_announcement": !is_recovery && grant.expressions && grant.groups_admin && mail.is_some(),
         "send_file": !is_recovery && grant.groups_admin && mail.is_some(),
         "groups_admin": !is_recovery && grant.groups_admin && mail.is_some(),
+        "contacts_manage": !is_recovery && grant.contacts_manage && mail.is_some(),
+        "act_history": !is_recovery && grant.act_history && mail.is_some(),
         "request_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "confirm_context": !is_recovery && grant.expressions && push && mail.is_some(),
         "receive_offer": push && mail.is_some(),
@@ -250,13 +259,21 @@ async fn serve(
                     Request::AgentEventsAvailable => Ok(Value::Bool(push)),
                     Request::LocalCapabilities => Ok(capabilities.clone()),
                     Request::AgentBootstrap => readiness
-                        .map(|status| super::bootstrap::report(
-                            *status.borrow(),
-                            grant.scope,
-                            push,
-                            is_recovery,
-                            &capabilities,
-                        ))
+                        .map(|status| {
+                            let mut report = super::bootstrap::report(
+                                *status.borrow(),
+                                grant.scope,
+                                push,
+                                is_recovery,
+                                &capabilities,
+                            );
+                            if !is_recovery
+                                && let Some(object) = report.as_object_mut()
+                            {
+                                object.insert("setup".into(), guided_setup_value(root));
+                            }
+                            report
+                        })
                         .ok_or(ErrorCode::IncompatibleVersion),
                     Request::RecoveryTask(args) => {
                         session.refresh_recovery()?;
@@ -297,29 +314,55 @@ async fn serve(
                     Request::SendExpression(_)
                     | Request::SendContextExpression(_)
                     | Request::SendAct(_)
+                    | Request::SendShardAnnouncement(_)
                     | Request::SendFile(_)
+                    | Request::ActHistorySearch(_)
+                    | Request::ContactLookup(_)
+                    | Request::ContactStatus
                     | Request::GroupList
                     | Request::GroupCreate
+                    | Request::GroupMembers(_)
+                    | Request::GroupSetAccess(_)
                     | Request::GroupInvite(_)
+                    | Request::GroupInviteRequest(_)
+                    | Request::GroupRejectJoinRequest(_)
                     | Request::DirectOpen(_)
                     | Request::RenewActBudget(_)
+                    | Request::RenewResourceBudget(_)
                     | Request::RequestContext(_)
                     | Request::ConfirmContext(_)
                     | Request::Fetch(_)
                     | Request::ReceiveOffer(_)
                         if is_recovery => Err(ErrorCode::PolicyDenied),
                     Request::SendExpression(args) => send_expression(mail, grant, args).await,
+                    Request::ActHistorySearch(args) => {
+                        act_history_search(mail, grant, args).await
+                    }
+                    Request::ContactLookup(args) => contact_lookup(mail, grant, args).await,
+                    Request::ContactStatus => contact_status(mail, grant).await,
                     Request::SendContextExpression(args) => {
                         send_context_expression(mail, grant, args).await
                     }
                     Request::SendAct(args) => send_act(mail, grant, args).await,
+                    Request::SendShardAnnouncement(args) => send_shard_announcement(mail, grant, args).await,
                     Request::SendFile(args) => send_file(mail, grant, args).await,
                     Request::GroupList => group_list(mail, grant).await,
                     Request::GroupCreate => group_create(mail, grant).await,
+                    Request::GroupMembers(args) => group_members(mail, grant, args).await,
+                    Request::GroupSetAccess(args) => group_set_access(mail, grant, args).await,
                     Request::GroupInvite(args) => group_invite(mail, grant, args).await,
+                    Request::GroupInviteRequest(args) => {
+                        group_invite_request(mail, grant, args).await
+                    }
+                    Request::GroupRejectJoinRequest(args) => {
+                        group_reject_join_request(mail, grant, args).await
+                    }
                     Request::DirectOpen(args) => direct_open(mail, grant, args).await,
                     Request::RenewActBudget(args) => {
                         renew_act_budget(mail, grant, args).await
+                    }
+                    Request::RenewResourceBudget(args) => {
+                        renew_resource_budget(mail, grant, args).await
                     }
                     Request::RequestContext(args) if subscribed => {
                         request_context(mail, grant, args).await
@@ -407,6 +450,27 @@ async fn serve(
     }
 }
 
+fn guided_setup_value(root: &Path) -> Value {
+    let status = crate::paths::AppPaths::open_existing(root)
+        .and_then(|paths| crate::identity_onboarding::guided_setup_status(&paths));
+    match status {
+        Ok(status) => serde_json::to_value(status).unwrap_or_else(|_| {
+            json!({
+                "schema": "asl-guided-setup-status-v1",
+                "stage": "blocked",
+                "next_action": "repair_local_profile",
+                "error_code": ErrorCode::InternalError,
+            })
+        }),
+        Err(error) => json!({
+            "schema": "asl-guided-setup-status-v1",
+            "stage": "blocked",
+            "next_action": "repair_local_profile",
+            "error_code": error_code(error),
+        }),
+    }
+}
+
 async fn request_permission(
     pending: &mut Option<InboxDecision>,
     request: impl Future<Output = Result<InboxDecision, AslError>>,
@@ -478,6 +542,20 @@ async fn send_act(
     Ok(json!({ "message_id": alloy_primitives::hex::encode(id.0) }))
 }
 
+async fn send_shard_announcement(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::ActArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.expressions && grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (root, act) = args.validate()?;
+    mail.send_shard_announcement(root, act)
+        .await
+        .map_err(error_code)
+}
+
 async fn send_file(
     mail: Option<&MailPort>,
     grant: &HostGrant,
@@ -506,6 +584,32 @@ async fn group_create(mail: Option<&MailPort>, grant: &HostGrant) -> Result<Valu
     mail.group_create().await.map_err(error_code)
 }
 
+async fn group_members(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupRoomArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let room = args.validate()?;
+    mail.group_members(room).await.map_err(error_code)
+}
+
+async fn group_set_access(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupSetAccessArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, update) = args.validate()?;
+    mail.group_set_access(room, update)
+        .await
+        .map_err(error_code)
+}
+
 async fn group_invite(
     mail: Option<&MailPort>,
     grant: &HostGrant,
@@ -516,6 +620,67 @@ async fn group_invite(
         .ok_or(ErrorCode::PolicyDenied)?;
     let (room, agent) = args.validate()?;
     mail.group_invite(room, agent).await.map_err(error_code)
+}
+
+async fn group_invite_request(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupInviteRequestArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, owner) = args.validate()?;
+    mail.group_invite_request(room, owner)
+        .await
+        .map_err(error_code)
+}
+
+async fn group_reject_join_request(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::GroupRejectJoinRequestArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (room, device) = args.validate()?;
+    mail.group_reject_join_request(room, device)
+        .await
+        .map_err(error_code)
+}
+
+async fn act_history_search(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::ActHistorySearchArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.act_history)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (query, limit) = args.validate()?;
+    mail.act_history_search(query, limit)
+        .await
+        .map_err(error_code)
+}
+
+async fn contact_lookup(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::AgentTargetArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.contacts_manage)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let agent = args.validate()?;
+    mail.contact_lookup(agent).await.map_err(error_code)
+}
+
+async fn contact_status(mail: Option<&MailPort>, grant: &HostGrant) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.contacts_manage)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    mail.contact_status().await.map_err(error_code)
 }
 
 async fn direct_open(
@@ -544,6 +709,20 @@ async fn renew_act_budget(
         .map_err(error_code)
 }
 
+async fn renew_resource_budget(
+    mail: Option<&MailPort>,
+    grant: &HostGrant,
+    args: super::contract::RenewResourceBudgetArgs,
+) -> Result<Value, ErrorCode> {
+    let mail = mail
+        .filter(|_| grant.groups_admin)
+        .ok_or(ErrorCode::PolicyDenied)?;
+    let (conversation_id, kind, additional, window_ms) = args.validate()?;
+    mail.renew_resource_budget(conversation_id, kind, additional, window_ms)
+        .await
+        .map_err(error_code)
+}
+
 async fn request_context(
     mail: Option<&MailPort>,
     grant: &HostGrant,
@@ -565,8 +744,11 @@ async fn confirm_context(
     args: super::contract::ConfirmContextArgs,
 ) -> Result<Value, ErrorCode> {
     let mail = mail.ok_or(ErrorCode::PolicyDenied)?;
-    let request_id = parse_id(&args.request_id)?;
-    let (message_id, status) = mail.confirm_context(request_id).await.map_err(error_code)?;
+    let (request_id, group) = args.validate()?;
+    let (message_id, status) = mail
+        .confirm_context(request_id, group)
+        .await
+        .map_err(error_code)?;
     Ok(json!({
         "message_id": alloy_primitives::hex::encode(message_id.0),
         "status": match status {
@@ -574,5 +756,7 @@ async fn confirm_context(
             asl_types::protocol::ContextAgreementStatus::Unresolved => "unresolved",
             asl_types::protocol::ContextAgreementStatus::Rejected => "rejected",
         },
+        "room": group.map(|(room, _)| format!("group:{}", alloy_primitives::hex::encode(room.0))),
+        "sender": group.map(|(_, sender)| format!("agent:{}", alloy_primitives::hex::encode(sender.0))),
     }))
 }

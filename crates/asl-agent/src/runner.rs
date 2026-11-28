@@ -352,6 +352,8 @@ fn fallback(
             media_kind: hit.media_kind,
             concepts: hit.concepts.clone(),
             expires_at_ms: query.expires_at_ms,
+            logical_group_id: None,
+            source_room_id: None,
         }),
         _ => answer(
             query,

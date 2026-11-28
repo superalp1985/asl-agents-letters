@@ -168,7 +168,11 @@ impl AgentIdentity {
 
     pub(crate) fn sign_domain_message(&self, message: &[u8]) -> Result<Signature65, AslError> {
         let digest = Keccak256::digest(message);
-        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(&digest);
+        self.sign_prehash(digest.as_slice())
+    }
+
+    pub(crate) fn sign_prehash(&self, digest: &[u8]) -> Result<Signature65, AslError> {
+        let (signature, recovery_id) = self.signing_key.sign_prehash_recoverable(digest);
         if recovery_id.to_byte() > 1 {
             return Err(AslError::InvalidIdentity);
         }

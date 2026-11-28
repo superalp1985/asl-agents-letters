@@ -128,6 +128,18 @@
       "accepted": true
     },
     {
+      "name": "group-policy-v1",
+      "root": "group-policy",
+      "codec": "group-policy",
+      "accepted": true
+    },
+    {
+      "name": "group-policy-v2",
+      "root": "group-policy",
+      "codec": "group-policy",
+      "accepted": true
+    },
+    {
       "name": "signed-profile-record-v1",
       "root": "signed-profile-record",
       "codec": "record",

@@ -3,10 +3,12 @@
 
 mod application;
 mod invite;
+mod invite_request;
 pub mod invite_review;
 #[cfg(test)]
 mod invite_tests;
 pub mod operator;
+mod outbox;
 mod outgoing;
 #[cfg(test)]
 mod outgoing_tests;
@@ -14,15 +16,27 @@ mod policy;
 mod recovery;
 #[cfg(test)]
 mod recovery_tests;
+mod removal_request;
+mod shard_forward;
+mod shards;
 mod sync_authority;
 mod sync_log;
 mod transition;
 
 pub use application::MlsApplicationAuthority;
 pub use invite::{MlsIncomingInvite, MlsInviteEndpoints, MlsJoinKey, MlsJoinedRoom};
+pub use invite_request::{
+    GROUP_INVITE_REQUEST_TTL_MS, GroupInviteRequest, GroupInviteRequestInput,
+};
+pub use outbox::{
+    MAX_SHARD_FORWARD_OUTBOX_BATCH, PendingShardForwardOutbox, SHARD_FORWARD_OUTBOX_RETRY_BASE_MS,
+    SHARD_FORWARD_OUTBOX_RETRY_MAX_MS, SHARD_FORWARD_OUTBOX_TERMINAL_RETENTION_MS,
+    ShardForwardOutboxRecord, ShardForwardOutboxRoute,
+};
 pub use outgoing::{MlsInviteResponse, MlsWelcomeRequest};
 pub use policy::{GroupInboundPolicy, GroupInboundSwitch};
 pub use recovery::{MlsMemberEvidence, MlsRoomActivation, MlsRoomRecovery};
+pub use removal_request::PendingGroupRemoval;
 pub use sync_authority::{MlsRemoveAuthority, MlsSyncAddAuthority, MlsSyncReadAuthority};
 pub use sync_log::{
     MLS_SYNC_MAX_STEPS, MLS_SYNC_RETENTION_MS, MlsEpochBindings, MlsSyncStoredStep,
@@ -91,6 +105,25 @@ impl Store {
         expected_policy_revision: u64,
         now_ms: u64,
     ) -> Result<RoomVersion, AslError> {
+        self.create_mls_room_linked(
+            room,
+            creator,
+            chain_id,
+            expected_policy_revision,
+            now_ms,
+            None,
+        )
+    }
+
+    pub fn create_mls_room_linked(
+        &mut self,
+        room: PendingMlsRoom<'_>,
+        creator: &MlsMemberEvidence,
+        chain_id: u64,
+        expected_policy_revision: u64,
+        now_ms: u64,
+        shard_root: Option<Hash32>,
+    ) -> Result<RoomVersion, AslError> {
         if room.mls_epoch != 0 || room.creator != &creator.certificate.peer_id {
             return Err(AslError::InvalidPolicyState);
         }
@@ -123,6 +156,10 @@ impl Store {
             ],
         )
         .map_err(database_error)?;
+        if let Some(root) = shard_root {
+            shards::link_shard(&tx, root, room.wire_id, room.creator)?;
+            shards::inherit_root_policy(&tx, root, room.local_id, room.creator, now)?;
+        }
         tx.commit().map_err(database_error)?;
         Ok(RoomVersion {
             revision: 1,

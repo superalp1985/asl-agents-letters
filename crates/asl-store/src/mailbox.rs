@@ -332,6 +332,50 @@ impl Store {
             .map_err(database_error)
     }
 
+    /// Lists only non-expired opaque envelopes for one locally derived mailbox
+    /// topic. The topic key is a routing identifier, never a decryption key.
+    pub fn list_mailbox_envelopes(
+        &self,
+        topic_id: &[u8; MAILBOX_ID_BYTES],
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<StoredMailboxEnvelope>, AslError> {
+        validate_random_id(topic_id)?;
+        validate_now(now_ms)?;
+        if limit == 0 || limit > MAX_MAILBOX_QUOTA_ENTRIES {
+            return Err(AslError::QuotaExceeded);
+        }
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "SELECT mailbox_id,envelope_hash,ciphertext,padded_size,
+                        created_at_ms,expires_at_ms
+                 FROM mailbox_slots
+                 WHERE topic_id=?1 AND expires_at_ms>?2
+                 ORDER BY created_at_ms,mailbox_id
+                 LIMIT ?3",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map(
+                params![topic_id.as_slice(), now_ms, i64::from(limit)],
+                |row| {
+                    Ok(StoredMailboxEnvelope {
+                        topic_id: *topic_id,
+                        mailbox_id: blob_id(row.get(0)?)?,
+                        envelope_hash: blob_id(row.get(1)?)?,
+                        ciphertext: row.get(2)?,
+                        padded_size: integer_u32(row.get(3)?)?,
+                        created_at_ms: row.get(4)?,
+                        expires_at_ms: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
     pub fn load_mailbox_shard(
         &self,
         topic_id: &[u8; MAILBOX_ID_BYTES],
@@ -908,9 +952,9 @@ mod tests {
     }
 
     #[test]
-    fn v35_migration_creates_all_new_tables() {
+    fn v35_through_v43_migrations_create_all_new_tables() {
         let (_directory, _path, store) = test_store();
-        assert_eq!(store.schema_version(), 35);
+        assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         for table in [
             "mailbox_slots",
             "mailbox_shards",
@@ -919,6 +963,17 @@ mod tests {
             "conversation_attachment_refs",
             "gossip_topic_state",
             "local_capacity_measurements",
+            "conversation_act_semantic_index",
+            "group_access_policies",
+            "group_access_members",
+            "group_file_policies",
+            "group_admin_capabilities",
+            "contact_invites",
+            "contact_invite_receipts",
+            "contact_invite_prompts",
+            "contact_invite_actions",
+            "group_invite_requests",
+            "migration_group_hints",
         ] {
             let exists: bool = store
                 .connection
@@ -942,27 +997,42 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE conversation_attachment_refs;
+                "DROP TABLE mls_shard_forward_receipts;
+                 DROP TABLE mls_shard_bindings;
+                 DROP TABLE mls_room_shards;
+                 DROP TABLE group_removal_requests;
+                 DROP TABLE conversation_act_semantic_index;
+                 DROP TABLE conversation_attachment_refs;
                  DROP TABLE conversation_act_events;
                  DROP TABLE conversation_budget_grants;
                  DROP TABLE mailbox_shards;
                  DROP TABLE mailbox_slots;
                  DROP TABLE gossip_topic_state;
                  DROP TABLE local_capacity_measurements;
-                 DELETE FROM schema_migrations WHERE version=35;",
+                 DROP TABLE group_admin_capabilities;
+                 DROP TABLE group_file_policies;
+                 DROP TABLE group_access_members;
+                 DROP TABLE group_access_policies;
+                 DROP TABLE group_invite_requests;
+                 DROP TABLE migration_group_hints;
+                 DROP TABLE resource_budget_grants;
+                 DROP TABLE IF EXISTS dht_provider_cache_v42;
+                 DROP TABLE dht_provider_cache;
+                 DROP TABLE dht_record_cache;
+                 DELETE FROM schema_migrations WHERE version>=35;",
             )
             .unwrap();
         drop(connection);
 
         let store = open_store(&path).unwrap();
-        assert_eq!(store.schema_version(), 35);
+        assert_eq!(store.schema_version(), crate::SCHEMA_VERSION as u32);
         let migration_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(migration_count, 35);
+        assert_eq!(migration_count, crate::SCHEMA_VERSION);
         let budget_table_exists: bool = store
             .connection
             .query_row(
@@ -1029,6 +1099,43 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn lists_live_opaque_envelopes_for_one_topic() {
+        let (_directory, _path, mut store) = test_store();
+        let topic_id = id(1);
+        for (seed, expires_at_ms) in [(2, 10_000), (3, 5_000)] {
+            store
+                .put_mailbox_envelope(MailboxEnvelope {
+                    topic_id,
+                    mailbox_id: id(seed),
+                    envelope_hash: id(seed + 10),
+                    ciphertext: &[seed; 16],
+                    padded_size: 32,
+                    now_ms: 1_000,
+                    expires_at_ms,
+                    quota: quota(4, 1_024),
+                })
+                .unwrap();
+        }
+        store
+            .put_mailbox_envelope(MailboxEnvelope {
+                topic_id: id(9),
+                mailbox_id: id(4),
+                envelope_hash: id(14),
+                ciphertext: b"other",
+                padded_size: 16,
+                now_ms: 1_000,
+                expires_at_ms: 10_000,
+                quota: quota(4, 1_024),
+            })
+            .unwrap();
+
+        let live = store.list_mailbox_envelopes(&topic_id, 6_000, 8).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mailbox_id, id(2));
+        assert_eq!(live[0].ciphertext, [2; 16]);
     }
 
     #[test]

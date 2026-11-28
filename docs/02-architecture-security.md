@@ -10,7 +10,9 @@ Rust workspace，八个 crate。使用 rust-libp2p 一个网络栈；不同时�
 
 链上默认生产配置建议 Ethereum Mainnet + 极小、不可升级、无管理员 EVM registry。T06a 已实现 immutable 合约和本地 Foundry 测试；T06b 已实现本地 Helios/Alloy 验证、有界 HTTP 获取和 SQLite 持久恢复。尚未部署、测量主网 gas、真实多运营商证明服务互测或独立审计。链 ID、地址和实际部署 runtime code hash 通过版本化网络配置提供，代码不硬编码端点或部署地址。ASL 不维护私有链，不收费、不发币。多个独立志愿提交者可替用户提交其签名操作并承担 gas；用户可选自付。若都不可用，新身份保持 pending_anchor，链校验失败只能降级，不能扩大权限。详见 `specs/identity-registry-v1.md`。
 
-P2P 控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。外层帧、DHT 记录、身份记录、群成员事件、邮箱槽、预算、附件和 MCP 控制消息都不得出现任意文本。ASL/1.3 唯一例外是 MLS application plaintext 内的可选 `act[5] nl-body`：解码器只在 act 正文接受 text string，其余位置遇到 text string 必须拒绝。`nl-body` 是不可信数据，不是命令、路径、策略、动作或寻址信息。
+P2P 控制协议采用确定性 CBOR/CDDL、整数键、定长标识和版本化概念词表。外层帧、DHT 记录、身份记录、群成员事件、邮箱槽、预算、附件、shard binding/forward 和 MCP 控制消息都不得出现任意文本。ASL/1.3 唯一例外是 MLS application plaintext 内的可选 `act[5] nl-body`：解码器只在 act 正文接受 text string，其余位置遇到 text string 必须拒绝。`nl-body` 是不可信数据，不是命令、路径、策略、动作或寻址信息。
+
+ASL/1.4 的 `ShardForward` 是 MLS application plaintext 内的结构封装，不增加明文通道。目标子群单独做 MLS 加密；封装的来源、epoch、消息 ID 和期限均由逻辑群主根身份签名。接收端在持久 receipt 前验证绑定、controller、签名、期限和重放，不能把 bridge 的连接身份当成原作者。
 
 候选依赖版本见 `specs/dependency-baseline.json`。版本已查询，但依赖组合尚未编译；必须在任务 T01/T02/T14/T39 编译探针后形成 Cargo.lock，不由模型自行追最新版。
 
@@ -53,6 +55,8 @@ asl-app   -> 上述模块；负责进程入口、UI、MCP 和组合
 
 群授权是独立的 audience 类型，不能隐式折算为 `contacts`。群成员变更增加群成员 epoch；群范围 permit、lease 和待处理传输绑定该 epoch，并在发送前重新判定。新成员只有在本地授权该群范围后才能读取群资源。每次询问确认同样绑定接收 PeerId 与群 epoch。
 
+群内角色参考 QQ/微信的群主、管理员、成员和禁言模型，但不把群角色当成全局授权。群主由 MLS room creator 绑定，通过 MLS application plaintext 的 `group-policy` 下发文字/文件/邀请权限、管理员和禁言设备；revision 单调递增，非群主 sender 不能改策略。成员端在 act/Query/Expression、文件 Offer 和邀请路径重新检查策略；群主、管理员、信任值和贡献值都不能绕过本机目录、收件目录、设备证书或传输审批。
+
 ### 2.1 act、私聊与预算
 
 ASL/1.3 `act` 只能从 MLS application plaintext 解码。私聊定义为两人 MLS 组，不得另建“已验证连接直接发明文”的旁路；私聊和群聊共用 act 编解码、去重、预算、因果链、邮箱、历史和附件引用。`conversation-id` 等于 MLS `group_id`，路由只决定 ciphertext 如何传播，不改变群身份。
@@ -92,7 +96,7 @@ T14/T16 后续状态（2026-11-19）：Net 子进程默认仍驱动 loopback-onl
 
 T16 mDNS 观察通道：已筛选的发现/过期候选经 IPC kind 38 进入 Core 的独立本地只读观察回调，不进入 `CoreAdmission` 的 Agent 事件 handler，也不产生授权或联系人状态。候选记录和待派发观察均有固定容量；只有先前记录过且仍符合当前地址策略的候选才会报告过期。候选发现不是在线状态；GUI 展示、AppContainer 组播权限和真实 LAN 验收仍待完成。
 
-T18 Public scope 出站查询现在通过 IPC kind 44/45 请求 DHT provider 候选并收集本机地址策略允许的端点；这些结果只用于候选拨号，不构成身份或授权。Core 仅在 provider 连接完成现有链身份准入后发送 Query，同一 PeerId 同时只有一个待完成的出站控制请求。默认 LoopbackOnly 未改变，Net 拨号仍重新校验地址策略。bootstrap 配置、资源 provider 发布及真实公网互通尚未完成，因此此能力在当前默认设置和无 bootstrap 的冷启动环境中不会发现公网节点。
+T18 Public scope 出站查询现在通过 IPC kind 44/45 请求 DHT provider 候选并收集本机地址策略允许的端点；这些结果只用于候选拨号，不构成身份或授权。Core 仅在 provider 连接完成现有链身份准入后发送 Query，同一 PeerId 同时只有一个待完成的出站控制请求。默认 LoopbackOnly 未改变，Net 拨号仍重新校验地址策略。`network-settings-v1.json` 已支持 `bootstrap_multiaddrs`，并在启动/恢复时逐个拨号；安装目录 `assets/network-seeds.json` 只有在配置 `network_seed_public_key`、`network_seed_network_id` 且 Ed25519 签名、network ID、有效期和 PeerId 绑定全部通过时才启用，无公钥时不加载。显式 public grant 的 content/concept hash 会进入 provider 发布集合。真实打包 seed 部署、冷启动公网、资源索引和双机互通仍需验收。
 
 网络能力包括不同地址类型的适配必须真实验证；AppContainer 的网络权限不等于按域名限制出站。外部模型 HTTP 由 core 的固定网关发起。
 
@@ -184,4 +188,4 @@ provider 由人预先授权，凭据不传给 worker。HTTP 禁止自动重定�
 
 便捷入网由发布包的 `assets/network-seeds.json` 提供至少两个运营配置独立的真实入口，受发布清单签名保护。首次网络授权后自动使用，不要求日常用户手工填写地址。显式 bootstrap 配置优先，缓存的已知节点次之，内置入口最后补充；用户可以禁用内置列表并授权自己的网络。入口不是身份审批机关，关闭维护者更新站不影响已经入网的节点。
 
-身份迁移包保留身份根密钥与用户选定的 ASL 本地数据，不包含可直接复用的设备私钥、OS 凭据或目录 grant。导入后创建新设备密钥并签发新证书，同时更新链上设备状态承诺；旧设备需停止或通过链上最终化更新/本地拒绝状态退役。群 MLS 状态不复制，需由当前群成员按标准 MLS 流程添加新设备。迁移文件格式和身份后端均有版本号与明确拒绝未知主版本的规则。
+身份迁移包保留身份根密钥与用户选定的 ASL 本地数据，不包含可直接复用的设备私钥、OS 凭据或目录 grant。导入后创建新设备密钥并签发新证书，同时更新链上设备状态承诺；旧设备需停止或通过链上最终化更新/本地拒绝状态退役。群 MLS 状态不复制；可选的 `groups` 数据只包含完整 Group ID、群名、群主 AgentId 和最后 epoch，供新设备向群主发起重入请求。标准 MLS Add/Welcome 和群主本机审批仍是唯二成员变更路径。迁移文件格式和身份后端均有版本号与明确拒绝未知主版本的规则。

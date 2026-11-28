@@ -2,7 +2,7 @@ use asl_app::network_settings::{NetworkAddressScopeV1, NetworkSettingsV1};
 use asl_store::dashboard::Dashboard;
 use asl_store::network_privacy::NetworkRuntimeState;
 use asl_types::error::AslError;
-use eframe::egui::{Checkbox, RichText, Ui};
+use eframe::egui::{Button, Checkbox, ComboBox, Id, RichText, TextEdit, Ui};
 
 use super::{LocalAction, MUTED, locale::Language};
 
@@ -43,9 +43,7 @@ pub(super) fn show(
     let fixed = config
         .as_ref()
         .is_ok_and(|c| c.address_scope == NetworkAddressScopeV1::RelayOnly);
-    let can_enable = config
-        .as_ref()
-        .is_ok_and(|c| !c.relay_addresses.is_empty() && !c.loopback_groups);
+    let can_enable = config.as_ref().is_ok_and(|c| !c.relay_addresses.is_empty());
     let mut checked = fixed || data.force_relay_only;
     if ui
         .add_enabled(
@@ -82,14 +80,6 @@ pub(super) fn show(
                 "Local configuration is fixed to relay-only",
             ),
         ),
-        Ok(c) if c.loopback_groups => ui.colored_label(
-            MUTED,
-            label(
-                language,
-                "回环群组模式不可与中继并用",
-                "Loopback groups cannot use relays",
-            ),
-        ),
         Ok(c) if c.relay_addresses.is_empty() => ui.colored_label(
             MUTED,
             label(language, "未配置中继地址", "No relay addresses configured"),
@@ -97,12 +87,153 @@ pub(super) fn show(
         Ok(c) => ui.colored_label(
             MUTED,
             format!(
-                "{}: {}",
-                label(language, "已配置地址", "Configured addresses"),
+                "{}: {} · {}: {} · {}: {}",
+                label(language, "地址范围", "Address scope"),
+                scope_label(language, c.address_scope),
+                label(language, "引导入口", "Bootstrap"),
+                c.bootstrap_multiaddrs.len(),
+                label(language, "中继", "Relays"),
                 c.relay_addresses.len()
             ),
         ),
     };
+    if let Ok(c) = config {
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(label(language, "地址范围", "Address scope"));
+            let mut scope = c.address_scope;
+            ComboBox::from_id_salt("asl-network-scope")
+                .selected_text(scope_label(language, scope))
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        NetworkAddressScopeV1::LoopbackOnly,
+                        NetworkAddressScopeV1::LanOnly,
+                        NetworkAddressScopeV1::InternetOnly,
+                        NetworkAddressScopeV1::Hybrid,
+                        NetworkAddressScopeV1::RelayOnly,
+                    ] {
+                        ui.selectable_value(
+                            &mut scope,
+                            candidate,
+                            scope_label(language, candidate),
+                        );
+                    }
+                });
+            if scope != c.address_scope {
+                *action = Some(LocalAction::new(
+                    "network",
+                    ["scope".into(), scope_code(scope).into()],
+                ));
+            }
+        });
+        ui.label(
+            RichText::new(label(
+                language,
+                "Bootstrap 入口（完整 multiaddr；添加后下次启动生效）",
+                "Bootstrap entries (full multiaddr; applies next startup)",
+            ))
+            .color(MUTED),
+        );
+        let input_id = Id::new("asl-network-bootstrap-input");
+        let mut input = ui
+            .ctx()
+            .data_mut(|data| data.get_temp::<String>(input_id).unwrap_or_default());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                [360.0, 26.0],
+                TextEdit::singleline(&mut input).hint_text("/ip4/.../tcp/.../p2p/..."),
+            );
+            if ui
+                .add_enabled(
+                    !input.trim().is_empty(),
+                    Button::new(label(language, "添加", "Add")),
+                )
+                .clicked()
+            {
+                *action = Some(LocalAction::new(
+                    "network",
+                    ["bootstrap".into(), "add".into(), input.trim().into()],
+                ));
+            }
+            if ui
+                .add_enabled(
+                    !input.trim().is_empty(),
+                    Button::new(label(language, "移除", "Remove")),
+                )
+                .clicked()
+            {
+                *action = Some(LocalAction::new(
+                    "network",
+                    ["bootstrap".into(), "remove".into(), input.trim().into()],
+                ));
+            }
+        });
+        ui.ctx().data_mut(|data| data.insert_temp(input_id, input));
+        if c.address_scope != NetworkAddressScopeV1::RelayOnly {
+            let port_id = Id::new("asl-network-ports");
+            let mut ports = ui.ctx().data_mut(|data| {
+                data.get_temp::<(String, String)>(port_id)
+                    .unwrap_or_else(|| {
+                        (
+                            if c.tcp_port == 0 {
+                                "4001".to_owned()
+                            } else {
+                                c.tcp_port.to_string()
+                            },
+                            if c.quic_port == 0 {
+                                "4001".to_owned()
+                            } else {
+                                c.quic_port.to_string()
+                            },
+                        )
+                    })
+            });
+            let mut listen = c.listen_on_interfaces;
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        enabled && action.is_none(),
+                        Checkbox::new(
+                            &mut listen,
+                            label(language, "监听外部连接", "Listen for external connections"),
+                        ),
+                    )
+                    .changed()
+                {
+                    *action = Some(LocalAction::new(
+                        "network",
+                        [
+                            "listen".into(),
+                            (if listen { "on" } else { "off" }).into(),
+                            ports.0.clone().into(),
+                            ports.1.clone().into(),
+                        ],
+                    ));
+                }
+                ui.label("TCP");
+                ui.add_sized([70.0, 26.0], TextEdit::singleline(&mut ports.0));
+                ui.label("QUIC");
+                ui.add_sized([70.0, 26.0], TextEdit::singleline(&mut ports.1));
+            });
+            ui.ctx().data_mut(|data| data.insert_temp(port_id, ports));
+        }
+        let mut groups = c.loopback_groups;
+        if ui
+            .add_enabled(
+                enabled && action.is_none(),
+                Checkbox::new(
+                    &mut groups,
+                    label(language, "启用群组网络", "Enable group networking"),
+                ),
+            )
+            .changed()
+        {
+            *action = Some(LocalAction::new(
+                "network",
+                ["groups".into(), (if groups { "on" } else { "off" }).into()],
+            ));
+        }
+    }
     if let Some(last) = &data.network_report {
         let mode = if last.relay_only {
             label(language, "仅中继", "Relay only")
@@ -192,5 +323,30 @@ fn label(language: Language, zh: &'static str, en: &'static str) -> &'static str
     match language {
         Language::Zh => zh,
         Language::En => en,
+    }
+}
+
+fn scope_label(language: Language, scope: NetworkAddressScopeV1) -> &'static str {
+    match (language, scope) {
+        (Language::Zh, NetworkAddressScopeV1::LoopbackOnly) => "仅回环",
+        (Language::Zh, NetworkAddressScopeV1::LanOnly) => "局域网",
+        (Language::Zh, NetworkAddressScopeV1::InternetOnly) => "互联网",
+        (Language::Zh, NetworkAddressScopeV1::Hybrid) => "混合",
+        (Language::Zh, NetworkAddressScopeV1::RelayOnly) => "仅中继",
+        (Language::En, NetworkAddressScopeV1::LoopbackOnly) => "Loopback only",
+        (Language::En, NetworkAddressScopeV1::LanOnly) => "LAN only",
+        (Language::En, NetworkAddressScopeV1::InternetOnly) => "Internet only",
+        (Language::En, NetworkAddressScopeV1::Hybrid) => "Hybrid",
+        (Language::En, NetworkAddressScopeV1::RelayOnly) => "Relay only",
+    }
+}
+
+fn scope_code(scope: NetworkAddressScopeV1) -> &'static str {
+    match scope {
+        NetworkAddressScopeV1::LoopbackOnly => "loopback",
+        NetworkAddressScopeV1::LanOnly => "lan",
+        NetworkAddressScopeV1::InternetOnly => "internet",
+        NetworkAddressScopeV1::Hybrid => "hybrid",
+        NetworkAddressScopeV1::RelayOnly => "relay",
     }
 }

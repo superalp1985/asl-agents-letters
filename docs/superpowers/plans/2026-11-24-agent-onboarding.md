@@ -78,10 +78,10 @@
 - A transaction receipt alone is not success; only finalized state independently verified by the configured light client may advance to directory issuance/admission.
 - If the target registry is not deployed/configured, status remains `network_profile_missing`; no sample or local fixture is accepted as a production network.
 
-- [ ] Test proposal binds exact AgentId, chain ID, registry address/code hash, device commitment, nonce/sequence, and expiry.
-- [ ] Test restart/replay, wrong deployment, unfinalized receipt, rejected transaction, expired proposal, and sponsor/endpoint failure remain non-ready.
-- [ ] Implement signing/submission through the existing root key boundary without exposing private key bytes to MCP or Agent.
-- [ ] Issue the first device certificate/directory only after finalized registration proof and verify it before reporting `network_ready`.
+- [x] Implement a persisted proposal binding exact AgentId, chain ID, registry address/code hash, device commitment, sequence, and expiry.
+- [x] Keep restart/replay, wrong deployment, unfinalized receipt, expired proposal, and sponsor/endpoint failure resumable or not ready.
+- [x] Implement signing/submission through the existing root key boundary; sponsors receive only the signed typed request and self-pay uses an external local signer.
+- [x] Issue the first device certificate/directory only after finalized registration proof; typed DHT publication follows installation.
 - [ ] Run all registration tests against local fixtures and record that live deployment is still a separate release prerequisite.
 
 ### Task 4: Generate Exact Local Host Configuration

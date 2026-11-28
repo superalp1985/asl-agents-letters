@@ -7,16 +7,24 @@ use std::{
 use asl_types::error::AslError;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub mod act_history;
 pub mod avatar_publication;
 pub mod avatar_receipts;
+pub mod budgets;
+pub mod capacity;
 pub mod chain;
 pub mod contact_bindings;
+pub mod contact_invites;
+pub mod contact_policy;
 pub mod conversation;
 pub mod dashboard;
+pub mod dht_cache;
 pub mod diagnostics;
 pub mod evidence;
+pub mod group_access;
 mod group_observations;
 pub mod group_state;
+pub mod group_topology;
 mod host_inbox;
 pub mod inbound_observations;
 pub mod mailbox;
@@ -35,7 +43,7 @@ pub mod semantic_context;
 mod transfer_peers;
 pub mod transfers;
 
-const SCHEMA_VERSION: i64 = 35;
+const SCHEMA_VERSION: i64 = 49;
 const SCHEMA_V1: &str = include_str!("../../../specs/schema-v1.sql");
 const SCHEMA_V2: &str = include_str!("../../../specs/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../specs/schema-v3.sql");
@@ -71,6 +79,20 @@ const SCHEMA_V32: &str = include_str!("../../../specs/schema-v32.sql");
 const SCHEMA_V33: &str = include_str!("../../../specs/schema-v33.sql");
 const SCHEMA_V34: &str = include_str!("../../../specs/schema-v34.sql");
 const SCHEMA_V35: &str = include_str!("../../../specs/schema-v35.sql");
+const SCHEMA_V36: &str = include_str!("../../../specs/schema-v36.sql");
+const SCHEMA_V37: &str = include_str!("../../../specs/schema-v37.sql");
+const SCHEMA_V38: &str = include_str!("../../../specs/schema-v38.sql");
+const SCHEMA_V39: &str = include_str!("../../../specs/schema-v39.sql");
+const SCHEMA_V40: &str = include_str!("../../../specs/schema-v40.sql");
+const SCHEMA_V41: &str = include_str!("../../../specs/schema-v41.sql");
+const SCHEMA_V42: &str = include_str!("../../../specs/schema-v42.sql");
+const SCHEMA_V43: &str = include_str!("../../../specs/schema-v43.sql");
+const SCHEMA_V44: &str = include_str!("../../../specs/schema-v44.sql");
+const SCHEMA_V45: &str = include_str!("../../../specs/schema-v45.sql");
+const SCHEMA_V46: &str = include_str!("../../../specs/schema-v46.sql");
+const SCHEMA_V47: &str = include_str!("../../../specs/schema-v47.sql");
+const SCHEMA_V48: &str = include_str!("../../../specs/schema-v48.sql");
+const SCHEMA_V49: &str = include_str!("../../../specs/schema-v49.sql");
 
 pub struct Store {
     connection: Connection,
@@ -298,6 +320,48 @@ pub fn open_store(path: &Path) -> Result<Store, AslError> {
         }
         if version < 35 {
             apply_migration_in_transaction(&transaction, SCHEMA_V35, 35, now)?;
+        }
+        if version < 36 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V36, 36, now)?;
+        }
+        if version < 37 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V37, 37, now)?;
+        }
+        if version < 38 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V38, 38, now)?;
+        }
+        if version < 39 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V39, 39, now)?;
+        }
+        if version < 40 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V40, 40, now)?;
+        }
+        if version < 41 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V41, 41, now)?;
+        }
+        if version < 42 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V42, 42, now)?;
+        }
+        if version < 43 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V43, 43, now)?;
+        }
+        if version < 44 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V44, 44, now)?;
+        }
+        if version < 45 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V45, 45, now)?;
+        }
+        if version < 46 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V46, 46, now)?;
+        }
+        if version < 47 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V47, 47, now)?;
+        }
+        if version < 48 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V48, 48, now)?;
+        }
+        if version < 49 {
+            apply_migration_in_transaction(&transaction, SCHEMA_V49, 49, now)?;
         }
         validate_existing_schema(&transaction)?;
         transaction.commit().map_err(database_error)?;

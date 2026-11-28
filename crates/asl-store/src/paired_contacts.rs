@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{Store, database_error};
 
-const MAX_INVITE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
+const MAX_INVITE_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const PAIRING_PROMPT_AGENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
 const PAIRING_PROMPT_GLOBAL_WINDOW_MS: u64 = 60 * 60 * 1_000;
 const MAX_PAIRING_PROMPTS_PER_AGENT: i64 = 1;

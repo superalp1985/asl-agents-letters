@@ -31,6 +31,20 @@ pub(super) fn report(
         }
         NetworkAdmissionStatus::Active => ("network_ready", "none"),
     };
+    let next_actions = match admission {
+        NetworkAdmissionStatus::TrustConfigurationMissing => {
+            vec!["configure_trusted_network_profile"]
+        }
+        NetworkAdmissionStatus::DeviceDirectoryMissing => {
+            vec!["prepare_device_directory", "submit_identity_registration"]
+        }
+        NetworkAdmissionStatus::DeviceDirectoryUnavailable => {
+            vec!["restore_signed_device_directory"]
+        }
+        NetworkAdmissionStatus::ChainUnavailable => vec!["retry_network_admission"],
+        NetworkAdmissionStatus::RegistryAnchorMissing => vec!["submit_identity_registration"],
+        NetworkAdmissionStatus::Active => Vec::new(),
+    };
     let mut available = vec!["query"];
     if !recovery {
         available.push("fetch");
@@ -42,6 +56,8 @@ pub(super) fn report(
         "send_expression",
         "send_context_expression",
         "request_context",
+        "act_history",
+        "contacts_manage",
         "receive_offer",
         "task_recovery",
         "recovery_query",
@@ -60,6 +76,7 @@ pub(super) fn report(
         "local_identity": "ready",
         "network_readiness": readiness,
         "next_step": next_step,
+        "next_actions": next_actions,
         "query_scope": match scope {
             QueryScope::ContactsOnly => "contacts_only",
             QueryScope::Public => "public",

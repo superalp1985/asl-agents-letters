@@ -1,6 +1,9 @@
 # ASL Agent Onboarding and Path Handoff
 
-**Status:** Local setup and MCP bootstrap implemented; first-device chain registration and installer host handoff remain planned.
+**Status:** Local setup, MCP bootstrap, resumable first-device chain onboarding,
+finality-gated directory installation, and typed DHT directory publication are
+implemented. Live deployment and installer host handoff remain external
+verification work.
 
 ## Goal
 
@@ -41,6 +44,16 @@ Make a fresh ASL install understandable to both a person and an Agent without ei
 - Existing `mcp --home <absolute path>` remains supported. New setup commands are additive and the package root entry forwards them to the active release.
 - A signed network profile can simplify selection, but it does not replace public-chain registration. Until a trusted profile, registry deployment, and registration path are available, a new install can be locally initialized but not truthfully advertised as publicly reachable.
 - Chain registration may use an explicitly selected volunteer sponsor or an authorized local transaction path; sponsor selection is not an ASL fee, account, balance, or purchase feature. No sponsor or endpoint is silently trusted.
+- `asl-core --identity-registration onboard` reads
+  `state/identity-onboarding-v1.json`, selects register/update from finalized
+  registry state, persists the signed request, submits through the configured
+  sponsor/self-pay/fallback order, waits for finality, installs the directory,
+  and publishes it to the typed DHT key. Resumption uses the same durable state.
+- The self-pay adapter executes an explicitly configured external local signer.
+  The protected root key is never passed to a sponsor, MCP tool, command-line
+  argument, or repository file. Receipts alone are not readiness.
+- A finalized revocation emits `identity.finalized_revocation_v1` as the local
+  hook that suspends admission while peers later refresh the verified proof.
 - Installation and host configuration do not require a cloud account. Public-chain registration and P2P discovery remain unavailable when their explicitly configured network is offline.
 
 ## Acceptance

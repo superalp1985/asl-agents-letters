@@ -9,7 +9,7 @@ rust-version.workspace = true
 asl-types = { path = "../asl-types" }
 blake3.workspace = true
 if-addrs = "=0.15.0"
-libp2p = { version = "=0.57.1", default-features = false, features = ["ed25519", "gossipsub", "kad", "macros", "mdns", "noise", "quic", "relay", "request-response", "tcp", "tokio", "yamux"] }
+libp2p = { version = "=0.57.1", default-features = false, features = ["autonat", "dcutr", "ed25519", "gossipsub", "identify", "kad", "macros", "mdns", "noise", "quic", "relay", "request-response", "tcp", "tokio", "yamux"] }
 rand.workspace = true
 tokio.workspace = true
 

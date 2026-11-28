@@ -2,13 +2,23 @@ use std::collections::BTreeMap;
 
 use asl_agent::{QueryScope, runner::InboundMode};
 use asl_groups::GroupApplication;
-use asl_store::{Store, group_state::GroupInboundPolicy, mailbox::ConversationBudgetRenewal};
+use asl_store::{
+    Store,
+    act_history::ActDirection,
+    budgets::BudgetKind,
+    contact_bindings::ContactBindingActionKind,
+    group_access::{GroupAccessKind, GroupAdminCapabilityKind, GroupFileAccessKind},
+    group_state::{GROUP_INVITE_REQUEST_TTL_MS, GroupInboundPolicy},
+    mailbox::ConversationBudgetRenewal,
+    search::group::GroupRequester,
+};
 use asl_types::{
     error::AslError,
     ids::{AgentId, Hash32, Id128, PeerId},
     protocol::{
         Act, ContextAgreement, ContextAgreementStatus, ContextExpression, ContextRequest,
-        Expression, ExpressionLetter, SemanticContextRef, WireFrame, encode_frame,
+        Expression, ExpressionLetter, GroupBody, GroupMembership, GroupPacket, SemanticContextRef,
+        WireFrame,
     },
 };
 use serde_json::{Value, json};
@@ -152,6 +162,19 @@ impl Supervisor {
             return;
         };
         match command {
+            MailCommand::ContactLookup { agent, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.contact_lookup(agent));
+            }
+            MailCommand::ContactStatus { reply } if !reply.is_closed() => {
+                let _ = reply.send(self.contact_status());
+            }
+            MailCommand::ActHistorySearch {
+                query,
+                limit,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.search_act_history(query, limit));
+            }
             MailCommand::RequestTaskInbox { reply } if !reply.is_closed() => {
                 let _ = reply.send(unix_time_ms().and_then(|now| {
                     self.mailbox
@@ -186,6 +209,9 @@ impl Supervisor {
             MailCommand::SendAct { room, act, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.send_group_act(room, act));
             }
+            MailCommand::SendShardAnnouncement { root, act, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.send_shard_announcement(root, act));
+            }
             MailCommand::SendFile {
                 room,
                 content_id,
@@ -194,6 +220,16 @@ impl Supervisor {
                 reply,
             } if !reply.is_closed() => {
                 let _ = reply.send(self.send_group_file(room, content_id, media_kind, concepts));
+            }
+            MailCommand::GroupMembers { room, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.group_members(room));
+            }
+            MailCommand::GroupSetAccess {
+                room,
+                update,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.set_group_access(room, update));
             }
             MailCommand::GroupList { reply } if !reply.is_closed() => {
                 let _ = reply
@@ -210,6 +246,16 @@ impl Supervisor {
             MailCommand::GroupInvite { room, agent, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.invite_group_agent(room, agent));
             }
+            MailCommand::GroupInviteRequest { room, owner, reply } if !reply.is_closed() => {
+                let _ = reply.send(self.request_group_join(room, owner));
+            }
+            MailCommand::GroupRejectJoinRequest {
+                room,
+                device,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.reject_group_join_request(room, &device));
+            }
             MailCommand::DirectOpen { agent, reply } if !reply.is_closed() => {
                 let _ = reply.send(self.open_direct_room(agent));
             }
@@ -225,6 +271,20 @@ impl Supervisor {
                     window_ms,
                 ));
             }
+            MailCommand::RenewResourceBudget {
+                conversation_id,
+                kind,
+                additional,
+                window_ms,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.renew_resource_budget(
+                    conversation_id,
+                    kind,
+                    additional,
+                    window_ms,
+                ));
+            }
             MailCommand::RequestContext {
                 target,
                 scope,
@@ -233,8 +293,12 @@ impl Supervisor {
             } if !reply.is_closed() => {
                 let _ = reply.send(self.send_context_request(target, scope, reference));
             }
-            MailCommand::ConfirmContext { request_id, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.confirm_context_request(request_id));
+            MailCommand::ConfirmContext {
+                request_id,
+                group,
+                reply,
+            } if !reply.is_closed() => {
+                let _ = reply.send(self.confirm_context_request(request_id, group));
             }
             MailCommand::Claim {
                 handle,
@@ -347,7 +411,7 @@ impl Supervisor {
             }
             Target::Group(room) => {
                 let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
-                groups.dispatch_letter(admission, room, letter, now, |cmd| {
+                groups.dispatch_letter(admission, local, room, letter, now, |cmd| {
                     check_target()?;
                     if store.network_pause_requested()? {
                         return Err(AslError::PolicyDenied);
@@ -370,9 +434,6 @@ impl Supervisor {
         expression: Expression,
         required_contexts: Vec<SemanticContextRef>,
     ) -> Result<Id128, AslError> {
-        let Target::Agent(agent) = target else {
-            return Err(AslError::InvalidMessage);
-        };
         let now = unix_time_ms()?;
         let store = self.network_report.store();
         if !self.net.is_running()
@@ -404,26 +465,42 @@ impl Supervisor {
             required_contexts,
             expression,
         };
-        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
-        let (_, connection, _) = admission
-            .admitted_connections(now)
-            .into_iter()
-            .filter(|(candidate, _, _)| *candidate == agent)
-            .find(|(_, connection, _)| admission.peer_supports_contexts(*connection))
-            .ok_or(AslError::IncompatibleVersion)?;
-        let command = admission
-            .authorize_control_command(connection, id.0, WireFrame::ContextExpression(letter), now)?
-            .into_ipc()?;
-        store.with_mail_dispatch(|| {
-            check_letter_target(store, &self.device_peer_id, scope, target)?;
-            if store.network_pause_requested()? {
-                return Err(AslError::PolicyDenied);
+        match target {
+            Target::Agent(agent) => {
+                let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+                let (_, connection, _) = admission
+                    .admitted_connections(now)
+                    .into_iter()
+                    .filter(|(candidate, _, _)| *candidate == agent)
+                    .find(|(_, connection, _)| admission.peer_supports_contexts(*connection))
+                    .ok_or(AslError::IncompatibleVersion)?;
+                let command = admission
+                    .authorize_control_command(
+                        connection,
+                        id.0,
+                        WireFrame::ContextExpression(letter),
+                        now,
+                    )?
+                    .into_ipc()?;
+                store.with_mail_dispatch(|| {
+                    check_letter_target(store, &self.device_peer_id, scope, Target::Agent(agent))?;
+                    if store.network_pause_requested()? {
+                        return Err(AslError::PolicyDenied);
+                    }
+                    if !self.net.try_send(&command)? {
+                        return Err(AslError::QuotaExceeded);
+                    }
+                    Ok(())
+                })?;
             }
-            if !self.net.try_send(&command)? {
-                return Err(AslError::QuotaExceeded);
+            Target::Group(room) => {
+                self.send_group_context_broadcast(
+                    room,
+                    GroupApplication::ContextExpression(letter),
+                    now,
+                )?;
             }
-            Ok(())
-        })?;
+        }
         Ok(id)
     }
 
@@ -572,7 +649,7 @@ impl Supervisor {
 
     fn send_context_request(
         &mut self,
-        target: asl_types::ids::AgentId,
+        target: Target,
         scope: QueryScope,
         reference: SemanticContextRef,
     ) -> Result<Id128, AslError> {
@@ -582,20 +659,10 @@ impl Supervisor {
             || self.network_admission_status != NetworkAdmissionStatus::Active
             || store.network_pause_requested()?
             || read_mode(store)? == InboundMode::Disabled
-            || (scope == QueryScope::ContactsOnly
-                && !store.authorized_contacts()?.contains(&target))
         {
             return Err(AslError::PolicyDenied);
         }
-        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
-        let (_, connection, peer) = admission
-            .admitted_connections(now)
-            .into_iter()
-            .find(|(agent, _, _)| *agent == target)
-            .ok_or(AslError::NotFound)?;
-        if !admission.peer_supports_contexts(connection) {
-            return Err(AslError::IncompatibleVersion);
-        }
+        check_letter_target(store, &self.device_peer_id, scope, target)?;
         let request_id = Id128(fresh_id()?);
         let expires_at_ms = now.saturating_add(10_000);
         let request = ContextRequest {
@@ -603,47 +670,79 @@ impl Supervisor {
             reference,
             expires_at_ms,
         };
-        let command = admission
-            .authorize_control_command(
-                connection,
-                request_id.0,
-                WireFrame::ContextRequest(request),
-                now,
-            )?
-            .into_ipc()?;
-        let pending = DownloadSource {
-            agent_id: target,
-            peer_id: peer,
-        };
-        store.with_mail_dispatch(|| {
-            if store.network_pause_requested()?
-                || (scope == QueryScope::ContactsOnly
-                    && !store.authorized_contacts()?.contains(&target))
-            {
-                return Err(AslError::PolicyDenied);
+        match target {
+            Target::Agent(target) => {
+                let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+                let (_, connection, peer) = admission
+                    .admitted_connections(now)
+                    .into_iter()
+                    .find(|(agent, _, _)| *agent == target)
+                    .ok_or(AslError::NotFound)?;
+                if !admission.peer_supports_contexts(connection) {
+                    return Err(AslError::IncompatibleVersion);
+                }
+                let command = admission
+                    .authorize_control_command(
+                        connection,
+                        request_id.0,
+                        WireFrame::ContextRequest(request),
+                        now,
+                    )?
+                    .into_ipc()?;
+                let pending = DownloadSource {
+                    agent_id: target,
+                    peer_id: peer,
+                };
+                store.with_mail_dispatch(|| {
+                    check_letter_target(store, &self.device_peer_id, scope, Target::Agent(target))?;
+                    if store.network_pause_requested()? {
+                        return Err(AslError::PolicyDenied);
+                    }
+                    self.mailbox.remember_context_request(
+                        pending,
+                        scope,
+                        connection,
+                        request_id,
+                        reference,
+                        expires_at_ms,
+                        unix_time_ms()?,
+                    )?;
+                    if !self.net.try_send(&command)? {
+                        self.mailbox.cancel_context_request(connection, request_id);
+                        return Err(AslError::QuotaExceeded);
+                    }
+                    Ok(())
+                })?;
             }
-            self.mailbox.remember_context_request(
-                pending,
-                scope,
-                connection,
-                request_id,
-                reference,
-                expires_at_ms,
-                unix_time_ms()?,
-            )?;
-            if !self.net.try_send(&command)? {
-                self.mailbox.cancel_context_request(connection, request_id);
-                return Err(AslError::QuotaExceeded);
+            Target::Group(room) => {
+                self.mailbox.remember_group_context_request(
+                    room,
+                    request_id,
+                    reference,
+                    expires_at_ms,
+                    now,
+                )?;
+                if let Err(error) = self.send_group_context_broadcast(
+                    room,
+                    GroupApplication::ContextRequest(request),
+                    now,
+                ) {
+                    self.mailbox.cancel_group_context_request(room, request_id);
+                    return Err(error);
+                }
             }
-            Ok(())
-        })?;
+        }
         Ok(request_id)
     }
 
     fn confirm_context_request(
         &mut self,
         request_id: Id128,
+        group: Option<(Hash32, AgentId)>,
     ) -> Result<(Id128, ContextAgreementStatus), AslError> {
+        if let Some((room, sender)) = group {
+            return self.confirm_group_context_request(request_id, room, sender);
+        }
         let now = unix_time_ms()?;
         let (connection, pending) = self
             .mailbox
@@ -697,7 +796,275 @@ impl Supervisor {
         Ok((agreement.message_id, status))
     }
 
-    fn send_group_act(&mut self, room: Hash32, mut act: Act) -> Result<Id128, AslError> {
+    fn confirm_group_context_request(
+        &mut self,
+        request_id: Id128,
+        room: Hash32,
+        sender: AgentId,
+    ) -> Result<(Id128, ContextAgreementStatus), AslError> {
+        let now = unix_time_ms()?;
+        if !self.net.is_running()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+            || self.network_report.store().network_pause_requested()?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let pending = self
+            .mailbox
+            .group_context_offer_for_confirmation(request_id, room, sender, now)?;
+        let current = self
+            .groups
+            .as_ref()
+            .ok_or(AslError::NotFound)?
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        let requester = self
+            .current_group_requester(
+                pending.connection,
+                &pending.source.peer_id,
+                room,
+                current.version.mls_epoch,
+            )
+            .ok_or(AslError::PolicyDenied)?;
+        if requester.direct.agent != sender {
+            return Err(AslError::InvalidIdentity);
+        }
+        let store = self.network_report.store();
+        let status = match load_conformance_ready_contexts(
+            store,
+            self.admission.as_mut().ok_or(AslError::NotFound)?,
+            &[pending.reference],
+            now,
+        ) {
+            Ok(_) => ContextAgreementStatus::Conformant,
+            Err(
+                AslError::NotFound
+                | AslError::ExpiredMessage
+                | AslError::IncompatibleVersion
+                | AslError::PolicyVersionConflict
+                | AslError::GrantRevoked,
+            ) => ContextAgreementStatus::Unresolved,
+            Err(_) => ContextAgreementStatus::Rejected,
+        };
+        let agreement = ContextAgreement {
+            message_id: Id128(fresh_id()?),
+            request_id,
+            reference: pending.reference,
+            status,
+        };
+        self.send_group_context_target(
+            room,
+            pending.connection,
+            GroupApplication::ContextAgreement(agreement),
+            now,
+        )?;
+        self.mailbox
+            .complete_group_context_offer(request_id, room, sender);
+        Ok((agreement.message_id, status))
+    }
+
+    pub(super) fn handle_group_context_request(
+        &mut self,
+        transfers: &mut TransferService,
+        requester: &GroupRequester,
+        connection: [u8; 16],
+        room: Hash32,
+        request: &ContextRequest,
+        now: u64,
+    ) -> Result<(), AslError> {
+        if request.expires_at_ms <= now
+            || !GroupInboundPolicy::load(self.network_report.store())?.answer_enabled
+        {
+            return Ok(());
+        }
+        let found = transfers.group_context_offer(
+            requester,
+            request.message_id,
+            request.reference,
+            request.expires_at_ms,
+            now,
+        )?;
+        match found {
+            Some((revision, permit, offer)) => transfers
+                .with_current_group_context_authority(requester, revision, &permit, || {
+                    self.send_group_context_target(
+                        room,
+                        connection,
+                        GroupApplication::ContextOffer(offer),
+                        now,
+                    )
+                })
+                .or_else(|error| match error {
+                    AslError::NotFound
+                    | AslError::PolicyVersionConflict
+                    | AslError::PolicyDenied
+                    | AslError::GrantRevoked => Ok(()),
+                    error => Err(error),
+                })?,
+            None => {
+                let agreement = ContextAgreement {
+                    message_id: Id128(fresh_id()?),
+                    request_id: request.message_id,
+                    reference: request.reference,
+                    status: ContextAgreementStatus::Unresolved,
+                };
+                self.send_group_context_target(
+                    room,
+                    connection,
+                    GroupApplication::ContextAgreement(agreement),
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn send_group_context_broadcast(
+        &mut self,
+        room: Hash32,
+        application: GroupApplication,
+        now: u64,
+    ) -> Result<(), AslError> {
+        if !self.net.is_running()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+            || self.network_report.store().network_pause_requested()?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        if groups
+            .store
+            .mls_room_progress(room)?
+            .is_none_or(|(state, _)| state != "active")
+            || !groups.store.group_can_send(
+                &snapshot.local_id,
+                &self.device_peer_id,
+                GroupAccessKind::Text,
+            )?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let forwarded_application = application.clone();
+        let sent = admission.send_loopback_mls_application_with_gossip(
+            &mut groups.store,
+            room,
+            application,
+            now,
+            |command| {
+                if self.net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        )?;
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
+        let _ = super::group_routing::publish_packet(
+            &self.net,
+            &groups.store,
+            room,
+            &self.device_peer_id,
+            &sent.packet,
+        );
+        let _ = super::groups::forward_application_to_logical_shards(
+            &mut groups.store,
+            admission,
+            &self.net,
+            &self.agent_identity,
+            &self.device_peer_id,
+            room,
+            &forwarded_application,
+            self.agent_identity.agent_id(),
+            &self.device_peer_id,
+            sent.packet.epoch,
+            now,
+        );
+        Ok(())
+    }
+
+    fn send_group_context_target(
+        &mut self,
+        room: Hash32,
+        connection: [u8; 16],
+        application: GroupApplication,
+        now: u64,
+    ) -> Result<(), AslError> {
+        if !self.net.is_running()
+            || self.network_admission_status != NetworkAdmissionStatus::Active
+            || self.network_report.store().network_pause_requested()?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        if groups
+            .store
+            .mls_room_progress(room)?
+            .is_none_or(|(state, _)| state != "active")
+            || !groups.store.group_can_send(
+                &snapshot.local_id,
+                &self.device_peer_id,
+                GroupAccessKind::Text,
+            )?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let sent = admission.send_loopback_mls_application_to_connection(
+            &mut groups.store,
+            crate::profile::MlsApplicationSendToConnection {
+                wire_id: room,
+                connection_id: connection,
+                envelope_id: Id128(fresh_id()?),
+                application,
+                now_ms: now,
+            },
+            |command| {
+                if self.net.try_send(&command.into_ipc()?)? {
+                    Ok(())
+                } else {
+                    Err(AslError::SandboxUnavailable)
+                }
+            },
+        )?;
+        if sent.queued == 0 {
+            return Err(AslError::NotFound);
+        }
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
+        Ok(())
+    }
+
+    pub(super) fn send_group_act(&mut self, room: Hash32, act: Act) -> Result<Id128, AslError> {
+        self.send_group_act_inner(room, act, true)
+    }
+
+    pub(super) fn send_group_act_inner(
+        &mut self,
+        room: Hash32,
+        mut act: Act,
+        forward_to_shards: bool,
+    ) -> Result<Id128, AslError> {
         let now = unix_time_ms()?;
         if !self.net.is_running()
             || self.network_admission_status != NetworkAdmissionStatus::Active
@@ -711,11 +1078,19 @@ impl Supervisor {
             .store
             .mls_room_snapshot(room)?
             .ok_or(AslError::NotFound)?;
+        let local_group_id = snapshot.local_id.clone();
         let (state, _) = groups
             .store
             .mls_room_progress(room)?
             .ok_or(AslError::NotFound)?;
         if state != "active" {
+            return Err(AslError::PolicyDenied);
+        }
+        if !groups.store.group_can_send(
+            &snapshot.local_id,
+            &self.device_peer_id,
+            GroupAccessKind::Text,
+        )? {
             return Err(AslError::PolicyDenied);
         }
         if act.message_id.0 == [0; 16] {
@@ -729,42 +1104,83 @@ impl Supervisor {
         if act.causal_root.0 == [0; 16] {
             act.causal_root = act.message_id;
         }
-        let conversation_id = alloy_primitives::hex::encode(act.conversation_id.0);
-        let now_i64 = i64::try_from(now).map_err(|_| AslError::InvalidMessage)?;
-        if !groups
-            .store
-            .conversation_budget_available(&conversation_id, 1, now_i64)?
-        {
-            return Err(AslError::QuotaExceeded);
-        }
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
+        let conversation_id = alloy_primitives::hex::encode(snapshot.local_id.0.0);
+        let message_bytes =
+            u64::try_from(act.encode()?.len()).map_err(|_| AslError::InvalidMessage)?;
+        let reservation = groups
+            .store
+            .reserve_budget(
+                &conversation_id,
+                1,
+                &[(BudgetKind::MessageBytes, message_bytes)],
+                now,
+            )?
+            .ok_or(AslError::QuotaExceeded)?;
         let message_id = act.message_id;
-        let sent = admission.send_loopback_mls_application_with_gossip(
+        let history_act = act.clone();
+        let mut dispatched = false;
+        let dispatch_result = admission.send_loopback_mls_application_with_gossip(
             &mut groups.store,
             room,
             GroupApplication::Act(act),
             now,
             |command| {
                 if self.net.try_send(&command.into_ipc()?)? {
+                    dispatched = true;
                     Ok(())
                 } else {
                     Err(AslError::SandboxUnavailable)
                 }
             },
-        )?;
-        groups
-            .store
-            .consume_conversation_budget(&conversation_id, 1, now_i64)?;
-        let envelope = sent.packet.into_envelope()?;
-        let payload = encode_frame(&WireFrame::GroupEnvelope(envelope))?;
-        let _ = self.net.try_send(
-            &NetworkCommand::GossipPublish {
-                operation_id: fresh_id()?,
-                key: room.0,
-                payload,
-            }
-            .into_ipc()?,
         );
+        let sent = match dispatch_result {
+            Ok(sent) => sent,
+            Err(error) => {
+                if !dispatched {
+                    groups.store.refund_budget_reservation(reservation, now)?;
+                }
+                return Err(error);
+            }
+        };
+        let _ = super::groups::record_act_history(
+            &mut groups.store,
+            &local_group_id,
+            sent.packet.epoch,
+            ActDirection::Out,
+            &history_act,
+            now,
+        );
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
+        let _ = super::group_routing::publish_packet(
+            &self.net,
+            &groups.store,
+            room,
+            &self.device_peer_id,
+            &sent.packet,
+        );
+        if forward_to_shards {
+            let forwarded_application = GroupApplication::Act(history_act.clone());
+            let _ = super::groups::forward_application_to_logical_shards(
+                &mut groups.store,
+                admission,
+                &self.net,
+                &self.agent_identity,
+                &self.device_peer_id,
+                room,
+                &forwarded_application,
+                self.agent_identity.agent_id(),
+                &self.device_peer_id,
+                sent.packet.epoch,
+                now,
+            );
+        }
         Ok(message_id)
     }
 
@@ -792,6 +1208,19 @@ impl Supervisor {
         if room_state.is_none_or(|(state, _)| state != "active") {
             return Err(AslError::PolicyDenied);
         }
+        let local_group_id = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?
+            .local_id;
+        if !groups.store.group_can_access_file(
+            &local_group_id,
+            &self.device_peer_id,
+            &content_id,
+            GroupFileAccessKind::Send,
+        )? {
+            return Err(AslError::PolicyDenied);
+        }
         let expires_at_ms = now.saturating_add(10 * 60 * 1_000);
         let offer = asl_types::protocol::Offer {
             message_id: Id128(fresh_id()?),
@@ -801,6 +1230,8 @@ impl Supervisor {
             media_kind,
             concepts,
             expires_at_ms,
+            logical_group_id: Some(groups.store.mls_logical_root(room)?),
+            source_room_id: Some(room),
         };
         let admission = self.admission.as_mut().ok_or(AslError::NotFound)?;
         let sent = admission.send_loopback_mls_application_with_gossip(
@@ -816,15 +1247,33 @@ impl Supervisor {
                 }
             },
         )?;
-        let envelope = sent.packet.into_envelope()?;
-        let payload = encode_frame(&WireFrame::GroupEnvelope(envelope))?;
-        let _ = self.net.try_send(
-            &NetworkCommand::GossipPublish {
-                operation_id: fresh_id()?,
-                key: room.0,
-                payload,
-            }
-            .into_ipc()?,
+        let _ = self.mailbox_wire.persist_group_packet(
+            &mut groups.store,
+            room,
+            self.agent_identity.agent_id(),
+            &sent.packet,
+            now,
+        );
+        let _ = super::group_routing::publish_packet(
+            &self.net,
+            &groups.store,
+            room,
+            &self.device_peer_id,
+            &sent.packet,
+        );
+        let forwarded_application = GroupApplication::Offer(offer.clone());
+        let _ = super::groups::forward_application_to_logical_shards(
+            &mut groups.store,
+            admission,
+            &self.net,
+            &self.agent_identity,
+            &self.device_peer_id,
+            room,
+            &forwarded_application,
+            self.agent_identity.agent_id(),
+            &self.device_peer_id,
+            sent.packet.epoch,
+            now,
         );
         Ok(json!({
             "room": alloy_primitives::hex::encode(room.0),
@@ -839,6 +1288,46 @@ impl Supervisor {
 
     fn invite_group_agent(&mut self, room: Hash32, agent: AgentId) -> Result<Value, AslError> {
         let now = unix_time_ms()?;
+        let groups = self.groups.as_ref().ok_or(AslError::NotFound)?;
+        let room = groups.store.mls_logical_root(room)?;
+        let snapshot = groups
+            .store
+            .mls_room_snapshot(room)?
+            .ok_or(AslError::NotFound)?;
+        if !groups.store.group_can_send(
+            &snapshot.local_id,
+            &self.device_peer_id,
+            GroupAccessKind::Invite,
+        )? {
+            return Err(AslError::PolicyDenied);
+        }
+        let policy = groups.store.group_access_policy(&snapshot.local_id)?;
+        if policy.admins.contains(&self.device_peer_id)
+            && !groups.store.group_admin_has_capability(
+                &snapshot.local_id,
+                &self.device_peer_id,
+                GroupAdminCapabilityKind::ManageInvites,
+            )?
+        {
+            return Err(AslError::PolicyDenied);
+        }
+        let owner = groups
+            .store
+            .group_access_owner(room)?
+            .ok_or(AslError::NotFound)?;
+        if owner != self.device_peer_id {
+            return Ok(json!({
+                "room": alloy_primitives::hex::encode(room.0),
+                "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
+                "state": "owner_action_required",
+                "error_code": "delegated_invite_requires_logical_owner",
+                "owner_peer": bs58::encode(owner.as_bytes()).into_string(),
+                "owner_agent": groups.store.mls_peer_agent(&owner)?.map(|agent| {
+                    format!("agent:{}", alloy_primitives::hex::encode(agent.0))
+                }),
+                "queued": 0,
+            }));
+        }
         let connections = self
             .admission
             .as_ref()
@@ -852,6 +1341,7 @@ impl Supervisor {
             return Err(AslError::NotFound);
         }
         let mut queued = 0_u64;
+        let mut invitations = Vec::with_capacity(connections.len());
         for connection_id in connections {
             let result = self.apply_local_group_action(
                 LocalGroupAction::Invite {
@@ -860,12 +1350,208 @@ impl Supervisor {
                 },
                 now,
             )?;
-            queued += result.get("queued").and_then(Value::as_u64).unwrap_or(0);
+            if result
+                .get("queued")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                queued += 1;
+            }
+            invitations.push(result);
         }
         Ok(json!({
             "room": alloy_primitives::hex::encode(room.0),
             "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
             "queued": queued,
+            "invitations": invitations,
+        }))
+    }
+
+    pub(super) fn request_group_join(
+        &mut self,
+        room: Hash32,
+        owner: AgentId,
+    ) -> Result<Value, AslError> {
+        if room.0 == [0; 32] || owner.0 == [0; 32] {
+            return Err(AslError::InvalidMessage);
+        }
+        let now = unix_time_ms()?;
+        if self.network_admission_status != NetworkAdmissionStatus::Active {
+            return Err(AslError::InvalidIdentity);
+        }
+        let connections = self
+            .admission
+            .as_ref()
+            .ok_or(AslError::InvalidIdentity)?
+            .admitted_connections(now)
+            .into_iter()
+            .filter(|(agent, _, _)| *agent == owner)
+            .map(|(_, connection, _)| connection)
+            .collect::<Vec<_>>();
+        if connections.is_empty() {
+            return Err(AslError::NotFound);
+        }
+        let expires_at_ms = now.saturating_add(GROUP_INVITE_REQUEST_TTL_MS);
+        let deadline_ms =
+            now.saturating_add(asl_net::transport::REQUEST_TIMEOUT.as_millis() as u64);
+        let mut queued = 0_u64;
+        let mut delivery_error = None;
+        for connection_id in connections {
+            let request = GroupPacket {
+                message_id: Id128(fresh_id()?),
+                group_id: room,
+                epoch: 0,
+                body: GroupBody::Membership(GroupMembership::InviteRequest {
+                    agent: self.agent_id(),
+                    device: self.device_peer_id.clone(),
+                    expires_at_ms,
+                }),
+            };
+            let command = NetworkCommand::SendGroup {
+                connection_id,
+                request_handle: fresh_id()?,
+                deadline_ms,
+                request,
+            };
+            match self.net.try_send(&command.into_ipc()?) {
+                Ok(true) => queued += 1,
+                Ok(false) => delivery_error = Some(AslError::SandboxUnavailable),
+                Err(error) => delivery_error = Some(error),
+            }
+        }
+        if queued == 0 {
+            return Err(delivery_error.unwrap_or(AslError::NotFound));
+        }
+        Ok(json!({
+            "room": alloy_primitives::hex::encode(room.0),
+            "owner": format!("agent:{}", alloy_primitives::hex::encode(owner.0)),
+            "queued": queued,
+            "expires_at_ms": expires_at_ms,
+        }))
+    }
+
+    fn contact_lookup(&self, agent: AgentId) -> Result<Value, AslError> {
+        if agent.0 == [0; 32] || agent == self.agent_id() {
+            return Err(AslError::PolicyDenied);
+        }
+        let now = unix_time_ms()?;
+        let store = asl_store::open_store(&self.state_database)?;
+        store.enqueue_contact_binding_action(
+            ContactBindingActionKind::Lookup,
+            Some(asl_types::record::short_code(agent)),
+            Some(agent),
+            None,
+            now,
+        )?;
+        Ok(json!({
+            "agent": format!("agent:{}", alloy_primitives::hex::encode(agent.0)),
+            "state": "queued",
+            "network_ready": self.network_admission_status == NetworkAdmissionStatus::Active,
+        }))
+    }
+
+    fn contact_status(&self) -> Result<Value, AslError> {
+        let store = asl_store::open_store_read_only(&self.state_database)?;
+        let policy = store.contact_request_policy()?;
+        let candidates = store
+            .contact_binding_candidates()?
+            .into_iter()
+            .map(|candidate| {
+                json!({
+                    "agent": format!("agent:{}", alloy_primitives::hex::encode(candidate.agent_id.0)),
+                    "peer_id": candidate.peer_id,
+                    "code": format!("{:016}", candidate.code),
+                    "first_seen_ms": candidate.first_seen_ms,
+                    "dismissed": candidate.dismissed,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "request_mode": policy.mode.as_str(),
+            "shared_group_auto_accept": policy.shared_group_auto_accept,
+            "recent_interaction_ttl_ms": policy.recent_interaction_ttl_ms,
+            "bindings": store.recent_contact_bindings()?,
+            "candidates": candidates,
+        }))
+    }
+
+    fn search_act_history(&self, query: String, limit: u32) -> Result<Value, AslError> {
+        let now = i64::try_from(unix_time_ms()?).map_err(|_| AslError::InvalidPolicyState)?;
+        let store = asl_store::open_store_read_only(&self.state_database)?;
+        let live_rows = store.search_act_history(now, &query, limit)?.into_iter();
+        let mut entries = Vec::new();
+        let mut seen = BTreeMap::new();
+        for row in live_rows {
+            seen.insert((row.conversation_id.clone(), row.act_id), ());
+            entries.push({
+                json!({
+                    "conversation_id": row.conversation_id,
+                    "act_id": alloy_primitives::hex::encode(row.act_id),
+                    "mls_epoch": row.mls_epoch,
+                    "direction": row.direction.as_str(),
+                    "act_kind": row.act_kind,
+                    "causal_root": alloy_primitives::hex::encode(row.causal_root),
+                    "reply_to": row.reply_to.map(alloy_primitives::hex::encode),
+                    "body": row.body,
+                    "received_at_ms": row.created_at_ms,
+                    "expires_at_ms": row.expires_at_ms,
+                    "source": "live_history",
+                })
+            });
+        }
+        let remaining = limit.saturating_sub(u32::try_from(entries.len()).unwrap_or(limit));
+        if remaining > 0 {
+            for row in store.search_act_history_archive(now, &query, remaining)? {
+                if seen
+                    .insert((row.conversation_id.clone(), row.act_id), ())
+                    .is_some()
+                {
+                    continue;
+                }
+                entries.push(json!({
+                    "conversation_id": row.conversation_id,
+                    "act_id": alloy_primitives::hex::encode(row.act_id),
+                    "direction": row.direction.as_str(),
+                    "act_kind": row.act_kind,
+                    "body": Value::Null,
+                    "semantic_score": row.score,
+                    "received_at_ms": row.received_at_ms,
+                    "expires_at_ms": row.expires_at_ms,
+                    "source": "semantic_index",
+                }));
+            }
+        }
+        Ok(json!({
+            "query": query,
+            "limit": limit,
+            "entries": entries,
+        }))
+    }
+
+    fn reject_group_join_request(
+        &mut self,
+        room: Hash32,
+        device: &PeerId,
+    ) -> Result<Value, AslError> {
+        let now = unix_time_ms()?;
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        let room_state = groups
+            .store
+            .mls_room_for_reconciliation(room)?
+            .ok_or(AslError::NotFound)?;
+        if room_state.creator != self.device_peer_id {
+            return Err(AslError::PolicyDenied);
+        }
+        if !groups
+            .store
+            .finish_group_invite_request(room, device, false, now)?
+        {
+            return Err(AslError::NotFound);
+        }
+        Ok(json!({
+            "room": alloy_primitives::hex::encode(room.0),
+            "device": bs58::encode(device.as_bytes()).into_string(),
+            "state": "rejected"
         }))
     }
 
@@ -927,6 +1613,38 @@ impl Supervisor {
         }))
     }
 
+    fn renew_resource_budget(
+        &mut self,
+        conversation_id: String,
+        kind: BudgetKind,
+        additional: u64,
+        window_ms: u64,
+    ) -> Result<Value, AslError> {
+        let now = unix_time_ms()?;
+        let expires_at_ms = now.saturating_add(window_ms);
+        let groups = self.groups.as_mut().ok_or(AslError::NotFound)?;
+        if !groups.store.renew_resource_budget(
+            &conversation_id,
+            kind,
+            additional,
+            expires_at_ms,
+            now,
+        )? {
+            return Err(AslError::NotFound);
+        }
+        Ok(json!({
+            "conversation_id": conversation_id,
+            "kind": match kind {
+                BudgetKind::MessageBytes => "message_bytes",
+                BudgetKind::ModelCalls => "model_calls",
+                BudgetKind::CpuMs => "cpu_ms",
+                BudgetKind::MailboxBytes => "mailbox_bytes",
+            },
+            "additional": additional,
+            "expires_at_ms": expires_at_ms,
+        }))
+    }
+
     fn claim_mail_offer(
         &mut self,
         handle: Id128,
@@ -943,8 +1661,22 @@ impl Supervisor {
             return Err(AslError::PolicyDenied);
         }
         if let Some((room, epoch, binding)) = &held.room {
+            let connection = if held.connection != [0; 16] {
+                held.connection
+            } else {
+                self.admission
+                    .as_ref()
+                    .ok_or(AslError::NotFound)?
+                    .admitted_connections(now)
+                    .into_iter()
+                    .find(|(agent, _, peer)| {
+                        *agent == held.source.agent_id && *peer == held.source.peer_id
+                    })
+                    .map(|(_, connection, _)| connection)
+                    .ok_or(AslError::NotFound)?
+            };
             let member = self
-                .current_group_requester(held.connection, &held.source.peer_id, *room, *epoch)
+                .current_group_requester(connection, &held.source.peer_id, *room, *epoch)
                 .ok_or(AslError::PolicyDenied)?;
             if !GroupInboundPolicy::load(store)?.browse_enabled
                 || member.direct.agent != held.source.agent_id

@@ -75,15 +75,10 @@ impl Provider {
                 panic!("expected TCP listener")
             };
             dialer.dial(TransportKind::Tcp, endpoint, &peer).unwrap();
-            let (left, right) = tokio::join!(dialer.next_event(), listener.next_event());
-            let (
-                TransportEvent::Connected { connection: client },
-                TransportEvent::Connected { connection: server },
-            ) = (left.unwrap(), right.unwrap())
-            else {
-                panic!("expected authenticated connections")
-            };
-            (client, server)
+            tokio::join!(
+                next_connected(dialer, &peer),
+                next_connected(&mut listener, &receiver.peer)
+            )
         })
         .await
         .unwrap();
@@ -201,6 +196,18 @@ impl Provider {
                 }
                 other => panic!("unexpected provider event: {other:?}"),
             }
+        }
+    }
+}
+
+async fn next_connected(transport: &mut LocalTransport, expected: &PeerId) -> AuthenticatedPeer {
+    loop {
+        match transport.next_event().await.unwrap() {
+            TransportEvent::Connected { connection } if connection.peer_id() == expected => {
+                return connection;
+            }
+            TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+            event => panic!("unexpected connection event: {event:?}"),
         }
     }
 }

@@ -17,19 +17,31 @@
 | Windows AppContainer/Job Object | T09 实现与真实负向探针已完成首轮；任务验收部分完成 | 本机真实测试覆盖读文件/Worker 联网与子进程拒绝、ACL/继承句柄、资源限制、清理、Net 外网 TCP 连接和多播 membership；公网 TCP 只证连接握手，外部 UDP echo、libp2p QUIC 与 mDNS query/response 未验收。执行文件 ACL DACL 更新有真实跨进程 mutex 串行化测试。最后一次独立复核发现的并发问题已修；不是独立安全审计 |
 | Supervisor 与有界 IPC | T10 实现切片及本机真实进程验证完成；系统验收部分完成 | 固定角色/消息/操作、序号、方向及 4 MiB 限制有单测；真实 AppContainer 测试覆盖 Net 心跳、Worker 在任务启动确认后、Core 放行执行前被终止时当前调用失败且新 Worker 可继续处理。此用例不代表计算中的崩溃注入。Supervisor 进程级故障注入和完整公网互通仍待验收 |
 | 默认后台收件与续传 | T23 工作线程已接入，验证见[实施计划](06-implementation-plan.md) | 真实认证 TCP 回环从 Fetch 到 NTFS 发布，链准入为夹具；续传用真实 NTFS/SQLite 和模拟网络事件。未验收生产跨进程下载全链路、公网重连或 GUI |
-| Inline 与文档/头像 Extractor | T24 本机功能切片已实现并通过定向验证 | inline 仅回传已请求且 hash 匹配的有界内存内容；Windows AppContainer 实测固定 PDF/头像操作。未完成 GUI 流程、文件传输端到端集成、完整工作区或公网验收 |
-| 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页与事务恢复有本机测试；不代表 PDF 解析、模型访问或远端搜索已接通 |
+| Inline 与文档/头像 Extractor | T24 已扩展为 PDF、DOCX、XLSX、PPTX、头像隔离处理，导入/重建索引路径已接线 | inline 仅回传已请求且 hash 匹配的有界内存内容；文档输入 4 MiB、输出 2 MiB、FTS 正文 32 KiB，宏/加密/越界 OOXML 拒绝。最终统一测试和完整 GUI/跨机验收待执行 |
+| 本地授权检索 | T12 本地导入、索引、受限查询与撤权清理；PDF/OOXML 解析结果只留在本机索引 | 中文正文、结构化概念、SQL/FTS 字面值、跨授权隔离、链身份撤销、有限分页和事务恢复有本机测试；Office/PDF 解析需最终统一验证，不代表模型访问或远端全文搜索已接通 |
 | 结构化签名记录 | T13 核心已实现；T31 本机目录续签已接入 | 严格 CBOR、当前链控制者签名、目录承诺、目录续签序号持久化；Profile 的 DHT 发布、远端记录历史持久化与真实公开投递仍待接入 |
-| T14 传输与身份握手 | 部分实现，仍未验收整项 | TCP/QUIC loopback request-response、Core 链证明准入及缓存 proof serving 有定向测试；设备密钥启动交付、Net/Core 命令事件与 loopback 监听已接入子进程边界；Core 自动身份闸门、公网地址策略、mDNS、DHT、中继和完整公网互测待完成 |
-| T27 Agent 查询 | 入站授权直答、出站联系人直询和公开 DHT provider 查找已接入 | 当前通过的是旧确定性 query/answer 路径，不是 ASL/1.3 act-nl。act、提示注入隔离、audience 裁剪、可续期预算、邮箱唤醒和公网互通仍未验收 |
+| T14 传输与身份握手 | Core 身份闸门、地址策略、DHT、mDNS、relay 与 TCP/QUIC 路径已有实现和局部测试，整项仍未公网验收 | TCP/QUIC loopback、真实双节点 DHT、relay v2 和 AppContainer 网络有定向证据；真实 LAN、NAT 打洞、双机重启补收、多运营商链 RPC 和完整公网互测仍待完成 |
+| T27 Agent 查询 | 入站授权直答、出站联系人直询、公开 DHT provider、ASL/1.3 act、自动回复和密文邮箱已接入 | act 控制面/数据面、audience 裁剪、双许可本地证据、持久预算和邮箱补收有局部测试；提示注入红队、缓存证据过期恢复、真实双机与公网互通仍未验收 |
 | T30 本机 MCP | 四个工具、Core 启动授权、加密会话和收件授权已接入 | 真实 stdio 子进程到真实 Core 覆盖离线查询和会话隔离；另用实际 MCP 消息处理、认证 TCP 回环、链准入夹具验证 Offer、批准与 NTFS 发布。不是公网或生产跨进程下载全链路。命令与分项结果见[实施计划](06-implementation-plan.md#t30--本机-stdio-mcp) |
 | T31/T32 三节点群消息 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t31-三节点容器回环验收) | 含邀请审批、结构化问答、浏览开关和剔除在线成员；不含跨容器传文件、真实链 RPC 或跨机网络 |
 | T32 双节点群文件 | Windows AppContainer 同机 TCP 回环已通过[管理员定向验收](plan-validation.md#2026-11-22-t32-跨容器群文件验收) | 单来源、双端逐文件审批、两个分块和收件文件逐字节核对；不含多来源并发、断点续传或跨机网络 |
 | 旧结构化群聊（Query/Answer/Offer） | OpenMLS 小群夹具和上述三节点回环验收已有局部实现 | 保留并继续维护；它不证明 ASL/1.3 act-nl、两人 MLS 私聊、离线加密邮箱、gossipsub 或大群容量已完成 |
-| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub 网络与 Core act 路由已接入；其余待实现 | act/群/IPC/MCP 定向测试和编译通过；`asl-net` 真实双节点 gossipsub 通过。尚无 act 历史、模型自动回复、远程密文邮箱和跨机多跳/规模验收 |
-| 两人 MLS 私聊（G00） | 待实现验收 | 必须与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
-| 加密邮箱、gossipsub 与容量分级 | v35 本地密文仓储、libp2p gossipsub 和 Core act 路径部分实现 | 邮箱远程托管/补收和分层拓扑待实现；direct/gossip 由本机容量选择，不设固定 64 人业务上限 |
+| ASL/1.3 `act-nl` | 编解码、MLS application 收发、入站通知、MCP 发信、持久发送预算、gossipsub、`Ask` 结构化模型回复、双许可本地证据、CLI/MCP Act 历史搜索、CLI 导出和 DHT 密文邮箱已接入 | act/群/IPC/MCP 定向测试、asl-agent 全目标、真实双节点 DHT mailbox put/get 通过。尚无缓存证据过期恢复、真实两设备重启补收、跨机多跳/规模验收 |
+| 两人 MLS 私聊（G00） | 已走两人 MLS 房间工具，真实双机验收未完成 | 与群聊共用 act、预算、邮箱、历史和文件路径；不得保留认证连接直接发明文的旁路 |
+| 加密邮箱、群权限、gossipsub、加入请求与容量分级 | SQLite v49、libp2p gossipsub、AutoNAT/DCUtR、Core act/Policy、群主策略转移、能力分层、逐文件权限、加入/重入请求、DHT 持久回灌、自动多子 MLS 邀请、ASL/1.4 根/子群绑定、持久去重转发与加密 shard-forward outbox、跨 shard 文件路由元数据已实现 | 最终本地编译/测试已通过；真实多设备策略同步、真实双机邮箱/群请求、公网 NAT/relay、512/2,000/10,000 容量矩阵待执行；不设固定 64 人业务上限 |
 | 完整 P2P 网络、群组与 GUI | 完整产品尚未验收 | 单机群消息结果不能替代公网发现/连接、Agent 自主行为、文件传输或完整 GUI 的系统验收 |
+
+2026-11-27 高级闭环集中验证（Windows x64，Rust 1.100.0，Cargo/target/临时目录位于 E 盘，离线）：
+
+- `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1`：退出码 0；所有非忽略测试通过。环境/子进程用途的 AppContainer、PowerShell 7、外部 TCP/UDP 目标和生产计时器用例仍按设计 ignored。
+- `cargo +1.100.0 clippy --workspace --all-targets --locked --offline -- -D warnings`：通过。
+- `cargo +1.100.0 clippy -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings` 与 desktop-ui lib 测试：通过。
+- `cargo +1.100.0 fmt --all -- --check`、`git diff --check`：通过。
+- `cargo +1.100.0 run -p asl-types --example export_schema_vectors --locked --offline -- --check`：36 个向量，26 accepted / 10 rejected。
+- `scripts/validate-cddl.ps1`：两个 CDDL 文件通过，26 accepted / 10 rejected。
+- identity onboarding 5 项、群上下文 4 项、group policy/file/admin 4 项、DHT provider 多 key 测试 1 项、net provider 5 项、topology 3 项、Act 语义索引 4 项通过。
+
+本轮新增代码覆盖 DHT provider 持久化和启动/恢复回灌、链身份 `onboard/resume/status/revoke-onchain` 状态机、群语义上下文、逐文件权限、管理员禁言委派、复合预算默认授予/消耗/续期、Act 跨保留期哈希索引，以及 10,000 成员 shard plan/路由。仍未执行真实链交易、真实多运营商 RPC、公开 seed/relay/NAT、两台真实设备、多个 >512 子 MLS 群、72 小时运行或独立安全审计；这些不能由本机测试替代。
 
 2026-11-20 T27 出站联系人直询切片集中验证（Windows x64，Rust 1.100.0，Cargo、target、临时目录均位于 E 盘，离线）：
 
@@ -112,6 +124,7 @@
 | A29 | 邮箱槽、分片或 gossip 主题泄露明文、文件名、群名、Agent 名或长期稳定标签 | 落盘和托管只见密文与受限元数据；固定大小桶、TTL、分片和主题轮换生效 |
 | A30 | 2、32、128、512 设备 direct/gossip 切换，2,000 逻辑成员收敛，10,000 级分层桥接 | 每档记录 CPU、内存、磁盘、带宽、p95 收敛、重复率和失败恢复；超过本机容量时拒绝扩容并退避，不崩溃 |
 | A31 | 浏览模式收到 act 或文件 offer | 可浏览并通知 Agent，但不生成回答；无接收权限时请求用户授权；设为不交流的会话在程序打开时再次确认 |
+| A32 | 群主策略回滚、非群主伪造 Policy、被禁言/禁止文件成员发送 act 或 Offer | 非群主 sender 被拒绝；revision 不回退；成员端在活动通知和文件收取前拒绝，群主/管理员权限不替代用户目录授权 |
 
 路径隔离、沙箱、认证、签名、撤销与模型输入前过滤由独立工程复核者读取代码并重跑。普通模型自评、截图或“没有报错”不替代复核。
 
@@ -179,11 +192,26 @@ fuzz 工具、SBOM 工具及其版本在 T02 锁定；记录实际工具版本�
 
 完整公开发布必须提供并验证打包种子里的真实地址，不能交付空列表却宣传开箱公网自动发现。用户另选自建网络属于网络授权，不依赖官方账户。方案阶段不编造尚未部署的公网地址。
 
+Linux 发布脚本为 `scripts/package-linux-infra.sh`，包说明见 `packaging/linux/README.md`。包结构固定为二进制、systemd 模板 `asl-infra.service.in`、示例配置、安装器、README、LICENSE、`THIRD-PARTY.txt`、`sbom.cdx.json`、`MPL-SOURCES.zip`、`BUILD-INFO.json` 和 `SHA256SUMS`。安装器默认使用 `/usr/local/bin/asl-infra`、`/etc/asl-infra/infra.toml`、`/var/lib/asl-infra` 和 `/etc/systemd/system/asl-infra.service`，并把实际路径渲染进 unit；已有配置不被覆盖。包外另发 `.sha256`、Ed25519 `.sig` 和可独立核验的公钥。
+
+Linux 正式签名域为 `ASL-LINUX-INFRA-RELEASE-v1`。使用 `scripts/sign-release-artifact.sh` 时，签名原文为该 ASCII 域名、一个 NUL 字节和 tar.gz 原始字节；下载方用 `packaging/linux/verify-release.sh` 验签。发布脚本默认拒绝脏工作树，只有本地测试才可显式设置 `ASL_RELEASE_ALLOW_DIRTY=1`。
+
 ## 8. 发布与更新
 
 必须交付 Windows 便携包/安装包、Linux infra 包、hash 清单、独立发布密钥的 Ed25519 签名、SBOM、第三方 notices 和构建版本信息。发布密钥不复用节点身份。
 
 Windows Authenticode 可在维护者持有合适证书时附加；产品更新的签名验证不依赖购买证书或付费账号。更新镜像可替换，离线导入仍验证签名，关闭更新服务不影响已安装节点运行。
+
+Windows 正式流程见 `packaging/windows/RELEASE.md`：
+
+1. `scripts/package-windows.ps1` 构建 ZIP，并在封包前对六个 EXE 执行 Authenticode 和 `Get-AuthenticodeSignature` 验证。只有证书存储中的 thumbprint 被接受，不把 PFX、密码或私钥写入脚本参数记录。
+2. `scripts/sign-windows-package.ps1` 生成严格 v1 manifest、64 字节 Ed25519 detached signature、PEM 公钥和原始 32 字节公钥。清单签名原文为 ASCII `ASL-WINDOWS-UPDATE-v1`、一个 NUL 字节和清单原始字节。
+3. 正式发布前必须用上一版受信任的 `asl-core.exe` 执行 `--verify-update`；同版本 Core 不能把同版本包当成升级包。
+4. 发布 ZIP、manifest、signature 和独立公布的公钥。用户固定公钥后，`Update-ASL.ps1` 验证签名、版本、长度、SHA-256 和候选 `asl-core.exe --version`。
+
+发布私钥只能在仓库外使用；脚本拒绝仓库内私钥路径。当前固定公钥是引导层，不随普通更新替换；密钥轮换和丢失恢复必须带外完成，不得用未签名自动更新掩盖。
+
+Linux 与 Windows 的发布脚本只生成物料和验证结果，不是公网、第二台机器、证书链或真实链交易的验收证据。正式发布日志必须记录实际命令、工具版本、产物摘要、签名公钥指纹、SBOM 摘要和未执行项。
 
 数据库迁移有备份和向前兼容说明；更新不能自动恢复更宽松的历史授权。所有严重安全问题修复后才打完整 1.0 标签。
 

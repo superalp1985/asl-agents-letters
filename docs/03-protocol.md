@@ -26,9 +26,13 @@ ASL/1.2 增加摘要绑定的语义上下文帧（kind 16-19）。`ContextExpres
 
 ASL/1.3 增加 `act-nl`（Hello feature 5）。`act` 不是外层 `control-frame`，只能作为 MLS `Application` 解密后的 `group-application` 明文；私聊是两人 MLS 组，与群聊共用同一 act 路径。act 控制字段包括 message/conversation/causal ID、act type、reply-to、结构化 action、blob-ref 附件、hop 和期限；唯一可选任意文本字段是 `act[5] nl-body`，最多 32 KiB。`nl-body` 是不可信远端数据，不能成为系统/开发者指令、工具调用、路径、授权、目标或动作。动作只能来自结构化 `action` 并经 PolicyService；文件字节仍走 `offer/fetch/chunk/hash`，act 只携带 blob-ref。
 
-当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。远程持久加密邮箱补收、自动模型回答、跨设备历史和大规模跨机验收仍未完成；本文不能据此宣称这些能力完整可用。
+ASL/1.4 增加 `shard-forward`（Hello feature 6）和根群/子群绑定。每个子群仍是独立 MLS 组；同一密文不能跨子群复用。逻辑群主对 `ShardBinding` 和 `ShardForward` 的规范 CBOR 前映像做根身份签名。转发封装绑定逻辑根、源/目标子群、原发送 Agent/Peer、源 MLS epoch、源成员 epoch、原消息 ID、短期期限、目标绑定、原 `group-application` 字节和桥接证明。接收端验证外层 MLS 发送者、当前目标群主、链上 controller、绑定和转发签名，再以 `(root, source child, target child, source peer, source message)` 做持久去重。桥接节点只可转发经其认证的原应用，不获得原发送者的私钥；策略、成员变更、移除请求和嵌套转发不得进入转发载荷。
 
-- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件和预算均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
+当前实现边界：`Act` 编解码、MLS application 封装、入站事件中的 `untrusted_remote_data` 标记、MCP `asl_send_act`、显式管理授权下的群/两人会话 MCP 工具、发送侧持久预算和 gossipsub act 路由已接入。回答开启时，`Ask` 可由本机已批准模型生成严格解析的 `Inform/Clarify`，模型不能返回 action、tool、path 或附件控制字段；在线群请求会从当前 audience 快照选择最多 4 个同时具备 `ReadChunk`/`ModelInput` permit 的本地文本证据。DHT 密文邮箱已接 8 KiB 记录、分片批次、3 天轮换键和 7 天 TTL；已知联系人或群成员可拉取并用 MLS 重新验证发送者。Act 元数据和 DPAPI 保护的本机正文预览进入活动历史，选择 `history` 的加密身份迁移包可携带未过期历史。邮箱不携带文件字节，不提供远端送达回执；真实两设备、公网/NAT/relay 和 MLS 密钥迁移仍待验收。
+
+ASL/1.3 群内还定义了 `group-policy` 控制值：正常情况下只在 MLS 解密后由当前群主发出，包含单调递增的 policy revision、成员默认权限位、管理员 PeerId、禁言 PeerId 和可选的新群主 PeerId。`1=成员可发文字`、`2=成员可发文件`、`4=成员可邀请`；管理员由群主指定，群主始终拥有最高权限。key 6 存在时执行群主策略转移，新群主必须是当前 MLS 活动成员且不能被禁言；接收方必须用 MLS 当前 epoch 的 sender leaf 验证发送者确实是当前群主，再原子替换本机策略。可选 key 7 按 content hash 给出逐文件 `read/send/fetch` 位，entries 按 hash32 严格排序且唯一，最多 512 项；没有对应 entry 时沿用成员默认文件权限。可选 key 8 为匹配管理员的 PeerId 绑定 `manage-members/manage-files/manage-invites` 能力位，只能引用 key 4 中的管理员。委派控制必须保持 policy revision、权限、owner、管理员名单和能力位不变：`manage-members` 只可改禁言快照，`manage-files` 只可改逐文件策略，`manage-invites` 只放行邀请操作。成员端对入站 act 和文件 Offer 都重新检查该策略，文件路径和传输时调用 `group_can_access_file`。群主策略转移不等于迁移 MLS creator 私钥或历史 ratchet 状态。
+
+- 使用确定性 CBOR（RFC 8949）及 CDDL（RFC 8610）；整数 map key、定长 ID、有限容器和版本化枚举。外层控制面、DHT 记录、身份记录、offer、群成员事件、预算、shard 绑定和 forwarding envelope 均不定义任意 text string。已有配对邀请的单句说明是固定长度兼容例外；ASL/1.3 仅额外允许 MLS 解密后的 `act[5] nl-body`。
 - 规范结构外的字节串只允许出现在用途固定的密码学值、hash、签名、PeerId、文件/MLS 密文载荷中。验证器按具体用途检查长度、格式和状态转移，不把未知 blob 交给模型。
 - 文件载荷与控制消息分流，是由本地 grant 明确授权的不透明对象；接收文件不自动解析成对话、指令、可执行内容或模型上下文。人类选择授权模型处理时，仍按不可信数据进入隔离模型闸门。
 - 本地配置、GUI 标签、日志和数据库可以有文本字段；它们不属于对端可控的 ASL 语义 wire。链上也不得写入自然语言字段。
@@ -60,22 +64,22 @@ Pairing exchange 的 attempt 从 1 开始，最大为 5；0 不合法。
 | `/asl/control/1.0.0` | hello、query、answer、offer、fetch、error | request-response 单帧确定性 CBOR 最多 64 KiB，前缀 u32 BE |
 | `/asl/identity-proof/1.1.0` | 按需交换链上身份状态与设备目录证明 | 请求为固定 IdentityProofRequest，响应确定性 CBOR 最多 256 KiB；均带 u32 BE 长度前缀；不兼容的 1.0.0 不协商 |
 | `/asl/blob/1.0.0` | manifest、块、inline 拉取 | request-response 一请求一响应；请求固定 91 字节，响应最多 2,097,237 字节（不含外层 u32 BE 前缀），manifest 最多 2,097,210 字节，数据块最多 1 MiB |
-| `/asl/group/1.0.0` | 定向群邀请/加入和有界 MLS 状态同步 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL；大群 gossipsub/分层尚未接入 |
+| `/asl/group/1.0.0` | 定向群邀请/加入、有界 MLS 状态同步和签名 shard 转发 | 每帧最多 256 KiB；MLS 解密后的 ASL 应用明文必须符合 CDDL；gossipsub 已按 shard/backbone topic 承载密文，512/2,000/10,000 跨机容量仍需实机验收 |
 | 本机 IPC/1 | core 与受限子进程 | 4 MiB 单帧硬上限，按消息种类再缩小；继承管道，不监听公网 |
 
 manifest 上限按固定格式精确计算：58 字节头 + 65,536×32 字节 hash = 2,097,210。不得先按对方声明长度分配无限 Vec。
 
 IPC/1 的 T14 类型消息使用 16 字节不透明 connection handle 和已认证设备 PeerId；连接事件只能由 Net 角色发送，PeerId 仅代表 Noise/libp2p 设备传输认证，不代表 AgentId 已验证。Net 启动时先从私有输入管道读取 `ASLK` v2 前导：4 字节 magic、u16 BE 版本、u32 BE 密钥长度、1 字节回环群开关（`0` 关闭，`1` 开启），随后是最多 1 KiB Ed25519 libp2p protobuf 密钥。该前导不是 IPC 帧；未知版本、格式错误或超限在分配正文前拒绝。Net 解码密钥后以 IPC kind 16 `NetReady` 返回 PeerId，Supervisor 将其与 DPAPI 本地设备身份比较，不匹配则终止子进程。本机 Agent 根身份也由当前用户 DPAPI 在启动时 create-once 加载或生成，但不等于链上身份状态已验证。身份证明请求/应答复用 `/asl/identity-proof/1.1.0` 的规范 CBOR 帧，额外绑定 connection handle；入站请求另带不透明 response handle，Core 回答时必须原样带回。每种 IPC 消息在读取 body 前执行自身长度上限。运行时将 handle 绑定活动连接、将 response handle 绑定原请求，并在断开后使旧句柄失效。Net 子进程连接表、传输事件/命令、身份证明转发和 `CoreAdmission` 身份闸门现已实现；Supervisor 启动时加载本地链状态 resolver 和签名设备目录，并只对通过链身份验证的本机 Agent 建立准入状态。常驻事件泵只向本地 handler 交付通过身份准入的 peer 事件，回调生成的控制/bulk 出站命令再次校验；缺少本机准入状态时关闭远端连接。默认命令行入口不接入 Agent 会话处理，不代表应用会自动回答消息。
 
-T24 增加本机 IPC kind 41 `RunExtractorTask`（仅 Core -> Extractor）与 kind 42 `ExtractorResult`（仅 Extractor -> Core）。请求固定为 task ID、`PdfText`/`Avatar` 枚举、u32 BE 长度和输入字节；单帧上限 4 MiB。结果固定为 task ID、`Completed`/`Rejected` 枚举、u32 BE 长度和输出字节；PDF 文本最多 2 MiB，头像最多 64 KiB。拒绝结果不含正文。Extractor 没有文件路径、网络或可继承文件句柄；Core 只提交已在内存中的文档并按 task ID 关联一次性响应。
+T24 增加本机 IPC kind 41 `RunExtractorTask`（仅 Core -> Extractor）与 kind 42 `ExtractorResult`（仅 Extractor -> Core）。请求固定为 task ID、`PdfText`/`DocumentText`/`Avatar` 枚举、u32 BE 长度和输入字节；单帧上限 4 MiB。`DocumentText` 在隔离进程内按 magic 识别 PDF 或 OOXML，并拒绝宏启用、加密、符号链接和越界关系部件；DOCX/XLSX/PPTX 只读取包声明的已知部件。结果固定为 task ID、`Completed`/`Rejected` 枚举、u32 BE 长度和输出字节；文档文本最多 2 MiB，头像最多 64 KiB。拒绝结果不含正文。Extractor 没有文件路径、网络或可继承文件句柄；Core 只提交已在内存中的文档并按 task ID 关联一次性响应。
 
-后续接线状态（2026-11-19）：Net 子进程连接表、传输命令/事件及身份证明转发已接通；`CoreAdmission` 在同一 IPC connection handle 上协调 Hello、身份链证明和设备目录核验，并在核验前拦截控制/bulk 业务事件及出站业务命令。准入失败通过 IPC kind 32 `CloseConnection` 关闭对应传输连接。Supervisor 从本机严格版本化信任配置、有效链状态和签名设备目录构造绑定自身根 AgentId 与实际 Net PeerId 的 Hello/准入状态；缺少配置、目录或链上 Active 身份时不开放业务消息。常驻事件泵将已准入事件交给本地 handler 并校验其出站命令；Agent 会话处理尚未接入，默认命令行 handler 静默。启动后的周期同步和首次注册仍未实现；传输目前限 loopback，公网策略与完整 T14 尚未验收。
+当前接线状态（2026-11-28）：Net 子进程连接表、传输命令/事件及身份证明转发已接通；`CoreAdmission` 在同一 IPC connection handle 上协调 Hello、身份链证明和设备目录核验，并在核验前拦截控制/bulk 业务事件及出站业务命令。准入失败通过 IPC kind 32 `CloseConnection` 关闭对应传输连接。Supervisor 从本机严格版本化信任配置、有效链状态和签名设备目录构造绑定自身根 AgentId 与实际 Net PeerId 的 Hello/准入状态；缺少配置、目录或链上 Active 身份时不开放业务消息。常驻事件泵将已准入事件交给本地 handler 并校验其出站命令；Agent 回复路径已接入，默认仍只在用户开启回答后运行。启动恢复、链注册/DHT 发布编排和 AutoNAT/DCUtR/relay 已有代码，但真实合约、公网双机和完整 T14 仍以外部验收为准。
 
 T27 直连集成（2026-11-20）更新了上面的历史接线状态：常驻命令行入口现在可以在用户本机允许回答后处理已准入的直接 query，缺省仍静默。检索只用结构化词表，回复沿用已定义的 `Answer` 或 `Offer`，不新增公网线字段、文本消息、文件读取或传输能力。本机 IPC kind 43 `ReplyDirect` 仅 Core -> Net，携带原 connection handle、原 response handle、u64 BE 有效期限（毫秒）和既有控制帧；Net 在送交传输前核对期限、回复类型及单次句柄。已通过 Core 授权并交接的回复不会延长有效期。
 
 IPC kind 38 `DiscoveryCandidate` 仅由 Net 发给 Core，正文为 u16 长度加规范 PeerId、传输类型、SocketAddr 和状态枚举（1=Discovered，2=Expired），正文上限 151 字节。它只表示通过本机地址策略筛选的 mDNS 候选元数据，不表示传输连接已建立、Agent 身份已验证或节点在线，也不授予联系人、查询或文件权限。Supervisor 将其转换成不产生网络命令的 `LocalNetworkObservation`，只交给单独的只读观察回调，不进入 Agent 业务 handler；默认事件泵不显示或持久化该观察。
 
-IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup ID 和 32 字节 DHT key。kind 45 `DhtProviders` 仅由 Net 发给 Core，包含 lookup ID、完成/失败状态及最多 20 个去重 provider 候选；每个候选只含规范 PeerId、可选的 TCP/QUIC SocketAddr 和已配置 relay 路由标志。Net 只从本地 provider/routing 地址中选取符合当前地址策略、且 PeerId 绑定一致的直接端点；无可用直接端点时不携带地址。候选及地址均为不可信发现数据，不表示 Agent 身份、资源内容或授权。Supervisor 将结果作为本机只读网络观察交给当前出站查询状态机；只有 CoreAdmission 提供的已准入连接才会收到 ASL Query。新增 IPC kind 不改变 ASL/1 应用帧。当前仍未配置 DHT bootstrap，资源 provider 发布也未接入，不能据此宣称冷启动公网发现可用。
+IPC kind 44 `FindProviders` 仅由 Core 发给 Net，固定包含非零 lookup ID 和 32 字节 DHT key。kind 45 `DhtProviders` 仅由 Net 发给 Core，包含 lookup ID、完成/失败状态及最多 20 个去重 provider 候选；每个候选只含规范 PeerId、可选的 TCP/QUIC SocketAddr 和已配置 relay 路由标志。Net 只从本地 provider/routing 地址中选取符合当前地址策略、且 PeerId 绑定一致的直接端点；无可用直接端点时不携带地址。候选及地址均为不可信发现数据，不表示 Agent 身份、资源内容或授权。Supervisor 将结果作为本机只读网络观察交给当前出站查询状态机；只有 CoreAdmission 提供的已准入连接才会收到 ASL Query。`network-settings-v1.json` 的 `bootstrap_multiaddrs` 现在会在启动/恢复时按当前地址策略逐个拨号；显式列表为空且配置发布公钥时，可加载安装目录 `assets/network-seeds.json`，Ed25519 签名、network ID、有效期、bootstrap 角色、数量和 PeerId/地址绑定必须通过。显式 public grant 的 content/concept hash 会进入 provider 发布集合。打包发布仍需提供真实、可达、签名的 seed 文件并完成冷启动公网验收。
 
 接收侧 IPC kind 27 `BulkReceived` 携带连接句柄、Net 端记录的原始本机请求 ID，以及通过 `/asl/blob/1.0.0` 响应关联校验的 BulkResponse。Core 再按当前准入的 AgentId、PeerId、连接、请求 ID 和期限匹配一次性待决请求；ASL blob 线上格式不变。匹配成功的普通 Bulk 响应通过 `BulkTransferResponse` 回调；未匹配响应不会交给调用方。
 
@@ -91,15 +95,15 @@ PAIR invite/exchange 使用整数键 CBOR。邀请携带 0 至 120 个 Unicode �
 
 ### 群子流
 
-`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，其中 ASL/1.3 可包含 `act`，其他应用帧仍不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。其 MLS 对象字段最多 65,408 字节且必须是无尾随数据的完整 TLS 编码 `MLSMessage`。KeyPackage 必须是一次性包；Welcome 只含指定包引用的一个收件项，携带 ratchet tree 扩展，新成员叶子必须与已提交 KeyPackage 的叶子一致。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；Commit/SyncCommit 必须是该群、该基础 epoch 的 MLS `PrivateMessage`（Commit）。
+`group-envelope` 外层不变：非零 16 字节消息 ID、非零 32 字节线上群 ID、`0..=2^63-1` epoch、操作码及最多 65,536 字节载荷。操作 `0` 是完整 TLS 编码的 MLS 1.0 `PrivateMessage`（Application）；解密后只接收 CDDL 的 `group-application`，可包含既有结构帧、`act`、群主策略、移除请求、语义上下文或 ASL/1.4 shard 控制；除 act `nl-body` 外不接受任意文本。操作 `1` 的载荷必须单独按 `group-membership` 做第二次确定性 CBOR 验证（数组首项为版本 `1`），不接受自由文本。群使用固定套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。
 
 | 请求 | 允许的回复 | 回复 epoch |
 | --- | --- | --- |
-| Application、Invite、Commit | Receipt | 请求 epoch |
+| Application、Invite、InviteRequest、Commit | Receipt | 请求 epoch |
 | KeyPackage | Welcome，回显邀请 ID | 请求 epoch + 1 |
 | SyncRequest | SyncCommit、AtHead、SyncUnavailable | 请求 epoch |
 
-Invite 通过 envelope 的消息 ID 标识邀请，写明目标 AgentId、目标 PeerId 和过期时间；不带群名、成员表或留言。KeyPackage 是接受邀请后的新请求，显式携带原邀请 ID。每个回复必须匹配原请求的消息 ID、完整群 ID 和已认证对端。Receipt 只表示收到了对应请求，不表示同意入群、持久写入或资源授权。
+Invite 通过 envelope 的消息 ID 标识邀请，写明目标 AgentId、目标 PeerId 和过期时间；不带群名、成员表或留言。InviteRequest 由希望加入或重新加入的设备发往群主，使用 `epoch=0` 表示请求方不知道当前 head；群主收到后必须以当前认证连接、群创建者和活动房间重新绑定 AgentId/PeerId，再把请求写入短期本机审批队列。该请求不携带群名、自由文本或成员资格推断。KeyPackage 是接受邀请后的新请求，显式携带原邀请 ID。每个回复必须匹配原请求的消息 ID、完整群 ID 和已认证对端。Receipt 只表示收到了对应请求，不表示同意入群、持久写入或资源授权。
 
 ASL 创建者证明是 MLS `GroupContext` 的私用扩展 `0xF720`，不改外层 CBOR。扩展数据是 `0x01 || random_nonce[32] || creator_agent_id[32] || canonical_creator_peer_id[1..128]`，线上群 ID 是 `SHA-256(ASCII "ASL-MLS-ROOM-v1\0" || extension_data)`。`RequiredCapabilities` 必须列出 `0xF720`，每个叶子必须声明支持；创建者使用当前已验证设备，身份承诺在同一群内不可变。收到 Welcome 时须独立重算承诺，从已验证树中定位该 AgentId/PeerId 的叶子，再要求 MLS 签名者索引与该叶子相同，且设备证书与原邀请和当前认证连接一致。不能以 Welcome 签名者、叶子序号或未验证 SQL 角色推导创建者。缺少扩展或必需能力的开发房间不能通过 Core 对账，不自动升级或启用群权限。不支持该能力的旧开发 KeyPackage 不能在此房间重用，需重新邀请和审批。
 
@@ -223,9 +227,9 @@ answer、offer、error 和 ack 不创建新的入站问答任务。只有本机�
 
 ## 6. Offer 与 lease
 
-offer 包含 `offer_id/content_id/concept_ids/file_size/media_kind/expires`，不含源路径、文件名、标题、摘要或自由文本标签。每个概念 ID 按协商的词表版本解释。文件名在本机接收后生成；本地索引仍可存标题/摘要，但不得随 offer 发出。
+offer 包含 `offer_id/content_id/concept_ids/file_size/media_kind/expires`，不含源路径、文件名、标题、摘要或自由文本标签。可选 key 9/10 分别是逻辑根和源 shard 的 hash32，两者必须同时存在；旧 offer 不带这两个字段，仍按单 shard/直连路径处理。每个概念 ID 按协商的词表版本解释。文件名在本机接收后生成；本地索引仍可存标题/摘要，但不得随 offer 发出。
 
-接收者接受 offer 后发送 `fetch_request`；提供者重新检查当前授权，回复 `fetch_grant`，签发 60 秒随机 lease，再请求 manifest。经 DHT 发现的公共资源和公开头像允许 offer_id=null，但仍按 content_id 找到可访问资源并验证 grant，不能跳过授权。不存在和无权限对远端统一返回 not_found。
+接收者接受 offer 后发送 `fetch_request`；可选 key 5/6 必须成对携带同一逻辑根和源 shard，接收方通过逻辑群主转发到源 shard，但文件字节仍只走源端与接收端的直接认证传输。提供者重新检查当前授权，回复 `fetch_grant`，签发 60 秒随机 lease，再请求 manifest。经 DHT 发现的公共资源和公开头像允许 offer_id=null，但仍按 content_id 找到可访问资源并验证 grant，不能跳过授权。不存在和无权限对远端统一返回 not_found。
 
 lease 绑定连接身份、内容、grant epoch 与 policy revision。revision 变化触发重判而不是无条件撤销，见架构文档。重连或重启后重新申请，不能仅凭 content_id 下载。fetch_grant 的 lease 不进入聊天记录、outbox 或普通日志。
 

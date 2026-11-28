@@ -208,6 +208,64 @@ fn reconciliation_requires_exact_live_device_and_chain_records() {
 }
 
 #[test]
+fn cached_group_requester_reconstructs_only_an_active_verified_member() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cached-requester.sqlite3");
+    let mut store = open_store(&path).unwrap();
+    let creator_agent = AgentId([1; 32]);
+    let member_agent = AgentId([2; 32]);
+    let creator_peer = test_peer(1);
+    let member_peer = test_peer(2);
+    register_evidence(&store, creator_agent, &creator_peer, 100);
+    register_evidence(&store, member_agent, &member_peer, 100);
+    let local_id = GroupId(Id128([3; 16]));
+    let wire_id = Hash32([4; 32]);
+    store
+        .stage_mls_room(PendingMlsRoom {
+            local_id: &local_id,
+            wire_id,
+            creator: &creator_peer,
+            local_name: "Cached",
+            mls_epoch: 0,
+            sealed_snapshot: b"staged",
+        })
+        .unwrap();
+    let base = store.mls_room_snapshot(wire_id).unwrap().unwrap().version;
+    store
+        .commit_mls_room_candidate(MlsRoomUpdate {
+            local_id: &local_id,
+            wire_id,
+            expected: base,
+            mls_epoch: 0,
+            sealed_snapshot: b"active",
+            members: &[creator_peer, member_peer.clone()],
+            event: None,
+        })
+        .unwrap();
+    store
+        .connection
+        .execute("UPDATE asl_groups SET state='active'", [])
+        .unwrap();
+    let requester = store
+        .cached_group_requester(wire_id, member_agent, &member_peer, 50)
+        .unwrap()
+        .unwrap();
+    assert_eq!(requester.direct.agent, member_agent);
+    assert_eq!(requester.group_id, local_id);
+    assert_eq!(requester.direct.registry_sequence, 1);
+    assert_eq!(requester.direct.controller, [0; 20]);
+    assert_eq!(requester.direct.session_expires_at_ms, 100);
+    assert!(
+        store
+            .cached_group_requester(wire_id, member_agent, &member_peer, 100)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+    let _ = path;
+}
+
+#[test]
 fn sync_requires_current_authority_and_rolls_back_an_expired_write() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = open_store(&directory.path().join("sync.sqlite3")).unwrap();

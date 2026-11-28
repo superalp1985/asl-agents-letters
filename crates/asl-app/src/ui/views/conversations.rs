@@ -67,10 +67,11 @@ pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64, language: Language) 
                     label(language, "时间", "Time"),
                     label(language, "方向", "Direction"),
                     label(language, "类型", "Type"),
+                    label(language, "内容", "Content"),
                     "AgentId",
                     label(language, "设备 PeerId", "Device PeerId"),
                 ],
-                [1.0, 0.7, 1.0, 2.0, 2.0],
+                [1.0, 0.7, 0.8, 2.4, 1.8, 1.8],
                 &events,
                 "",
                 |row| {
@@ -83,6 +84,19 @@ pub(super) fn show(ui: &mut Ui, data: &Dashboard, now: i64, language: Language) 
                         }
                         .into(),
                         text(&row.kind, language).into(),
+                        row.preview
+                            .as_deref()
+                            .unwrap_or_default()
+                            .chars()
+                            .map(|character| {
+                                if character.is_control() {
+                                    ' '
+                                } else {
+                                    character
+                                }
+                            })
+                            .take(120)
+                            .collect::<String>(),
                         row.agent_id.clone().unwrap_or_default(),
                         row.peer_id.clone(),
                     ]
@@ -121,6 +135,7 @@ mod tests {
             peer_id: peer.into(),
             agent_id: None,
             created_at_ms: time,
+            preview: None,
         };
         let rows = [
             event("group", "a", 4),

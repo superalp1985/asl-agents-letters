@@ -1,4 +1,4 @@
-use asl_net::transport::{LocalTransport, TransportEvent, TransportKind};
+use asl_net::transport::{AuthenticatedPeer, LocalTransport, TransportEvent, TransportKind};
 use asl_types::ids::PeerId;
 use libp2p::identity::Keypair;
 use std::{
@@ -51,15 +51,12 @@ async fn tcp_noise_yamux_loopback() {
     dialer
         .dial(TransportKind::Tcp, endpoint, &listener_peer)
         .unwrap();
-    let (left, right) = tokio::join!(dialer.next_event(), listener.next_event());
-    assert!(matches!(
-        left.unwrap(),
-        TransportEvent::Connected { connection } if connection.peer_id() == &listener_peer
-    ));
-    assert!(matches!(
-        right.unwrap(),
-        TransportEvent::Connected { connection } if connection.peer_id() == &dialer_peer
-    ));
+    let (left, right) = tokio::join!(
+        next_connected(&mut dialer, &listener_peer),
+        next_connected(&mut listener, &dialer_peer)
+    );
+    left.unwrap();
+    right.unwrap();
 }
 
 #[tokio::test]
@@ -83,37 +80,30 @@ async fn closing_an_authenticated_connection_emits_disconnects_on_both_sides() {
     dialer
         .dial(TransportKind::Tcp, endpoint, &listener_peer)
         .unwrap();
-    let (dialer_event, listener_event) = tokio::join!(dialer.next_event(), listener.next_event());
-    let TransportEvent::Connected {
-        connection: dialer_connection,
-    } = dialer_event.unwrap()
-    else {
-        panic!("dialer did not authenticate the listener");
-    };
-    let TransportEvent::Connected {
-        connection: listener_connection,
-    } = listener_event.unwrap()
-    else {
-        panic!("listener did not authenticate the dialer");
-    };
+    let (dialer_connection, listener_connection) = tokio::join!(
+        next_connected(&mut dialer, &listener_peer),
+        next_connected(&mut listener, &dialer_peer)
+    );
+    let dialer_connection = dialer_connection.unwrap();
+    let listener_connection = listener_connection.unwrap();
     assert_eq!(dialer_connection.peer_id(), &listener_peer);
     assert_eq!(listener_connection.peer_id(), &dialer_peer);
 
     dialer.close_connection(&dialer_connection).unwrap();
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(5), dialer.next_event())
-            .await
-            .unwrap()
-            .unwrap(),
-        TransportEvent::Disconnected { peer, .. } if peer == listener_peer
-    ));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(5), listener.next_event())
-            .await
-            .unwrap()
-            .unwrap(),
-        TransportEvent::Disconnected { peer, .. } if peer == dialer_peer
-    ));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        next_disconnected(&mut dialer, &listener_peer),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        next_disconnected(&mut listener, &dialer_peer),
+    )
+    .await
+    .unwrap()
+    .unwrap();
 }
 
 #[tokio::test]
@@ -312,7 +302,7 @@ async fn run_dialer_child(
 
     let mut transport = LocalTransport::new(identity)?;
     transport.dial(kind, endpoint, &expected_peer)?;
-    let event = timeout_at(deadline, transport.next_event())
+    let event = timeout_at(deadline, next_dial_result(&mut transport))
         .await
         .map_err(|_| timeout_error())?;
 
@@ -356,6 +346,66 @@ async fn next_event(
     timeout_at(deadline, transport.next_event())
         .await
         .map_err(|_| timeout_error())?
+}
+
+async fn next_connected(
+    transport: &mut LocalTransport,
+    expected: &PeerId,
+) -> io::Result<AuthenticatedPeer> {
+    loop {
+        match transport.next_event().await? {
+            TransportEvent::Connected { connection } if connection.peer_id() == expected => {
+                return Ok(connection);
+            }
+            TransportEvent::ReachabilityChanged(_)
+            | TransportEvent::RouteChanged(_)
+            | TransportEvent::Listening(_, _)
+            | TransportEvent::InboundRejected
+            | TransportEvent::Disconnected { .. } => {}
+            event => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected transport event while connecting: {event:?}"),
+                ));
+            }
+        }
+    }
+}
+
+async fn next_dial_result(transport: &mut LocalTransport) -> io::Result<TransportEvent> {
+    loop {
+        match transport.next_event().await? {
+            event @ (TransportEvent::Connected { .. } | TransportEvent::DialFailed { .. }) => {
+                return Ok(event);
+            }
+            TransportEvent::ReachabilityChanged(_)
+            | TransportEvent::RouteChanged(_)
+            | TransportEvent::Listening(_, _)
+            | TransportEvent::InboundRejected
+            | TransportEvent::Disconnected { .. } => {}
+            event => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected transport event after dial: {event:?}"),
+                ));
+            }
+        }
+    }
+}
+
+async fn next_disconnected(transport: &mut LocalTransport, expected: &PeerId) -> io::Result<()> {
+    loop {
+        match transport.next_event().await? {
+            TransportEvent::Disconnected { peer, .. } if &peer == expected => return Ok(()),
+            TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {}
+            event => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected disconnect event: {event:?}"),
+                ));
+            }
+        }
+    }
 }
 
 async fn accept_control(listener: &TcpListener, deadline: Instant) -> io::Result<TcpStream> {

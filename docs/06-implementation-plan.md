@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` when available. Without those skills, use `prompts/implement-one-task.md` and execute one ready task at a time. No external skill is a runtime dependency.
 
+> **Historical implementation record:** This document retains task-level history and older “not implemented” checkpoints. It is not the current readiness source. Use `docs/implementation-status.md` for the current code and validation state.
+
 **Goal:** 完整实现 R01–R33，发布可无人值守运行的 A信 1.0。
 
 **Architecture:** Rust workspace 分层实现；确定性 core broker 与 libp2p net 属于可信计算基，模型 worker/helper 被隔离。确定性 CBOR/CDDL 控制面、身份根/公共链校验、策略服务、SQLite、OpenMLS 两人/群会话、加密邮箱和纯传输调度器分别测试；ASL/1.3 `nl-body` 只在 MLS 解密后作为不可信数据进入模型数据区。GUI 只观察与授权。
@@ -661,7 +663,7 @@ T27 直连集成旧切片（2026-11-20，兼容状态）：`Supervisor::run()` �
 
 T27 出站联系人直询切片（2026-11-20）：新增有界 `OutgoingQueryPort`，只接受本地类型化 `OutgoingTask` 且限 `ContactsOnly`；队列最多 16 项、同时运行最多 8 项。Core 从本机 `authorized_contacts` 与当前已准入会话的交集中，按本地授权顺序挑选现有在线联系人；没有通过身份准入的 PeerId 不进入查询路由。发送前仍由 `CoreAdmission` 对该连接重验链身份，再通过原 Net request-response 通道发送固定 CBOR `Query`。Answer、Offer、Error 只按 request ID/AgentId/连接关联，Answer/Offer 还须匹配 root task 与有效期限；Offer 只接受资源型任务。结果经有界结构事件端口回交调用方，不自动追问、不自动拉取文件，也不调用模型。QueryRouter 终结任务后释放状态槽。
 
-T27 计划 11 增量（部分实现）：act 编解码、MLS application 收发、入站主动通知、`untrusted_remote_data` 隔离、MCP 发 act、发送侧持久预算、gossipsub 网络与 Core act 路由已接入；`ASL_MCP_GROUPS=admin` 下可建群、邀请和创建两人 MLS 会话。仍未接入 act 历史、自动模型回复、audience 自动裁剪、预算续期 UI、远程加密邮箱唤醒和跨机规模验收；在这些功能完成前，不宣称“无限制交流”或“任意内容可理解”已完整验收。
+T27 计划 11 增量（部分实现）：act 编解码、MLS application 收发、入站主动通知、`untrusted_remote_data` 隔离、MCP 发 act、发送侧持久预算、gossipsub 网络与 Core act 路由已接入；`ASL_MCP_GROUPS=admin` 下可建群、邀请和创建两人 MLS 会话。回答开启时，`Ask` 会被送到本机已批准模型端点，只接受严格结构的 `Inform/Clarify`；在线连接、DHT 邮箱和 gossip 经 MLS 认证后都从缓存链/设备证据重建当前群 requester，并按 audience 搜索本地文本，最多提供 4 个同时具备 ReadChunk/ModelInput permit 的候选，模型不能生成 action/tool/path。群 act 和 Offer 会写入 DHT 密文邮箱，已知联系人或群成员按 3 天轮换键和 16 个 8 KiB 分片拉取，MLS 再验证真实发送者。收发 act 的元数据和 DPAPI 保护的正文预览按群保留策略保存最多 7 天，并显示在活动页；`history` 迁移选择会用 age 加密包携带未过期 Act 历史，并在新设备重新 DPAPI 保护。仍未接入缓存证据过期后的离线证据恢复、MLS 群密钥迁移、预算续期 UI、送达回执和跨机规模验收；在这些功能完成前，不宣称“无限制交流”或“任意内容可理解”已完整验收。
 
 出站切片尚无 GUI/MCP 任务生产者，任务和结果暂不持久化；contacts-only 只向已在线且本地列入 `authorized_contacts` 的联系人直询，Public scope 已接入 DHT provider 查询和准入后直询。bootstrap 配置/节点入口、资源 provider 发布、离线投递、模型生成结构查询、结果本地历史及公网互通仍未接入。入站侧仍未实现多窗口检索或跨 Agent 公平排队、T26 异步模型、只浏览界面和 MLS 群消息。以上不关闭 T27。
 
@@ -896,6 +898,14 @@ SQLite v31 接入显式授权的直连续传：本机用户绑定已开始的传
 同一接口已接入现有回环群模式下的续传。读取与重新派发检查原群组成员版本，使用原设备和分块，不改线上协议或 SQLite 版本。待批准 Offer、推送回放及跨版本双节点端到端验收仍未完成。
 
 SQLite v32 接入收件审批状态补读。用户可将一个仍有效的原审批状态共享给当前恢复宿主，宿主断线后只读查询，不消耗审批、不授予文件权限，也不重建 Offer。完整 Offer 回放、推送回放与跨版本双节点验收仍待完成。
+
+### G01 — 群主、管理员与成员权限
+
+依赖 T31/T32 和现有 MCP 群管理授权。
+
+完成：群主由 MLS room creator 绑定；`group-policy` 只作为 MLS application plaintext；成员文字/文件/邀请权限、管理员和禁言设备使用确定性 CBOR；SQLite v36 投影保存 revision 和角色；入站 act/查询/表达式/Offer、出站 act/Offer/邀请和响应 Offer 都检查策略；MCP `asl_group_members`、`asl_group_set_access`、GUI 成员权限显示和群主权限编辑已接入。
+
+验收已覆盖策略 codec、非群主伪造、revision 回退、禁言、默认成员权限、v36 升级、MCP 参数和 UI 显示。仍待两台真实设备验证策略同步、群主转移、管理员管理动作、策略媒体/历史保留和公网群组。
 
 ### T37 — 独立安全复核与 fuzz
 

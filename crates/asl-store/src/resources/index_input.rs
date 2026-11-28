@@ -8,6 +8,8 @@ use asl_types::{
 
 use crate::search::{LocalIndexText, PreparedIndex};
 
+use super::DocumentTextExtractor;
+
 const MAX_TITLE_CHARS: usize = 160;
 const MAX_BODY_BYTES: usize = 32768;
 const TEXT_EXTENSIONS: &[&str] = &[
@@ -19,6 +21,7 @@ pub(super) fn copy_and_prepare(
     source: &mut AuthorizedFile,
     relative: &Path,
     capture_context: bool,
+    document_extractor: Option<&dyn DocumentTextExtractor>,
     progress: impl FnMut() -> Result<(), AslError>,
 ) -> Result<(StagedSnapshot, PreparedIndex, Option<Vec<u8>>), AslError> {
     let basename = relative
@@ -34,6 +37,12 @@ pub(super) fn copy_and_prepare(
     });
     let mut body = String::new();
     let mut first_chunk = true;
+    let extract_document = document_extractor.filter(|extractor| {
+        !text
+            && source.len() <= extractor.max_input_bytes()
+            && extractor.supports(relative, source.len())
+    });
+    let mut document_bytes = extract_document.map(|_| Vec::new());
     let mut context_bytes = (capture_context
         && (1..=MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES as u64).contains(&source.len()))
     .then(Vec::new);
@@ -42,10 +51,19 @@ pub(super) fn copy_and_prepare(
             body.push_str(text_prefix(chunk));
         }
         first_chunk = false;
+        if let Some(bytes) = document_bytes.as_mut() {
+            bytes.extend_from_slice(chunk);
+        }
         if let Some(bytes) = context_bytes.as_mut() {
             bytes.extend_from_slice(chunk);
         }
     })?;
+    if body.is_empty()
+        && let (Some(extractor), Some(bytes)) = (extract_document, document_bytes.as_deref())
+        && let Some(extracted) = extractor.extract(bytes)?
+    {
+        body.push_str(utf8_prefix(&extracted));
+    }
     let index = PreparedIndex::new(LocalIndexText {
         title: &title,
         summary: "",
@@ -57,6 +75,17 @@ pub(super) fn copy_and_prepare(
         },
     })?;
     Ok((staged, index, context_bytes))
+}
+
+fn utf8_prefix(text: &str) -> &str {
+    if text.len() <= MAX_BODY_BYTES {
+        return text;
+    }
+    let mut end = MAX_BODY_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn text_prefix(chunk: &[u8]) -> &str {

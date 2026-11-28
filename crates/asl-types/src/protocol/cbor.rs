@@ -416,6 +416,7 @@ fn feature(value: Value) -> Result<Feature, AslError> {
         3 => Ok(Feature::Inline),
         4 => Ok(Feature::Profile),
         5 => Ok(Feature::ActNl),
+        6 => Ok(Feature::ShardForward),
         _ => invalid(),
     }
 }
@@ -427,6 +428,7 @@ fn feature_code(value: Feature) -> u64 {
         Feature::Inline => 3,
         Feature::Profile => 4,
         Feature::ActNl => 5,
+        Feature::ShardForward => 6,
     }
 }
 
@@ -682,7 +684,7 @@ fn decode_answer(mut fields: Fields) -> Result<WireFrame, AslError> {
 }
 
 fn decode_offer(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6, 7, 8, 9, 10])?;
     let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let root_task_id = Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?);
     let content_id = Hash32(fixed_bytes::<32>(take(&mut fields, 4)?)?);
@@ -690,10 +692,17 @@ fn decode_offer(mut fields: Fields) -> Result<WireFrame, AslError> {
     let media_kind = media_kind(take(&mut fields, 6)?)?;
     let concepts = concept_refs(take(&mut fields, 7)?, 16)?;
     let expires_at_ms = as_u64(take(&mut fields, 8)?)?;
+    let logical_group_id = take_optional(&mut fields, 9)
+        .map(|value| fixed_bytes::<32>(value).map(Hash32))
+        .transpose()?;
+    let source_room_id = take_optional(&mut fields, 10)
+        .map(|value| fixed_bytes::<32>(value).map(Hash32))
+        .transpose()?;
     finish(fields)?;
     if file_size > MAX_FILE_SIZE
         || expires_at_ms > MAX_TIME_MS
         || concepts.iter().any(|concept| !is_topic(*concept))
+        || logical_group_id.is_some() != source_room_id.is_some()
     {
         return invalid();
     }
@@ -705,19 +714,32 @@ fn decode_offer(mut fields: Fields) -> Result<WireFrame, AslError> {
         media_kind,
         concepts,
         expires_at_ms,
+        logical_group_id,
+        source_room_id,
     }))
 }
 
 fn decode_fetch_request(mut fields: Fields) -> Result<WireFrame, AslError> {
-    check_keys(&fields, &[2, 3, 4])?;
+    check_keys(&fields, &[2, 3, 4, 5, 6])?;
     let message_id = Id128(fixed_bytes::<16>(take(&mut fields, 2)?)?);
     let root_task_id = Id128(fixed_bytes::<16>(take(&mut fields, 3)?)?);
     let content_id = Hash32(fixed_bytes::<32>(take(&mut fields, 4)?)?);
+    let logical_group_id = take_optional(&mut fields, 5)
+        .map(|value| fixed_bytes::<32>(value).map(Hash32))
+        .transpose()?;
+    let source_room_id = take_optional(&mut fields, 6)
+        .map(|value| fixed_bytes::<32>(value).map(Hash32))
+        .transpose()?;
     finish(fields)?;
+    if logical_group_id.is_some() != source_room_id.is_some() {
+        return invalid();
+    }
     Ok(WireFrame::FetchRequest(FetchRequest {
         message_id,
         root_task_id,
         content_id,
+        logical_group_id,
+        source_room_id,
     }))
 }
 
@@ -1342,20 +1364,36 @@ fn encode_value(frame: &WireFrame) -> Value {
             ),
             (9, uint(result_status_code(value.result_status))),
         ]),
-        WireFrame::Offer(value) => entries.extend([
-            (2, Value::Bytes(value.message_id.0.to_vec())),
-            (3, Value::Bytes(value.root_task_id.0.to_vec())),
-            (4, Value::Bytes(value.content_id.0.to_vec())),
-            (5, uint(value.file_size)),
-            (6, uint(media_kind_code(value.media_kind))),
-            (7, concept_refs_value(&value.concepts)),
-            (8, uint(value.expires_at_ms)),
-        ]),
-        WireFrame::FetchRequest(value) => entries.extend([
-            (2, Value::Bytes(value.message_id.0.to_vec())),
-            (3, Value::Bytes(value.root_task_id.0.to_vec())),
-            (4, Value::Bytes(value.content_id.0.to_vec())),
-        ]),
+        WireFrame::Offer(value) => {
+            entries.extend([
+                (2, Value::Bytes(value.message_id.0.to_vec())),
+                (3, Value::Bytes(value.root_task_id.0.to_vec())),
+                (4, Value::Bytes(value.content_id.0.to_vec())),
+                (5, uint(value.file_size)),
+                (6, uint(media_kind_code(value.media_kind))),
+                (7, concept_refs_value(&value.concepts)),
+                (8, uint(value.expires_at_ms)),
+            ]);
+            if let Some(group) = value.logical_group_id {
+                entries.push((9, Value::Bytes(group.0.to_vec())));
+            }
+            if let Some(room) = value.source_room_id {
+                entries.push((10, Value::Bytes(room.0.to_vec())));
+            }
+        }
+        WireFrame::FetchRequest(value) => {
+            entries.extend([
+                (2, Value::Bytes(value.message_id.0.to_vec())),
+                (3, Value::Bytes(value.root_task_id.0.to_vec())),
+                (4, Value::Bytes(value.content_id.0.to_vec())),
+            ]);
+            if let Some(group) = value.logical_group_id {
+                entries.push((5, Value::Bytes(group.0.to_vec())));
+            }
+            if let Some(room) = value.source_room_id {
+                entries.push((6, Value::Bytes(room.0.to_vec())));
+            }
+        }
         WireFrame::FetchGrant(value) => entries.extend([
             (2, Value::Bytes(value.message_id.0.to_vec())),
             (3, Value::Bytes(value.content_id.0.to_vec())),

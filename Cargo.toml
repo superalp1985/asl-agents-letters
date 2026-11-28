@@ -10,7 +10,11 @@ members = [
     "crates/asl-app",
 ]
 resolver = "3"
-exclude = ["vendor/helios-consensus-core", "probes/chain-dependencies"]
+exclude = [
+    "vendor/helios-consensus-core",
+    "vendor/qrcodegen",
+    "probes/chain-dependencies",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -65,3 +69,4 @@ alloy-consensus = { version = "=2.6.1", default-features = false, features = ["s
 helios-consensus-core = { path = "vendor/helios-consensus-core", version = "=0.12.0" }
 alloy-rpc-types-eth = { version = "=2.6.1", default-features = false, features = ["std", "serde"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["native-tls", "json"] }
+qrcodegen = { path = "vendor/qrcodegen", version = "=1.8.0", default-features = false }

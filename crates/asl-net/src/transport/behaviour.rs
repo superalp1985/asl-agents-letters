@@ -4,7 +4,7 @@ use super::*;
 use crate::address_policy::{AddressPolicy, validate_multiaddr};
 use crate::dht::BoundedRecordStore;
 use libp2p::{
-    gossipsub, kad, mdns, relay,
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay,
     request_response::ProtocolSupport,
     swarm::{THandlerInEvent, behaviour::toggle::Toggle, dummy},
 };
@@ -19,6 +19,7 @@ pub(super) struct AslBehaviour {
     admission: Admission,
     discovery: DiscoveryBehaviour,
     relay: relay::client::Behaviour,
+    identify: identify::Behaviour,
     pub(super) dht: kad::Behaviour<BoundedRecordStore>,
     pub(super) control: request_response::Behaviour<ControlCodec>,
     pub(super) identity_proof: request_response::Behaviour<IdentityProofCodec>,
@@ -26,6 +27,8 @@ pub(super) struct AslBehaviour {
     pub(super) bulk: request_response::Behaviour<BulkCodec>,
     pub(super) group: Toggle<request_response::Behaviour<GroupStreamCodec>>,
     pub(super) gossip: super::gossip::GossipBehaviour,
+    pub(super) autonat: autonat::Behaviour,
+    pub(super) dcutr: dcutr::Behaviour,
 }
 
 #[derive(Debug)]
@@ -34,6 +37,7 @@ pub(super) enum BehaviourEvent {
     Admission(Infallible),
     Discovery(DiscoveryEvent),
     Relay(relay::client::Event),
+    Identify,
     Kad(kad::Event),
     Control(request_response::Event<WireFrame, WireFrame>),
     IdentityProof(request_response::Event<IdentityProofRequest, IdentityProof>),
@@ -41,6 +45,8 @@ pub(super) enum BehaviourEvent {
     Bulk(request_response::Event<BulkRequest, BulkResponse>),
     Group(request_response::Event<TimedGroupEnvelope, GroupEnvelope>),
     Gossip(gossipsub::Event),
+    Autonat(autonat::Event),
+    Dcutr(dcutr::Event),
 }
 
 #[derive(Debug)]
@@ -63,6 +69,12 @@ impl From<DiscoveryEvent> for BehaviourEvent {
 impl From<relay::client::Event> for BehaviourEvent {
     fn from(value: relay::client::Event) -> Self {
         Self::Relay(value)
+    }
+}
+
+impl From<identify::Event> for BehaviourEvent {
+    fn from(_: identify::Event) -> Self {
+        Self::Identify
     }
 }
 
@@ -108,11 +120,25 @@ impl From<gossipsub::Event> for BehaviourEvent {
     }
 }
 
+impl From<autonat::Event> for BehaviourEvent {
+    fn from(value: autonat::Event) -> Self {
+        Self::Autonat(value)
+    }
+}
+
+impl From<dcutr::Event> for BehaviourEvent {
+    fn from(value: dcutr::Event) -> Self {
+        Self::Dcutr(value)
+    }
+}
+
 impl AslBehaviour {
     pub(super) fn new(
         local_peer_id: libp2p::PeerId,
+        local_public_key: libp2p::identity::PublicKey,
         relay: relay::client::Behaviour,
         loopback_groups: bool,
+        traversal: TraversalConfig,
     ) -> Self {
         fn request_response<C: request_response::Codec + Clone + Send + 'static>(
             codec: C,
@@ -147,10 +173,35 @@ impl AslBehaviour {
         let mut dht = kad::Behaviour::with_config(local_peer_id, store, kad_config);
         dht.set_mode(Some(kad::Mode::Server));
 
+        let autonat_config = autonat::Config {
+            timeout: traversal.autonat_request_timeout(),
+            boot_delay: traversal.autonat_boot_delay(),
+            refresh_interval: traversal.autonat_refresh_interval(),
+            retry_interval: traversal.autonat_retry_interval(),
+            throttle_server_period: traversal.autonat_retry_interval(),
+            confidence_max: usize::from(traversal.autonat_confidence_max),
+            max_peer_addresses: usize::from(traversal.autonat_max_peer_addresses),
+            ..autonat::Config::default()
+        };
+        let identify_config =
+            identify::Config::new("/asl/identify/1.0.0".to_owned(), local_public_key)
+                .with_agent_version(format!("asl/{}", env!("CARGO_PKG_VERSION")))
+                .with_interval(traversal.identify_interval())
+                .with_push_listen_addr_updates(true);
+
         Self {
-            admission: Admission::new(local_peer_id, AddressPolicy::LoopbackOnly),
+            admission: Admission::new(
+                local_peer_id,
+                AddressPolicy::LoopbackOnly,
+                usize::from(
+                    traversal
+                        .autonat_max_peer_addresses
+                        .max(traversal.max_relay_routes_per_dial),
+                ),
+            ),
             discovery: DiscoveryBehaviour::new(local_peer_id),
             relay,
+            identify: identify::Behaviour::new(identify_config),
             dht,
             control: request_response(ControlCodec, CONTROL_PROTOCOL),
             identity_proof: request_response(IdentityProofCodec, IDENTITY_PROOF_PROTOCOL),
@@ -165,6 +216,8 @@ impl AslBehaviour {
                 .into(),
             gossip: super::gossip::new_behaviour()
                 .expect("static bounded gossipsub configuration must be valid"),
+            autonat: autonat::Behaviour::new(local_peer_id, autonat_config),
+            dcutr: dcutr::Behaviour::new(local_peer_id),
         }
     }
 
@@ -178,7 +231,10 @@ impl AslBehaviour {
         &mut self,
         endpoint: crate::relay::RelayEndpoint,
     ) -> io::Result<()> {
-        self.admission.allow_relay_endpoint(endpoint)
+        self.admission.allow_relay_endpoint(endpoint.clone())?;
+        self.autonat
+            .add_server(endpoint.peer_id, Some(endpoint.address.clone()));
+        Ok(())
     }
 }
 

@@ -980,7 +980,7 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 单 MLS 群编译硬上限从 64 调整为 512；这是资源上限，不是跨机大群验收。libp2p gossipsub 网络层、Net IPC 命令/事件、Core 订阅/发布以及 gossip act 的 MLS/房间成员重验路径已接线；尚无跨机多跳群聊收敛验收。
 - 实际运行：`asl-types` act 2 项、`asl-groups` 11 项、`asl-net` 35 项（含真实双节点 TCP/Noise gossipsub）、`asl-store mailbox::tests` 6 项、`asl-app` gossip IPC round-trip 1 项、真实 `mcp_contract` 4 项、三 Core 群消息进程测试 1 项和双 Core 群文件双端审批测试 1 项通过；`cargo check -p asl-app --all-targets --locked --offline` 与工作区全目标编译通过；`scripts/validate-cddl.ps1` 语法通过（24 接受、10 拒绝，含独立 act 向量）。
 - 群消息进程测试首次运行发现 active room 列表把 TEXT `local_group_id` 当 BLOB 读取；修复为严格 32-hex 解码后重跑通过。`group_file_crosses_core_processes_with_two_approvals` 也通过，验证双 Core 群文件双端审批、分块下载和最终内容。两测试验证 direct 路径，不是 gossipsub 多跳或跨机。
-- v35 迁移和 opaque 邮箱/预算仓储已实现并测试，但尚未接入远程 DHT 托管、邮箱收发、Core/Agent 预算 UI 或离线补收。
+- v35 迁移和 opaque 邮箱/预算仓储已实现并测试；本段是当时快照，远程 DHT 托管、邮箱收发和已知发送者离线补收后来已接线，见本文件末尾的 2026-11-26 Act 自动回复与 DHT 密文邮箱记录。Core/Agent 预算 UI 和送达回执仍未完成。
 - 未运行最新工作区全量测试、严格 Clippy、真实两设备建群/邀请/act 互通、群文件回归、提示注入红队、离线邮箱投递、512 人大群或公网/链 RPC。上述功能不得仅凭本轮编译和局部测试标为完整验收。
 
 ### 2026-11-26 Agent 文件 Offer MCP 入口与工作区基线
@@ -988,3 +988,121 @@ SQLite 定向用例在交接后撤销并重新批准另一组选题，重开数�
 - 新增 `asl_send_file`，仅在本机宿主获得 `ASL_MCP_GROUPS=admin` 且 Core/MLS 会话可用时暴露。参数绑定现有 MLS room、已导入本机快照 content ID、媒体类型和有界 ASL topic；Core 先验证快照与 active room，再发送结构化 `Offer`，不会接受任意路径、文件名、目录或自然语言。接收方仍走现有的成员/epoch、收件目录、传输审批和分块校验。
 - `cargo +1.100.0 check -p asl-app --all-targets --locked --offline` 通过；`cargo +1.100.0 clippy -p asl-app --all-targets --locked --offline -- -D warnings` 通过。新增 MCP 参数单测 1 项通过：合法 `document` Offer 可解析，未知媒体类型、非 topic concept 和错误 content ID 被拒绝。
 - 本轮变更后完整工作区测试已重跑：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **899 通过、0 失败、13 忽略**。`asl-app` 库 295 项通过、`asl-store` 203 项通过、`asl-net` 62 项通过、`asl-policy` 119 项通过、`asl-types` 76 项通过、`asl-agent` 42 项通过；忽略项均来自显式环境门槛或子进程入口。`scripts/validate-cddl.ps1` 本轮未执行成功，本机当前 PATH 没有 `cddl` 命令；schema exporter 通过并核对 34 个向量（24 接受、10 拒绝）。`asl_send_file` 的 Core→MLS→接收方端到端尚未单独验收，不能把它等同于公网文件传输完成。
+
+### 2026-11-26 群主策略、角色与成员权限
+
+- 新增 ASL/1.3 `group-policy` MLS application plaintext：群创建者是群主，策略包含单调递增 revision、成员文字/文件/邀请权限位、管理员 PeerId 和有期限的禁言设备集合。编码器使用确定性 CBOR；解码器拒绝零 revision、未知权限位、重复/乱序 PeerId、超限列表和非 canonical CBOR。
+- SQLite v36 增量迁移新增 `group_access_policies` 与 `group_access_members`，不改 v1–v35。群主策略只能由当前 MLS room creator 的 sender leaf 应用；非群主、revision 回退、非活动成员、禁言群主均被拒绝。入站 act/查询/表达式/文件 Offer、出站 act/Offer/邀请和响应 Offer 均检查当前策略；目录授权、收件目录、设备证书和传输审批仍是独立硬边界。
+- MCP 增加 `asl_group_members` 和 owner-only `asl_group_set_access`。GUI 群管理成员列表显示群主/管理员/成员、禁言和文字/文件/邀请权限。本轮未实现群主转移、管理员代管成员的独立策略编辑、跨设备策略同步人工验收或公网群组验收。
+- 定向测试：`asl-types` 库 3 项、`asl-groups` 库 12 项、`asl-store` 库 123 项（含 group_access 2 项和 v36 迁移）、MCP stdio 7 项、UI 23 项、schema exporter 35 个向量（25 接受、10 拒绝）通过。修复了旧 v32 升级夹具未清理 v36 表的问题后，单独语义上下文集成测试 1 项通过。
+- 最终统一运行：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；按 Cargo 目标汇总 **904 通过、0 失败、13 忽略**。工作区严格 Clippy、格式、schema exporter 和 `git diff --check` 通过。`scripts/validate-cddl.ps1` 仍因本机 PATH 没有 `cddl` 命令未执行；此前独立 CDDL 结果不代表本轮 35 个向量。
+
+### 2026-11-26 有期限联系人邀请与二维码
+
+- 新增 SQLite v37：`contact_invites` 保存完整签名、token、创建/到期时间、状态和绑定 AgentId；`contact_invite_receipts` 持久化单次消费；`contact_invite_prompts` 投影待确认 Pairing 请求；`contact_invite_actions` 承载 CLI/Core 的 import/decide 动作。v1–v36 迁移保持不改写。
+- 新增独立 `ASL-CONTACT-INVITE:1:<base58>` canonical CBOR envelope，签名绑定 inviter、invite/token、时间、单句附言和 24 小时上限；二维码与完整 envelope 使用同一载荷。16 位临时短码采用 `ASL-CONTACT-INVITE-CODE:1:<inviter-AgentId>:<device-PeerId>:<code>`，必须同时绑定邀请人完整 AgentId 和签发设备，不代替长期身份；二维码使用 vendored `qrcodegen 1.8.0`。
+- Contacts 页展示完整 AgentId、绑定 AgentId 和签发设备 PeerId 的临时短码、完整邀请和二维码；完整邀请在拨号前先查询本地链控制者并验签，短码路径先按绑定 PeerId 过滤 DHT provider，准入后再命中绑定的 AgentId 才发送 Pairing。导入必须经本机 Pairing 确认。DHT provider 只提供 token 发现，实际建联仍由双方签名 Pairing、设备证书和链身份核验完成。邀请消费不创建 `authorized_contacts`、文件授权或群成员资格。
+- 定向验证：`asl-types` 6 项 contact invite、`asl-store` 9 项 contact invite、`asl-app` 1 项邀请类型、CLI 1 项、桌面 UI/二维码 28 项通过；真实临时资料执行 `--initialize-profile`、`--contact-invites create 5 "..."`、`list`、短码 `import` 成功。`cargo +1.100.0 clippy -p asl-app --all-targets --features desktop-ui --locked --offline -- -D warnings`、格式、schema exporter 和 `git diff --check` 通过。
+- 安全复核后追加：完整 AgentId 查询使用 `lookup-agent` 在同一动作中保存目标 `AgentId`，公开发现使用 `ASL-AGENT-LOOKUP-v1` 专用 DHT provider 键，Core 只记录精确相等且通过链/设备准入的候选，不再把长号降级成短码后接受其他 Agent；临时短码编码为同时绑定邀请人 AgentId 和签发设备 PeerId 的 `ASL-CONTACT-INVITE-CODE:1:...`。完整 signed envelope 在 DHT 拨号前先查本地链控制者并验签；短码连接在 DHT provider 过滤和发送 Pairing 前都必须命中绑定的 AgentId/PeerId。公开精确发现默认关闭，用户开启后才发布该 provider，不授予联系人/文件权限。重启时无内存连接上下文的 pending prompt 自动关闭，Pairing 回复先进入 Net 再提交本地 receipt，拨号和 outgoing 请求按操作/连接/到期回收；Pairing 邀请 24 小时签名上限与 store 消费上限已统一。`send_network_command(ReplyPairing)` 只确认帧已写入 Net IPC，仍不等同远端实际收到；持久回复 outbox/远端送达确认尚未实现。
+- 安全修复后的全工作区回归：首次运行唯一失败为既有 `model_endpoint_settings::cli_approval_controls_an_existing_gateway_without_restarting` 在本机 mock socket 上遇到 `Os { code: 10035, kind: WouldBlock }` 后返回 `ProviderUnavailable`。该 fixture 接受连接后继承 Windows 非阻塞状态，已改为显式 `set_nonblocking(false)`；精确用例随后 0.19 秒通过，并再次执行同命令全工作区测试，退出码 0。邀请修复相关的 `asl-store` 精确 lookup、`asl-app` 邀请类型、Core CLI 绑定/邀请参数测试和桌面目标编译均通过。
+- 最终统一运行（含精确 AgentId DHT 键、设备绑定短码、Pairing 上限统一和 endpoint fixture 修复）：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0；本轮 `--list` 枚举 929 项，忽略项仍为显式环境门槛/子进程入口。先前一次失败来自 `agent_setup` 仍断言 schema v36，修正为 v37 后重跑通过。跨两台真实设备、公网 DHT 可达性、二维码被真实摄像头扫描和跨机邀请确认仍未验收。
+
+### 2026-11-28 ASL/1.4 shard forwarding and feature closure
+
+- Code now includes ASL/1.4 `ShardBinding` and `ShardForward`, automatic root/child MLS invitation, per-child policy propagation, owner-root signatures, persistent forward receipts, and source-preserving Act/context/Offer delivery.
+- NAT code now composes AutoNAT, relay reservation, direct-first dialing, DCUtR observation, relay fallback, configured traversal limits, and reachability/route IPC events.
+- Setup now has one guided preflight/resume/status path with signed network seeds and explicit external chain prerequisites. Migration v2, automatic recovery, contact device rebinding and opt-in group rejoin are wired.
+- Packaging now includes deterministic offline archives, detached signature checks, Windows rollback metadata, and Linux systemd install/upgrade/rollback tooling.
+- Unified local/loopback acceptance completed: all workspace/all-target tests passed with 13 environment-gated ignores; desktop-ui passed 323/323 with 5 ignores; strict Clippy, fmt, schema vectors, CDDL, release build and Windows offline test package generation passed.
+- This still does not certify real two-machine NAT traversal, multi-hop 10,000-member capacity, live chain deployment or independent security audit.
+
+### 2026-11-26 Act 自动回复与 DHT 密文邮箱
+
+- `asl-agent::act_reply` 只把 `Ask` act 转为严格结构的 `Inform` 或 `Clarify`。远端 `nl_body` 和本地证据 excerpt 都放在 untrusted JSON 数据区；回复解析拒绝 action、tool、path、附件和未知字段，正文上限 8 KiB。`AuthorizedPrompt::data_free` 允许已批准模型端点在没有本地私有证据时调用，带本地证据的路径仍要求 ReadChunk + ModelInput permit。
+- `supervisor::auto_reply` 仅在群组开关允许回答时排队，使用注册表顺序中第一个已批准 provider；模型失败不发伪造回复，单会话 5 秒冷却，队列和最近请求均有界。当前应用接线使用 data-free 提示；本地证据选择接口已存在，但尚未把文件候选自动装进该后台回复。
+- 新增 `asl-net::mailbox` 8 KiB 二进制记录：recipient/sender/topic/mailbox/shard、epoch、分片、TTL 和 BLAKE3 hash，记录键域分离。DHT store 只接受键与路由字段一致的密文邮箱记录；传输入口支持 put/get，并用真实双节点 TCP/Noise 测试验证 put 完成和 raw get。
+- `supervisor::mailbox_wire` 将群 act/Offer 的 MLS 密文写入本地 opaque 槽，按 3 天轮换 epoch 组成最多 16 个 8 KiB 分片批次，发布到 DHT；已知联系人或群成员按最近 3 个 epoch 拉取，重组后仍由 MLS 验证实际成员/epoch。HTTP/relay/NAT 可达性仍来自现有配置化 libp2p 地址策略，不写死地址。
+- 定向验证：`asl-net` mailbox lib 10 项、DHT limits 7 项、`asl-agent` 全目标 46 项、`asl-app` IPC round-trip 1 项和 DHT mailbox admission 1 项通过。完整工作区 `cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略。
+- `cargo +1.100.0 clippy -p asl-agent -p asl-net -p asl-store -p asl-app --all-targets --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、schema exporter（35 向量，25 接受、10 拒绝）和 `git diff --check` 通过。未完成真实两设备重启补收、送达回执、NAT/relay 邮箱矩阵、模型本地证据自动选取或公网 DHT 验收；不得把这些定向测试写成公网完成。
+
+### 2026-11-26 本地证据、Act 历史与迁移
+
+- 新增 `supervisor::auto_reply_evidence`：在线群 `Ask` 先经当前群 search snapshot，最多选择 4 个同时具备群作用域 `ReadChunk` 与 `ModelInput` permit 的本地文本，截断 1200 字符送入模型；查询正文不解释为路径、URL、action 或工具。Provider 本地/远端模式从已批准注册表配置传入，LocalOnly 授权不会误判为远端。DHT 邮箱和 gossip 经 MLS 验证后，可用缓存且仍在有效期内的链/设备证据重建同一群 requester，因此离线补收的 `Ask` 也能使用相同证据选择；缓存缺失或过期时回退 data-free。
+- `conversation_act_events` 现实际记录收发 Act 的 conversation/act ID、epoch、类型、因果/回复引用、方向和保留时间。本地正文在 Windows 上按当前用户 DPAPI 保护，夜间/重启可读；群「浏览来信」关闭时不记录入站正文，保留期选择 0 会清除 Act 历史。
+- 活动页直接显示 Act 的方向、类型和 120 字符预览。身份迁移的 `history` 选择会从未过期 Act 历史解密到 age 加密迁移包，再在目标设备重新 DPAPI 保护；不会复制旧设备密钥、目录授权或 MLS 私钥。
+- 邮箱 Offer 的领取不再死绑接收时的连接：若 Offer 来自离线邮箱，用户/Agent 在来源设备后来上线且仍处同一群 epoch 时可以重新解析当前连接再进入既有双端传输审批；Offer 本身仍不是下载授权。
+- 群组网络不再由代码强制回环：`NetworkSettingsV1`、Transport 地址策略和 relay 预约现在允许群子流跟随 loopback/LAN/Internet/RelayOnly 配置；默认仍关闭群组网络。这是配置接线，不替代真实双机公网、NAT 打洞或 relay 群消息验收。
+- 定向验证：`asl-app` 自动证据 3 项、`asl-store` cached requester 1 项、Act history 2 项、Dashboard Act 预览 1 项、三 Core 群消息 1 项、双 Core 群文件 1 项、桌面会话分组 1 项、身份迁移含 Act 1 项通过。完整工作区测试退出码 0，0 失败、13 项按环境/子进程用途忽略。
+- 严格 Clippy（`asl-store`/`asl-app`，含 `desktop-ui`）、格式、schema exporter（35 向量）和 `git diff --check` 通过。未覆盖真实双机迁移包、旧版本包兼容抽样、DPAPI 跨用户、邮箱 Offer 重新上线竞态或 GUI 不同 DPI 的人工检查。
+
+### 2026-11-26 迁移夹具期限修正与最终集中验证
+
+- 完整工作区测试曾只剩 `encrypted_migration_preserves_selected_data_with_a_fresh_device` 失败：测试把 Act 历史和直连查询的 `expires_at_ms` 设为 `now + 60_000`，age/scrypt 导入在负载下接近或超过该窗口，目标端 Dashboard 加载时 Act 已过期。测试夹具改为 7 天保留窗口，生产迁移逻辑未改。
+- 精确回归 `cargo +1.100.0 test -p asl-app --test identity_migration --locked --offline -- --nocapture --test-threads=1`：1 项通过，用时 58.71 秒。
+- 最终集中验证：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 项环境/子进程用途忽略；`cargo +1.100.0 clippy -p asl-store -p asl-app -p asl-net --all-targets --features desktop-ui --locked --offline -- -D warnings`、`cargo +1.100.0 fmt --all -- --check`、`git diff --check` 和 schema exporter（35 向量：25 接受、10 拒绝）均通过。
+- 本轮仍未验收真实双机公网/NAT/relay、真实链 RPC、跨用户 DPAPI、MLS 群密钥跨设备迁移或人工 DPI/窗口检查；不可用上述集中测试替代这些范围。
+
+### 2026-11-26 Act 历史搜索与显式导出
+
+- `asl-store::act_history` 现在返回 Act 摘要的 epoch、因果与回复摘要、期限，并新增当前用户解密后的有界、不区分大小写子串搜索：最多扫描 1,000 条保留记录，单次最多返回 100 条，查询上限 256 字节。
+- `asl-core --act-history search "<文字>"` 输出结构化 JSON；`asl-core --act-history export <新文件>` 使用现有 Profile/WriteGrant 路径检查写入版本化 JSON，并要求目标文件不存在。导出范围与最近历史查看相同，不跨出当前保留期或 DPAPI 用户边界。
+- 定向测试：`asl-store` Act history 3 项（含搜索边界与保留策略）和 `asl-app` 导出新文件/拒绝覆盖 1 项通过。生产逻辑不改变网络、群权限或迁移包格式；语义排序、跨保留期索引和跨用户导出未实现。
+
+### 2026-11-26 群加入与重入请求
+
+- 新增 `group-membership` 版本 1 的 `InviteRequest` 控制项：完整 room 由外层群 ID 绑定，正文只含请求方 AgentId、设备 PeerId 和 5 分钟期限。`epoch=0` 用于不知道当前 head 的新设备；群主 Core 仍以本地活动房间实际 epoch 记录。
+- SQLite v38 新增 `group_invite_requests`。群主只接受当前认证连接、精确 AgentId/PeerId、当前活动房间和本地创建者设备；每群最多 32 条待处理、每 Agent 每小时 5 条、全局每小时 64 条。重复请求复用原记录，活动成员不产生提示；成功定向邀请后标记 approved，过期记录由群清理周期收敛。
+- 群管理刷新将待处理请求和在线准入连接关联；`asl_group_invite_request` 只向一个已准入群主的现有连接入队请求并返回 `queued`，不声称群主已收到或已批准。Agent 事件流收到结构化 `group_invite_request` 通知，不含远端自由文本。
+- 首次完整回归发现两个群进程夹具失败：快照刷新请求使用 `VIEW_LIMIT=200`，而加入请求存储层上限是 100，导致 `InvalidMessage`；现在群管理使用独立的 100 条请求视图上限。另一个 v32 升级测试只删除旧版表，已补上 v38 `group_invite_requests` 清理。
+- 群主拒绝路径绑定单次管理快照、完整 room 和 device：`reject-request <tag> <room> <device>` 与 GUI 确认走同一持久状态机。定向测试覆盖错误 tag/room/device、过期快照和 store rejected 状态；`asl-ui` 群管理 5 项原测试继续通过。
+- 最终完整工作区：`cargo +1.100.0 test --workspace --all-targets --locked --offline --no-fail-fast -- --test-threads=1` 退出码 0，0 失败、13 忽略。最终错误聚合改动后，`cargo +1.100.0 test -p asl-app --lib --features desktop-ui --locked --offline --no-fail-fast -- --test-threads=1` 为 303 通过、0 失败、5 忽略；严格 Clippy、格式、schema exporter、CDDL（25 接受、10 拒绝）和 `git diff --check` 通过。
+- 尚未执行真实双设备请求、群主 GUI 点击、拒绝审计或公网送达验收。
+
+### 2026-11-26 无密钥迁移群线索
+
+- `Selection.groups` 从源库导出最多 512 条 `active/needs_sync` 群线索：完整线上 Group ID、群名、群主 AgentId 和最后 epoch。迁移包不包含 `sealed_snapshot`、MLS 私钥、成员资格、文件授权或群策略；导入后写入 SQLite v39 `migration_group_hints`，不会创建本机 MLS 房间。
+- `asl_group_list` 把线索以 `state: needs_rejoin` 返回，Agent 可把完整 room 和 owner 交给 `asl_group_invite_request`。成功 Welcome 进入本机房间的事务会删除对应线索；线索只是导航信息，不是入群凭证。
+- 定向验证：`migration::tests::group_hints_export_ids_and_owner_without_mls_state`、v35→v39 迁移和含 `groups` 的加密身份迁移通过，并断言迁移 JSON 不含源 sealed snapshot、目标端没有伪 MLS 房间。
+- 最终完整工作区再次通过：0 失败、13 忽略；严格 Clippy、格式、schema exporter（35 向量：25 接受、10 拒绝）、CDDL（25 接受、10 拒绝）和 `git diff --check` 均通过。
+
+### 2026-11-26 MCP Act 历史搜索
+
+- `ASL_MCP_HISTORY=read` 是独立本机授权；未设置时 `asl_act_history_search` 不出现在工具列表。工具只调用现有 `Store::search_act_history`，查询上限 256 字节、默认 25 条、最多 100 条，结果只返回有界结构化字段，不发送网络消息。
+- 参数解析测试覆盖合法查询、空/超长查询、0/101 上限和未知字段拒绝；`asl-app --all-targets --features desktop-ui` 编译、严格 Clippy 和当前 `asl-app` 库 304 通过/5 忽略通过。真实 MCP 宿主跨进程搜索尚未单独执行。
+
+### 2026-11-26 迁移群线索 GUI 投影
+
+- Dashboard 新增 `group_rejoin_hints`，只读取 SQLite v39 `migration_group_hints` 最多 100 条；测试确认线索出现时 `groups` 仍为空，不伪造 MLS 房间。
+- 群组页显示迁移后的群名、完整 Group ID、群主 AgentId、最后 epoch、复制和“请求重入”按钮，并明确标注“线索不是成员资格”。按钮映射到 `group-admin request-join <room> <owner>`，复用 Core 的 5 分钟结构化请求。`asl-ui` 25 项 UI 测试通过，store 定向投影测试和 AgentId 规范解析测试通过。
+- MCP 群管理增加 `asl_group_reject_join_request`，只接受完整 room 和 canonical PeerId；Supervisor 再次核对当前设备是该房间 creator 后调用同一持久 rejected 状态机。参数解析、`asl-app --all-targets --features desktop-ui` 编译和严格 Clippy 通过。
+- 拒绝状态把记录期限延长 1 小时；同群同设备在该窗口内重发 `InviteRequest` 会被忽略，不触发 Agent 通知，也不重复进入待审批队列。定向测试覆盖 rejected 后立即重试仍返回空结果。
+
+### 2026-11-26 Windows 离线测试包
+
+- `scripts/package-windows.ps1 -Offline` 完成 release 构建并生成 `E:\ASL\dist\ASL-Windows-x64-Test-2026-11-26-final-125045.zip`。这是未签名测试候选，不是正式发布包。
+- ZIP 大小 48,684,435 字节，SHA-256 `BDC39BF371AFD37E7BAC81A80DAC795B08D00BD190BE26920E07DAD38330B47C`；包内 18 个文件，含启动/更新脚本、`asl-core.exe`、`asl-ui.exe`、`SHA256SUMS.txt`、SBOM、第三方许可与 MPL sources。
+- 尚未执行解包后 GUI 总测、真实托盘/DPI、公网双机、真实链 RPC 和签名更新验收。
+
+### 2026-11-26 链持久化夹具碰撞修复
+
+- 全工作区串行回归曾单次失败于 `chain::persistence::tests::positive_proof_is_reverified_after_restart_without_renewing_expiry`，创建 resolver 时返回 `InvalidLocalState`。生产链逻辑未改；测试数据库只使用进程 ID 和静态序号，PID 复用时可命中旧文件。
+- 测试数据库文件名增加 128 位随机后缀。精确用例连续运行 3 次通过；该修改只在 `cfg(test)` 中，不进入 Windows 测试包运行时。
+- 修复后的完整工作区验证：`cargo +1.100.0 test --workspace --all-targets --locked` 退出码 0；所有非忽略用例通过，环境门槛和子进程入口用例按标记忽略。随后 `cargo +1.100.0 clippy --workspace --all-targets --locked -- -D warnings` 退出码 0。
+- 本轮验证范围仍是当前 Windows 主机上的构建、单元/集成/契约/本机进程回环测试；没有新增公网双机、真实链 RPC、跨用户 DPAPI、真实托盘/DPI 或独立安全审计证据。
+
+### 2026-11-28 陌生人联系人请求策略
+
+- 联系人页、`asl-core --bindings policy` 和 Core 动作队列现在共享同一持久请求策略：默认逐次确认，可选自动接受或拒绝。策略更新只排队，不把“已排队”显示成网络已生效。
+- 接受邀请后会再次核验当前连接上的 AgentId/PeerId，再写入本机联系人绑定；联系人范围问询授权、文件授权、群成员资格和模型权限均不被隐式创建。已撤销身份不会被自动重新绑定。
+- 定向验证：`asl-store` 联系人策略持久化 1 项、接受后只建绑定不授予访问 1 项、`asl-core` 参数边界 1 项和 MCP 联系人工具参数边界 1 项通过；`cargo +1.100.0 check -p asl-store -p asl-app --all-targets --features asl-app/desktop-ui --locked --offline` 通过。
+- 尚未执行两台真实设备上的自动接受、并发邀请、策略变更竞态和 GUI 人工点击验收。群来源、近期交互来源的独立规则仍需要签名 provenance 字段，当前没有把这两类来源冒充为已实现。
+- 本功能组的统一验证：workspace/all-targets 测试退出码 0、0 失败、13 项环境门槛忽略；`asl-app` desktop-ui 库 323 通过、0 失败、5 忽略；workspace 严格 Clippy、desktop-ui 严格 Clippy、格式、36 个 schema 向量、CDDL 和 `git diff --check` 均通过。
+- 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-contacts.zip`，79,259,397 字节，SHA-256 `072DFD232A470B56DBAFB3BB7359A2D7E8CF37A87E404FD1F12ED4C25F5A60E1`。这是未签名 debug/test 包，不是生产签名发行包。
+
+### 2026-11-28 群规模、文档路由和来源证据增量
+
+- v46 重建联系人动作表，新增固定期限交互证据表；v47 曾增加逻辑群唯一 Agent/Peer 只读视图；v48 删除持久视图，改为代码内递归查询；v49 增加只保存已加密控制帧、路由和期限的 shard-forward outbox。来源规则只使用本机当前共享群的同一认证 PeerId 或已固化的近期交互证据，不保存正文。
+- Dashboard 和管理快照按逻辑根聚合，创建群没有业务数量上限；单群邀请前按唯一 Agent 检查 10,000 上限，单 MLS shard 上限 512。
+- `Offer`/`FetchRequest` 增加可选逻辑根和源 shard 元数据；群文件请求可经逻辑群主转发回源 shard，文件字节仍要求直接认证传输。
+- 本轮最终集中验收：workspace/all-targets 退出码 0，1006 通过、0 失败、13 忽略；`asl-app` desktop-ui 库 323 通过、5 忽略；严格 Clippy、格式、schema 36 向量、CDDL 和 `git diff --check` 通过；release build 通过。
+- 新测试包：`E:\ASL\dist\ASL-Windows-x64-Test-2026-11-28-v49.zip`，80,952,123 字节，SHA-256 `A60E314973480E98FFE7536E6154D1DE887AE12C4229FB3307C09DB01D088789`。这是未签名 debug/test 包，不是生产签名发行包。

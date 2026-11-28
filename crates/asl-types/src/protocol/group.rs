@@ -42,6 +42,11 @@ pub enum GroupMembership {
     },
     SyncUnavailable,
     Receipt,
+    InviteRequest {
+        agent: AgentId,
+        device: PeerId,
+        expires_at_ms: u64,
+    },
 }
 
 impl GroupMembership {
@@ -80,6 +85,12 @@ impl GroupMembership {
             },
             7 => Self::SyncUnavailable,
             8 => Self::Receipt,
+            9 => Self::InviteRequest {
+                agent: AgentId(fixed_bytes(next()?)?),
+                device: PeerId::from_bytes(byte_string(next()?, 1, 128)?)
+                    .map_err(|_| AslError::InvalidMessage)?,
+                expires_at_ms: as_u64(next()?)?,
+            },
             _ => return Err(AslError::InvalidMessage),
         };
         if values.next().is_some() {
@@ -126,6 +137,16 @@ impl GroupMembership {
             }
             Self::SyncUnavailable => values.push(uint(7)),
             Self::Receipt => values.push(uint(8)),
+            Self::InviteRequest {
+                agent,
+                device,
+                expires_at_ms,
+            } => values.extend([
+                uint(9),
+                bytes(agent.as_bytes()),
+                bytes(device.as_bytes()),
+                uint(expires_at_ms),
+            ]),
         }
         cbor2::to_canonical_vec(&Value::Array(values)).map_err(|_| AslError::InvalidMessage)
     }
@@ -133,6 +154,11 @@ impl GroupMembership {
     fn validate(&self) -> Result<(), AslError> {
         let valid = match self {
             Self::Invite {
+                agent,
+                expires_at_ms,
+                ..
+            } => agent.0 != [0; 32] && (1..=i64::MAX as u64).contains(expires_at_ms),
+            Self::InviteRequest {
                 agent,
                 expires_at_ms,
                 ..
@@ -220,7 +246,8 @@ impl GroupPacket {
                 Membership::Invite { .. }
                 | Membership::KeyPackage { .. }
                 | Membership::Commit(_)
-                | Membership::SyncRequest { .. },
+                | Membership::SyncRequest { .. }
+                | Membership::InviteRequest { .. },
             ) => Ok(()),
             _ => Err(AslError::InvalidMessage),
         }
@@ -242,7 +269,11 @@ impl GroupPacket {
         let matches = match (&self.body, response) {
             (
                 GroupBody::Application(_)
-                | GroupBody::Membership(Membership::Invite { .. } | Membership::Commit(_)),
+                | GroupBody::Membership(
+                    Membership::Invite { .. }
+                    | Membership::Commit(_)
+                    | Membership::InviteRequest { .. },
+                ),
                 Membership::Receipt,
             ) => reply.epoch == base,
             (
@@ -286,6 +317,7 @@ impl GroupPacket {
                     | Membership::KeyPackage { .. }
                     | Membership::Commit(_)
                     | Membership::SyncCommit(_)
+                    | Membership::InviteRequest { .. }
                         if self.epoch == MAX_EPOCH =>
                     {
                         return Err(AslError::InvalidMessage);

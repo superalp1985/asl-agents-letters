@@ -48,6 +48,25 @@ impl Store {
             [limit_ms],
         )
         .map_err(database_error)?;
-        tx.commit().map_err(database_error)
+        if days == 0 {
+            tx.execute("DELETE FROM conversation_act_events", [])
+                .map_err(database_error)?;
+            crate::act_history::discard_archive_index_on(&tx)?;
+        } else {
+            tx.execute(
+                "DELETE FROM conversation_act_events
+                 WHERE expires_at_ms<=?1 OR received_at_ms<=?2",
+                params![now, now.saturating_sub(limit_ms)],
+            )
+            .map_err(database_error)?;
+            tx.execute(
+                "UPDATE conversation_act_events
+                 SET expires_at_ms=min(expires_at_ms,received_at_ms+?1)",
+                [limit_ms],
+            )
+            .map_err(database_error)?;
+        }
+        tx.commit().map_err(database_error)?;
+        crate::act_history::finish_archive_index_scrub_on(&self.connection)
     }
 }

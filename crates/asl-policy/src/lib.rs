@@ -30,6 +30,8 @@ pub use platform::windows::local_ipc::{
 #[cfg(windows)]
 pub use platform::windows::notification::play_notification_sound;
 #[cfg(windows)]
+pub use platform::windows::resources::{ResourceSample, local_resource_sample, thread_cpu_time};
+#[cfg(windows)]
 pub use platform::windows::tray::{TrayCommand, TrayHandle, set_tray_language, start_tray};
 pub use platform::{protect_secret, unprotect_secret, validate_storage_root};
 pub use service::{Permit, PolicyEngine, PolicyService, ScopedPolicy};

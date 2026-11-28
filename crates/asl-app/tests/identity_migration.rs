@@ -12,6 +12,7 @@ use asl_app::{
     paths::AppPaths,
 };
 use asl_store::{
+    act_history::{ActDirection, ActHistoryRecord},
     dashboard::Dashboard,
     evidence::{TrustDimension, TrustOutcome},
     open_store,
@@ -55,6 +56,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+    let retained_until_ms = now + 7 * 24 * 60 * 60 * 1000;
     store
         .record_trust_observation(
             contact,
@@ -73,7 +75,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
                 message_id: [3; 16].into(),
                 root_task_id: [4; 16].into(),
                 created_at_ms: now,
-                expires_at_ms: now + 60_000,
+                expires_at_ms: retained_until_ms,
                 intent_id: Intent::LocateResource,
                 topics: vec![ConceptRef::RUST],
                 constraints: vec![],
@@ -82,6 +84,20 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
             },
             now as i64,
         )
+        .unwrap();
+    store
+        .record_act_history(ActHistoryRecord {
+            conversation_id: "00112233445566778899aabbccddeeff",
+            message_id: [6; 16].into(),
+            mls_epoch: 2,
+            direction: ActDirection::In,
+            act_kind: 1,
+            reply_to: None,
+            causal_root: [7; 16].into(),
+            body: Some("migrated act preview"),
+            now_ms: now,
+            expires_at_ms: retained_until_ms,
+        })
         .unwrap();
     drop(store);
     let export_path = fixture.path().join("export");
@@ -96,6 +112,7 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
             contacts: true,
             trust: true,
             history: true,
+            groups: true,
         },
     )
     .unwrap();
@@ -126,6 +143,13 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
     );
     assert!(!target_paths.signed_device_directory().exists());
     let target_database = target_paths.state().join("asl.sqlite3");
+    assert!(
+        open_store(&target_database)
+            .unwrap()
+            .migration_group_hints()
+            .unwrap()
+            .is_empty()
+    );
     let view = Dashboard::load(&target_database).unwrap();
     assert_eq!(view.contact_bindings.len(), 2);
     assert!(
@@ -145,5 +169,9 @@ fn encrypted_migration_preserves_selected_data_with_a_fresh_device() {
     assert_eq!(view.direct_observations.len(), 1);
     assert_eq!(view.direct_observations[0].observed_at_ms, now as i64);
     assert_eq!(view.direct_observations[0].topic_ids, vec![(1, 101)]);
+    assert!(view.activity.iter().any(|row| {
+        row.direction.as_deref() == Some("in")
+            && row.preview.as_deref() == Some("migrated act preview")
+    }));
     assert!(import_new(&bundle, &target, passphrase()).is_err());
 }

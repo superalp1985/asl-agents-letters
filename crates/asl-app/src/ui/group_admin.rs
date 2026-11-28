@@ -1,7 +1,12 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use asl_app::network_settings::NetworkSettingsV1;
 use asl_store::{
-    dashboard::Dashboard,
-    group_state::operator::{AdminMember, AdminOutcome, AdminPeer, AdminRoom, AdminSnapshot},
+    dashboard::{Dashboard, GroupRow},
+    group_state::operator::{
+        AdminAccessDetails, AdminCapability, AdminFilePolicy, AdminJoinRequest, AdminMember,
+        AdminOutcome, AdminPeer, AdminRoom, AdminSnapshot,
+    },
 };
 use asl_types::error::AslError;
 use eframe::egui::{self, RichText};
@@ -15,6 +20,60 @@ pub(super) struct Form {
     peer: Option<(String, String, String)>,
     confirmation: Option<Confirmation>,
     selection_reset: bool,
+    access: Option<AccessDraft>,
+    group_filter: String,
+}
+
+struct AccessDraft {
+    room: String,
+    revision: u64,
+    allow_member_text: bool,
+    allow_member_files: bool,
+    allow_member_invite: bool,
+    admins: BTreeSet<String>,
+    muted: BTreeSet<String>,
+    capabilities: BTreeMap<String, u8>,
+    files: BTreeMap<String, u8>,
+    new_content: String,
+    new_owner: Option<String>,
+    budget_changes: BTreeMap<String, (u64, u32)>,
+}
+
+impl AccessDraft {
+    fn from_room(room: &AdminRoom) -> Self {
+        Self {
+            room: room.room.clone(),
+            revision: room.policy_revision,
+            allow_member_text: room.allow_member_text,
+            allow_member_files: room.allow_member_files,
+            allow_member_invite: room.allow_member_invite,
+            admins: room
+                .members
+                .iter()
+                .filter(|member| member.role == "admin")
+                .map(|member| member.device.clone())
+                .collect(),
+            muted: room
+                .members
+                .iter()
+                .filter(|member| member.muted)
+                .map(|member| member.device.clone())
+                .collect(),
+            capabilities: room
+                .admin_capabilities
+                .iter()
+                .map(|entry| (entry.peer.clone(), entry.capabilities))
+                .collect(),
+            files: room
+                .file_policies
+                .iter()
+                .map(|entry| (entry.content_id.clone(), entry.permissions))
+                .collect(),
+            new_content: String::new(),
+            new_owner: None,
+            budget_changes: BTreeMap::new(),
+        }
+    }
 }
 
 pub(super) struct ShowContext<'a> {
@@ -36,14 +95,35 @@ struct RosterContext<'a> {
 enum Confirmation {
     Create,
     Invite,
+    JoinRequest { room: String, connection: String },
+    RejectJoinRequest { room: String, device: String },
     Remove { agent: String, device: String },
 }
 
-pub(super) fn enabled(config: &Result<NetworkSettingsV1, AslError>, data: &Dashboard) -> bool {
-    !data.force_relay_only && config.as_ref().is_ok_and(|cfg| cfg.loopback_groups)
+pub(super) fn enabled(config: &Result<NetworkSettingsV1, AslError>, _data: &Dashboard) -> bool {
+    config.as_ref().is_ok_and(|cfg| cfg.loopback_groups)
 }
 
 impl Form {
+    pub(super) fn group_filter_ui(&mut self, ui: &mut egui::Ui, language: Language) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.group_filter)
+                .hint_text(label(
+                    language,
+                    "按群名或完整 Group ID 筛选",
+                    "Filter by name or full Group ID",
+                ))
+                .desired_width(360.0),
+        );
+    }
+
+    pub(super) fn group_filter_matches(&self, group: &GroupRow) -> bool {
+        let filter = self.group_filter.trim().to_ascii_lowercase();
+        filter.is_empty()
+            || group.name.to_ascii_lowercase().contains(&filter)
+            || group.group_id.to_ascii_lowercase().contains(&filter)
+    }
+
     pub(super) fn observe(&mut self, snapshot: Option<&AdminSnapshot>) {
         let tag = snapshot.map(|snapshot| snapshot.tag.as_str());
         let selection_missing = snapshot.is_some_and(|snapshot| {
@@ -52,6 +132,12 @@ impl Form {
                 || (self.peer.is_some() && self.selected_peer(snapshot).is_none())
                 || (matches!(self.confirmation, Some(Confirmation::Remove { .. }))
                     && room.and_then(|room| self.removal_member(room)).is_none())
+                || (matches!(self.confirmation, Some(Confirmation::JoinRequest { .. }))
+                    && self.join_request(snapshot).is_none())
+                || (matches!(
+                    self.confirmation,
+                    Some(Confirmation::RejectJoinRequest { .. })
+                ) && self.join_request(snapshot).is_none())
         });
         if self.tag.as_deref() != tag || selection_missing {
             self.clear_selection();
@@ -74,8 +160,8 @@ impl Form {
         if !*loopback_enabled {
             ui.weak(label(
                 *language,
-                "回环群组未启用",
-                "Loopback groups are disabled",
+                "群组网络未启用",
+                "Group networking is disabled",
             ));
             return;
         }
@@ -87,6 +173,15 @@ impl Form {
         let ready = *actions_enabled
             && action.is_none()
             && !matches!(status, Some(AdminOutcome::Queued | AdminOutcome::Applying));
+        if ui
+            .add_enabled(
+                ready,
+                egui::Button::new(label(*language, "测量本机容量", "Measure local capacity")),
+            )
+            .clicked()
+        {
+            **action = Some(LocalAction::new("group-admin", ["measure-capacity".into()]));
+        }
         if ui
             .add_enabled(
                 ready,
@@ -113,12 +208,49 @@ impl Form {
             ));
             return;
         };
+        if let Some(capacity) = &snapshot.capacity {
+            if capacity.fresh {
+                ui.label(format!(
+                    "{}  {} / {}",
+                    label(*language, "本机规划容量", "Local planning capacity"),
+                    capacity.planner_direct_members,
+                    capacity.planner_extended_members,
+                ));
+            } else {
+                ui.weak(label(
+                    *language,
+                    "容量测量已过期",
+                    "Capacity measurement expired",
+                ));
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (bytes, name) in [
+                    (
+                        capacity.process_working_set_bytes,
+                        label(*language, "进程内存", "Process memory"),
+                    ),
+                    (
+                        capacity.available_memory_bytes,
+                        label(*language, "可用内存", "Available memory"),
+                    ),
+                    (
+                        capacity.available_disk_bytes,
+                        label(*language, "数据盘可用", "Data disk free"),
+                    ),
+                ] {
+                    if let Some(bytes) = bytes {
+                        ui.label(format!("{} {} MiB", name, bytes / (1024 * 1024)));
+                    }
+                }
+            });
+        }
         identifier(ui, *language, "快照标签", "Snapshot tag", &snapshot.tag);
 
         let ready = ready && action.is_none();
         ui.add_enabled_ui(ready, |ui| {
             self.select_targets(ui, snapshot, *language);
         });
+        self.show_join_requests(ui, snapshot, ready, *language, action);
         let room = self.selected_room(snapshot);
         let peer = self.selected_peer(snapshot);
         if let Some(room) = room {
@@ -131,6 +263,7 @@ impl Form {
                 room.membership_epoch
             ));
             identifier(ui, *language, "群组 ID", "Group ID", &room.room);
+            self.ensure_access(room);
         }
         if let Some(peer) = peer {
             identifier(ui, *language, "Agent ID", "Agent ID", &peer.agent);
@@ -169,6 +302,38 @@ impl Form {
                                 ],
                             )
                         }),
+                    ),
+                    Confirmation::JoinRequest { room, connection } => (
+                        label(
+                            *language,
+                            "确认批准该加入请求并发送邀请？",
+                            "Approve this join request and send an invite?",
+                        ),
+                        Some(LocalAction::new(
+                            "group-admin",
+                            [
+                                "invite".into(),
+                                snapshot.tag.as_str().into(),
+                                room.as_str().into(),
+                                connection.as_str().into(),
+                            ],
+                        )),
+                    ),
+                    Confirmation::RejectJoinRequest { room, device } => (
+                        label(
+                            *language,
+                            "确认拒绝该加入请求？",
+                            "Reject this join request?",
+                        ),
+                        Some(LocalAction::new(
+                            "group-admin",
+                            [
+                                "reject-request".into(),
+                                snapshot.tag.as_str().into(),
+                                room.as_str().into(),
+                                device.as_str().into(),
+                            ],
+                        )),
                     ),
                     Confirmation::Remove { .. } => return,
                 };
@@ -218,6 +383,8 @@ impl Form {
                 action,
             };
             self.show_roster(ui, room, snapshot, &mut view);
+            self.show_access(ui, room, snapshot, *language, ready, action);
+            show_removal_requests(ui, room, snapshot, *language, ready, action);
         }
     }
 
@@ -243,6 +410,7 @@ impl Form {
         self.room = None;
         self.peer = None;
         self.confirmation = None;
+        self.access = None;
     }
 
     fn selected_room<'a>(&self, snapshot: &'a AdminSnapshot) -> Option<&'a AdminRoom> {
@@ -274,6 +442,15 @@ impl Form {
             self.peer = None;
             self.confirmation = None;
             self.selection_reset = false;
+            self.access = Some(AccessDraft::from_room(room));
+        }
+    }
+
+    fn ensure_access(&mut self, room: &AdminRoom) {
+        if self.access.as_ref().is_none_or(|access| {
+            access.room != room.room || access.revision != room.policy_revision
+        }) {
+            self.access = Some(AccessDraft::from_room(room));
         }
     }
 
@@ -357,6 +534,77 @@ impl Form {
         });
     }
 
+    fn show_join_requests(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AdminSnapshot,
+        ready: bool,
+        language: Language,
+        action: &mut Option<LocalAction>,
+    ) {
+        if snapshot.join_requests.is_empty() {
+            return;
+        }
+        ui.separator();
+        ui.label(
+            RichText::new(label(language, "待审批加入请求", "Pending join requests")).strong(),
+        );
+        for request in &snapshot.join_requests {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{} · {} · {}",
+                    short(&request.room, 12),
+                    short(&request.agent, 12),
+                    short(&request.device, 12)
+                ));
+                if request.connection.is_some() {
+                    if ui
+                        .add_enabled(
+                            ready && action.is_none(),
+                            egui::Button::new(label(language, "审批并邀请", "Review and invite")),
+                        )
+                        .clicked()
+                    {
+                        self.confirmation = Some(Confirmation::JoinRequest {
+                            room: request.room.clone(),
+                            connection: request.connection.clone().unwrap_or_default(),
+                        });
+                    }
+                } else {
+                    ui.weak(label(language, "目标当前不在线", "Target is offline"));
+                }
+                if ui
+                    .add_enabled(
+                        ready && action.is_none(),
+                        egui::Button::new(label(language, "拒绝", "Reject")),
+                    )
+                    .clicked()
+                {
+                    self.confirmation = Some(Confirmation::RejectJoinRequest {
+                        room: request.room.clone(),
+                        device: request.device.clone(),
+                    });
+                }
+            });
+        }
+    }
+
+    fn join_request<'a>(&self, snapshot: &'a AdminSnapshot) -> Option<&'a AdminJoinRequest> {
+        match self.confirmation.as_ref()? {
+            Confirmation::JoinRequest { room, connection } => {
+                snapshot.join_requests.iter().find(|request| {
+                    request.room == *room
+                        && request.connection.as_deref() == Some(connection.as_str())
+                })
+            }
+            Confirmation::RejectJoinRequest { room, device } => snapshot
+                .join_requests
+                .iter()
+                .find(|request| request.room == *room && request.device == *device),
+            _ => None,
+        }
+    }
+
     fn review_removal(&mut self, member: &AdminMember) {
         if !member.creator {
             self.confirmation = Some(Confirmation::Remove {
@@ -413,11 +661,17 @@ impl Form {
                 let reviewing = self.removal_member(room) == Some(member);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(if member.creator {
-                        label(view.language, "创建者", "Creator")
+                    let role = if member.role == "owner" {
+                        label(view.language, "群主", "Owner")
+                    } else if member.role == "admin" {
+                        label(view.language, "管理员", "Admin")
                     } else {
                         label(view.language, "成员", "Member")
-                    });
+                    };
+                    ui.label(role);
+                    if member.muted {
+                        ui.weak(label(view.language, "已禁言", "Muted"));
+                    }
                     if !member.creator
                         && !reviewing
                         && ui
@@ -436,6 +690,27 @@ impl Form {
                 });
                 identifier(ui, view.language, "Agent ID", "Agent ID", &member.agent);
                 identifier(ui, view.language, "设备 ID", "Device ID", &member.device);
+                ui.weak(format!(
+                    "{}: {}  {}: {}  {}: {}",
+                    label(view.language, "文字", "Text"),
+                    if member.can_send_text {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    },
+                    label(view.language, "文件", "Files"),
+                    if member.can_send_files {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    },
+                    label(view.language, "邀请", "Invite"),
+                    if member.can_invite {
+                        label(view.language, "允许", "allowed")
+                    } else {
+                        label(view.language, "禁止", "blocked")
+                    }
+                ));
                 if reviewing {
                     ui.label(format!(
                         "{} \"{}\"?",
@@ -472,6 +747,308 @@ impl Form {
             });
         }
     }
+
+    fn show_access(
+        &mut self,
+        ui: &mut egui::Ui,
+        room: &AdminRoom,
+        snapshot: &AdminSnapshot,
+        language: Language,
+        ready: bool,
+        action: &mut Option<LocalAction>,
+    ) {
+        let Some(access) = &mut self.access else {
+            return;
+        };
+        ui.separator();
+        ui.label(RichText::new(label(language, "群成员权限", "Member permissions")).strong());
+        ui.checkbox(
+            &mut access.allow_member_text,
+            label(language, "成员可发送文字", "Members may send text"),
+        );
+        ui.checkbox(
+            &mut access.allow_member_files,
+            label(language, "成员可发送文件", "Members may send files"),
+        );
+        ui.checkbox(
+            &mut access.allow_member_invite,
+            label(language, "成员可邀请", "Members may invite"),
+        );
+        ui.separator();
+        ui.label(RichText::new(label(language, "资源预算", "Resource budgets")).strong());
+        for kind in ["message_bytes", "model_calls", "cpu_ms", "mailbox_bytes"] {
+            let (name, default_additional) = match kind {
+                "message_bytes" => (
+                    label(language, "消息字节", "Message bytes"),
+                    64 * 1024 * 1024_u64,
+                ),
+                "model_calls" => (label(language, "模型调用", "Model calls"), 1_000_u64),
+                "cpu_ms" => (label(language, "CPU 毫秒", "CPU milliseconds"), 600_000_u64),
+                "mailbox_bytes" => (
+                    label(language, "邮箱字节", "Mailbox bytes"),
+                    16 * 1024 * 1024_u64,
+                ),
+                _ => continue,
+            };
+            let (additional, hours) = access
+                .budget_changes
+                .entry(kind.into())
+                .or_insert((default_additional, 24));
+            ui.push_id(kind, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(budget) = room.budgets.iter().find(|entry| entry.kind == kind) {
+                        ui.label(format!("{name}  {}/{}", budget.consumed, budget.granted));
+                    } else {
+                        ui.label(name);
+                    }
+                    ui.add(egui::DragValue::new(additional).range(1..=1_000_000_000_u64))
+                        .on_hover_text(label(language, "增加额度", "Additional allowance"));
+                    ui.add(egui::DragValue::new(hours).range(1..=720_u32).suffix(" h"));
+                    if ui
+                        .add_enabled(
+                            ready && action.is_none(),
+                            egui::Button::new(label(language, "续期", "Renew")),
+                        )
+                        .clicked()
+                    {
+                        *action = Some(LocalAction::new(
+                            "group-admin",
+                            [
+                                "budget".into(),
+                                snapshot.tag.as_str().into(),
+                                room.room.as_str().into(),
+                                kind.into(),
+                                additional.to_string().into(),
+                                hours.to_string().into(),
+                            ],
+                        ));
+                    }
+                });
+            });
+        }
+        for member in room.members.iter().filter(|member| member.role != "owner") {
+            ui.push_id(format!("access-{}", member.device), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(short(&member.agent, 12));
+                    let mut admin = access.admins.contains(&member.device);
+                    if ui
+                        .checkbox(&mut admin, label(language, "管理员", "Admin"))
+                        .changed()
+                    {
+                        if admin {
+                            access.admins.insert(member.device.clone());
+                        } else {
+                            access.admins.remove(&member.device);
+                            access.capabilities.remove(&member.device);
+                        }
+                    }
+                    let mut muted = access.muted.contains(&member.device);
+                    if ui
+                        .checkbox(&mut muted, label(language, "禁言", "Muted"))
+                        .changed()
+                    {
+                        if muted {
+                            access.muted.insert(member.device.clone());
+                        } else {
+                            access.muted.remove(&member.device);
+                        }
+                    }
+                    if admin {
+                        let bits = access
+                            .capabilities
+                            .entry(member.device.clone())
+                            .or_insert(7);
+                        bit_checkbox(ui, bits, 1, label(language, "代管成员", "Manage members"));
+                        bit_checkbox(ui, bits, 2, label(language, "代管文件", "Manage files"));
+                        bit_checkbox(ui, bits, 4, label(language, "代管邀请", "Manage invites"));
+                    }
+                });
+            });
+        }
+        ui.collapsing(
+            label(language, "逐文件权限", "Per-file permissions"),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut access.new_content)
+                            .char_limit(64)
+                            .hint_text(label(language, "内容哈希", "Content hash")),
+                    );
+                    let valid = access.new_content.len() == 64
+                        && access
+                            .new_content
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit());
+                    if ui
+                        .add_enabled(
+                            valid && access.files.len() < 512,
+                            egui::Button::new(label(language, "添加规则", "Add rule")),
+                        )
+                        .clicked()
+                    {
+                        access
+                            .files
+                            .entry(access.new_content.to_ascii_lowercase())
+                            .or_insert(0);
+                        access.new_content.clear();
+                    }
+                });
+                let mut remove = None;
+                for (content, bits) in &mut access.files {
+                    ui.push_id(content.as_str(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(short(content, 12)).on_hover_text(content.as_str());
+                            bit_checkbox(ui, bits, 1, label(language, "读取", "Read"));
+                            bit_checkbox(ui, bits, 2, label(language, "发送", "Send"));
+                            bit_checkbox(ui, bits, 4, label(language, "获取", "Fetch"));
+                            if ui
+                                .small_button(label(language, "删除规则", "Remove rule"))
+                                .clicked()
+                            {
+                                remove = Some(content.clone());
+                            }
+                        });
+                    });
+                }
+                if let Some(content) = remove {
+                    access.files.remove(&content);
+                }
+            },
+        );
+        egui::ComboBox::from_id_salt("group-owner-transfer")
+            .selected_text(access.new_owner.as_deref().map_or(
+                label(language, "保留当前群主", "Keep current owner"),
+                |owner| short(owner, 16),
+            ))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut access.new_owner,
+                    None,
+                    label(language, "保留当前群主", "Keep current owner"),
+                );
+                for member in room.members.iter().filter(|member| member.role != "owner") {
+                    ui.selectable_value(
+                        &mut access.new_owner,
+                        Some(member.device.clone()),
+                        short(&member.device, 16),
+                    )
+                    .on_hover_text(&member.device);
+                }
+            });
+        let details = serde_json::to_string(&AdminAccessDetails {
+            owner: access.new_owner.clone(),
+            file_policies: access
+                .files
+                .iter()
+                .map(|(content_id, permissions)| AdminFilePolicy {
+                    content_id: content_id.clone(),
+                    permissions: *permissions,
+                })
+                .collect(),
+            admin_capabilities: access
+                .capabilities
+                .iter()
+                .map(|(peer, capabilities)| AdminCapability {
+                    peer: peer.clone(),
+                    capabilities: *capabilities,
+                })
+                .collect(),
+        })
+        .ok();
+        let admins = access.admins.iter().cloned().collect::<Vec<_>>().join(",");
+        let muted = access.muted.iter().cloned().collect::<Vec<_>>().join(",");
+        let details =
+            details.filter(|details| details.len() + admins.len() + muted.len() <= 24_000);
+        if ui
+            .add_enabled(
+                ready && action.is_none() && details.is_some(),
+                egui::Button::new(if access.new_owner.is_some() {
+                    label(
+                        language,
+                        "确认转移群主并应用",
+                        "Confirm owner transfer and apply",
+                    )
+                } else {
+                    label(language, "应用群权限", "Apply group permissions")
+                }),
+            )
+            .clicked()
+            && let Some(details) = details
+        {
+            let switch = |value| if value { "on" } else { "off" };
+            *action = Some(LocalAction::new(
+                "group-admin",
+                [
+                    "access".into(),
+                    snapshot.tag.as_str().into(),
+                    room.room.as_str().into(),
+                    access.revision.to_string().into(),
+                    switch(access.allow_member_text).into(),
+                    switch(access.allow_member_files).into(),
+                    switch(access.allow_member_invite).into(),
+                    admins.into(),
+                    muted.into(),
+                    details.into(),
+                ],
+            ));
+            self.room = None;
+            self.peer = None;
+            self.access = None;
+            self.confirmation = None;
+        }
+    }
+}
+
+fn bit_checkbox(ui: &mut egui::Ui, bits: &mut u8, bit: u8, text: &str) {
+    let mut enabled = *bits & bit != 0;
+    if ui.checkbox(&mut enabled, text).changed() {
+        *bits = (*bits & !bit) | if enabled { bit } else { 0 };
+    }
+}
+
+fn show_removal_requests(
+    ui: &mut egui::Ui,
+    room: &AdminRoom,
+    snapshot: &AdminSnapshot,
+    language: Language,
+    ready: bool,
+    action: &mut Option<LocalAction>,
+) {
+    if room.removal_requests.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.strong(label(language, "成员移除请求", "Member removal requests"));
+    for request in &room.removal_requests {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(short(&request.target, 16))
+                .on_hover_text(&request.target);
+            ui.label(short(&request.requester, 16))
+                .on_hover_text(&request.requester);
+            for (command, text) in [
+                (
+                    "approve-remove",
+                    label(language, "批准移除", "Approve removal"),
+                ),
+                ("reject-remove", label(language, "拒绝", "Reject")),
+            ] {
+                if ui
+                    .add_enabled(ready && action.is_none(), egui::Button::new(text))
+                    .clicked()
+                {
+                    *action = Some(LocalAction::new(
+                        "group-admin",
+                        [
+                            command.into(),
+                            snapshot.tag.as_str().into(),
+                            room.room.as_str().into(),
+                            request.request.as_str().into(),
+                        ],
+                    ));
+                }
+            }
+        });
+    }
 }
 
 fn invite_candidates<'a>(
@@ -495,11 +1072,24 @@ fn identifier(
     en_label: &'static str,
     value: &str,
 ) {
-    ui.add(
-        egui::Label::new(format!("{}: {value}", label(language, zh_label, en_label)))
-            .wrap()
-            .selectable(true),
-    );
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::Label::new(format!("{}: {value}", label(language, zh_label, en_label)))
+                .wrap()
+                .selectable(true),
+        );
+        if ui
+            .small_button(label(language, "复制", "Copy"))
+            .on_hover_text(label(
+                language,
+                "复制完整 ID，不复制截断显示。",
+                "Copy the full ID, not the shortened display.",
+            ))
+            .clicked()
+        {
+            ui.ctx().copy_text(value.to_owned());
+        }
+    });
 }
 
 fn room_label(room: &AdminRoom) -> String {
@@ -544,10 +1134,51 @@ fn outcome_text(outcome: &AdminOutcome, language: Language) -> &'static str {
             "上次操作：邀请已排队，尚未确认送达或入群",
             "Invite queued, delivery and membership unconfirmed",
         ),
+        AdminOutcome::InviteOwnerRequired => label(
+            language,
+            "邀请未执行：当前设备没有目标子群的 MLS 提交权限，请由逻辑群主操作",
+            "Invite not sent: this device lacks MLS commit authority for the target shard; the logical owner must act",
+        ),
         AdminOutcome::MemberRemoved => label(
             language,
             "上次操作：成员移除已在本机提交",
             "Member removal submitted locally",
+        ),
+        AdminOutcome::RemovalRequested => {
+            label(language, "移除请求已排队", "Removal request queued")
+        }
+        AdminOutcome::RemovalRejected => {
+            label(language, "移除请求已拒绝", "Removal request declined")
+        }
+        AdminOutcome::JoinRequestRejected => label(
+            language,
+            "上次操作：加入请求已拒绝",
+            "Join request rejected",
+        ),
+        AdminOutcome::RequestJoinQueued => label(
+            language,
+            "上次操作：重入请求已排队，尚未确认送达",
+            "Rejoin request queued, delivery unconfirmed",
+        ),
+        AdminOutcome::AccessUpdated => label(
+            language,
+            "上次操作：群权限已提交",
+            "Group permissions submitted",
+        ),
+        AdminOutcome::AccessPartiallyUpdated => label(
+            language,
+            "上次操作：子群权限仅部分提交，根群未标记为完整成功",
+            "Shard permissions were only partially submitted; the root was not marked complete",
+        ),
+        AdminOutcome::OwnerTransferBlocked => label(
+            language,
+            "群主转移未执行：目标设备必须先加入全部子群",
+            "Owner transfer was not applied: the target device must join every shard first",
+        ),
+        AdminOutcome::BudgetUpdated => label(
+            language,
+            "上次操作：资源预算已续期",
+            "Resource budget renewed",
         ),
         AdminOutcome::Failed => label(language, "上次操作：失败", "Failed"),
         AdminOutcome::Unconfirmed => label(
@@ -574,21 +1205,40 @@ mod tests {
         AdminSnapshot {
             tag: "review-1".into(),
             expires_ms: 100,
+            capacity: None,
             rooms: vec![AdminRoom {
                 room: "room-1".into(),
                 name: "Room one".into(),
                 epoch: 8,
                 membership_epoch: 5,
+                policy_revision: 1,
+                allow_member_text: true,
+                allow_member_files: true,
+                allow_member_invite: false,
+                budgets: Vec::new(),
+                file_policies: Vec::new(),
+                admin_capabilities: Vec::new(),
+                removal_requests: Vec::new(),
                 members: vec![
                     AdminMember {
                         agent: "owner-agent".into(),
                         device: "owner-device".into(),
                         creator: true,
+                        role: "owner".into(),
+                        muted: false,
+                        can_send_text: true,
+                        can_send_files: true,
+                        can_invite: true,
                     },
                     AdminMember {
                         agent: "member-agent".into(),
                         device: "offline-device".into(),
                         creator: false,
+                        role: "member".into(),
+                        muted: true,
+                        can_send_text: false,
+                        can_send_files: false,
+                        can_invite: false,
                     },
                 ],
             }],
@@ -597,6 +1247,7 @@ mod tests {
                 device: "owner-device".into(),
                 connection: "owner-connection".into(),
             }],
+            join_requests: vec![],
         }
     }
 
@@ -606,6 +1257,19 @@ mod tests {
         form.select_room(&snapshot.rooms[0]);
         form.review_removal(&snapshot.rooms[0].members[1]);
         form
+    }
+
+    #[test]
+    fn room_selection_seeds_owner_policy_editor() {
+        let snapshot = snapshot();
+        let mut form = Form::default();
+        form.observe(Some(&snapshot));
+        form.select_room(&snapshot.rooms[0]);
+        let access = form.access.as_ref().unwrap();
+        assert_eq!(access.revision, 1);
+        assert!(access.allow_member_text);
+        assert!(!access.admins.contains("offline-device"));
+        assert!(access.muted.contains("offline-device"));
     }
 
     #[test]

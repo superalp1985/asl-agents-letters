@@ -1,0 +1,21 @@
+; Versioned, human-transferable ASL contact invitation payload.
+; The textual envelope is:
+;   "ASL-CONTACT-INVITE:1:" || base58(canonical CBOR)
+; Decoders must enforce the canonical CBOR rules, a maximum lifetime of 24h,
+; non-zero IDs, current-time bounds, and the shared one-line note limits.
+
+contact-invite-v1 = {
+  0: 1,
+  1: id128,
+  2: id128,
+  3: agent-id,
+  4: time-ms,
+  5: time-ms,
+  6: tstr .size (0..480),
+  7: signature65
+}
+
+id128 = bstr .size 16
+agent-id = bstr .size 32
+signature65 = bstr .size 65
+time-ms = uint .le 9223372036854775807

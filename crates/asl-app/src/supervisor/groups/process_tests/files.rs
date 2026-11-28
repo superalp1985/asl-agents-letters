@@ -137,7 +137,7 @@ fn handle(
             let inbox_grant = core
                 .libraries
                 .authorize_inbox_directory(&parent.join("inbox"), LIMIT)?;
-            *ticket = Some(port.submit(DownloadJob::Fetch(DownloadSelection {
+            *ticket = Some(port.submit(DownloadJob::Fetch(Box::new(DownloadSelection {
                 content_id: content,
                 inbox_grant,
                 filename: DEST.into(),
@@ -146,8 +146,10 @@ fn handle(
                     group_id: snapshot.local_id,
                     membership_epoch: snapshot.version.membership_epoch,
                 }),
+                group_logical_id: None,
+                group_source_room_id: None,
                 context_ref: None,
-            }))?);
+            })))?);
         }
         FileAction::Status | FileAction::WaitingForUpload => unreachable!(),
     }

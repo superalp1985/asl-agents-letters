@@ -268,6 +268,7 @@ pub enum AdmittedNetworkEvent {
         registry_sequence: u64,
         record: Vec<u8>,
     },
+    MailboxRecordAvailable(asl_net::mailbox::MailboxRecord),
 }
 
 #[derive(Default)]
@@ -303,7 +304,7 @@ impl CoreAdmission {
             device_certificate,
             major: ASL_PROTOCOL_MAJOR,
             minor: ASL_PROTOCOL_MINOR,
-            features: vec![Feature::ActNl],
+            features: vec![Feature::ActNl, Feature::ShardForward],
         };
         let mut admission = Self::new(
             local_peer_id,
@@ -733,7 +734,10 @@ impl CoreAdmission {
                     .push(AdmittedNetworkEvent::RelayUnavailable { relay_peer_id });
             }
             NetworkEvent::DiscoveryCandidate { .. }
+            | NetworkEvent::ReachabilityChanged { .. }
+            | NetworkEvent::RouteChanged { .. }
             | NetworkEvent::DhtProviders { .. }
+            | NetworkEvent::DhtProviderObserved { .. }
             | NetworkEvent::GossipReceived { .. } => {}
             NetworkEvent::DhtRecordCandidate {
                 candidate_id,
@@ -799,11 +803,43 @@ impl CoreAdmission {
                 connection_id,
                 proof,
             } => self.queue_proof(connection_id, proof, &mut batch),
-            NetworkEvent::UnverifiedPairingInvite { connection_id, .. } => {
-                self.close(connection_id, &mut batch);
+            NetworkEvent::UnverifiedPairingInvite {
+                connection_id,
+                response_id,
+                invite,
+            } => {
+                if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingInviteReceived {
+                            connection_id,
+                            agent_id,
+                            response_id,
+                            invite,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
             }
-            NetworkEvent::UnverifiedPairingExchangeResponse { connection_id, .. } => {
-                self.close(connection_id, &mut batch);
+            NetworkEvent::UnverifiedPairingExchangeResponse {
+                connection_id,
+                request_id,
+                invite,
+                exchange,
+            } => {
+                if let Some(agent_id) = self.current_agent(connection_id, now_ms) {
+                    batch
+                        .events
+                        .push(AdmittedNetworkEvent::PairingExchangeReceived {
+                            connection_id,
+                            agent_id,
+                            request_id,
+                            invite,
+                            exchange,
+                        });
+                } else {
+                    self.close(connection_id, &mut batch);
+                }
             }
             NetworkEvent::UnverifiedControlRequest {
                 connection_id,
@@ -990,6 +1026,25 @@ impl CoreAdmission {
             candidate_id,
             accept: false,
         };
+        if let Ok(record) = asl_net::mailbox::decode_mailbox_record_for_key(
+            &asl_net::dht::RecordKey::new(&key),
+            &value,
+        ) {
+            if record.recipient_id != self.local_hello.agent_id.0
+                || record.validate_at(now_ms).is_err()
+            {
+                batch.commands.push(reject());
+            } else {
+                batch.commands.push(NetworkCommand::DecideDhtRecord {
+                    candidate_id,
+                    accept: true,
+                });
+                batch
+                    .events
+                    .push(AdmittedNetworkEvent::MailboxRecordAvailable(record));
+            }
+            return;
+        }
         let Ok(signed) = decode_record(&value) else {
             batch.commands.push(reject());
             return;
@@ -1569,6 +1624,20 @@ impl CoreAdmission {
                 .and_then(|peer| peer.remote_hello.as_ref())
                 .is_some_and(|hello| {
                     hello.major == 1 && hello.minor >= 3 && hello.features.contains(&Feature::ActNl)
+                })
+    }
+
+    pub(crate) fn peer_supports_shard_forward(&self, connection_id: [u8; 16]) -> bool {
+        self.local_hello.minor >= 4
+            && self.local_hello.features.contains(&Feature::ShardForward)
+            && self
+                .peers
+                .get(&connection_id)
+                .and_then(|peer| peer.remote_hello.as_ref())
+                .is_some_and(|hello| {
+                    hello.major == 1
+                        && hello.minor >= 4
+                        && hello.features.contains(&Feature::ShardForward)
                 })
     }
 

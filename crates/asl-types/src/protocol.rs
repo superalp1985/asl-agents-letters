@@ -2,7 +2,10 @@ mod act;
 pub(crate) mod cbor;
 mod expression;
 mod group;
+mod group_control;
+mod group_removal;
 mod semantic_context;
+mod shard;
 
 use serde::Serialize;
 use serde_json::Value as Json;
@@ -24,6 +27,15 @@ pub use group::{
     GroupBody, GroupMembership, GroupPacket, MAX_GROUP_MEMBERS, MAX_GROUP_MLS_OBJECT_BYTES,
     MAX_GROUP_PAYLOAD_BYTES,
 };
+pub use group_control::{
+    GROUP_ADMIN_MANAGE_FILES, GROUP_ADMIN_MANAGE_INVITES, GROUP_ADMIN_MANAGE_MEMBERS,
+    GROUP_ALLOW_MEMBER_FILES, GROUP_ALLOW_MEMBER_INVITE, GROUP_ALLOW_MEMBER_TEXT,
+    GROUP_ALLOWED_ADMIN_CAPABILITY_BITS, GROUP_ALLOWED_FILE_PERMISSION_BITS,
+    GROUP_ALLOWED_PERMISSION_BITS, GROUP_FILE_FETCH, GROUP_FILE_READ, GROUP_FILE_SEND,
+    GroupAdminCapability, GroupControl, GroupFilePolicy, MAX_GROUP_CONTROL_BYTES,
+    MAX_GROUP_CONTROL_FILE_POLICIES, MAX_GROUP_CONTROL_PEERS,
+};
+pub use group_removal::{GROUP_REMOVAL_REQUEST_TTL_MS, GroupRemovalRequest};
 pub use semantic_context::{
     ContextAgreement, ContextAgreementStatus, ContextExpression, ContextOffer, ContextRequest,
     MAX_SEMANTIC_CONTEXT_BUNDLE_BYTES, MAX_SEMANTIC_CONTEXT_CONCEPTS,
@@ -31,9 +43,14 @@ pub use semantic_context::{
     SemanticConformanceVector, SemanticContextBundle, SemanticContextRef,
     SignedSemanticContextBundle,
 };
+pub use shard::{
+    MAX_SHARD_BINDING_BYTES, MAX_SHARD_BINDING_LIFETIME_MS, MAX_SHARD_FORWARD_BYTES,
+    MAX_SHARD_FORWARD_HOP, MAX_SHARD_FORWARD_LIFETIME_MS, MAX_SHARD_FORWARD_PAYLOAD_BYTES,
+    SHARD_BINDING_SIGNING_DOMAIN, SHARD_FORWARD_SIGNING_DOMAIN, ShardBinding, ShardForward,
+};
 
 pub const ASL_PROTOCOL_MAJOR: u16 = 1;
-pub const ASL_PROTOCOL_MINOR: u16 = 3;
+pub const ASL_PROTOCOL_MINOR: u16 = 4;
 pub const MAX_PAIRING_NOTE_CHARS: usize = 120;
 pub const MAX_PAIRING_NOTE_BYTES: usize = MAX_PAIRING_NOTE_CHARS * 4;
 
@@ -71,6 +88,7 @@ pub enum Feature {
     Inline,
     Profile,
     ActNl,
+    ShardForward,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -334,6 +352,8 @@ pub struct Offer {
     pub media_kind: MediaKind,
     pub concepts: Vec<ConceptRef>,
     pub expires_at_ms: u64,
+    pub logical_group_id: Option<Hash32>,
+    pub source_room_id: Option<Hash32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -341,6 +361,8 @@ pub struct FetchRequest {
     pub message_id: Id128,
     pub root_task_id: Id128,
     pub content_id: Hash32,
+    pub logical_group_id: Option<Hash32>,
+    pub source_room_id: Option<Hash32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

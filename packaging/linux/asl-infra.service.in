@@ -5,26 +5,36 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=asl-infra
-Group=asl-infra
-ExecStart=/usr/bin/asl-infra /etc/asl-infra/infra.toml
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+ExecStart=@BIN_PATH@ @CONFIG_PATH@
+WorkingDirectory=@STATE_PATH@
 Restart=on-failure
 RestartSec=5s
-UMask=0077
-StateDirectory=asl-infra
-StateDirectoryMode=0750
+UMask=0027
+ReadWritePaths=@STATE_PATH@
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectClock=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectHostname=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RemoveIPC=true
 MemoryMax=1G
-TasksMax=128
-LimitNOFILE=4096
+TasksMax=256
+LimitNOFILE=8192
 
 [Install]
 WantedBy=multi-user.target

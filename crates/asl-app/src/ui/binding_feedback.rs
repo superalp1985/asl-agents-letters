@@ -5,8 +5,8 @@ pub(super) fn kind(code: &str) -> &'static str {
         "dismiss" => "忽略候选",
         "revoke" => "撤销绑定",
         "forget" => "遗忘绑定",
-        "publish_code" => "允许公开短码",
-        "unpublish_code" => "关闭公开短码",
+        "publish_code" => "允许 AgentId 精确发现",
+        "unpublish_code" => "关闭 AgentId 精确发现",
         _ => "其他操作",
     }
 }

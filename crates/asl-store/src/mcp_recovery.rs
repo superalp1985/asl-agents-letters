@@ -502,6 +502,11 @@ mod tests {
              ALTER TABLE mcp_recovery_tasks DROP COLUMN request_digest;
              ALTER TABLE mcp_recovery_tasks DROP COLUMN request_id;
              ALTER TABLE mcp_recovery_grant DROP COLUMN replay_floor_ms;
+             DROP TABLE mls_shard_forward_receipts;
+             DROP TABLE mls_shard_bindings;
+             DROP TABLE mls_room_shards;
+             DROP TABLE group_removal_requests;
+             DROP TABLE conversation_act_semantic_index;
              DROP TABLE conversation_attachment_refs;
              DROP TABLE conversation_act_events;
              DROP TABLE conversation_budget_grants;
@@ -511,7 +516,17 @@ mod tests {
              DROP TABLE local_capacity_measurements;
              DROP TABLE semantic_context_resources;
              DROP TABLE semantic_context_candidates;
-             DELETE FROM schema_migrations WHERE version IN (29,30,31,32,33,34,35);",
+             DROP TABLE group_admin_capabilities;
+             DROP TABLE group_file_policies;
+             DROP TABLE group_access_members;
+             DROP TABLE group_access_policies;
+             DROP TABLE group_invite_requests;
+             DROP TABLE migration_group_hints;
+             DROP TABLE resource_budget_grants;
+             DROP TABLE IF EXISTS dht_provider_cache_v42;
+             DROP TABLE dht_provider_cache;
+             DROP TABLE dht_record_cache;
+             DELETE FROM schema_migrations WHERE version>=29;",
             )
             .unwrap();
         drop(store);

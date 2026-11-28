@@ -1,3 +1,4 @@
+pub mod contact_invite;
 pub mod error;
 pub mod ids;
 pub mod manifest;

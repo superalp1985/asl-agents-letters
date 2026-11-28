@@ -177,7 +177,19 @@ pub(super) fn commit_candidate(
         };
         let (browse_kind, browse_expires_at_ms) = match event.kind {
             MlsJournalKind::ReceivedApplication(_, name)
-                if super::GroupInboundPolicy::read(tx)?.browse_enabled =>
+                if super::GroupInboundPolicy::read(tx)?.browse_enabled
+                    && matches!(
+                        name,
+                        "query"
+                            | "answer"
+                            | "offer"
+                            | "fetch_request"
+                            | "fetch_grant"
+                            | "fetch_pending"
+                            | "error"
+                            | "expression"
+                            | "act"
+                    ) =>
             {
                 let deadline = browse_deadline(tx, now, expires_at_ms)?;
                 (deadline.map(|_| name), deadline)

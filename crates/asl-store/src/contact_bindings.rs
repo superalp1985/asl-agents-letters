@@ -1,7 +1,7 @@
 use asl_types::{
     error::AslError,
     ids::{AgentId, PeerId},
-    record::short_code,
+    record::{DeviceDirectory, short_code},
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -12,6 +12,62 @@ const MAX_ACTION_HISTORY: i64 = 256;
 const MAX_PENDING_ACTIONS: i64 = 64;
 const MAX_BINDING_CANDIDATES: i64 = 200;
 const MAX_PEER_ID_BASE58_BYTES: usize = 175;
+
+impl Store {
+    /// Core supplies a current chain-verified directory. Preserve the existing
+    /// AgentId binding and only replace an explicitly revoked device.
+    pub fn rebind_verified_contact_device(
+        &self,
+        directory: &DeviceDirectory,
+        now_ms: u64,
+    ) -> Result<Option<(String, String)>, AslError> {
+        let mut active = directory
+            .devices
+            .iter()
+            .filter(|device| device.issued_at_ms <= now_ms && now_ms < device.expires_at_ms);
+        let Some(device) = active.next() else {
+            return Ok(None);
+        };
+        if active.next().is_some() || directory.revoked_serials.is_empty() {
+            return Ok(None);
+        }
+        let previous: Option<(String, i64)> = self
+            .connection
+            .query_row(
+                "SELECT b.peer_id,d.certificate_serial
+             FROM contact_bindings b JOIN device_identities d ON d.peer_id=b.peer_id
+             WHERE b.agent_id=?1 AND b.state='bound' AND d.agent_id=?2",
+                params![
+                    directory.agent_id.as_bytes(),
+                    agent_text(directory.agent_id)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((previous, serial)) = previous else {
+            return Ok(None);
+        };
+        if !u64::try_from(serial).is_ok_and(|serial| directory.revoked_serials.contains(&serial)) {
+            return Ok(None);
+        }
+        let replacement = bs58::encode(device.peer_id.as_bytes()).into_string();
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE contact_bindings SET peer_id=?1,updated_at_ms=?2
+             WHERE agent_id=?3 AND peer_id=?4 AND state='bound'",
+                params![
+                    replacement,
+                    i64::try_from(now_ms).map_err(|_| AslError::InvalidMessage)?,
+                    directory.agent_id.as_bytes(),
+                    previous
+                ],
+            )
+            .map_err(database_error)?;
+        Ok((changed == 1).then_some((previous, replacement)))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContactBindingState {
@@ -28,6 +84,12 @@ pub enum ContactBindingActionKind {
     Forget,
     PublishCode,
     UnpublishCode,
+    SetRequestReview,
+    SetRequestAutoAccept,
+    SetRequestReject,
+    EnableSharedGroupAutoAccept,
+    DisableSharedGroupAutoAccept,
+    SetRecentInteractionTtl,
 }
 
 impl ContactBindingActionKind {
@@ -40,6 +102,12 @@ impl ContactBindingActionKind {
             Self::Forget => "forget",
             Self::PublishCode => "publish_code",
             Self::UnpublishCode => "unpublish_code",
+            Self::SetRequestReview => "set_request_review",
+            Self::SetRequestAutoAccept => "set_request_auto_accept",
+            Self::SetRequestReject => "set_request_reject",
+            Self::EnableSharedGroupAutoAccept => "enable_shared_group_auto_accept",
+            Self::DisableSharedGroupAutoAccept => "disable_shared_group_auto_accept",
+            Self::SetRecentInteractionTtl => "set_recent_interaction_ttl",
         }
     }
 }
@@ -605,7 +673,7 @@ fn valid_action(
     has_peer: bool,
 ) -> bool {
     match kind {
-        ContactBindingActionKind::Lookup => code.is_some() && agent_id.is_none() && !has_peer,
+        ContactBindingActionKind::Lookup => code.is_some() && !has_peer,
         ContactBindingActionKind::Approve | ContactBindingActionKind::Dismiss => {
             code.is_some() && agent_id.is_some() && has_peer
         }
@@ -614,6 +682,18 @@ fn valid_action(
         }
         ContactBindingActionKind::PublishCode | ContactBindingActionKind::UnpublishCode => {
             code.is_none() && agent_id.is_none() && !has_peer
+        }
+        ContactBindingActionKind::SetRequestReview
+        | ContactBindingActionKind::SetRequestAutoAccept
+        | ContactBindingActionKind::SetRequestReject => {
+            code.is_none() && agent_id.is_none() && !has_peer
+        }
+        ContactBindingActionKind::EnableSharedGroupAutoAccept
+        | ContactBindingActionKind::DisableSharedGroupAutoAccept => {
+            code.is_none() && agent_id.is_none() && !has_peer
+        }
+        ContactBindingActionKind::SetRecentInteractionTtl => {
+            code.is_some() && agent_id.is_none() && !has_peer
         }
     }
 }
@@ -627,6 +707,16 @@ fn parse_action_kind(value: &str) -> Result<ContactBindingActionKind, AslError> 
         "forget" => Ok(ContactBindingActionKind::Forget),
         "publish_code" => Ok(ContactBindingActionKind::PublishCode),
         "unpublish_code" => Ok(ContactBindingActionKind::UnpublishCode),
+        "set_request_review" => Ok(ContactBindingActionKind::SetRequestReview),
+        "set_request_auto_accept" => Ok(ContactBindingActionKind::SetRequestAutoAccept),
+        "set_request_reject" => Ok(ContactBindingActionKind::SetRequestReject),
+        "enable_shared_group_auto_accept" => {
+            Ok(ContactBindingActionKind::EnableSharedGroupAutoAccept)
+        }
+        "disable_shared_group_auto_accept" => {
+            Ok(ContactBindingActionKind::DisableSharedGroupAutoAccept)
+        }
+        "set_recent_interaction_ttl" => Ok(ContactBindingActionKind::SetRecentInteractionTtl),
         _ => Err(AslError::InvalidDatabase),
     }
 }
@@ -798,6 +888,26 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn exact_agent_lookup_preserves_the_full_target_id() {
+        let (_directory, mut store) = store();
+        let agent = AgentId([71; 32]);
+        store
+            .enqueue_contact_binding_action(
+                ContactBindingActionKind::Lookup,
+                Some(short_code(agent)),
+                Some(agent),
+                None,
+                25,
+            )
+            .unwrap();
+        let actions = store.claim_contact_binding_actions().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ContactBindingActionKind::Lookup);
+        assert_eq!(actions[0].code, Some(short_code(agent)));
+        assert_eq!(actions[0].agent_id, Some(agent));
     }
 
     #[test]

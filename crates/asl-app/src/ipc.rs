@@ -4,11 +4,12 @@ use std::io::{Read, Write};
 use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkOperation, BulkRequest, BulkResponse, BulkStatus},
-    dht::MAX_DHT_VALUE_BYTES,
+    dht::{MAX_DHT_PROVIDER_ADDRESSES, MAX_DHT_VALUE_BYTES},
     relay::MAX_RELAY_ENDPOINT_BYTES,
     transport::{
         DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, MAX_GOSSIP_PAYLOAD_BYTES,
-        TransportKind,
+        MAX_REACHABILITY_ADDRESS_BYTES, ReachabilityState, ReachabilityStatus, RouteFailure,
+        RouteState, RouteStatus, TransportKind, TraversalConfig,
     },
 };
 use asl_types::{
@@ -33,9 +34,11 @@ pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 const TASK_BODY_HEADER_BYTES: usize = 21;
 const NET_STARTUP_PRELUDE_MAGIC: [u8; 4] = *b"ASLK";
-const NET_STARTUP_PRELUDE_VERSION: u16 = 2;
+const NET_STARTUP_PRELUDE_VERSION: u16 = 3;
 const NET_STARTUP_PRELUDE_FLAG_OFFSET: usize = 10;
-const NET_STARTUP_PRELUDE_HEADER_BYTES: usize = NET_STARTUP_PRELUDE_FLAG_OFFSET + 1;
+const NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET: usize = NET_STARTUP_PRELUDE_FLAG_OFFSET + 1;
+const NET_STARTUP_PRELUDE_HEADER_BYTES: usize = NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET + 2;
+const NET_STARTUP_TRAVERSAL_BYTES: usize = 91;
 const MAX_DEVICE_IDENTITY_PRELUDE_BYTES: usize = MAX_DEVICE_KEY_BYTES;
 pub const MAX_IPC_TASK_PAYLOAD_BYTES: usize =
     MAX_IPC_FRAME_BYTES - HEADER_BYTES - TASK_BODY_HEADER_BYTES;
@@ -47,6 +50,7 @@ pub const MAX_IPC_PAIRING_FRAME_BYTES: usize = MAX_PAIRING_FRAME_BYTES;
 pub const MAX_IPC_BULK_PAYLOAD_BYTES: usize = MAX_MANIFEST_LEN;
 const MAX_IPC_GROUP_FRAME_BYTES: usize = MAX_EXTENDED_FRAME_BYTES;
 const MAX_IPC_DHT_PROVIDER_CANDIDATES: usize = 20;
+const MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES: usize = 512;
 const MAGIC: [u8; 4] = *b"ASLI";
 const VERSION: u16 = 1;
 
@@ -67,7 +71,7 @@ impl IpcRole {
                 Self::Core,
                 Self::Net | Self::Worker | Self::Extractor,
                 2 | 4
-            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62)
+            ) | (Self::Core, Self::Net, 14 | 15 | 17 | 18 | 24 | 25 | 28 | 29 | 33 | 40 | 44 | 48 | 49 | 54..=62 | 64..=71)
                 | (Self::Core, Self::Net, 34 | 35 | 43)
                 | (Self::Core, Self::Net, 32)
                 | (Self::Core, Self::Net, 50..=51)
@@ -81,7 +85,7 @@ impl IpcRole {
                 | (Self::Net, Self::Core, 10..=13)
                 | (Self::Net, Self::Core, 16 | 19..=23 | 26..=27 | 30..=31)
                 | (Self::Net, Self::Core, 36..=39 | 45..=47)
-                | (Self::Net, Self::Core, 52..=53 | 63)
+                | (Self::Net, Self::Core, 52..=53 | 63 | 68 | 72..=73)
                 | (Self::Worker | Self::Extractor, Self::Core, 7)
                 | (Self::Worker, Self::Core, 8)
                 | (Self::Extractor, Self::Core, 42)
@@ -118,6 +122,7 @@ impl WorkerOperation {
 pub enum ExtractorOperation {
     PdfText = 1,
     Avatar = 2,
+    DocumentText = 3,
 }
 
 impl ExtractorOperation {
@@ -125,6 +130,7 @@ impl ExtractorOperation {
         match value {
             1 => Ok(Self::PdfText),
             2 => Ok(Self::Avatar),
+            3 => Ok(Self::DocumentText),
             _ => Err(AslError::InvalidMessage),
         }
     }
@@ -286,6 +292,12 @@ pub enum IpcMessage {
     RelayUnavailable {
         relay_peer_id: PeerId,
     },
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
+    },
     DiscoveryCandidate {
         peer_id: PeerId,
         kind: TransportKind,
@@ -300,6 +312,24 @@ pub enum IpcMessage {
     FindProviders {
         lookup_id: [u8; 16],
         key: [u8; 32],
+    },
+    LookupDhtRecord {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    RestoreDhtRecord {
+        expires_at_ms: u64,
+        value: Vec<u8>,
+    },
+    RestoreDhtProvider {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
+    },
+    PublishMailboxRecord {
+        operation_id: [u8; 16],
+        record: Vec<u8>,
     },
     StartProviding {
         operation_id: [u8; 16],
@@ -321,6 +351,18 @@ pub enum IpcMessage {
         operation_id: [u8; 16],
         receipt_id: [u8; 16],
     },
+    PrepareDirectory {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishDirectory {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
+    },
+    CancelDirectory {
+        operation_id: [u8; 16],
+        receipt_id: [u8; 16],
+    },
     LookupProfile {
         operation_id: [u8; 16],
         agent: AgentId,
@@ -329,6 +371,12 @@ pub enum IpcMessage {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
     },
     ControlRequested {
         connection_id: [u8; 16],
@@ -875,6 +923,54 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(peer_bytes);
             37
         }
+        IpcMessage::ReachabilityChanged { status } => {
+            let address = status.public_address.as_deref().unwrap_or_default();
+            if address.len() > MAX_REACHABILITY_ADDRESS_BYTES
+                || (status.state != ReachabilityState::Public && !address.is_empty())
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.push(status.state as u8);
+            body.push(status.confidence);
+            body.extend_from_slice(
+                &u16::try_from(address.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(address);
+            72
+        }
+        IpcMessage::RouteChanged { status } => {
+            let peer = status.peer_id.as_bytes();
+            if peer.is_empty() || peer.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(peer.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(peer);
+            body.push(status.state as u8);
+            let relay = status
+                .relay_peer_id
+                .as_ref()
+                .map(PeerId::as_bytes)
+                .unwrap_or_default();
+            if relay.len() > 128 {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(
+                &u16::try_from(relay.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(relay);
+            body.push(status.direct_attempts);
+            body.push(status.relay_attempts);
+            body.push(status.failure.map_or(0, |failure| failure as u8));
+            73
+        }
         IpcMessage::DiscoveryCandidate {
             peer_id,
             kind,
@@ -1095,6 +1191,51 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(key);
             44
         }
+        IpcMessage::LookupDhtRecord { operation_id, key } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(key);
+            64
+        }
+        IpcMessage::RestoreDhtRecord {
+            expires_at_ms,
+            value,
+        } => {
+            if *expires_at_ms == 0 || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(&expires_at_ms.to_be_bytes());
+            body.extend_from_slice(
+                &u16::try_from(value.len())
+                    .map_err(|_| AslError::InvalidMessage)?
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(value);
+            66
+        }
+        IpcMessage::RestoreDhtProvider {
+            key,
+            peer_id,
+            addresses,
+            expires_at_ms,
+        } => {
+            append_dht_provider_observation(&mut body, key, peer_id, addresses, *expires_at_ms)?;
+            67
+        }
+        IpcMessage::PublishMailboxRecord {
+            operation_id,
+            record,
+        } => {
+            if *operation_id == [0; 16] || asl_net::mailbox::MailboxRecord::decode(record).is_err()
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(record);
+            65
+        }
         IpcMessage::StartProviding { operation_id, key } => {
             if *operation_id == [0; 16] {
                 return Err(AslError::InvalidMessage);
@@ -1155,6 +1296,39 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
             body.extend_from_slice(receipt_id);
             58
         }
+        IpcMessage::PrepareDirectory {
+            operation_id,
+            agent,
+        } => {
+            if *operation_id == [0; 16] {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(agent.as_bytes());
+            69
+        }
+        IpcMessage::PublishDirectory {
+            operation_id,
+            value,
+        } => {
+            if *operation_id == [0; 16] || value.is_empty() || value.len() > MAX_DHT_VALUE_BYTES {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(value);
+            70
+        }
+        IpcMessage::CancelDirectory {
+            operation_id,
+            receipt_id,
+        } => {
+            if *operation_id == [0; 16] || *receipt_id == [0; 16] || operation_id == receipt_id {
+                return Err(AslError::InvalidMessage);
+            }
+            body.extend_from_slice(operation_id);
+            body.extend_from_slice(receipt_id);
+            71
+        }
         IpcMessage::DhtProviders {
             lookup_id,
             status,
@@ -1193,6 +1367,15 @@ fn encode_message(message: &IpcMessage) -> Result<(u8, Vec<u8>), AslError> {
                 body.push(u8::from(provider.relay_route_available));
             }
             45
+        }
+        IpcMessage::DhtProviderObserved {
+            key,
+            peer_id,
+            addresses,
+            expires_at_ms,
+        } => {
+            append_dht_provider_observation(&mut body, key, peer_id, addresses, *expires_at_ms)?;
+            68
         }
         IpcMessage::DecideDhtRecord {
             candidate_id,
@@ -1535,6 +1718,76 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                     .map_err(|_| AslError::InvalidMessage)?,
             })
         }
+        72 if body.len() >= 4 => {
+            let state = match body[0] {
+                1 => ReachabilityState::Unknown,
+                2 => ReachabilityState::Private,
+                3 => ReachabilityState::Public,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let address_len = u16::from_be_bytes(body[2..4].try_into().unwrap()) as usize;
+            if address_len > MAX_REACHABILITY_ADDRESS_BYTES
+                || body.len() != 4 + address_len
+                || (state != ReachabilityState::Public && address_len != 0)
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::ReachabilityChanged {
+                status: ReachabilityStatus {
+                    state,
+                    confidence: body[1],
+                    public_address: (address_len != 0).then(|| body[4..].to_vec()),
+                },
+            })
+        }
+        73 if body.len() >= 9 => {
+            let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
+            let peer_end = 2 + peer_len;
+            if peer_len == 0 || peer_len > 128 || body.len() < peer_end + 6 {
+                return Err(AslError::InvalidMessage);
+            }
+            let state = match body[peer_end] {
+                1 => RouteState::DirectDialing,
+                2 => RouteState::RelayDialing,
+                3 => RouteState::HolePunching,
+                4 => RouteState::Direct,
+                5 => RouteState::HolePunched,
+                6 => RouteState::Relayed,
+                7 => RouteState::Failed,
+                _ => return Err(AslError::InvalidMessage),
+            };
+            let relay_len =
+                u16::from_be_bytes(body[peer_end + 1..peer_end + 3].try_into().unwrap()) as usize;
+            let relay_end = peer_end + 3 + relay_len;
+            if relay_len > 128 || body.len() != relay_end + 3 {
+                return Err(AslError::InvalidMessage);
+            }
+            let relay_peer_id = (relay_len != 0)
+                .then(|| PeerId::from_bytes(body[peer_end + 3..relay_end].to_vec()))
+                .transpose()
+                .map_err(|_| AslError::InvalidMessage)?;
+            let failure = match body[relay_end + 2] {
+                0 => None,
+                1 => Some(RouteFailure::DirectUnavailable),
+                2 => Some(RouteFailure::RelayUnavailable),
+                3 => Some(RouteFailure::HolePunchFailed),
+                4 => Some(RouteFailure::TimedOut),
+                5 => Some(RouteFailure::PeerIdentityMismatch),
+                6 => Some(RouteFailure::Disconnected),
+                _ => return Err(AslError::InvalidMessage),
+            };
+            Ok(IpcMessage::RouteChanged {
+                status: RouteStatus {
+                    peer_id: PeerId::from_bytes(body[2..peer_end].to_vec())
+                        .map_err(|_| AslError::InvalidMessage)?,
+                    state,
+                    relay_peer_id,
+                    direct_attempts: body[relay_end],
+                    relay_attempts: body[relay_end + 1],
+                    failure,
+                },
+            })
+        }
         38 if body.len() >= 11 => {
             let peer_len = u16::from_be_bytes(body[..2].try_into().unwrap()) as usize;
             let peer_end = 2 + peer_len;
@@ -1585,6 +1838,43 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             lookup_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
         }),
+        64 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::LookupDhtRecord {
+            operation_id: body[..16].try_into().unwrap(),
+            key: body[16..48].try_into().unwrap(),
+        }),
+        66 if body.len() >= 10 => {
+            let expires_at_ms = u64::from_be_bytes(body[..8].try_into().unwrap());
+            let length = u16::from_be_bytes(body[8..10].try_into().unwrap()) as usize;
+            if expires_at_ms == 0
+                || length == 0
+                || length > MAX_DHT_VALUE_BYTES
+                || body.len() != length + 10
+            {
+                return Err(AslError::InvalidMessage);
+            }
+            Ok(IpcMessage::RestoreDhtRecord {
+                expires_at_ms,
+                value: body[10..].to_vec(),
+            })
+        }
+        67 => {
+            let (key, peer_id, addresses, expires_at_ms) = decode_dht_provider_observation(body)?;
+            Ok(IpcMessage::RestoreDhtProvider {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            })
+        }
+        65 if (18..=17 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES).contains(&body.len())
+            && body[..16] != [0; 16]
+            && asl_net::mailbox::MailboxRecord::decode(&body[16..]).is_ok() =>
+        {
+            Ok(IpcMessage::PublishMailboxRecord {
+                operation_id: body[..16].try_into().unwrap(),
+                record: body[16..].to_vec(),
+            })
+        }
         54 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::StartProviding {
             operation_id: body[..16].try_into().unwrap(),
             key: body[16..48].try_into().unwrap(),
@@ -1601,6 +1891,26 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
             Ok(IpcMessage::PublishProfile {
                 operation_id: body[..16].try_into().unwrap(),
                 value: body[16..].to_vec(),
+            })
+        }
+        69 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::PrepareDirectory {
+            operation_id: body[..16].try_into().unwrap(),
+            agent: AgentId(body[16..].try_into().unwrap()),
+        }),
+        70 if (17..=16 + MAX_DHT_VALUE_BYTES).contains(&body.len()) && body[..16] != [0; 16] => {
+            Ok(IpcMessage::PublishDirectory {
+                operation_id: body[..16].try_into().unwrap(),
+                value: body[16..].to_vec(),
+            })
+        }
+        71 if body.len() == 32
+            && body[..16] != [0; 16]
+            && body[16..] != [0; 16]
+            && body[..16] != body[16..] =>
+        {
+            Ok(IpcMessage::CancelDirectory {
+                operation_id: body[..16].try_into().unwrap(),
+                receipt_id: body[16..].try_into().unwrap(),
             })
         }
         59 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::LookupProfile {
@@ -1684,6 +1994,15 @@ fn decode_message(kind: u8, body: &[u8]) -> Result<IpcMessage, AslError> {
                 lookup_id: body[..16].try_into().unwrap(),
                 status,
                 providers,
+            })
+        }
+        68 => {
+            let (key, peer_id, addresses, expires_at_ms) = decode_dht_provider_observation(body)?;
+            Ok(IpcMessage::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
             })
         }
         60 if body.len() == 48 && body[..16] != [0; 16] => Ok(IpcMessage::GossipSubscribe {
@@ -2138,6 +2457,93 @@ fn decode_socket_addr(bytes: &[u8]) -> Result<(SocketAddr, usize), AslError> {
     Ok((SocketAddr::new(ip, port), length))
 }
 
+fn append_dht_provider_observation(
+    body: &mut Vec<u8>,
+    key: &[u8; 32],
+    peer_id: &PeerId,
+    addresses: &[String],
+    expires_at_ms: u64,
+) -> Result<(), AslError> {
+    let peer_bytes = peer_id.as_bytes();
+    if expires_at_ms == 0
+        || peer_bytes.is_empty()
+        || peer_bytes.len() > 128
+        || addresses.len() > MAX_DHT_PROVIDER_ADDRESSES
+        || addresses
+            .iter()
+            .any(|address| address.is_empty() || address.len() > MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES)
+    {
+        return Err(AslError::InvalidMessage);
+    }
+    body.extend_from_slice(key);
+    body.extend_from_slice(
+        &u16::try_from(peer_bytes.len())
+            .map_err(|_| AslError::InvalidMessage)?
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(peer_bytes);
+    body.extend_from_slice(&expires_at_ms.to_be_bytes());
+    body.push(addresses.len() as u8);
+    for address in addresses {
+        body.extend_from_slice(
+            &u16::try_from(address.len())
+                .map_err(|_| AslError::InvalidMessage)?
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(address.as_bytes());
+    }
+    Ok(())
+}
+
+fn decode_dht_provider_observation(
+    body: &[u8],
+) -> Result<([u8; 32], PeerId, Vec<String>, u64), AslError> {
+    if body.len() < 32 + 2 + 8 + 1 {
+        return Err(AslError::InvalidMessage);
+    }
+    let key = body[..32].try_into().unwrap();
+    let peer_len = u16::from_be_bytes(body[32..34].try_into().unwrap()) as usize;
+    if peer_len == 0 || peer_len > 128 || body.len() < 34 + peer_len + 8 + 1 {
+        return Err(AslError::InvalidMessage);
+    }
+    let peer_id = PeerId::from_bytes(body[34..34 + peer_len].to_vec())
+        .map_err(|_| AslError::InvalidMessage)?;
+    let mut offset = 34 + peer_len;
+    let expires_at_ms = u64::from_be_bytes(body[offset..offset + 8].try_into().unwrap());
+    offset += 8;
+    if expires_at_ms == 0 {
+        return Err(AslError::InvalidMessage);
+    }
+    let count = body[offset] as usize;
+    offset += 1;
+    if count > MAX_DHT_PROVIDER_ADDRESSES {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut addresses = Vec::with_capacity(count);
+    for _ in 0..count {
+        if body.len() < offset + 2 {
+            return Err(AslError::InvalidMessage);
+        }
+        let length = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        if length == 0
+            || length > MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES
+            || body.len() < offset + length
+        {
+            return Err(AslError::InvalidMessage);
+        }
+        addresses.push(
+            String::from_utf8(body[offset..offset + length].to_vec())
+                .map_err(|_| AslError::InvalidMessage)?,
+        );
+        offset += length;
+    }
+    if offset != body.len() {
+        return Err(AslError::InvalidMessage);
+    }
+    Ok((key, peer_id, addresses, expires_at_ms))
+}
+
 fn max_body_bytes(kind: u8) -> Option<usize> {
     Some(match kind {
         1..=3 => 0,
@@ -2182,6 +2588,21 @@ fn max_body_bytes(kind: u8) -> Option<usize> {
         60..=61 => 48,
         62 => 50 + MAX_GOSSIP_PAYLOAD_BYTES,
         63 => 34 + 128 + 32 + 2 + MAX_GOSSIP_PAYLOAD_BYTES,
+        64 => 48,
+        65 => 16 + asl_net::mailbox::MAX_MAILBOX_RECORD_BYTES,
+        66 => 8 + 2 + MAX_DHT_VALUE_BYTES,
+        67 | 68 => {
+            32 + 2
+                + 128
+                + 8
+                + 1
+                + MAX_DHT_PROVIDER_ADDRESSES * (2 + MAX_IPC_DHT_PROVIDER_ADDRESS_BYTES)
+        }
+        69 => 48,
+        70 => 16 + MAX_DHT_VALUE_BYTES,
+        71 => 32,
+        72 => 4 + MAX_REACHABILITY_ADDRESS_BYTES,
+        73 => 2 + 128 + 1 + 2 + 128 + 3,
         45 => 18 + MAX_IPC_DHT_PROVIDER_CANDIDATES * (2 + 128 + 1 + 2 + 19 + 1),
         46 | 48 => 32 + 4 + MAX_IPC_PAIRING_FRAME_BYTES,
         47 => 32 + 8 + 2 * MAX_IPC_PAIRING_FRAME_BYTES,
@@ -2292,8 +2713,8 @@ pub(crate) fn run_net_pipe_fixture(
     mut input: std::io::PipeReader,
     output: std::io::PipeWriter,
 ) -> Result<(), AslError> {
-    let (identity, loopback_groups) = read_net_startup_prelude(&mut input)?;
-    net_runtime::run(identity, loopback_groups, input, output)
+    let (identity, loopback_groups, traversal) = read_net_startup_prelude(&mut input)?;
+    net_runtime::run(identity, loopback_groups, traversal, input, output)
 }
 
 pub fn run_worker_child() -> Result<(), AslError> {
@@ -2318,8 +2739,14 @@ fn run_child_for(allowed_roles: &[IpcRole]) -> Result<(), AslError> {
 
     let stdin = std::io::stdin();
     if role == IpcRole::Net {
-        let (identity, loopback_groups) = read_net_startup_prelude(&mut stdin.lock())?;
-        return net_runtime::run(identity, loopback_groups, stdin, std::io::stdout());
+        let (identity, loopback_groups, traversal) = read_net_startup_prelude(&mut stdin.lock())?;
+        return net_runtime::run(
+            identity,
+            loopback_groups,
+            traversal,
+            stdin,
+            std::io::stdout(),
+        );
     }
     let stdout = std::io::stdout();
     let mut reader = FrameReader::new(stdin.lock(), IpcRole::Core, role);
@@ -2381,7 +2808,11 @@ pub(crate) fn write_net_startup_prelude<W: Write>(
     writer: &mut W,
     identity: &DeviceIdentity,
     loopback_groups: bool,
+    traversal: TraversalConfig,
 ) -> Result<(), AslError> {
+    let traversal = traversal
+        .validate()
+        .map_err(|_| AslError::InvalidIdentity)?;
     let secret = identity.to_ipc_secret()?;
     let length = u32::try_from(secret.len()).map_err(|_| AslError::InvalidIdentity)?;
     let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
@@ -2389,16 +2820,20 @@ pub(crate) fn write_net_startup_prelude<W: Write>(
     header[4..6].copy_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
     header[6..NET_STARTUP_PRELUDE_FLAG_OFFSET].copy_from_slice(&length.to_be_bytes());
     header[NET_STARTUP_PRELUDE_FLAG_OFFSET] = u8::from(loopback_groups);
+    header[NET_STARTUP_PRELUDE_CONFIG_LENGTH_OFFSET..]
+        .copy_from_slice(&(NET_STARTUP_TRAVERSAL_BYTES as u16).to_be_bytes());
     writer.write_all(&header)?;
+    writer.write_all(&encode_traversal_config(traversal))?;
     writer.write_all(&secret)?;
     writer.flush()?;
     Ok(())
 }
 
-fn read_net_startup_prelude<R: Read>(reader: &mut R) -> Result<(DeviceIdentity, bool), AslError> {
-    let mut header = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES];
-    let (prefix, flag) = header.split_at_mut(NET_STARTUP_PRELUDE_FLAG_OFFSET);
-    reader.read_exact(prefix)?;
+fn read_net_startup_prelude<R: Read>(
+    reader: &mut R,
+) -> Result<(DeviceIdentity, bool, TraversalConfig), AslError> {
+    let mut prefix = [0u8; NET_STARTUP_PRELUDE_FLAG_OFFSET];
+    reader.read_exact(&mut prefix)?;
     if prefix[..4] != NET_STARTUP_PRELUDE_MAGIC {
         return Err(AslError::InvalidMessage);
     }
@@ -2409,15 +2844,112 @@ fn read_net_startup_prelude<R: Read>(reader: &mut R) -> Result<(DeviceIdentity, 
     if length == 0 || length > MAX_DEVICE_IDENTITY_PRELUDE_BYTES {
         return Err(AslError::InvalidMessage);
     }
-    reader.read_exact(flag)?;
-    let loopback_groups = match flag[0] {
+    let mut suffix = [0u8; NET_STARTUP_PRELUDE_HEADER_BYTES - NET_STARTUP_PRELUDE_FLAG_OFFSET];
+    reader.read_exact(&mut suffix)?;
+    let loopback_groups = match suffix[0] {
         0 => false,
         1 => true,
         _ => return Err(AslError::InvalidMessage),
     };
+    let config_length = u16::from_be_bytes(suffix[1..].try_into().unwrap()) as usize;
+    if config_length != NET_STARTUP_TRAVERSAL_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    let mut traversal = [0u8; NET_STARTUP_TRAVERSAL_BYTES];
+    reader.read_exact(&mut traversal)?;
+    let traversal = decode_traversal_config(&traversal)?;
     let mut secret = Zeroizing::new(vec![0u8; length]);
     reader.read_exact(&mut secret)?;
-    Ok((DeviceIdentity::from_ipc_secret(&secret)?, loopback_groups))
+    Ok((
+        DeviceIdentity::from_ipc_secret(&secret)?,
+        loopback_groups,
+        traversal,
+    ))
+}
+
+fn encode_traversal_config(config: TraversalConfig) -> [u8; NET_STARTUP_TRAVERSAL_BYTES] {
+    let mut bytes = [0u8; NET_STARTUP_TRAVERSAL_BYTES];
+    let mut offset = 0;
+    for value in [
+        config.connection_timeout_ms,
+        config.idle_connection_timeout_ms,
+        config.hole_punch_timeout_ms,
+        config.identify_interval_ms,
+        config.autonat_boot_delay_ms,
+        config.autonat_retry_interval_ms,
+        config.autonat_refresh_interval_ms,
+        config.autonat_request_timeout_ms,
+        config.relay_retry_base_ms,
+        config.relay_retry_max_ms,
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        offset += 8;
+    }
+    for value in [
+        config.max_relay_endpoints,
+        config.max_relay_routes_per_dial,
+        config.max_pending_routes,
+        config.max_relay_reservation_retries,
+        config.autonat_max_peer_addresses,
+    ] {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        offset += 2;
+    }
+    bytes[offset] = config.autonat_confidence_max;
+    bytes
+}
+
+fn decode_traversal_config(
+    bytes: &[u8; NET_STARTUP_TRAVERSAL_BYTES],
+) -> Result<TraversalConfig, AslError> {
+    let mut offset = 0;
+    let mut next_u64 = || {
+        let value = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        value
+    };
+    let connection_timeout_ms = next_u64();
+    let idle_connection_timeout_ms = next_u64();
+    let hole_punch_timeout_ms = next_u64();
+    let identify_interval_ms = next_u64();
+    let autonat_boot_delay_ms = next_u64();
+    let autonat_retry_interval_ms = next_u64();
+    let autonat_refresh_interval_ms = next_u64();
+    let autonat_request_timeout_ms = next_u64();
+    let relay_retry_base_ms = next_u64();
+    let relay_retry_max_ms = next_u64();
+    drop(next_u64);
+    let mut next_u16 = || {
+        let value = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        value
+    };
+    let max_relay_endpoints = next_u16();
+    let max_relay_routes_per_dial = next_u16();
+    let max_pending_routes = next_u16();
+    let max_relay_reservation_retries = next_u16();
+    let autonat_max_peer_addresses = next_u16();
+    drop(next_u16);
+    TraversalConfig {
+        connection_timeout_ms,
+        idle_connection_timeout_ms,
+        hole_punch_timeout_ms,
+        identify_interval_ms,
+        autonat_boot_delay_ms,
+        autonat_retry_interval_ms,
+        autonat_refresh_interval_ms,
+        autonat_request_timeout_ms,
+        relay_retry_base_ms,
+        relay_retry_max_ms,
+        max_relay_endpoints,
+        max_relay_routes_per_dial,
+        max_pending_routes,
+        max_relay_reservation_retries,
+        autonat_max_peer_addresses,
+        autonat_confidence_max: bytes[offset],
+    }
+    .validate()
+    .map_err(|_| AslError::InvalidMessage)
 }
 
 #[cfg(test)]
@@ -2533,6 +3065,23 @@ mod tests {
             IpcMessage::RelayUnavailable {
                 relay_peer_id: DeviceIdentity::generate().unwrap().peer_id(),
             },
+            IpcMessage::ReachabilityChanged {
+                status: ReachabilityStatus {
+                    state: ReachabilityState::Private,
+                    confidence: 2,
+                    public_address: None,
+                },
+            },
+            IpcMessage::RouteChanged {
+                status: RouteStatus {
+                    peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                    state: RouteState::Relayed,
+                    relay_peer_id: Some(DeviceIdentity::generate().unwrap().peer_id()),
+                    direct_attempts: 1,
+                    relay_attempts: 1,
+                    failure: Some(RouteFailure::HolePunchFailed),
+                },
+            },
             IpcMessage::DiscoveryCandidate {
                 peer_id: DeviceIdentity::generate().unwrap().peer_id(),
                 kind: TransportKind::Quic,
@@ -2571,6 +3120,18 @@ mod tests {
             IpcMessage::LookupProfile {
                 operation_id: [41; 16],
                 agent: AgentId([42; 32]),
+            },
+            IpcMessage::PrepareDirectory {
+                operation_id: [70; 16],
+                agent: AgentId([71; 32]),
+            },
+            IpcMessage::PublishDirectory {
+                operation_id: [70; 16],
+                value: vec![0x82, 0x01, 0x02],
+            },
+            IpcMessage::CancelDirectory {
+                operation_id: [70; 16],
+                receipt_id: [72; 16],
             },
             IpcMessage::DhtProviders {
                 lookup_id: [34; 16],
@@ -2696,6 +3257,46 @@ mod tests {
             IpcMessage::NetworkError {
                 code: NetworkErrorCode::Capacity,
             },
+            IpcMessage::LookupDhtRecord {
+                operation_id: [61; 16],
+                key: [62; 32],
+            },
+            IpcMessage::RestoreDhtRecord {
+                expires_at_ms: u64::MAX - 1,
+                value: vec![0x81, 0x01],
+            },
+            IpcMessage::RestoreDhtProvider {
+                key: [70; 32],
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                addresses: vec![
+                    "/ip4/127.0.0.1/tcp/4001".into(),
+                    "/ip4/127.0.0.1/udp/4001/quic-v1".into(),
+                ],
+                expires_at_ms: u64::MAX - 1,
+            },
+            IpcMessage::DhtProviderObserved {
+                key: [71; 32],
+                peer_id: DeviceIdentity::generate().unwrap().peer_id(),
+                addresses: vec!["/ip4/192.168.1.4/tcp/4001".into()],
+                expires_at_ms: u64::MAX - 1,
+            },
+            IpcMessage::PublishMailboxRecord {
+                operation_id: [63; 16],
+                record: asl_net::mailbox::MailboxRecord {
+                    recipient_id: [64; 32],
+                    sender_id: [65; 32],
+                    topic_id: [66; 32],
+                    mailbox_id: [67; 32],
+                    shard_id: [68; 32],
+                    epoch: 1,
+                    shard_index: 0,
+                    shard_count: 1,
+                    expires_at_ms: u64::MAX - 1,
+                    ciphertext: vec![69; 16],
+                }
+                .encode()
+                .unwrap(),
+            },
             IpcMessage::GossipSubscribe {
                 operation_id: [51; 16],
                 key: [52; 32],
@@ -2727,9 +3328,12 @@ mod tests {
                 | IpcMessage::Listening { .. }
                 | IpcMessage::RelayReserved { .. }
                 | IpcMessage::RelayUnavailable { .. }
+                | IpcMessage::ReachabilityChanged { .. }
+                | IpcMessage::RouteChanged { .. }
                 | IpcMessage::DiscoveryCandidate { .. }
                 | IpcMessage::DhtRecordCandidate { .. }
                 | IpcMessage::DhtProviders { .. }
+                | IpcMessage::DhtProviderObserved { .. }
                 | IpcMessage::PairingInviteRequested { .. }
                 | IpcMessage::PairingExchangeReceived { .. }
                 | IpcMessage::ControlRequested { .. }
@@ -2755,6 +3359,10 @@ mod tests {
                 | IpcMessage::ReplyGroup { .. }
                 | IpcMessage::SetAddressPolicy { .. }
                 | IpcMessage::FindProviders { .. }
+                | IpcMessage::LookupDhtRecord { .. }
+                | IpcMessage::RestoreDhtRecord { .. }
+                | IpcMessage::RestoreDhtProvider { .. }
+                | IpcMessage::PublishMailboxRecord { .. }
                 | IpcMessage::StartProviding { .. }
                 | IpcMessage::StopProviding { .. }
                 | IpcMessage::PrepareProfile { .. }
@@ -2782,7 +3390,10 @@ mod tests {
                 IpcMessage::RequestIdentityProof { .. }
                 | IpcMessage::ReplyIdentityProof { .. }
                 | IpcMessage::RequestPairing { .. }
-                | IpcMessage::ReplyPairing { .. } => (IpcRole::Core, IpcRole::Net),
+                | IpcMessage::ReplyPairing { .. }
+                | IpcMessage::PrepareDirectory { .. }
+                | IpcMessage::PublishDirectory { .. }
+                | IpcMessage::CancelDirectory { .. } => (IpcRole::Core, IpcRole::Net),
             };
             let bytes = encode_frame(sender, receiver, 7, &message)
                 .unwrap_or_else(|error| panic!("failed to encode {message:?}: {error:?}"));
@@ -2992,13 +3603,16 @@ mod tests {
         let frame = encode_frame(IpcRole::Core, IpcRole::Net, 1, &first_command).unwrap();
         for enabled in [false, true] {
             let mut bytes = Vec::new();
-            write_net_startup_prelude(&mut bytes, &identity, enabled).unwrap();
+            let traversal = TraversalConfig::default();
+            write_net_startup_prelude(&mut bytes, &identity, enabled, traversal).unwrap();
             bytes.extend_from_slice(&frame);
             let mut stream = Cursor::new(bytes);
 
-            let (received, loopback_groups) = read_net_startup_prelude(&mut stream).unwrap();
+            let (received, loopback_groups, received_traversal) =
+                read_net_startup_prelude(&mut stream).unwrap();
             assert_eq!(received.peer_id(), identity.peer_id());
             assert_eq!(loopback_groups, enabled);
+            assert_eq!(received_traversal, traversal);
             let mut reader = FrameReader::new(stream, IpcRole::Core, IpcRole::Net);
             assert_eq!(reader.receive().unwrap().message, first_command);
         }
@@ -3020,21 +3634,42 @@ mod tests {
             }
         }
 
-        for (magic, version, length, flag) in [
-            (*b"NOPE", NET_STARTUP_PRELUDE_VERSION, 32_u32, 0),
-            (NET_STARTUP_PRELUDE_MAGIC, 1_u16, 32, 0),
-            (NET_STARTUP_PRELUDE_MAGIC, NET_STARTUP_PRELUDE_VERSION, 0, 0),
+        for (magic, version, length, flag, config_length) in [
+            (
+                *b"NOPE",
+                NET_STARTUP_PRELUDE_VERSION,
+                32_u32,
+                0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
+            (NET_STARTUP_PRELUDE_MAGIC, 1_u16, 32, 0, 0),
+            (
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                0,
+                0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
             (
                 NET_STARTUP_PRELUDE_MAGIC,
                 NET_STARTUP_PRELUDE_VERSION,
                 (MAX_DEVICE_IDENTITY_PRELUDE_BYTES + 1) as u32,
                 0,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
             ),
             (
                 NET_STARTUP_PRELUDE_MAGIC,
                 NET_STARTUP_PRELUDE_VERSION,
                 32,
                 2,
+                NET_STARTUP_TRAVERSAL_BYTES as u16,
+            ),
+            (
+                NET_STARTUP_PRELUDE_MAGIC,
+                NET_STARTUP_PRELUDE_VERSION,
+                32,
+                0,
+                0,
             ),
         ] {
             let mut header = Vec::new();
@@ -3043,6 +3678,7 @@ mod tests {
             header.extend_from_slice(&length.to_be_bytes());
             if version == NET_STARTUP_PRELUDE_VERSION {
                 header.push(flag);
+                header.extend_from_slice(&config_length.to_be_bytes());
             }
             let mut reader = HeaderOnly {
                 bytes: Cursor::new(header),
@@ -3067,6 +3703,8 @@ mod tests {
             bytes.extend_from_slice(&NET_STARTUP_PRELUDE_VERSION.to_be_bytes());
             bytes.extend_from_slice(&length.to_be_bytes());
             bytes.push(0);
+            bytes.extend_from_slice(&(NET_STARTUP_TRAVERSAL_BYTES as u16).to_be_bytes());
+            bytes.extend_from_slice(&encode_traversal_config(TraversalConfig::default()));
             bytes.extend_from_slice(payload);
             assert!(read_net_startup_prelude(&mut Cursor::new(bytes)).is_err());
         }

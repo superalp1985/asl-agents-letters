@@ -1,6 +1,6 @@
 # 修订计划：结构化控制 + 加密自然语言、按性能伸缩的群聊与不限次交流
 
-状态：第 3 版实现基线（2026-11-25）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 已用于表达式信件，ASL/1.2 已用于签名语义上下文，ASL/1.3 新增 `act-nl`；当前存储 schema 为 v35。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、发送侧持久预算、libp2p gossipsub 网络与 Core act 路由、v35 opaque 邮箱底座已经落地；远程邮箱补收、自动模型回复、完整 audience 隔离和大规模跨机验收仍未完成。
+状态：第 7 版实现基线（2026-11-28）。第 0 节记录 D1–D5。仓库事实是：ASL/1.1 用于表达式信件，ASL/1.2 用于签名语义上下文，ASL/1.3 增加 `act-nl`，ASL/1.4 增加签名 shard binding/forward；当前存储 schema 为 v49。v46 增加联系人策略动作与固定期限交互证据，v47 曾增加逻辑群唯一 Agent 成员视图，v48 用代码内递归查询取代持久视图，v49 增加加密 shard-forward outbox。act 编解码、MLS application 收发、MCP 发信、建群/邀请/两人会话工具、持久复合预算、libp2p AutoNAT/DCUtR/relay、Core act/Policy 路由、opaque 邮箱、群策略、逐文件权限和管理员能力已经落地。普通邀请自动选择或创建独立子 MLS 群，根策略逐子群提交并返回部分结果；跨 shard 应用由逻辑群主根签名证明来源，各子群分别加密并可持久重试。文件 Offer/Fetch 现在携带可选的逻辑根和源 shard 元数据，使跨 shard 的文档授权路径可回到源 shard；文件字节仍要求双方建立直接认证传输。管理员能力按 `manage-members`/`manage-files`/`manage-invites` 分片。真实两设备重启补收、512/2,000/10,000 跨机矩阵、公网 NAT/relay 和链上部署仍未验收。
 
 ## 0. 决策记录（2026-11-25）
 
@@ -176,6 +176,10 @@ group-application = query / answer / offer / fetch-request / fetch-grant /
 - act 在发送前加密一次，同一密文可 direct fan-out 和 gossipsub 发布；接收端按 MLS 重放与 act-id 去重。
 - `asl-net` 只转发有界不透明 MLS 字节，解密、成员状态、act 校验和群授权留在 Core/`asl-groups`。
 
+### 4.9 ASL/1.4 跨 shard 封装
+
+子群之间不能复用 MLS 密文。逻辑群主在源子群收到并认证原应用后，创建根身份签名的 `ShardForward`，绑定根群、源/目标子群、原 Agent/Peer、源 epoch、原消息 ID、期限和目标 `ShardBinding`，再为每个目标子群分别做 MLS 加密。接收端只用当前目标群主、已验证 controller、签名和持久 receipt 判断来源，不把 MLS bridge leaf 当作原作者。策略、成员变更、移除请求和嵌套转发不得跨越该封装；跨 shard 文件 Offer 可转发，文件字节仍要求双方建立直接认证传输。
+
 ## 5. 私聊、群聊、邮箱与伸缩
 
 ### 5.1 统一会话模型
@@ -196,10 +200,10 @@ group-application = query / answer / offer / fetch-request / fetch-grant /
 | 级别 | 建议成员数 | 路由 | 说明 |
 | --- | --- | --- | --- |
 | S | ≤ 64 | 对已认证成员逐个直连发送 MLS ciphertext | 复用现有认证连接，与 `docs/01-product.md` 第 129 行的原逐成员投递一致 |
-| M | 65–512 | 由自愿担任转发者的成员经 gossipsub 传播密文 | 512 是当前单 MLS 编译硬上限；是否承担转发由本机容量探测决定 |
-| L | >512 | gossipsub + 分层房间，桥接成员只转密文与成员摘要 | 按 5.4 拆子群，不持续向单个 MLS 组 Add |
+| M | 65–512 | 单 MLS shard；逻辑群主按根签名转发跨 shard 应用 | 512 是当前单 MLS 编译硬上限；策略和成员变更仍由 MLS application 验证 |
+| L | >512 | 最多 20 个独立 MLS shard，逻辑群唯一 Agent 数上限 10,000 | 按 5.4 拆子群；逻辑群主解密后重新加密，不把 bridge 当作原作者 |
 
-- `65,536` 是建议的编译期硬上限，防止 Welcome、ratchet tree、去重表和 epoch 重放窗口无界增长；本机可依实测下调，但不允许运行时无限上调。
+- 单 MLS shard 硬上限是 512；逻辑群规划上限是 10,000 个唯一 Agent。逻辑群数量没有业务硬上限，实际资源由本机数据库、磁盘和并发预算约束。
 - `direct_max`、gossip mesh 参数、队列和并发都是本机配置/实测值，不是协议全局人数常量。群可在运行中从 direct fan-out 迁移到 gossipsub，迁移不能改变 MLS group_id、epoch、消息去重语义或已授权 permit 的 audience 判定。
 - **gossipsub 只传密文**：libp2p-gossipsub 0.50.1 使用 `MessageAuthenticity::Anonymous` + `ValidationMode::Anonymous`（无 author/signature 字段，发送者认证由 MLS 提供），topic 从 32 字节 room key 派生，禁止携带群名或 AgentId；mesh 邻居只看得到密文大小与时间。
 - **连接分池**：私聊/小群直连连接与大群 gossip 连接分开池化、独立配额，避免大群流量挤占已建立的低延迟私聊会话。
@@ -222,7 +226,7 @@ group-application = query / answer / offer / fetch-request / fetch-grant /
 
 ### 5.4 MLS 规模现实与容量准入
 
-RFC 9420（MLS）的设计区间是两人到数千人：Welcome 消息、ratchet tree 和 Commit 的大小与成员数近似线性增长，成员变更会触发全组更新。所以「条件允许就无限群聊」不能理解为单个 MLS 组无限扩张——万人级必须按 5.2 的 L 级分层，把成员拆成子群、由桥接成员转发密文，而不是给一个 MLS 组持续 Add。这也决定了编译期硬上限与 epoch 重放窗口必须受约束。
+RFC 9420（MLS）的设计区间是两人到数千人：Welcome 消息、ratchet tree 和 Commit 的大小与成员数近似线性增长，成员变更会触发全组更新。所以「条件允许就无限群聊」不能理解为单个 MLS 组无限扩张——万人级必须按 5.2 的 L 级分层，把唯一 Agent 拆到独立子群。当前实现由逻辑群主接收源 shard 的已认证 application，验证根身份授权和持久 receipt 后，为每个目标 shard 重新加密；bridge 不能直接转用其他 shard 的 MLS 密文。单 shard 512 硬上限、逻辑群 10,000 唯一 Agent 上限和 epoch 重放窗口必须保持有界。
 
 首次启动、配置变化和定期基准中实测 CPU、内存、磁盘、上下行、MLS 操作延迟、邮箱分片和 gossip 收敛时间，形成本机容量等级。创建、加入或承担转发时使用该等级判断：
 
@@ -254,6 +258,15 @@ Agent 可以提出建群、邀请、加入和文件交换建议，但以下动�
 - 延长预算或提高资源等级。
 
 授权策略必须绑定主体、会话、资源、期限和动作；模型输出、远端 `nl-body`、信任值、贡献值和在线状态都不能替代授权。
+
+### 5.7 群主、管理员与成员权限
+
+参考 QQ/微信群管理，但保持去中心化和可验证：
+
+- 群创建者是群主；群主由 MLS room creator 绑定，不接受成员自报。群主可通过 MLS application plaintext 的 `group-policy` 设置成员默认文字、文件和邀请权限，并指定管理员及禁言设备。
+- 后端策略使用单调递增 revision；非群主发送、回退 revision、指定非活动成员、禁言群主或重复/乱序 PeerId 均拒绝。接收端先验证当前 epoch 的 MLS sender 是群主，再原子更新本地投影。
+- 成员端对入站 `act`、查询/表达式和文件 `Offer` 重新检查策略；群主和管理员只能收窄本机可见行为，不能绕过用户目录授权、收件目录授权、设备证书或传输审批。
+- 联系人、信任、贡献和在线状态不能替代群主身份或用户授权。群管理动作必须在 GUI/MCP 中明确显示其作用域和结果，不能把“排队”展示为“已完成”。
 
 ## 6. 身份、迁移与分身/女巫防护
 
@@ -314,7 +327,7 @@ Agent 可以提出建群、邀请、加入和文件交换建议，但以下动�
 | `docs/01-product.md` | R21/R32 改口径；删除 64 人上限；第 103、123、129、133 行按对话/邮箱/预算改写；R19 补充邮箱密文 TTL |
 | `docs/02-architecture-security.md` | 第 7、13 行按 act-nl 与 gossipsub 改写；第 52–54 行补转发对象；补 audience 裁剪、PolicyService 动作闸门与分身资源限额 |
 | `docs/03-protocol.md` | 分配 ASL/1.3；冻结 `act`、`nl-body`、group-application、预算、邮箱、gossip 路由元数据、分片与版本规则 |
-| `docs/04-storage-policy.md` | 第 45 行加「控制面」限定；新增 schema v35 迁移（不得改写 v1–v34） |
+| `docs/04-storage-policy.md` | 第 45 行加「控制面」限定；新增 schema v36 群权限迁移（不得改写 v1–v35） |
 | `docs/05-agent-gui.md` | 第 24、28、30、34 行按对话/预算改写；浏览/回答、用户授权、通知、会话视图、附件状态和提示注入数据区展示；不提供自然语言控制面 |
 | `docs/06-implementation-plan.md` | 插入 G00；改写 T14–T19、T26–T27、T31–T32 验收和需求映射；保留已通过的安全切片 |
 | `docs/07-testing-release.md` | 第 19 行状态表补 act-nl 待实现项；A25 与第 97 行改写；增加注入、audience、私聊 MLS、邮箱、预算、gossip 和容量测试 |
@@ -323,11 +336,11 @@ Agent 可以提出建群、邀请、加入和文件交换建议，但以下动�
 | `docs/10-vocabulary.md` | 第 3、18、20 行限定为结构化 query；对话不再要求无损映射；`specs/vocabulary-v1.csv` 不扩充 |
 | `docs/plan-validation.md` | 旧验证记录保留；新增状态必须注明是否覆盖 act、两人 MLS、邮箱、gossip 和最新工作树 |
 | `schemas/asl-v1.cddl` | 追加 ASL/1.3 `act` / `nl-body` 到 MLS group-application；仅 `act[5]` 接受有限 tstr；其他根继续拒绝 text |
-| `specs/schema-v35.sql` | 已作为 v34 之后的增量迁移落地；不得改写 v1–v34 |
+| `specs/schema-v35.sql` / `specs/schema-v36.sql` | v35 邮箱/预算底座与 v36 群权限已分别作为增量迁移落地；不得改写 v1–v34 |
 
-### 7.3 v35 存储底座
+### 7.3 v35/v36 存储底座
 
-v35 已落地下列表和 opaque 仓储 API：
+v35 已落地邮箱/预算表；v36 增加 `group_access_policies` 和 `group_access_members`：
 
 - `conversation_budget_grants`：主体、范围、额度、续期链、期限和持久消耗。
 - `conversation_act_events`：act-id、conversation-id、类型、因果根、epoch、处理状态和回复关联。
@@ -337,7 +350,7 @@ v35 已落地下列表和 opaque 仓储 API：
 - `gossip_topic_state`：主题、群/epoch 绑定、轮换时间、mesh 健康度和本地资源预算。
 - `local_capacity_measurements`：本机容量等级、测量时间和参数；不能成为身份权限。
 
-私聊与群聊复用现有 MLS 房间表；conversation-id 映射继续使用 `mls_room_states.local_group_id`。邮箱 API 只接受密文字节，不解析内容。远程 DHT/relay 邮箱传输尚未接通。
+私聊与群聊复用现有 MLS 房间表；conversation-id 映射继续使用 `mls_room_states.local_group_id`。邮箱 API 只接受密文字节，不解析内容。DHT 邮箱投递和已知发送者轮换拉取已接通；真实双机、送达回执、公网/NAT/relay 与重启补收仍未验收。
 
 ### 7.4 当前对齐结果
 
@@ -346,6 +359,7 @@ v35 已落地下列表和 opaque 仓储 API：
 - 产品、架构、协议、存储、GUI、实施计划、测试、表达式语言和验证记录统一为 ASL/1.3 `act-nl`。
 - `docs/03-protocol.md` 和 `schemas/asl-v1.cddl` 只允许 `act[5]` 的有限 tstr；外层控制面、DHT、身份、预算和邮箱槽仍拒绝任意文本。
 - 存储文档和 `specs/schema-v35.sql` 已从 v34 增量迁移；不改 v1–v34。
+- v36 群权限迁移只追加群主策略、管理员和禁言投影；不改写 v1–v35。
 - README 中文在上、英文在下；保留现有美术和截图引用，并明确已实现/待实现边界。
 - 群规模不写死 64；当前编译硬上限 512，测试矩阵仍要求 2/32/128/512/2,000/10,000 档容量验证。
 - gossipsub、文件 blob-ref、用户授权、分身资源限额和链身份约束已进入正式文档；未接通项不能标为完成。
@@ -356,20 +370,27 @@ v35 已落地下列表和 opaque 仓储 API：
 
 当前实现状态以代码、README、`docs/06-implementation-plan.md` 恢复点和 `docs/07-testing-release.md` 为准：
 
-- 已实现：严格确定性 CBOR、ASL/1.1 表达式、ASL/1.2 语义上下文、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v35、查询/文件基础、OpenMLS 群房间、群文件授权、act codec、act MLS 收发、MCP 发 act、群/MCP 管理、p2p/gossipsub 网络层及 Core act 路径。
-- 部分实现：两人 MLS 会话工具已存在但缺两台真实设备验收；gossipsub 有真实双节点网络测试和 Core 路径，但缺跨机多跳/规模验收；v35 有 opaque 邮箱仓储但远程 DHT/relay 投递未接；发送预算已持久扣减和可续期，其他复合额度未接。
-- 尚未实现：自动模型回复、act 历史持久化、audience 自动裁剪、远程邮箱补收、分层拓扑、完整 GUI 操作、提示注入红队和公网/链 RPC 全链路验收。
+- 代码闭环：严格确定性 CBOR、ASL/1.1/1.2 语义路径、ASL/1.3 act、ASL/1.4 shard binding/forward、链身份/设备证书、授权判定、Windows 沙箱、有界 IPC、SQLite v49、OpenMLS 群房间、根群策略/子群策略传播、逐文件权限、能力分层管理员、群移除审批、MCP 群管理、复合预算、AutoNAT/DCUtR/relay、p2p/gossipsub、DHT 持久化及 Core act/Policy 路径。
+- 待统一验收：两人 MLS、群操作、AutoNAT/DCUtR、DHT 密文邮箱、多子 MLS 创建/分配、跨 shard 转发、群策略、文件 Offer/Fetch 和迁移编排均需在当前工作树统一执行本机/容器测试；不能沿用先前提交的通过记录代替本轮结果。
+- 待真实外部环境：两设备重启补收、512/2,000/10,000 跨机矩阵、公网 NAT/relay、真实链 RPC/部署、72 小时运行和独立安全审计仍未完成。MLS 私钥不随身份迁移；新设备必须重新入群。
 
-待实现：
+代码层剩余：
 
-- act 历史持久化、模型自动回复、audience 自动裁剪和提示注入红队。
-- 两台真实设备的两人 MLS 建群/邀请/重启恢复验收。
-- 字节数、模型调用、CPU/时间和邮箱复合预算，以及 GUI/Agent 续期策略。
-- DHT/relay 密文邮箱远程投递、主题轮换、离线补收和签收。
-- 跨机 gossipsub 多跳收敛、分层拓扑和 512/2,000/10,000 档容量验收。
+- 联系人来源规则目前使用本机共享群和近期真实交互证据；远端签名的来源记录、多设备在线策略同步尚未实现。
+
+已完成的收尾代码：
+
+- PDF/DOCX/XLSX/PPTX 使用无网络 Extractor 提取有界文本，并接入本机导入/重建索引；宏、加密、符号链接和越界 OOXML 部件拒绝。
+- 逻辑群跨 shard 控制帧在 MLS ratchet 提交时持久入队；定向发送成功才清除，gossip-only 成功仍保持 pending，失败按退避重试，过期或 binding/epoch 变化终止。
+
+外部环境验收：
+
+- 两台真实设备的两人 MLS 建群/邀请/重启恢复、DHT 邮箱补收和文件传输。
+- 512/2,000/10,000 实机容量矩阵、跨机多跳 gossip 收敛和 72 小时运行。
+- 公网 NAT/relay/DCUtR、真实链合约/RPC/资金/赞助/撤销传播和独立安全审计。
 - 提示注入红队、audience 外泄测试和分身资源压力测试。
 
-本轮只补方案，不宣称上述待实现项已完成。交付口径是完整 1.0 功能闭环，不设 MVP。
+上述代码完成后仍需统一测试；计划项和外部验收项都不因“已有代码”自动记为通过。交付口径是完整 1.0 功能闭环，不设 MVP。
 
 ### 8.2 G00 — 通用 MLS 会话基底
 
@@ -435,7 +456,7 @@ T14–T18 已有的安全切片不删除、不回退。只有与本计划明确�
 
 ### 8.6 执行顺序
 
-1. **冻结文档与线格式**：已冻结 ASL/1.3 `act`、版本、文本边界和 v35 迁移；后续只允许按次版本兼容规则追加。
+1. **冻结文档与线格式**：已冻结 ASL/1.3 `act`、版本、文本边界、v35 邮箱底座和 v36 群权限迁移；后续只允许按次版本兼容规则追加。
 2. **G00 会话基底**：完成两人 MLS 和通用会话接口，放在 T19 前。
 3. **T14–T19 功能闭环**：复用现有身份、网络和查询基础，接入 act、预算、outbox、私聊和邮箱入口，完成公网配置化。
 4. **T26–T27 Agent 闭环**：接入浏览/回答、注入隔离、主动通知、授权请求和可续期预算。
@@ -476,4 +497,4 @@ T14–T18 已有的安全切片不删除、不回退。只有与本计划明确�
 - 新增 `act` / `nl-body` 的接受/拒绝固定向量：合法正文通过；非 `act[5]` 位置的 tstr、非法 UTF-8、NUL、超长正文、未知必需字段、错误 MLS sender、重复 act-id 全部拒绝。
 - `scripts/validate-cddl.ps1` 与 `docs/protocol-vectors.md` 同步扩充；A25 按 7.4 改写，不再把「act[5] 合法文本」判为缺陷。
 - 注入红队（4.6）、audience 外泄、预算耗尽与容量门槛按 8.4–8.6 集中执行，并如实记录实际命令与结果。
-- 当前已有 act 2 项、asl-groups 11 项、asl-net 35 项、mailbox 6 项、gossip IPC 1 项和 MCP 契约 4 项定向测试通过；CDDL 语法通过。未运行工作区全量测试、严格 Clippy、真实两设备 act 互通、远程邮箱、跨机 gossip 或规模验收，不得把计划项写成全量通过。
+- 当前已有 act、asl-groups、真实双节点 DHT mailbox put/get、mailbox 本地分片、gossip IPC、MCP 契约定向测试、持久复合预算、AutoNAT/DCUtR/relay 代码和多子 MLS 转发代码。最终统一验收前不重复宣称局部测试等于全量通过；真实两设备 act 互通、重启补收、公网/NAT/relay、跨机 gossip 和规模矩阵仍必须按外部环境项记录。

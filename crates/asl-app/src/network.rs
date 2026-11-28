@@ -4,11 +4,14 @@ use asl_net::{
     address_policy::AddressPolicy,
     codec::{BulkRequest, BulkResponse},
     relay::relay_endpoint_config,
-    transport::{DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, TransportKind},
+    transport::{
+        DhtLookupStatus, DhtProviderCandidate, DiscoveryCandidateState, ReachabilityStatus,
+        RouteStatus, TransportKind,
+    },
 };
 use asl_types::{
     error::AslError,
-    ids::PeerId,
+    ids::{AgentId, PeerId},
     protocol::{
         GroupPacket, IdentityProof, IdentityProofRequest, PairingExchange, PairingInvite, WireFrame,
     },
@@ -114,6 +117,14 @@ pub enum NetworkCommand {
         lookup_id: [u8; 16],
         key: [u8; 32],
     },
+    LookupDhtRecord {
+        operation_id: [u8; 16],
+        key: [u8; 32],
+    },
+    PublishMailboxRecord {
+        operation_id: [u8; 16],
+        record: asl_net::mailbox::MailboxRecord,
+    },
     StartProviding {
         operation_id: [u8; 16],
         key: [u8; 32],
@@ -121,6 +132,14 @@ pub enum NetworkCommand {
     StopProviding {
         operation_id: [u8; 16],
         key: [u8; 32],
+    },
+    PrepareDirectory {
+        operation_id: [u8; 16],
+        agent: AgentId,
+    },
+    PublishDirectory {
+        operation_id: [u8; 16],
+        value: Vec<u8>,
     },
     GossipSubscribe {
         operation_id: [u8; 16],
@@ -179,9 +198,25 @@ impl NetworkCommand {
                 response_id,
                 proof,
             },
-            Self::RequestPairing { .. }
-            | Self::ReplyPairing { .. }
-            | Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
+            Self::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            } => IpcMessage::RequestPairing {
+                connection_id,
+                request_id,
+                invite,
+            },
+            Self::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            } => IpcMessage::ReplyPairing {
+                connection_id,
+                response_id,
+                exchange,
+            },
+            Self::AnswerPairingInvite { .. } => return Err(AslError::PolicyDenied),
             Self::SendControl {
                 connection_id,
                 request_id,
@@ -265,12 +300,36 @@ impl NetworkCommand {
                 accept,
             },
             Self::FindProviders { lookup_id, key } => IpcMessage::FindProviders { lookup_id, key },
+            Self::LookupDhtRecord { operation_id, key } => {
+                IpcMessage::LookupDhtRecord { operation_id, key }
+            }
+            Self::PublishMailboxRecord {
+                operation_id,
+                record,
+            } => IpcMessage::PublishMailboxRecord {
+                operation_id,
+                record: record.encode()?,
+            },
             Self::StartProviding { operation_id, key } => {
                 IpcMessage::StartProviding { operation_id, key }
             }
             Self::StopProviding { operation_id, key } => {
                 IpcMessage::StopProviding { operation_id, key }
             }
+            Self::PrepareDirectory {
+                operation_id,
+                agent,
+            } => IpcMessage::PrepareDirectory {
+                operation_id,
+                agent,
+            },
+            Self::PublishDirectory {
+                operation_id,
+                value,
+            } => IpcMessage::PublishDirectory {
+                operation_id,
+                value,
+            },
             Self::GossipSubscribe { operation_id, key } => {
                 IpcMessage::GossipSubscribe { operation_id, key }
             }
@@ -310,6 +369,12 @@ pub enum NetworkEvent {
     RelayUnavailable {
         relay_peer_id: PeerId,
     },
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
+    },
     DiscoveryCandidate {
         peer_id: PeerId,
         kind: TransportKind,
@@ -325,6 +390,12 @@ pub enum NetworkEvent {
         lookup_id: [u8; 16],
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
+    },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
     },
     GossipReceived {
         key: [u8; 32],
@@ -405,6 +476,12 @@ pub enum NetworkEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalNetworkObservation {
+    ReachabilityChanged {
+        status: ReachabilityStatus,
+    },
+    RouteChanged {
+        status: RouteStatus,
+    },
     DiscoveryCandidate {
         peer_id: PeerId,
         kind: TransportKind,
@@ -416,11 +493,25 @@ pub enum LocalNetworkObservation {
         status: DhtLookupStatus,
         providers: Vec<DhtProviderCandidate>,
     },
+    DhtProviderObserved {
+        key: [u8; 32],
+        peer_id: PeerId,
+        addresses: Vec<String>,
+        expires_at_ms: u64,
+    },
 }
 
 impl NetworkEvent {
     pub fn as_local_observation(&self) -> Option<LocalNetworkObservation> {
         match self {
+            Self::ReachabilityChanged { status } => {
+                Some(LocalNetworkObservation::ReachabilityChanged {
+                    status: status.clone(),
+                })
+            }
+            Self::RouteChanged { status } => Some(LocalNetworkObservation::RouteChanged {
+                status: status.clone(),
+            }),
             Self::DiscoveryCandidate {
                 peer_id,
                 kind,
@@ -440,6 +531,17 @@ impl NetworkEvent {
                 lookup_id: *lookup_id,
                 status: *status,
                 providers: providers.clone(),
+            }),
+            Self::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            } => Some(LocalNetworkObservation::DhtProviderObserved {
+                key: *key,
+                peer_id: peer_id.clone(),
+                addresses: addresses.clone(),
+                expires_at_ms: *expires_at_ms,
             }),
             _ => None,
         }
@@ -468,6 +570,8 @@ impl TryFrom<IpcMessage> for NetworkEvent {
             IpcMessage::RelayUnavailable { relay_peer_id } => {
                 Ok(Self::RelayUnavailable { relay_peer_id })
             }
+            IpcMessage::ReachabilityChanged { status } => Ok(Self::ReachabilityChanged { status }),
+            IpcMessage::RouteChanged { status } => Ok(Self::RouteChanged { status }),
             IpcMessage::DiscoveryCandidate {
                 peer_id,
                 kind,
@@ -496,6 +600,17 @@ impl TryFrom<IpcMessage> for NetworkEvent {
                 lookup_id,
                 status,
                 providers,
+            }),
+            IpcMessage::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
+            } => Ok(Self::DhtProviderObserved {
+                key,
+                peer_id,
+                addresses,
+                expires_at_ms,
             }),
             IpcMessage::GossipReceived {
                 key,
@@ -713,6 +828,12 @@ impl Supervisor {
     ) -> Result<Vec<AdmittedNetworkEvent>, AslError> {
         self.flush_disconnects()?;
         let event = self.receive_network_event(timeout)?;
+        if let Some(observation @ LocalNetworkObservation::DhtProviderObserved { .. }) =
+            event.as_local_observation()
+        {
+            self.observe_dht_provider_observation(&observation)?;
+            return Ok(Vec::new());
+        }
         let batch = self.handle_admitted_event(event, now_ms)?;
         for command in batch.commands {
             self.send_network_command(command)?;
@@ -720,12 +841,6 @@ impl Supervisor {
         let mut events = Vec::with_capacity(batch.events.len());
         for event in batch.events {
             self.observe_contact_binding_event(&event)?;
-            if let AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } = &event {
-                self.send_network_command(NetworkCommand::CloseConnection {
-                    connection_id: *connection_id,
-                })?;
-                continue;
-            }
             if matches!(
                 &event,
                 AdmittedNetworkEvent::PairingAccepted { .. }

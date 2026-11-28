@@ -6,6 +6,7 @@ use rusqlite::TransactionBehavior;
 
 use super::{
     GroupInboundPolicy, MlsJournalKind, MlsMemberEvidence, MlsRoomUpdate, RoomVersion,
+    ShardForwardOutboxRecord,
     recovery::require_member,
     sql_number,
     sync_authority::{member_ids, room_version},
@@ -56,6 +57,7 @@ impl Store {
         &mut self,
         update: MlsRoomUpdate<'_>,
         authority: MlsApplicationAuthority<'_>,
+        outbox: Option<&ShardForwardOutboxRecord>,
         mut current_time: impl FnMut() -> Result<u64, AslError>,
     ) -> Result<(RoomVersion, bool), AslError> {
         if !update.event.as_ref().is_some_and(|event| {
@@ -90,6 +92,9 @@ impl Store {
             .any(|member| now >= member.certificate.expires_at_ms)
         {
             return Err(AslError::ExpiredMessage);
+        }
+        if let Some(outbox) = outbox {
+            super::outbox::insert(&tx, outbox, now)?;
         }
         tx.commit().map_err(database_error)?;
         Ok((version, browse_enabled))

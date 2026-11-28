@@ -76,6 +76,20 @@ impl ModelEndpointAccess {
         open_store(&self.database)?.set_model_provider_approval(id, None)
     }
 
+    /// Deterministic provider selection for local autonomous work. Registry
+    /// order is user authored; only an explicitly approved provider qualifies.
+    pub fn first_authorized(&self) -> Result<Option<ProviderId>, AslError> {
+        Ok(self.first_authorized_config()?.map(|provider| provider.id))
+    }
+
+    pub fn first_authorized_config(&self) -> Result<Option<ProviderConfigV1>, AslError> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|provider| provider.authorized)
+            .map(|provider| provider.config))
+    }
+
     fn registry(&self) -> Result<ProviderRegistryV1, AslError> {
         ProviderRegistryV1::load(&self.registry).map_err(|_| AslError::InvalidPolicyState)
     }

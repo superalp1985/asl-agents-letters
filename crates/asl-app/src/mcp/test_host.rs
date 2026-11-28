@@ -8,7 +8,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{OutgoingQueryPort, downloads::DownloadPort};
+use crate::{OutgoingQueryPort, agent_mail::Target, downloads::DownloadPort};
 
 use super::{HostGrant, McpWorker, client::Client, grant::Key, stdio};
 
@@ -39,6 +39,8 @@ impl Host {
                 expressions: false,
                 agent_push: true,
                 groups_admin: false,
+                act_history: false,
+                contacts_manage: false,
             },
             queries,
             downloads,
@@ -296,6 +298,8 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
         expressions: true,
         agent_push: true,
         groups_admin: false,
+        act_history: false,
+        contacts_manage: false,
     };
     let worker = McpWorker::spawn_with_mail(
         home.clone(),
@@ -359,7 +363,7 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
         else {
             panic!("context requests must be routed through Core");
         };
-        assert_eq!(received_target, target);
+        assert_eq!(received_target, Target::Agent(target));
         assert_eq!(scope, QueryScope::ContactsOnly);
         assert_eq!(reference.authority, authority);
         assert_eq!(reference.namespace, 7);
@@ -396,6 +400,8 @@ async fn idle_host_receives_structured_letter_and_requests_missing_inbox_without
                 media_kind: MediaKind::Other,
                 concepts: vec![],
                 expires_at_ms: 100,
+                logical_group_id: None,
+                source_room_id: None,
             });
             assert!(mailbox.observe(source.clone(), [1; 16], None, &offer, 3));
         }
@@ -523,6 +529,8 @@ async fn bootstrap_resource_maps_core_readiness_without_paths_or_secrets() {
             expressions: true,
             agent_push: false,
             groups_admin: false,
+            act_history: false,
+            contacts_manage: false,
         },
         queries,
         downloads,

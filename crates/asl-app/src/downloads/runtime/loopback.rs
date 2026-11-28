@@ -280,6 +280,9 @@ async fn verify_download(scenario: Scenario) {
                             code: crate::ipc::NetworkErrorCode::TimedOut,
                         });
                     }
+                    TransportEvent::ReachabilityChanged(_) | TransportEvent::RouteChanged(_) => {
+                        continue;
+                    }
                     other => panic!("unexpected receiver event: {other:?}"),
                 }
             }

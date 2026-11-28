@@ -13,7 +13,7 @@ use asl_store::dashboard::{Dashboard, GroupRow};
 use eframe::egui::{self, RichText, Ui};
 pub(super) use remote_avatars::RemoteAvatars;
 
-use super::{ACCENT, MUTED, art::Glyph, locale::Language};
+use super::{ACCENT, LocalAction, MUTED, art::Glyph, locale::Language};
 
 pub(super) struct AccessForm {
     pub(super) share_path: String,
@@ -36,7 +36,7 @@ impl Default for AccessForm {
     fn default() -> Self {
         Self {
             share_path: String::new(),
-            extensions: "md,pdf,rs".into(),
+            extensions: "md,txt,pdf,docx,xlsx,pptx,rs,json,csv".into(),
             audience: ShareAudience::default(),
             audience_target: String::new(),
             selected_group: None,
@@ -66,6 +66,7 @@ pub(super) struct Interaction<'a> {
     >,
     pub(super) actions_enabled: bool,
     pub(super) checkpoint_form: &'a mut super::checkpoint::CheckpointForm,
+    pub(super) contact_invites: &'a mut super::contact_invites::Form,
     pub(super) group_admin: &'a mut super::group_admin::Form,
     pub(super) profile_form: &'a mut super::profile_signing::ProfileForm,
     pub(super) remote_avatars: &'a mut RemoteAvatars,
@@ -130,6 +131,7 @@ impl Page {
             network_config,
             model_endpoints,
             checkpoint_form,
+            contact_invites,
             group_admin,
             profile_form,
             remote_avatars,
@@ -268,6 +270,7 @@ impl Page {
                     data,
                     now,
                     code_input,
+                    contact_invites,
                     *language,
                     *actions_enabled,
                     action,
@@ -325,7 +328,13 @@ impl Page {
                         }
                     });
                     ui.add_space(12.0);
-                    empty_glyph(ui, data.groups.is_empty(), Glyph::EmptyGroup);
+                    group_admin.group_filter_ui(ui, *language);
+                    let groups = data
+                        .groups
+                        .iter()
+                        .filter(|group| group_admin.group_filter_matches(group))
+                        .collect::<Vec<_>>();
+                    empty_glyph(ui, groups.is_empty(), Glyph::EmptyGroup);
                     table(
                         ui,
                         [
@@ -336,7 +345,7 @@ impl Page {
                             "Group ID",
                         ],
                         [2.2, 1.1, 0.7, 1.6, 1.4],
-                        &data.groups,
+                        &groups,
                         ui_text(*language, "暂无群组", "No groups"),
                         |row| {
                             [
@@ -348,6 +357,7 @@ impl Page {
                             ]
                         },
                     );
+                    group_rejoin_hints(ui, data, *language, *actions_enabled, action);
                     group_invites::show(
                         ui,
                         data,
@@ -434,6 +444,75 @@ impl Page {
                     access(ui, data, access_form, *language, *actions_enabled, action);
                 }
             });
+    }
+}
+
+fn group_rejoin_hints(
+    ui: &mut egui::Ui,
+    data: &Dashboard,
+    language: Language,
+    actions_enabled: bool,
+    action: &mut Option<LocalAction>,
+) {
+    if data.group_rejoin_hints.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "迁移后可重入的群组",
+            "Groups available to rejoin after migration",
+        ))
+        .strong(),
+    );
+    ui.weak(ui_text(
+        language,
+        "这些只是迁移线索，不是群成员资格。Agent 用完整群 ID 和群主请求重入，群主批准后才进入 MLS。",
+        "These are migration hints, not membership. The Agent requests rejoin using the full room and owner; the owner must approve before MLS admission.",
+    ));
+    for hint in &data.group_rejoin_hints {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} · epoch {}", hint.name, hint.last_epoch));
+            ui.add(
+                egui::Label::new(format!("Group ID: {}", hint.group_id))
+                    .wrap()
+                    .selectable(true),
+            );
+            if ui
+                .small_button(ui_text(language, "复制群 ID", "Copy room"))
+                .clicked()
+            {
+                ui.ctx().copy_text(hint.group_id.clone());
+            }
+            ui.add(
+                egui::Label::new(format!("Owner: {}", hint.owner_agent_id))
+                    .wrap()
+                    .selectable(true),
+            );
+            if ui
+                .small_button(ui_text(language, "复制群主", "Copy owner"))
+                .clicked()
+            {
+                ui.ctx().copy_text(hint.owner_agent_id.clone());
+            }
+            if ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(ui_text(language, "请求重入", "Request rejoin")),
+                )
+                .clicked()
+            {
+                *action = Some(LocalAction::new(
+                    "group-admin",
+                    [
+                        "request-join".into(),
+                        hint.group_id.as_str().into(),
+                        hint.owner_agent_id.as_str().into(),
+                    ],
+                ));
+            }
+        });
     }
 }
 
@@ -775,6 +854,40 @@ fn compact(value: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BindingLookup {
+    Legacy(u64),
+    Exact(asl_types::ids::AgentId),
+}
+
+fn binding_lookup(value: &str) -> Option<BindingLookup> {
+    let value = value.trim();
+    if value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .ok()
+            .filter(|code| *code < 10_000_000_000_000_000)
+            .map(BindingLookup::Legacy);
+    }
+    let bytes = bs58::decode(value).into_vec().ok()?;
+    let agent = asl_types::ids::AgentId(bytes.try_into().ok()?);
+    Some(BindingLookup::Exact(agent))
+}
+
+fn copy_button(ui: &mut Ui, language: Language, value: &str) {
+    if ui
+        .small_button(ui_text(language, "复制", "Copy"))
+        .on_hover_text(ui_text(
+            language,
+            "复制完整 ID，不复制截断显示。",
+            "Copy the full ID, not the shortened display.",
+        ))
+        .clicked()
+    {
+        ui.ctx().copy_text(value.to_owned());
+    }
+}
+
 fn remaining(expires_at_ms: i64, now_ms: i64, language: Language) -> String {
     let seconds = expires_at_ms.saturating_sub(now_ms).max(0) / 1000;
     let (value, zh, en) = if seconds < 60 {
@@ -787,32 +900,46 @@ fn remaining(expires_at_ms: i64, now_ms: i64, language: Language) -> String {
     format!("{value} {}", ui_text(language, zh, en))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn contacts(
     ui: &mut Ui,
     data: &Dashboard,
     now: i64,
     code_input: &mut String,
+    contact_invites: &mut super::contact_invites::Form,
     language: Language,
     actions_enabled: bool,
     action: &mut Option<super::LocalAction>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!(
-            "{}: {}",
-            ui_text(language, "本机短码", "Local short code"),
-            data.identity
-                .binding_code
-                .as_deref()
-                .map(format_code)
-                .unwrap_or_else(|| ui_text(language, "不可用", "Unavailable").into())
-        ));
-        let mut publish = data.binding_code_public;
+    contact_invites.show(ui, data, now, language, actions_enabled, action);
+    ui.separator();
+    ui.label(
+        RichText::new(ui_text(language, "添加联系人", "Add contact"))
+            .strong()
+            .size(16.0),
+    );
+    if let Some(agent) = data.identity.agent_id.as_deref() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(ui_text(
+                language,
+                "我的唯一长号（完整 AgentId）",
+                "My unique long ID (full AgentId)",
+            ));
+            ui.add(egui::Label::new(agent).truncate())
+                .on_hover_text(agent);
+            copy_button(ui, language, agent);
+        });
+        let mut public = data.binding_code_public;
         if ui
             .add_enabled(
                 actions_enabled && action.is_none(),
                 egui::Checkbox::new(
-                    &mut publish,
-                    ui_text(language, "公开短码", "Publish short code"),
+                    &mut public,
+                    ui_text(
+                        language,
+                        "允许其他 Agent 用完整 AgentId 精确找到我",
+                        "Let other Agents find me by exact AgentId",
+                    ),
                 ),
             )
             .changed()
@@ -821,36 +948,227 @@ fn contacts(
                 "bindings",
                 [
                     OsString::from("publish"),
-                    OsString::from(if publish { "on" } else { "off" }),
+                    OsString::from(if public { "on" } else { "off" }),
                 ],
             ));
         }
-    });
+    }
     ui.horizontal_wrapped(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(code_input)
-                .hint_text(ui_text(language, "输入 16 位短码", "Enter 16-digit code"))
-                .desired_width(190.0),
-        );
+        ui.label(ui_text(
+            language,
+            "陌生人联系人请求",
+            "New contact requests",
+        ));
+        let mut mode = data.contact_request_mode;
+        egui::ComboBox::from_id_salt("contact-request-mode")
+            .selected_text(match mode {
+                asl_store::contact_policy::ContactRequestMode::Review => {
+                    ui_text(language, "逐次确认", "Review each request")
+                }
+                asl_store::contact_policy::ContactRequestMode::AutoAccept => {
+                    ui_text(language, "自动接受", "Accept automatically")
+                }
+                asl_store::contact_policy::ContactRequestMode::Reject => {
+                    ui_text(language, "拒绝", "Reject")
+                }
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::Review,
+                    ui_text(language, "逐次确认", "Review each request"),
+                );
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::AutoAccept,
+                    ui_text(language, "自动接受", "Accept automatically"),
+                );
+                ui.selectable_value(
+                    &mut mode,
+                    asl_store::contact_policy::ContactRequestMode::Reject,
+                    ui_text(language, "拒绝", "Reject"),
+                );
+            });
+        if mode != data.contact_request_mode && action.is_none() {
+            let mode = match mode {
+                asl_store::contact_policy::ContactRequestMode::Review => "review",
+                asl_store::contact_policy::ContactRequestMode::AutoAccept => "auto-accept",
+                asl_store::contact_policy::ContactRequestMode::Reject => "reject",
+            };
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy"), OsString::from(mode)],
+            ));
+        }
+    });
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "自动接受只建立本机联系人绑定，不会授予联系人问询、文件、群聊或模型权限。",
+            "Automatic acceptance only creates a local contact binding. It grants no contact query, file, group or model access.",
+        ))
+        .color(MUTED),
+    );
+    ui.horizontal_wrapped(|ui| {
+        let mut group_auto_accept = data.contact_group_auto_accept;
         if ui
             .add_enabled(
-                actions_enabled
-                    && action.is_none()
-                    && code_input.len() == 16
-                    && code_input.bytes().all(|byte| byte.is_ascii_digit()),
-                egui::Button::new(ui_text(language, "查找", "Find")),
+                actions_enabled && action.is_none(),
+                egui::Checkbox::new(
+                    &mut group_auto_accept,
+                    ui_text(
+                        language,
+                        "当前群成员可自动建立联系",
+                        "Auto-bind current group members",
+                    ),
+                ),
             )
-            .clicked()
+            .on_hover_text(ui_text(
+                language,
+                "只对本机当前有效 MLS 群成员生效；不会授予联系人访问，也不会绕过拒绝策略。",
+                "Applies only to current active MLS group members. It grants no contact access and never overrides Reject.",
+            ))
+            .changed()
+            && action.is_none()
         {
             *action = Some(super::LocalAction::new(
                 "bindings",
                 [
-                    OsString::from("lookup"),
-                    OsString::from(code_input.as_str()),
+                    OsString::from("policy-group"),
+                    OsString::from(if group_auto_accept { "on" } else { "off" }),
                 ],
             ));
         }
+
+        ui.separator();
+        ui.label(ui_text(
+            language,
+            "近期真实交互",
+            "Recent verified interaction",
+        ));
+        let mut ttl_ms = data.contact_recent_interaction_ttl_ms;
+        let label = |ttl_ms| match ttl_ms {
+            0 => ui_text(language, "关闭", "Off"),
+            3_600_000 => ui_text(language, "1 小时", "1 hour"),
+            86_400_000 => ui_text(language, "24 小时", "24 hours"),
+            asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS => {
+                ui_text(language, "7 天", "7 days")
+            }
+            _ => ui_text(language, "未知", "Unknown"),
+        };
+        egui::ComboBox::from_id_salt("contact-recent-interaction")
+            .selected_text(label(ttl_ms))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut ttl_ms, 0, ui_text(language, "关闭", "Off"));
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    3_600_000,
+                    ui_text(language, "1 小时", "1 hour"),
+                );
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    86_400_000,
+                    ui_text(language, "24 小时", "24 hours"),
+                );
+                ui.selectable_value(
+                    &mut ttl_ms,
+                    asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS,
+                    ui_text(language, "7 天", "7 days"),
+                );
+            });
+        if ttl_ms != data.contact_recent_interaction_ttl_ms
+            && action.is_none()
+            && let Some(ttl) = match ttl_ms {
+                0 => Some("off"),
+                3_600_000 => Some("1h"),
+                86_400_000 => Some("24h"),
+                asl_store::contact_policy::MAX_RECENT_INTERACTION_TTL_MS => Some("7d"),
+                _ => None,
+            }
+        {
+            *action = Some(super::LocalAction::new(
+                "bindings",
+                [OsString::from("policy-recent"), OsString::from(ttl)],
+            ));
+        }
     });
+    ui.label(
+        RichText::new(ui_text(
+            language,
+            "添加联系人时，优先粘贴对方的完整 AgentId。查找只返回已认证设备，找到后仍需你确认绑定。",
+            "Add a contact by pasting the other side's full AgentId. Lookup only returns authenticated devices; you still confirm the binding.",
+        ))
+        .color(MUTED),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(code_input)
+                .hint_text(ui_text(
+                    language,
+                    "粘贴完整 AgentId",
+                    "Paste a full AgentId",
+                ))
+                .desired_width(360.0),
+        );
+        let lookup = binding_lookup(code_input);
+        if let Some(lookup) = lookup
+            && ui
+                .add_enabled(
+                    actions_enabled && action.is_none(),
+                    egui::Button::new(ui_text(language, "查找联系人", "Find contact")),
+                )
+                .on_hover_text(ui_text(
+                    language,
+                    "精确查找不会把完整 AgentId 当作自由文本或文件名。",
+                    "Exact lookup does not treat the full AgentId as free text or a filename.",
+                ))
+                .clicked()
+        {
+            *action = Some(match lookup {
+                BindingLookup::Legacy(code) => super::LocalAction::new(
+                    "bindings",
+                    [
+                        OsString::from("lookup"),
+                        OsString::from(format!("{code:016}")),
+                    ],
+                ),
+                BindingLookup::Exact(agent) => super::LocalAction::new(
+                    "bindings",
+                    [
+                        OsString::from("lookup-agent"),
+                        OsString::from(bs58::encode(agent.as_bytes()).into_string()),
+                    ],
+                ),
+            });
+        }
+    });
+    ui.collapsing(
+        ui_text(
+            language,
+            "旧版兼容：16 位查找码",
+            "Legacy compatibility: 16-digit lookup code",
+        ),
+        |ui| {
+            ui.label(
+                RichText::new(ui_text(
+                    language,
+                    "此码用于兼容旧版联系人，不是新的身份地址，也不是临时邀请。新联系人请使用上面的完整 AgentId。",
+                    "This code is only for legacy contacts. It is not a new identity address or a temporary invitation. Use the full AgentId above for new contacts.",
+                ))
+                .color(MUTED),
+            );
+            if let Some(code) = data.identity.binding_code.as_deref() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "{}: {}",
+                        ui_text(language, "旧版查找码", "Legacy lookup code"),
+                        format_code(code)
+                    ));
+                    copy_button(ui, language, code);
+                });
+            }
+        },
+    );
     ui.add_space(12.0);
     ui.label(RichText::new(ui_text(language, "待确认候选", "Pending candidates")).strong());
     let pending = data
@@ -882,7 +1200,7 @@ fn contacts(
             if ui
                 .add_enabled(
                     actions_enabled && action.is_none(),
-                    egui::Button::new(ui_text(language, "绑定", "Bind")),
+                    egui::Button::new(ui_text(language, "添加为联系人", "Add contact")),
                 )
                 .clicked()
             {
@@ -1050,7 +1368,7 @@ fn access(
         ui.label(ui_text(language, "文件类型", "File types"));
         ui.add(
             egui::TextEdit::singleline(&mut form.extensions)
-                .hint_text("md,pdf,rs")
+                .hint_text("md,pdf,docx,xlsx,pptx")
                 .desired_width(220.0),
         );
         ui.label(ui_text(language, "单文件上限 MiB", "Per-file limit MiB"));
@@ -1791,6 +2109,7 @@ fn pending_decisions(
         .iter()
         .filter(|item| !item.approved)
         .count();
+    let contacts = data.contact_invite_prompts.len();
     let rows = [
         (
             ui_text(language, "文件授权", "File access"),
@@ -1802,8 +2121,13 @@ fn pending_decisions(
             invites,
             Page::Groups,
         ),
+        (
+            ui_text(language, "联系人请求", "Contact requests"),
+            contacts,
+            Page::Contacts,
+        ),
     ];
-    let waiting = transfers + invites > 0;
+    let waiting = transfers + invites + contacts > 0;
     let fill = if waiting {
         super::tokens::WARNING_SOFT
     } else {
@@ -2253,5 +2577,19 @@ mod tests {
         assert!(selected_active_group(&form, &data).is_none());
         data.groups.remove(0);
         assert!(selected_active_group(&form, &data).is_none());
+    }
+
+    #[test]
+    fn contact_lookup_accepts_full_agent_ids_and_legacy_codes_only() {
+        let agent = asl_types::ids::AgentId([7; 32]);
+        let full = bs58::encode(agent.as_bytes()).into_string();
+        assert_eq!(binding_lookup(&full), Some(BindingLookup::Exact(agent)));
+        assert_eq!(
+            binding_lookup("0000000000000042"),
+            Some(BindingLookup::Legacy(42))
+        );
+        for invalid in ["42", "10000000000000000", "not-an-agent-id"] {
+            assert_eq!(binding_lookup(invalid), None);
+        }
     }
 }

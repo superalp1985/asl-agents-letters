@@ -5,15 +5,19 @@
 本文件下方保留历次群组实现和验收记录。当前新增状态如下，不能把历史“普通 Agent 不能收发群消息”的旧边界继续当作最终状态：
 
 - `group-application` 现在可携带 ASL/1.3 `act`。act 只在 MLS application plaintext 解码，唯一任意文本字段是 `act[5] nl-body`；入站 act 通过 `asl://agent/inbound-events` 主动通知已订阅 Agent，正文只出现在 `untrusted_remote_data`。
-- `ASL_MCP_GROUPS=admin` 时，MCP 暴露 `asl_group_list`、`asl_group_create`、`asl_group_invite`、`asl_direct_open` 和 `asl_renew_act_budget`；`asl_send_act` 需要普通发信授权。邀请仍由目标设备本机批准。
+- ASL/1.4 增加 `ShardBinding` 和 `ShardForward`。普通邀请按容量选择根群/子群，满时自动创建独立 MLS 子群；根群策略更新逐子群提交并返回部分结果。跨 shard 内容由逻辑群主根签名证明来源，每个目标子群重新加密，持久 receipt 阻止重放。桥接节点不会把原消息冒充成自己发送。
+- 文件 Offer/Fetch 可选携带逻辑根和源 shard 元数据；接收方在非源 shard 发起 Fetch 时，由逻辑群主转发到源 shard，文件字节仍只允许源设备与接收设备建立直接认证传输。没有这两个字段的旧 Offer 仍走单 shard/直连路径。
+- `ASL_MCP_GROUPS=admin` 时，MCP 暴露群列表/创建/成员/访问策略/邀请/加入请求、两人会话、消息预算和复合资源预算续期工具；`asl_send_act` 需要普通发信授权。加入请求和邀请都仍由对应设备本机审批。
 - 两人私聊复用同一 MLS 房间路径：`asl_direct_open` 创建房间并邀请一个目标 Agent，不增加明文私聊旁路。
-- 群创建/加入时生成持久 act 消息预算并订阅该群 wire ID 派生的 gossipsub topic；act 可先 direct fan-out，再以同一 MLS 密文发布到 gossipsub。入站 gossip 按房间 roster、设备证书、MLS sender/epoch 重新验证后进入同一 act 通知路径。
-- 单 MLS 群编译硬上限已从 64 调整为 512，但尚未完成大于 64 的跨机验收。gossipsub 网络层有真实双节点 TCP/Noise 测试，Core 多跳收敛尚无验收。
-- 远程密文邮箱托管/补收尚未接通；v35 只有本地 opaque 邮箱和预算仓储。
+- 群创建/加入时生成消息数、消息字节、模型调用、CPU 和邮箱预算。群管理页显示用量并允许按 24 小时续期；MCP 和 `asl-core --group-admin budget` 也提供精确续期入口。预算耗尽后 fail closed。
+- 群策略现在包含逐文件 content-hash `read/send/fetch` 位和管理员能力位。`manage-members` 只可提交 muted 切片，`manage-files` 只可提交逐文件策略切片；policy revision、permissions、owner、管理员名单和能力位保持 owner-only。MLS 的 Remove Commit 仍只能由 creator 提交。
+- 群语义 `ContextExpression/ContextRequest/ContextOffer/ContextAgreement` 已进入 MLS application 路径，确认时绑定 request ID、room 和 sender。
+- 单 MLS 群编译硬上限为 512。Core 可自动创建最多 19 个独立子 MLS 群，并连同根群覆盖约 10,000 成员；每个子群单独加密，ASL/1.4 转发封装保留来源、epoch、消息 ID 和期限。跨机 512/2,000/10,000 容量矩阵仍需验收。
+- DHT record/provider 缓存支持重启和网络恢复回灌；v42 同一 key 可保存多个 provider，v43 增加 Act 哈希索引，v44 增加移除请求/子群链接，v45 增加签名 shard 绑定和转发 receipt，v46 增加联系人来源证据，v48 用代码内递归查询在逻辑群根上聚合唯一 Agent，v49 增加只保存已加密控制帧的 shard-forward outbox。真实两设备重启补收和公网 NAT/relay 仍未验收。
 
 ## 已实现：群消息编解码
 
-群子流沿用冻结的 `/asl/group/1.0.0`、4 字节大端长度前缀和确定性 CBOR `group-envelope`。收发只接受群 envelope；整帧上限 256 KiB，envelope 内的 MLS 密文上限 64 KiB。默认不注册群子流；显式回环构造器例外。编解码本身不认证身份、不授权群成员、不匹配回复。
+群子流沿用冻结的 `/asl/group/1.0.0`、4 字节大端长度前缀和确定性 CBOR `group-envelope`。收发只接受群 envelope；整帧上限 256 KiB，envelope 内的 MLS 密文上限 64 KiB。默认不注册群子流；显式群组构造器例外。启用后可由同一地址策略使用 loopback、LAN、Internet 或 relay；公网端到端仍需双机验收。编解码本身不认证身份、不授权群成员、不匹配回复。
 
 `GroupPacket` 对操作 `1` 内的 `group-membership` 进行二次确定性 CBOR 校验，限制请求和回复种类、完全匹配群 ID、请求 ID、预期 epoch 和邀请 ID。网络 codec 只检查外层，传输适配器和 Core 分别检查消息及各自的连接、待决请求绑定。OpenMLS 适配器核验普通 KeyPackage、单收件项 Welcome、解密后的群 ID/epoch/套件及本机叶子，并检查 Application/Commit 是相符的 MLS 私有消息。同步绑定由 MLS exporter 派生，不发送原始 epoch authenticator。完整消息表见 [协议](03-protocol.md#群子流)。
 
@@ -31,7 +35,7 @@ Windows 本机适配复用 OpenMLS 的内存存储与现有 DPAPI，密封快照
 
 MLS 1.0 使用 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`。Core 带独立随机 MLS 签名密钥，严禁把传输私钥作为 MLS 签名密钥使用。ASL BasicCredential 内容为 `signature65 || canonical_device_certificate_cbor`；根签名的预映像是 `ASL-MLS-LEAF-v1\0 || wire_group_id[32] || mls_signing_public_key[32] || canonical_device_certificate_cbor`。检查群 ID、公钥编码和当前 ASL 证书。通过已有链解析器核对活动身份根、已验证设备目录和证书有效期；直接来源还须匹配当前认证连接中精确的 Hello 证书。同 Agent 的其他设备、过期/被替换证书和其他房间均不可复用该叶子。签名绑定只证明身份根授权该公钥；MLS 自身仍须验证该叶子或消息的签名和密钥持有关系，链证据的新鲜度沿用现有解析器规则。
 
-SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、成员授权 epoch 和全局权限版本，一起提交候选快照、成员投影和群事件。应用消息用群 ID、认证发送设备和 MLS 明文的消息 ID 去重，不信任外层消息 ID；提交事件用群 ID、基础 epoch 和已验证 MLS 数据去重。更新 ratchet 不增加成员授权 epoch，候选成员变化也不会使本机房间从 `needs_sync` 切为 `active`；后续只有实际授权成员或可用状态变化才推进成员授权 epoch 及全局权限版本。事件写入 7 天期限，启用回环群组的 Core 在启动时和之后每 30 秒分批清理到期密文及关联同步记录。清理不改变 MLS 快照、成员投影或同步预算，也不承诺擦除磁盘和备份中的旧副本。生产 Core 仍需在提交之前重新核对本机权限与链证据，提交失败时丢弃候选，成功后才允许交付明文或排队发送。
+SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、成员授权 epoch 和全局权限版本，一起提交候选快照、成员投影和群事件。应用消息用群 ID、认证发送设备和 MLS 明文的消息 ID 去重，不信任外层消息 ID；提交事件用群 ID、基础 epoch 和已验证 MLS 数据去重。更新 ratchet 不增加成员授权 epoch，候选成员变化也不会使本机房间从 `needs_sync` 切为 `active`；后续只有实际授权成员或可用状态变化才推进成员授权 epoch 及全局权限版本。事件写入 7 天期限，启用群组网络的 Core 在启动时和之后每 30 秒分批清理到期密文及关联同步记录。清理不改变 MLS 快照、成员投影或同步预算，也不承诺擦除磁盘和备份中的旧副本。生产 Core 仍需在提交之前重新核对本机权限与链证据，提交失败时丢弃候选，成功后才允许交付明文或排队发送。
 
 ## 待实现：生产权限与投递
 
@@ -40,9 +44,9 @@ SQLite `BEGIN IMMEDIATE` 比较本机/线上群 ID、快照版本、MLS epoch、
 
 ## 已实现：入站邀请本机状态
 
-SQLite v13 记录完整线上群 ID、邀请 ID、基础 epoch、邀请方及本机目标的 AgentId 和 PeerId、短期有效期。邀请最多有效 5 分钟；同 AgentId 的不同设备共享 24 小时 1 次额度，另有本机每小时 20 次、同时未结 5 条上限。拒绝、过期和完成不退还提示额度；过期清理会移除密封包，保留 24 小时内的提示历史。启用回环群组时，Core 启动及运行期间都会清理过期邀请。群邀请不带任何自由文本。
+SQLite v13 记录完整线上群 ID、邀请 ID、基础 epoch、邀请方及本机目标的 AgentId 和 PeerId、短期有效期。邀请最多有效 5 分钟；同 AgentId 的不同设备共享 24 小时 1 次额度，另有本机每小时 20 次、同时未结 5 条上限。拒绝、过期和完成不退还提示额度；过期清理会移除密封包，保留 24 小时内的提示历史。启用群组网络时，Core 启动及运行期间都会清理过期邀请。群邀请不带任何自由文本。
 
-Windows DPAPI 适配只持久化单次 KeyPackage 和对应 MLS 签名密钥，绑定该邀请元组、请求 ID 与包引用，可重建同一请求和新的候选 provider。审批先持久化才可发送，同一线上群最多一个获批的待加入包；启动后可按本机身份及设备发现尚未过期的审批。SQLite 原子消费审批、关闭同群其余邀请、创建新房间并写入冻结快照和已验证的成员投影；失败统一回滚。房间保持 `needs_sync`，不修改权限版本。GUI 同意操作和网络入口尚未接入。
+Windows DPAPI 适配只持久化单次 KeyPackage 和对应 MLS 签名密钥，绑定该邀请元组、请求 ID 与包引用，可重建同一请求和新的候选 provider。审批先持久化才可发送，同一线上群最多一个获批的待加入包；启动后可按本机身份及设备发现尚未过期的审批。SQLite 原子消费审批、关闭同群其余邀请、创建新房间并写入冻结快照和已验证的成员投影；失败统一回滚。房间保持 `needs_sync`，不修改权限版本。GUI 群管理同意操作已接线；真实双机邀请网络入口仍需外部环境验收。
 
 收方 Core 以当前认证连接确定邀请者，只接受指向本机 AgentId 与设备的 Invite；重复邀请不会创建新提示。审批入口仅供本机用户决定使用，先保存一次性包再允许准备请求。收件、审批、恢复包都在 SQLite 中核对双方链状态和设备证书。重试只恢复原请求；旧开发加入包缺少必需能力时不可重用。恢复清单不触发发送。
 
@@ -62,19 +66,27 @@ Core 为本机新群生成随机创建者承诺，OpenMLS 和 SQLite 使用由�
 
 重启后只读对账检查 DPAPI 快照、MLS 成员、SQLite 投影、当前设备和链证据。目录不能低于 Core 已知的 DHT 或认证连接历史；可信调用方可用同一设备证书的更新签名目录续期，不接受回退。对账成功不会改变 `needs_sync`，不证明已追上远端最新 epoch，也不产生联系人或文件权限。[本轮验证范围](plan-validation.md#2026-11-20-t31core-定向邀请add-和-welcome-重试)。
 
-## 已实现：回环群子流与入群请求绑定
+## 已实现：群子流与入群请求绑定
 
-显式启用的本机回环传输和 Net IPC 复用已有连接、请求超时与有界句柄表。Net 把回复与原子流、认证连接和消息关联；送入 Core 的每次请求凭据独立于线上消息 ID。入站回复使用原连接上的单次 IPC 句柄，不能借其他协议或另一连接送出。回环模式不允许切换 LAN/公网策略，也不允许中继。默认生产 Net 子进程不协商群子流。
+显式启用的群组传输和 Net IPC 复用已有连接、请求超时与有界句柄表。Net 把回复与原子流、认证连接和消息关联；送入 Core 的每次请求凭据独立于线上消息 ID。入站回复使用原连接上的单次 IPC 句柄，不能借其他协议或另一连接送出。群组启用后可跟随当前 `address_scope` 使用 loopback、LAN、Internet 或 relay；默认生产 Net 子进程不协商群子流。
 
 Core 群驱动仅处理 Invite、KeyPackage 和对应回复。持久化后未能入队的 Invite 可以显式重试，不换邀请 ID、不延长期限。Invite 先保存后提示，只回复结构化 Receipt，不表示本机同意。获批 KeyPackage 只有在成功交给 Net 队列后才登记待决记录；它绑定当前准入连接、原邀请及设备、完整线上群 ID、原始请求、单次发送凭据和本机房间信息。最多五条待决记录；超时、断开或对应请求失败解除待决绑定，但不消耗持久审批。重试只使用原 KeyPackage 和新发送凭据，迟到、错连接或重复 Welcome 不能再次入群。Welcome 通过匹配后仍须经过完整 MLS/SQLite 检查。
 
+## 已实现：加入与重入请求
+
+希望加入或在新设备上重入的 Agent 可向完整群 ID 的群主发送 `InviteRequest`。请求只包含请求方 AgentId、当前设备 PeerId 和最多 5 分钟期限；`epoch=0` 表示请求方不需要预先知道当前 MLS head。群主 Core 只接受通过当前认证连接的精确 AgentId/PeerId、当前活动房间和本地创建者设备，并把请求写入 SQLite v38 的有界本机队列。每群最多 32 条待处理请求，每 Agent 每小时 5 条、全局每小时 64 条；重复请求复用同一记录，已是活动成员的设备不产生提示。群主拒绝后，同群同设备 1 小时内再次请求会被静默忽略。
+
+群管理刷新把仍有效的请求和当前已准入连接关联；只有目标设备仍在线且连接未变时 GUI 才显示“审批并邀请”。确认后走原有定向 Invite、KeyPackage、Welcome 和本机再次审批路径；数据库在该邀请成功入队后把请求标记为 approved。群主也可对在线或已离线请求明确标记 rejected，GUI 和 `asl-group-admin reject-request` 都绑定当前快照、完整 room 和 device。请求本身不提供 MLS 快照、群密钥、成员资格、目录授权或文件访问，也没有自由文本。
+
+身份迁移选择 `groups` 时，目标端只得到 SQLite v39 的 `migration_group_hints`：完整 Group ID、群名、群主 AgentId 和最后 epoch。`asl_group_list` 将其标为 `needs_rejoin`；Agent 用完整 room/owner 发送 `InviteRequest`。成功 Welcome 时同一事务删除线索，不复制旧 MLS 叶子或群密钥。
+
 期限只在本机流转，不改线上协议。Net 将 Core 的出队期限换为单调时钟期限，协商后仍用同一截止时间限制写请求、关闭发送端、读回复和接收完成事件。入站以锁定版本 `libp2p-request-response 0.30.0` 在协商完成后克隆子流 codec 的时点为起点，不晚于 libp2p 自身工作计时器；读帧、Net 回复句柄、写回复及关闭发送端共用该期限。转发到 Core 只公布当时剩余时间，不从转发点续期；Core 继续用本机系统时间检查 IPC 到期。已经完整交给传输层的请求属于在途：即使本机关闭发送端超时，对端仍可能读到完整帧并处理，超时不等于远端没有提交。发方先持久保存 Welcome，符合条件的重试只取回原回复，不重复 Add。
 
-## 已实现：正式进程中的回环群组与本机审批
+## 已实现：正式进程中的群组网络与本机审批
 
-Windows Core 启动时经私有前导把 `loopback_groups` 交给 Net。该选项默认关闭；显式开启后仍不能改用 LAN、公网或中继。Supervisor 用独立路径处理群子流，不把群帧、回复句柄或审批入口交给通用 Agent、MCP 或 Worker。断开和请求失败沿用现有待决清理；房间仍为 `needs_sync`。
+Windows Core 启动时经私有前导把群组网络开关交给 Net。配置键历史上叫 `loopback_groups`，现在语义是“启用群组网络”，默认关闭；显式开启后按 `address_scope` 使用 loopback、LAN、Internet 或 relay。Supervisor 用独立路径处理群子流，不把群帧、回复句柄或审批入口交给通用 Agent、MCP 或 Worker。断开和请求失败沿用现有待决清理；房间仍为 `needs_sync`。
 
-配置位于 `ASL_HOME` 下的 `state/network-settings-v1.json`。使用 `version: 1`、`address_scope: "loopback_only"`、`loopback_groups: true`、空 `relay_addresses`；需接受连接的节点再启用 `listen_on_interfaces` 并设置自己的 `tcp_port`、`quic_port`。启动 `asl-core --groups` 时必须使用本机交互终端。`peers` 显示本机身份和已准入连接；按需要用 `dial <ip:port> <PeerId>` 连接另一回环节点。`create` 建群，`invite <room-id> <connection-id>` 定向邀请，`list` 显示当前设备的待审批和已审批邀请，`room <room-id>` 查看是否已落盘及当前 epoch。`approve <invite-id>` 持久保存审批并尝试发送一次；失败或重启后由本机操作员用 `retry <invite-id>` 重试。`reject <invite-id>` 只关闭尚未批准的邀请，不能删除已有加入包：对端可能已经提交 Add。查看恢复清单不会发送。双方仍需要可验证的链身份和设备目录。
+配置位于 `ASL_HOME` 下的 `state/network-settings-v1.json`。使用 `version: 1`、所需的 `address_scope`、`loopback_groups: true`（兼容键名，实际表示启用群组网络）以及该作用域需要的 relay 地址；需接受外部连接的节点再启用 `listen_on_interfaces` 并设置自己的 `tcp_port`、`quic_port`。启动 `asl-core --groups` 时必须使用本机交互终端。`peers` 显示本机身份和已准入连接；`dial <ip:port> <PeerId>` 接受任何当前地址策略允许的 SocketAddr，由 Net 的真实策略和身份准入决定成败，不在 Core 写死回环地址。`create` 建群，`invite <room-id> <connection-id>` 定向邀请，`list` 显示当前设备的待审批和已审批邀请，`room <room-id>` 查看是否已落盘及当前 epoch。`approve <invite-id>` 持久保存审批并尝试发送一次；失败或重启后由本机操作员用 `retry <invite-id>` 重试。`reject <invite-id>` 只关闭尚未批准的邀请，不能删除已有加入包：对端可能已经提交 Add。查看恢复清单不会发送。双方仍需要可验证的链身份和设备目录。
 
 启用后，Core 至多缓存 128 个 Agent 的已验证签名设备目录，来源限成功的已准入 Hello 证明或已经过签名与链核验的 DHT 目录，不采用 Welcome 自带的材料。缓存可跨断开使用，不跨 Core 重启；每次仍重新核对时效、链状态、目录历史和精确设备证书。尚未观察到某成员的新鲜目录时拒绝 Welcome，保留原审批以便先取得证据、再显式重试。建群、收发受限邀请和提交 Welcome 不再依赖文件传输预先登记设备；设备登记与对应群事务一起写入，不授予联系人或文件访问权限。超出提示额度的邀请不登记设备。新房间和成员变化后的房间先进入 `needs_sync`，只有后续状态机证据满足条件才可转为 `active`。
 
@@ -86,9 +98,9 @@ SQLite v15 将新 Add 的基础与下一 epoch 的 MLS exporter 绑定、短期�
 
 SQLite 读取仅返回距离本机 head 不超过 256 个 epoch、未超过本机 7 天期限且到 head 连续的记录。读取到记录本身不授予传输权限。
 
-## 已实现：回环加入提交补齐
+## 已实现：加入提交补齐
 
-启用回环群组后，Core 在入群完成时尝试同步，并定期从本机暂停房间及当前已知成员连接中轮流选取同步对象。每轮绑定一个连接和一个群，一次应用一个提交；断开、回复超时、错误分支或缺少身份材料会停止该轮，不跳过 epoch。服务端只向当前已核验的群成员回复，在同一个 SQLite 读事务中从请求的基础 epoch exporter 校验到本机密封 head，逐条核对密封摘要；任何一步损坏或过期都不返回该后缀的第一条。接收端分别核对转发设备与基础 epoch 的 OpenMLS 签名者，只应用创建者签名的单个有效内联成员变更（Add 或 Remove）。应用后把新快照、成员投影及本机同步记录原子提交。
+启用群组网络后，Core 在入群完成时尝试同步，并定期从本机暂停房间及当前已知成员连接中轮流选取同步对象。每轮绑定一个连接和一个群，一次应用一个提交；断开、回复超时、错误分支或缺少身份材料会停止该轮，不跳过 epoch。服务端只向当前已核验的群成员回复，在同一个 SQLite 读事务中从请求的基础 epoch exporter 校验到本机密封 head，逐条核对密封摘要；任何一步损坏或过期都不返回该后缀的第一条。接收端分别核对转发设备与基础 epoch 的 OpenMLS 签名者，只应用创建者签名的单个有效内联成员变更（Add 或 Remove）。应用后把新快照、成员投影及本机同步记录原子提交。
 
 DPAPI 快照 v3 在同一候选事务中保存房间累计拉取的提交数，上限 256。断线、换来源、重启、历史窗口滚动或 `AtHead` 都不重置。旧 v2 快照无法区分本地产生和拉取的记录，首个新同步按现有历史长度保守扣除。预算用尽后不会开启新的自动同步；须通过新的定向邀请和本机审批恢复。
 
@@ -104,7 +116,7 @@ DPAPI 快照 v3 在同一候选事务中保存房间累计拉取的提交数，�
 - 权限激活单独处理：只有本机已落盘、已对账的房间视图与符合群策略的新鲜证据才能进入候选；任一普通成员的 `AtHead` 不能证明全群最新。激活后也必须在每次实际授权时重判成员与版本，不能把曾经对齐或链上身份有效等同于当前群授权。
 - 不得把编解码成功当作入群，所有群数据都不发布到 DHT。
 
-## 已实现：回环成员移除与同房间重入
+## 已实现：成员移除与同房间重入
 
 在本机控制台运行 `room <room-id>` 查看保存的成员设备；`remove <room-id> <base58-peer-id>` 只能由房间的原创建者设备执行，不要求目标在线，不能移除自己。SQLite 在同一事务写入新快照、投影和同步历史并作废目标的旧 Welcome。保留成员仍通过已有子流补齐；已经应用移除的节点不会向目标继续提供补齐。尚未同步的节点不知晓最新成员状态；没有回复也不能作为已被移除的证明。
 
@@ -126,13 +138,13 @@ Core 在独立候选中收发准备，要求调用方指定精确房间版本；
 
 事务成功只证明本机候选已保存，不证明远端已同步。普通成员的 `AtHead` 或传输 Receipt 不能激活房间。
 
-## 已实现：受限回环群消息投递
+## 已实现：受限群消息投递
 
-启用原有回环群配置后，可信 Core 调用可以发送结构化群消息。创建者对照本机已提交的 MLS 成员表，向当前已认证的成员设备逐个入队；同一设备只选一个连接。普通成员只可向创建者发送，并且只接收创建者发来的应用消息。创建者核对自己的当前版本和成员表才接受普通成员的消息；普通成员不相互投递，也不会转发。此限制让普通成员无需凭另一普通成员的视图判断当前成员资格。
+启用群组网络后，可信 Core 调用可以发送结构化群消息。创建者对照本机已提交的 MLS 成员表，向当前已认证的成员设备逐个入队；同一设备只选一个连接。普通成员只可向创建者发送，并且只接收创建者发来的应用消息。创建者核对自己的当前版本和成员表才接受普通成员的消息；普通成员不相互投递，也不会转发。此限制让普通成员无需凭另一普通成员的视图判断当前成员资格。
 
 发方只加密一次，密文和发送状态落盘后再入队。SQLite 写锁保护版本及身份检查和入队边界，较新的成员变更已落盘时不按旧名单入队。同一密文的各条请求使用独立的本机传输凭据。离线不补发，不自动重试；入队不表示送达。已经入队或已发送的旧消息不能召回，接收方只处理自己的当前 epoch。
 
-正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复或向 Agent 交付 act。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识。可信 Core/MCP 现在可按用户授权创建房间、邀请、发送 act 和续期消息预算；`nl-body` 不作为控制命令。回环默认关闭；跨机普通成员互发、GUI、公网、LAN 和中继仍需各自验收。
+正式 Supervisor 的收方已接线：身份、成员、时效、MLS 与去重事务全部通过后，才对原请求排队回复或向 Agent 交付 act。`room <room-id>` 可看当前 epoch 最近处理的消息类型和标识。可信 Core/MCP 现在可按用户授权创建房间、邀请、发送 act 和续期消息预算；`nl-body` 不作为控制命令。群组网络默认关闭；跨机普通成员互发、GUI 以及真实公网、LAN 和 relay 仍需各自验收。
 
 ## 已实现：群内文件传输授权链
 
@@ -182,3 +194,15 @@ SQLite v16 把下载同意和持久传输绑定到群 ID、成员 epoch、目标
 若捕获的 `Allow inbound AppContainer loopback` 规则属于旧测试 SID，可在上述命令后加 `-ReleaseOrphanSid '<旧测试 SID>'`。脚本核对 profile、进程所有者、系统程序路径、调试参数和父进程状态，再显示会话信息。确认是已结束的 ASL 测试后输入 `Y`，脚本会移除该 SID 的出站调试豁免并关闭遗留程序。
 
 测试会打印三个节点的 PeerId、Core 进程号、TCP 监听端口和每次拨号的目标。真实容器的状态轮询超时时，测试会在清理临时程序前查询 Windows Filtering Platform，按本次 `asl-net.exe`、TCP 和 IPv4 回环地址筛选。成功导出的 `netevents.xml` 和 `filters.xml` 位于开发根的 `work/tmp/asl-group-wfp-*` 下，控制台会给出路径。用拨号端口匹配丢弃事件，再用事件的 `filterId` 查过滤规则。若事件为空，阻断原因仍待确认。[Windows 网络隔离排查](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)
+
+## 已实现：群主、管理员与成员权限
+
+群创建者是群主，身份由 MLS room creator 和当前 epoch 的 sender leaf 共同确定；成员不能自报群主。群主可通过 `asl_group_members` 读取角色、禁言和权限状态，通过 `asl_group_set_access` 发布新的 `group-policy`：
+
+- 成员默认允许/禁止发送 `act`、发起查询或表达式、发送文件 Offer、邀请新成员。
+- 群主可指定管理员 PeerId，也可指定禁言设备；管理员仍只能发送消息/文件/邀请，不能替代群主修改策略或改变 MLS 创建者。
+- 群主可按 32 字节内容 hash 下发逐文件 `read/send/fetch` 权限；未配置的内容沿用成员默认文件权限，显式 entry 是群策略授权而不是本机目录读取许可。
+- 群主可为活动管理员绑定 `manage-members/manage-files/manage-invites` 能力位；未绑定的旧 v1 管理员保持全部委派能力，群主始终拥有全部能力。
+- 策略 revision 单调递增；非群主 sender、回退 revision、非活动成员、禁言群主和重复/乱序 PeerId 都被拒绝。
+
+策略只通过 MLS application plaintext 传播，不写入 DHT、文件名、路径或自然语言字段。key 7/8 缺省时兼容旧 v1。接收端在通知 Agent、收取 act/Offer 或开始文件传输前重新检查当前群策略；文件授权调用 `group_can_access_file`，管理动作调用管理员能力检查。本机目录授权、收件目录授权、设备证书和传输审批仍然是独立硬边界。当前验证覆盖控制值 round-trip、兼容解码、存储策略/角色/禁言、逐文件权限和委派能力；尚未完成两台真实设备的管理员策略同步、群主转移和管理员管理动作验收。

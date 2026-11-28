@@ -1,5 +1,6 @@
 //! Bounded autonomous task state machine.
 
+pub mod act_reply;
 mod conversation;
 pub mod decision;
 pub mod gateway;
@@ -8,6 +9,10 @@ mod query;
 pub mod reputation;
 pub mod runner;
 
+pub use act_reply::{
+    ActQuestion, ActReplyError, ActReplyEvidence, ActReplyKind, ActReplyPlan, build_act_reply,
+    generate_act_reply,
+};
 pub use conversation::{
     CONVERSATION_WINDOW_MS, Conversation, ConversationMessageKind, InboundDecision,
     MAX_CONVERSATION_ROUNDS, MAX_OUTBOX_RETRIES, MAX_SEMANTIC_MESSAGES, PendingDelivery,

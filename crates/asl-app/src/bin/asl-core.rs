@@ -1,11 +1,15 @@
 #[path = "asl-core/access_control.rs"]
 mod access_control;
+#[path = "asl-core/act_history_control.rs"]
+mod act_history_control;
 #[path = "asl-core/avatar_control.rs"]
 mod avatar_control;
 #[path = "asl-core/bindings_control.rs"]
 mod bindings_control;
 #[path = "asl-core/checkpoint_control.rs"]
 mod checkpoint_control;
+#[path = "asl-core/contact_invite_control.rs"]
+mod contact_invite_control;
 #[path = "asl-core/download_control.rs"]
 mod download_control;
 #[cfg(windows)]
@@ -14,6 +18,8 @@ mod group_admin;
 #[cfg(windows)]
 #[path = "asl-core/group_control.rs"]
 mod group_control;
+#[path = "asl-core/identity_registration_control.rs"]
+mod identity_registration_control;
 #[cfg(windows)]
 #[path = "asl-core/migration_control.rs"]
 mod migration_control;
@@ -51,10 +57,15 @@ fn main() {
             .and_then(asl_app::supervisor::set_direct_inbound_from_environment),
         [flag, args @ ..] if flag == "--downloads" => download_control::run(args),
         [flag, args @ ..] if flag == "--access" => access_control::run(args),
+        [flag, args @ ..] if flag == "--act-history" => act_history_control::run(args),
         [flag, args @ ..] if flag == "--avatar" => avatar_control::run(args),
         [flag, args @ ..] if flag == "--bindings" => bindings_control::run(args),
+        [flag, args @ ..] if flag == "--contact-invites" => contact_invite_control::run(args),
         [flag, args @ ..] if flag == "--checkpoint" => checkpoint_control::run(args),
         [flag, args @ ..] if flag == "--profile" => profile_control::run(args),
+        [flag, args @ ..] if flag == "--identity-registration" => {
+            identity_registration_control::run(args)
+        }
         [flag, args @ ..] if flag == "--uploads" => upload_control::run(args),
         [flag, args @ ..] if flag == "--providers" => provider_control::run(args),
         [flag, destination] if flag == "--diagnostics" => export_diagnostics(destination),
@@ -101,6 +112,7 @@ fn main() {
         [flag, key, mode] if flag == "--network" && key == "pause" => {
             network_control::set_pause(mode)
         }
+        [flag, args @ ..] if flag == "--network" => network_control::configure(args),
         #[cfg(windows)]
         [flag, field, value] if flag == "--group-inbound" => {
             group_control::set_inbound(field, value)

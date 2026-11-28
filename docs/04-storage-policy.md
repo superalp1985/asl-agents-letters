@@ -36,7 +36,7 @@ Core 每次调用读取当前配置与授权，并在交给 HTTP 客户端前重
 
 ## 2. 数据表
 
-当前版本为 SQLite v35。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；远程邮箱传输尚未接通。`specs/schema-v20.sql` 为群事件增加可空的 `browse_kind`，v21 增加独立的 `browse_expires_at_ms`，迁移时仅为原本可见的事件保留原期限。验证通过的群来信在提交密文和接收状态的同一事务内读取本机浏览授权与保留期限。仅在允许浏览且期限非零时写入消息类型与活动页到期时间，不延长群事件的原期限。缩短期限会在设置事务内清除过期的浏览字段，选择 0 天会清除全部浏览字段。群事件密文、去重和同步记录沿用原策略，这不是密文擦除。
+当前版本为 SQLite v49。v35 新增密文邮箱槽/分片、持久会话预算、act 事件、附件引用、gossip topic 和容量测量表；v36 新增群主策略投影和成员角色/禁言/权限投影；v37 新增有期限联系人邀请和 Pairing 确认；v38 新增群加入/重入请求；v39 新增无 MLS 密钥迁移群线索；v40/v41 增加 DHT 持久缓存与群主设备字段；v42 增加逐文件权限、委派管理员能力和同 key 多 provider 缓存；v43 增加不保存正文的 Act token 哈希索引；v44 增加群移除请求和多 MLS 子群链接；v45 增加根群/子群签名绑定与跨 shard 转发 receipt；v46 增加联系人请求来源动作和固定期限交互证据；v47 曾增加逻辑群唯一 Agent/Peer 只读视图；v48 删除持久视图，改由代码内递归查询按逻辑根聚合根群和子群，避免旧迁移夹具删除依赖表后留下失效视图；v49 增加 `mls_shard_forward_outbox`，只保存已加密的 shard-forward 控制帧、路由元数据、尝试次数和期限。`group_file_policies` 只保存本地群 ID、内容 hash 和 `read/send/fetch` 位；`group_admin_capabilities` 只保存活动管理员 PeerId 与能力位。`manage-members` 和 `manage-files` 只能分别替换其授权切片，policy revision、权限、owner、管理员名单和能力位保持 owner-only。`mls_shard_bindings` 保存已验签的根/子群关系、owner、revision 和期限；`mls_shard_forward_receipts` 保存过期前去重键，不保存聊天正文。`conversation_act_semantic_index` 只保存域分离 token 哈希、room/act ID、方向和类型，默认保留 365 天；正文到期删除后仍可返回引用和命中分数，但不会恢复明文。DHT 邮箱投递、Core/Net 命令和轮换拉取已接通；真实公网/NAT/relay 和跨机重启验收尚未完成。
 
 v22 增加 `observed_remote_profiles`，保存 Core 已验签的远端公开主题投影。每个 Agent 一条、总量最多 200 条，不保存头像或原始报文。只读面板按有效期、链观察与本机撤销状态过滤；该表不用于身份、权限或信任判定。
 
@@ -57,9 +57,9 @@ T06b 现已实现链状态、身份观察和证明缓存的原子事务，DDL �
 | 配置/身份 | settings、agents、local_agent_identity、device_identities、local_device_identity、chain_state_cache、identity_registry_states、identity_proof_cache、contact_bindings、contact_binding_candidates、contact_binding_actions、schema_migrations | AgentId/本机根密钥引用、链身份状态/最终性缓存、远端设备证书、本机身份 pin、待核验发现候选及受限动作队列 |
 | 节点 | agents、device_identities、peers、authorized_contacts、preferred_peers | 稳定 Agent、设备证书、连接观察、按 AgentId 固定的授权成员和自主偏好，彼此不混用 |
 | 授权 | providers、grants、grant_agents、write_grants、transfer_consents | 模型端点、读/披露范围、独立写入和绑定文件/接收 Agent 的确认 |
-| 群组 | asl_groups、group_members、group_events、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、定向入群邀请与有期限密文事件 |
+| 群组 | asl_groups、group_members、group_events、group_access_policies、group_access_members、group_file_policies、group_admin_capabilities、mls_room_states、mls_incoming_invites | MLS 群状态、成员投影、群主策略、管理员/禁言/能力投影、逐文件权限、定向入群邀请与有期限密文事件 |
 | 内容 | snapshots、resources、resource_fts、derivation_sources、semantic_context_candidates、semantic_context_resources | 物理内容、授权引用、本机检索索引、溯源和已验证语义上下文候选/精确资源关联 |
-| 任务 | tasks、messages、offers、outbox、processed_requests | v35+ 前的有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
+| 任务 | tasks、messages、offers、outbox、processed_requests | 有界会话、确定性 CBOR 语义帧、重试与去重；不代表 ASL/1.3 act 已完成 |
 | 本机观察 | direct_inbound_observations | 有界、短期的结构化直连请求浏览记录，不含请求正文或回复 |
 | 传输 | reservations、transfers、transfer_sources、transfer_chunks | 额度、目标、来源和持久块状态 |
 | 证据 | trust_events、contribution_events、model_calls、security_events | 本地评价、调用状态和脱敏审计 |
@@ -94,13 +94,13 @@ T29 将本机观察按 integrity/availability/evidence/promise 分开保存；�
 
 ## 2.1 v35 增量存储（底座已实现）
 
-当前 v1–v34 迁移保持不变；v35 已通过新迁移增加下列表。`asl-store::mailbox` 已实现 opaque 密文槽/分片的写入、读取、签收、TTL 清理，以及持久预算授予、有限续期和原子扣减。远程 DHT 托管、Core/Net 邮箱命令、GUI 预算续期和离线补收仍未接线，不能把本地仓储 API 当作完整离线邮箱。
+当前 v1–v34 迁移保持不变；v35 已通过新迁移增加下列表。`asl-store::mailbox` 已实现 opaque 密文槽/分片的写入、读取、签收、TTL 清理，以及持久预算授予、有限续期和原子扣减。远程 DHT 记录、Core/Net 邮箱命令、已知联系人与群成员轮换拉取已接线；发送端从本地密文槽构建有界批次，接收端解密后仍须 MLS 成员/epoch 校验。GUI 预算续期、送达回执和真实公网/NAT/relay 补收仍未完成，不能把 DHT 缓存当作送达证明。
 
 | 表或等价仓储 | 责任 | 约束 |
 | --- | --- | --- |
 | `conversation_rooms` | 私聊/群聊到 MLS group_id、角色、状态和容量等级的唯一映射 | 私聊是两人 MLS 组，和群聊共用 act、预算、历史、邮箱和附件路径 |
 | `conversation_budget_grants` | 主体、会话范围、消息/字节/模型调用/CPU/邮箱额度、期限和续期链 | 原子扣减；重启、换设备、重连不能重置；信任值和贡献值不参与授权 |
-| `conversation_act_events` | act-id、conversation-id、类型、因果根、reply-to、MLS epoch、处理状态和回复关联 | 去重与排序使用结构字段；`nl-body` 单独标记 untrusted data，不作为动作来源 |
+| `conversation_act_events` | act-id、conversation-id、类型、因果根、reply-to、MLS epoch、处理状态和回复关联；本机正文预览按用户 DPAPI 保护 | 去重与排序使用结构字段；`nl-body` 单独标记 untrusted data，不作为动作来源；群浏览关闭时不写入入站正文，保留期 0 会清除历史 |
 | `conversation_attachment_refs` | act 到 blob-ref、offer、下载授权和状态 | 只存引用；字节仍走 `offer/fetch/chunk/hash`，不嵌入 act |
 | `mailbox_slots` | 轮换 topic、密文摘要、大小桶、TTL、签收和本机配额 | 只存 envelope 密文与路由元数据，不存 `nl-body`、身份资料、文件名或明文主题 |
 | `mailbox_shards` | 分片序号、密文摘要、宿主能力和重组状态 | 不得保存明文；容量不足时明确排队/拒绝 |
@@ -109,9 +109,25 @@ T29 将本机观察按 integrity/availability/evidence/promise 分开保存；�
 
 会话历史、预算、act 事件、附件引用、邮箱和容量表都必须引用当前已验证的 AgentId、设备证书和 MLS epoch。邮箱内容的持久化边界是密文；本机解密后的历史按本地保留策略另存，但必须带 conversation audience、来源和不可信数据标记。清理邮箱槽、密文分片和过期容量样本时，不删除仍有效的共享源文件或未发送的本地 outbox。
 
+## 2.1.1 v46/v49 联系人、群成员与迁移增量
+
+- v46 重建 `contact_binding_actions` 的 kind 约束，加入请求策略和来源规则动作；新增 `contact_interaction_evidence`，只保存 AgentId、PeerId、根交互 ID、可选逻辑群/epoch、观察时间和固定到期时间，不保存问题、回答、文件或模型正文。来源规则只在动作执行时读取本机当前策略；证据到期时间在交互发生时固化。
+- v47 曾增加 `logical_group_agents` 和 `logical_group_peers` 只读视图；v48 删除这两个持久视图，改由代码内递归查询展开根群和子 MLS 群。唯一 Agent 数用于 10,000 逻辑群容量检查，群管理列表按逻辑根聚合，不把子 shard 当成用户可见的独立群。
+- v49 增加 `mls_shard_forward_outbox`：控制帧先随 MLS ratchet 提交持久化，再尝试定向或 gossipsub 发送；暂时不可达时按退避重试，成功进入本机 Net 队列后删除，过期、目标 epoch/binding 变化或 owner 不匹配时标记 terminal。该表不保存自然语言正文。
+- 联系人策略在 `Selection.contacts` 迁移包中随本机联系人表导出/恢复；策略不是授权，不携带 pending invite、候选或文件权限。真实多设备在线同步仍未实现。
+
 秘密不进 settings、messages 或 security_events。日志中的 peer 可截断显示，完整身份只存业务表；lease、API Key、私钥和模型端点认证头不进入诊断。
 
 FTS5 的结果不能直接返回 peer。检索前先确定请求者可读的 resource_key 集合，再以集合约束执行 MATCH。不能先把私有片段交给模型，再指望输出过滤。
+
+## 2.2 v36 群权限存储（已实现）
+
+v36 不改写 v1–v35，只增加：
+
+- `group_access_policies`：每个群一条群主策略，保存单调递增的 revision、成员默认权限位和更新时间。
+- `group_access_members`：只保存管理员和禁言投影；群主始终由 `asl_groups.creator_peer_id` 推导，普通成员不需要额外行。
+
+策略只能由群创建者通过 MLS 应用明文中的 `group-policy` 下发。Core 先核对当前 epoch 的 MLS sender 等于创建者，再在同一事务中替换策略、管理员和禁言集合。策略 revision 不能回退；成员从 MLS 群移除后仍保留的旧行不会授予发送权限。群组成员列表和操作入口会把角色、禁言、文字发送、文件发送和邀请权限分开显示。
 
 ## 3. 应用类型与职责
 
@@ -230,13 +246,13 @@ Core 运行循环启动时及其后每分钟清理到期活动。直连观察按
 
 清理引用在事务内完成；物理内容仅在没有有效资源/任务引用时回收。source 文件永远不删除。清理使用已固定的应用根句柄，不跟随路径或链接。
 
-本机 DPAPI/keystore 保护身份根密钥与设备密钥。身份迁移是单独的、用户显式触发的加密导出流程，优先复用成熟 `age` passphrase 文件格式，不自创 KDF/AEAD 封装。包内明文归档有固定 magic、主/次版本、AgentId、根密钥 seed、公钥校验值、用户选择的联系人/信任/短期历史与清单 hash；不含设备私钥、系统凭据、文件目录路径授权、未选中的共享资料或 MLS ratchet 状态。导入检查版本、AgentId 推导、清单 hash 和所有记录边界后，再建立本机事务。
+本机 DPAPI/keystore 保护身份根密钥与设备密钥。身份迁移是单独的、用户显式触发的加密导出流程，优先复用成熟 `age` passphrase 文件格式，不自创 KDF/AEAD 封装。包内明文归档有固定 magic、主/次版本、AgentId、根密钥 seed、公钥校验值、用户选择的联系人/信任/短期历史、无密钥群线索与清单 hash；不含设备私钥、系统凭据、文件目录路径授权、未选中的共享资料或 MLS ratchet 状态。导入检查版本、AgentId 推导、清单 hash 和所有记录边界后，再建立本机事务。
 
 目标设备导入后必须生成新设备密钥，由根密钥签发更高 serial 的设备证书，并以链上 state commitment 更新设备集合，随后发布签名设备目录。迁移模式下旧实例应先停止；无法联系旧设备或获得最新最终化链状态时，撤销传播可能延迟，不能承诺即时全网撤销。群组通过 MLS 将新设备作为新叶子加入；不复制旧设备 ratchet 状态。目录路径、OS 凭据、grant 和传输中的短期 lease 必须重新授权/生成。
 
 迁移文件只写入用户明确选择并授权的本地目录。`age` 口令由人提供，仅用于本次迁移，不入日志；加密工具负责 KDF、AEAD 和文件格式。未知主版本、截断、损坏、错误口令或清单校验失败均拒绝导入，不做部分身份恢复。
 
-已实现 Windows 本地迁移命令。退出源 Core 后，在 `ASL_HOME` 指向源资料目录的终端运行 `asl-core --migration export <目标文件绝对路径> [contacts] [trust] [history]`；导出默认只包含身份根。还原用 `asl-core --migration import-new <包绝对路径> <新资料目录绝对路径>`。目标目录不能已存在。口令仅通过交互终端输入。可选短期历史仅包含未到期的直连观察，使用原期限；联系人保留绑定与撤销状态，不继承设备绑定或访问授权。导入生成新设备密钥，显示 `pending_device_registration`。此命令不签发设备证书、不提交链交易、不复制群状态或网络配置。
+已实现 Windows 本地迁移命令。退出源 Core 后，在 `ASL_HOME` 指向源资料目录的终端运行 `asl-core --migration export <目标文件绝对路径> [contacts] [trust] [history] [groups]`；导出默认只包含身份根。还原用 `asl-core --migration import-new <包绝对路径> <新资料目录绝对路径>`。目标目录不能已存在。口令仅通过交互终端输入。可选短期历史仅包含未到期的直连观察，使用原期限；联系人保留绑定与撤销状态，不继承设备绑定或访问授权。`groups` 只保存最多 512 条完整 Group ID、群名、群主 AgentId 和最后 epoch，目标端写成 `needs_rejoin` 线索；不复制 MLS 快照、密钥或成员资格，成功 Welcome 后删除对应线索。导入生成新设备密钥，显示 `pending_device_registration`。此命令不签发设备证书、不提交链交易或复制网络配置。
 
 迁移明文归档的概念字段如下，具体二进制/归档编码由 T35 与 schema 一并冻结：
 

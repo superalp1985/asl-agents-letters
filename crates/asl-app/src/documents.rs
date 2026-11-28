@@ -13,8 +13,11 @@ use pdf_extract::{Document, PlainTextOutput};
 
 use crate::ipc::{ExtractorOperation, MAX_IPC_EXTRACTOR_INPUT_BYTES};
 
+mod office;
+
 pub const MAX_PDF_PAGES: usize = 500;
-pub const MAX_PDF_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_DOCUMENT_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PDF_TEXT_BYTES: usize = MAX_DOCUMENT_TEXT_BYTES;
 pub const MAX_AVATAR_INPUT_BYTES: usize = MAX_IPC_EXTRACTOR_INPUT_BYTES;
 pub const MAX_AVATAR_BYTES: usize = asl_store::avatar_publication::MAX_IMAGE_BYTES;
 pub const MAX_AVATAR_EDGE: u32 = 128;
@@ -28,7 +31,41 @@ pub(crate) fn process(
 ) -> Result<Vec<u8>, asl_types::error::AslError> {
     match operation {
         ExtractorOperation::PdfText => extract_pdf_text(input).map(String::into_bytes),
+        ExtractorOperation::DocumentText => extract_document_text(input).map(String::into_bytes),
         ExtractorOperation::Avatar => reencode_avatar(input),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentFormat {
+    Pdf,
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+pub fn detect_document_format(input: &[u8]) -> Result<DocumentFormat, asl_types::error::AslError> {
+    use asl_types::error::AslError;
+
+    if input.is_empty() || input.len() > MAX_IPC_EXTRACTOR_INPUT_BYTES {
+        return Err(AslError::InvalidMessage);
+    }
+    if input.starts_with(b"%PDF-") {
+        return Ok(DocumentFormat::Pdf);
+    }
+    office::detect_format(input).map(|format| match format {
+        office::OfficeFormat::Docx => DocumentFormat::Docx,
+        office::OfficeFormat::Xlsx => DocumentFormat::Xlsx,
+        office::OfficeFormat::Pptx => DocumentFormat::Pptx,
+    })
+}
+
+pub fn extract_document_text(input: &[u8]) -> Result<String, asl_types::error::AslError> {
+    match detect_document_format(input)? {
+        DocumentFormat::Pdf => extract_pdf_text(input),
+        DocumentFormat::Docx | DocumentFormat::Xlsx | DocumentFormat::Pptx => {
+            office::extract_text(input)
+        }
     }
 }
 

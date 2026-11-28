@@ -14,7 +14,7 @@ pub struct RegistryDeploymentV1 {
 }
 
 impl RegistryDeploymentV1 {
-    pub(super) fn validate(&self) -> Result<(), ChainError> {
+    pub fn validate(&self) -> Result<(), ChainError> {
         if self.version != INTERFACE_VERSION
             || self.chain_id == 0
             || self.address == [0; 20]

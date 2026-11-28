@@ -49,12 +49,14 @@ pub struct DownloadSelection {
     pub filename: String,
     pub sources: Vec<DownloadSource>,
     pub group: Option<GroupTransferBinding>,
+    pub group_logical_id: Option<Hash32>,
+    pub group_source_room_id: Option<Hash32>,
     pub context_ref: Option<asl_types::protocol::SemanticContextRef>,
 }
 
 #[derive(Debug)]
 pub enum DownloadJob {
-    Fetch(DownloadSelection),
+    Fetch(Box<DownloadSelection>),
     Resume {
         transfer_id: TransferId,
         sources: Vec<DownloadSource>,

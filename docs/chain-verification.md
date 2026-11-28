@@ -350,3 +350,32 @@ No test contacted a public Beacon/RPC provider. Local socket tests do not prove
 independent operator compatibility, live HTTPS or deployed ASL registry
 operation. This slice did not repeat the earlier memory sampling and makes no
 new background resource or production-security claim.
+
+## Identity Onboarding Orchestration
+
+The application now has a resumable onboarding state machine in
+`crates/asl-app/src/identity_onboarding.rs`. It reads explicit chain and
+submission configuration, generates a signed device directory and typed
+register/update request, submits through a configured sponsor, an external local
+self-pay signer, or the configured fallback order, and then waits for finalized
+registry state matching the exact AgentId, controller, sequence, and device
+commitment. Transaction receipts and sponsor responses are treated only as
+submission evidence.
+
+The signed directory is installed locally only after that finalized match. The
+command then drives the sandboxed Net process through a typed
+`ASL-DEVICE-DIRECTORY-v1` DHT publication and reports `ready_to_join` only after
+the publication acknowledgement. If no DHT peer or network is available, the
+status remains `directory_installed` and `resume` retries; it is not reported as
+ready. A running Core also detects `directory_installed`, validates the exact
+signed record again, and retries typed publication without requiring manual
+network configuration.
+
+`revoke-onchain` uses the same submission and finality path. A finalized
+revocation writes `identity.finalized_revocation_v1` as the durable local hook
+for admission suspension and later peer proof refresh. This does not wake
+offline peers or claim immediate global revocation delivery.
+
+This section records implemented code paths and local compile checks only. No
+real sponsor, funded transaction, deployed registry, public RPC finality, or
+public DHT publication was exercised.

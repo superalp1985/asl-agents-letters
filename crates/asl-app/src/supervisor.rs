@@ -34,7 +34,7 @@ use crate::chain::DurableIdentityResolver;
 use crate::chain_refresh::{ChainRefreshEvent, ChainRefreshWorker};
 use crate::direct_inbound::{self, DirectInbound};
 use crate::direct_outbound::DirectOutbound;
-use crate::documents::{MAX_AVATAR_BYTES, MAX_PDF_TEXT_BYTES};
+use crate::documents::{MAX_AVATAR_BYTES, MAX_DOCUMENT_TEXT_BYTES};
 use crate::downloads::{
     DownloadBridge, DownloadDriverEvent, DownloadEnqueue, DownloadRuntime, WorkerRequest,
     download_channel,
@@ -53,7 +53,7 @@ use crate::network_settings::NetworkSettingsV1;
 use crate::pairing::{self, PairingAuthorization};
 use crate::paths::AppPaths;
 use crate::profile::{
-    AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS,
+    AdmissionBatch, AdmittedNetworkEvent, CoreAdmission, MAX_ADMISSION_CONNECTIONS, fresh_id,
 };
 use crate::transfer::{ReceivedBulk, TransferService};
 use crate::{OutgoingQueryRuntime, outgoing_query_channel};
@@ -62,16 +62,26 @@ use asl_store::{
     dashboard::LocalIdentityProjection, open_store, search::direct::open_direct_store,
 };
 
+mod auto_reply;
+mod auto_reply_evidence;
 mod avatar_download;
 mod bindings;
+mod contact_invites;
+mod dht_cache;
 mod directory;
+#[cfg(windows)]
+mod group_routing;
 #[cfg(windows)]
 mod groups;
 #[cfg(windows)]
 mod mail;
+#[cfg(windows)]
+mod mailbox_wire;
 mod network_pause;
 mod network_report;
+mod onboarding_publication;
 mod profile_signing;
+mod resource_providers;
 #[cfg(windows)]
 pub use groups::{LocalGroupAction, LocalGroupCommand, run_with_local_groups_from_environment};
 
@@ -88,7 +98,11 @@ const DIRECTORY_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct Supervisor {
     #[cfg(windows)]
+    auto_reply: auto_reply::AutoReplyRuntime,
+    #[cfg(windows)]
     mailbox: crate::agent_mail::Mailbox,
+    #[cfg(windows)]
+    mailbox_wire: mailbox_wire::MailboxWireRuntime,
     agent_identity: AgentIdentity,
     device_peer_id: PeerId,
     libraries: LocalLibraries,
@@ -99,6 +113,7 @@ pub struct Supervisor {
     device_key_path: PathBuf,
     transport_connections: HashMap<[u8; 16], PeerId>,
     network_report: network_report::NetworkStatus,
+    onboarding_publication: onboarding_publication::OnboardingPublicationRuntime,
     profile_signing: profile_signing::ProfileSigningRuntime,
     pub(crate) admission: Option<CoreAdmission>,
     network_admission_status: NetworkAdmissionStatus,
@@ -111,6 +126,9 @@ pub struct Supervisor {
     directory_removed: bool,
     directory_renewal_retry_at: Instant,
     contact_bindings: bindings::ContactBindingRuntime,
+    contact_invites: contact_invites::ContactInviteRuntime,
+    resource_providers: resource_providers::ResourceProviderRuntime,
+    dht_restore: dht_cache::DhtRestoreRuntime,
     pending_disconnects: PendingDisconnects,
     #[cfg(windows)]
     groups: Option<groups::LoopbackGroups>,
@@ -138,12 +156,29 @@ impl Supervisor {
     fn start_with_net(
         paths: AppPaths,
         launcher: SandboxLauncher,
-        start_net: impl FnOnce(&SandboxLauncher, &DeviceIdentity, bool) -> Result<NetRuntime, AslError>,
+        start_net: impl FnOnce(
+            &SandboxLauncher,
+            &DeviceIdentity,
+            bool,
+            asl_net::transport::TraversalConfig,
+        ) -> Result<NetRuntime, AslError>,
     ) -> Result<Self, AslError> {
         let owner = ProfileOwner::core(paths.dos_root())?;
         let state_database = paths.state().join("asl.sqlite3");
-        let settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let mut settings = NetworkSettingsV1::load(&paths.network_settings_configuration())?;
+        let packaged_seeds = sibling_binary_directory()?
+            .join("assets")
+            .join("network-seeds.json");
+        let profile_seeds = paths.network_seeds();
+        let seeds = if profile_seeds.try_exists()? {
+            crate::paths::validate_existing_components(&profile_seeds)?;
+            &profile_seeds
+        } else {
+            &packaged_seeds
+        };
+        settings.apply_packaged_bootstrap(seeds, unix_time_ms()?)?;
         let network_store = open_store(&state_database)?;
+        let _ = network_store.prune_dht_cache(unix_time_ms()?);
         let network_settings =
             settings.with_relay_only_override(network_store.force_relay_only()?)?;
         let model_gateway =
@@ -177,11 +212,18 @@ impl Supervisor {
                 &launcher,
                 &device_identity,
                 network_settings.loopback_groups,
+                network_settings.traversal.transport_config()?,
             )?
         };
+        #[cfg(windows)]
+        let auto_reply = auto_reply::AutoReplyRuntime::spawn(&paths)?;
         let mut supervisor = Self {
             #[cfg(windows)]
+            auto_reply,
+            #[cfg(windows)]
             mailbox: Default::default(),
+            #[cfg(windows)]
+            mailbox_wire: Default::default(),
             agent_identity,
             device_peer_id,
             libraries,
@@ -189,6 +231,7 @@ impl Supervisor {
             model_gateway,
             net,
             profile_signing: profile_signing::ProfileSigningRuntime::open(&state_database)?,
+            onboarding_publication: onboarding_publication::OnboardingPublicationRuntime::new(),
             network_report: network_report::NetworkStatus::new(network_store, &network_settings),
             network_settings,
             device_key_path,
@@ -204,6 +247,9 @@ impl Supervisor {
             directory_removed: false,
             directory_renewal_retry_at: Instant::now(),
             contact_bindings: bindings::ContactBindingRuntime::default(),
+            contact_invites: contact_invites::ContactInviteRuntime::default(),
+            resource_providers: resource_providers::ResourceProviderRuntime::default(),
+            dht_restore: dht_cache::DhtRestoreRuntime::default(),
             pending_disconnects: PendingDisconnects::default(),
             #[cfg(windows)]
             groups,
@@ -223,6 +269,8 @@ impl Supervisor {
             supervisor
                 .net
                 .apply_settings(&supervisor.network_settings)?;
+            supervisor.reload_dht_restore()?;
+            supervisor.pump_dht_restore()?;
             supervisor
                 .network_report
                 .set_runtime(NetworkRuntimeState::Running);
@@ -259,23 +307,49 @@ impl Supervisor {
 
     pub fn issue_pairing_invite(
         &mut self,
-        _connection_id: [u8; 16],
-        _target: AgentId,
-        _note: &str,
-        _now_ms: u64,
+        connection_id: [u8; 16],
+        target: AgentId,
+        note: &str,
+        now_ms: u64,
     ) -> Result<PairingInvite, AslError> {
-        Err(AslError::PolicyDenied)
+        let invite = pairing::issue_signed_invite(&self.agent_identity, target, note, now_ms)?;
+        let request_id = fresh_id()?;
+        self.send_network_command(NetworkCommand::RequestPairing {
+            connection_id,
+            request_id,
+            invite: invite.clone(),
+        })?;
+        Ok(invite)
     }
 
     pub(crate) fn answer_pairing_invite(
         &mut self,
-        _connection_id: [u8; 16],
-        _response_id: [u8; 16],
-        _invite: PairingInvite,
-        _authorization: PairingAuthorization,
-        _now_ms: u64,
+        connection_id: [u8; 16],
+        response_id: [u8; 16],
+        invite: PairingInvite,
+        authorization: PairingAuthorization,
+        now_ms: u64,
     ) -> Result<PairingExchange, AslError> {
-        Err(AslError::PolicyDenied)
+        let admission = self.admission.as_mut().ok_or(AslError::InvalidIdentity)?;
+        let (remote_agent, exchange) = pairing::prepare_answer(
+            &self.agent_identity,
+            admission,
+            &self.device_peer_id,
+            connection_id,
+            &invite,
+            authorization,
+            now_ms,
+        )?;
+        self.send_network_command(NetworkCommand::ReplyPairing {
+            connection_id,
+            response_id,
+            exchange: exchange.clone(),
+        })?;
+        let mut store = open_store(&self.state_database)?;
+        if !pairing::commit_answer(&mut store, remote_agent, &invite, &exchange, now_ms)? {
+            return Err(AslError::InvalidMessage);
+        }
+        Ok(exchange)
     }
 
     pub(crate) fn verify_pairing_response(
@@ -283,11 +357,10 @@ impl Supervisor {
         event: AdmittedNetworkEvent,
         _now_ms: u64,
     ) -> Result<Option<AdmittedNetworkEvent>, AslError> {
-        let AdmittedNetworkEvent::PairingExchangeReceived { connection_id, .. } = event else {
+        if !matches!(event, AdmittedNetworkEvent::PairingExchangeReceived { .. }) {
             return Ok(Some(event));
-        };
-        self.send_network_command(NetworkCommand::CloseConnection { connection_id })?;
-        Ok(None)
+        }
+        Ok(Some(event))
     }
 
     pub fn activate_network_admission(
@@ -348,6 +421,92 @@ impl Supervisor {
         self.net.wait_for_pong(nonce, NET_PING_TIMEOUT)
     }
 
+    /// One-shot typed DHT publication used by the onboarding command. The
+    /// signed record is checked against the finalized directory commitment
+    /// before it enters the Net process.
+    pub fn publish_signed_directory_once(
+        paths: &AppPaths,
+        expected_agent: AgentId,
+        expected_sequence: u64,
+        expected_commitment: [u8; 32],
+        timeout: Duration,
+    ) -> Result<(), AslError> {
+        let bytes = std::fs::read(paths.signed_device_directory())?;
+        crate::identity_onboarding::verify_signed_directory(
+            &bytes,
+            expected_agent,
+            expected_sequence,
+            expected_commitment,
+        )?;
+
+        let reopened = AppPaths::open_existing(paths.root())?;
+        let mut supervisor = Self::start(reopened)?;
+        if !supervisor.net.is_running()
+            || supervisor.network_admission_status != NetworkAdmissionStatus::Active
+        {
+            return Err(AslError::InvalidIdentity);
+        }
+        let operation_id = fresh_id()?;
+        supervisor.send_network_command(NetworkCommand::PrepareDirectory {
+            operation_id,
+            agent: expected_agent,
+        })?;
+        let deadline = Instant::now() + timeout;
+        let mut publishing = false;
+        loop {
+            if Instant::now() >= deadline {
+                let _ = supervisor.net.send(&IpcMessage::CancelDirectory {
+                    operation_id,
+                    receipt_id: fresh_id()?,
+                });
+                return Err(AslError::ExpiredMessage);
+            }
+            let Some(message) = supervisor.net.receive_runtime_message_optional(
+                NETWORK_EVENT_POLL_INTERVAL.min(Duration::from_secs(1)),
+            )?
+            else {
+                continue;
+            };
+            match message {
+                IpcMessage::Pong { nonce } => {
+                    supervisor.net.acknowledge_pong(nonce)?;
+                }
+                IpcMessage::OperationAccepted {
+                    operation_id: accepted,
+                } if accepted == operation_id && !publishing => {
+                    supervisor.send_network_command(NetworkCommand::PublishDirectory {
+                        operation_id,
+                        value: bytes.clone(),
+                    })?;
+                    publishing = true;
+                }
+                IpcMessage::OperationAccepted {
+                    operation_id: accepted,
+                } if accepted == operation_id && publishing => {
+                    return Ok(());
+                }
+                IpcMessage::OperationFailed {
+                    operation_id: failed,
+                    ..
+                } if failed == operation_id => {
+                    let _ = supervisor.net.send(&IpcMessage::CancelDirectory {
+                        operation_id,
+                        receipt_id: fresh_id()?,
+                    });
+                    return Err(AslError::InvalidIdentity);
+                }
+                message if is_network_event(&message) => {
+                    let event = NetworkEvent::try_from(message)?;
+                    let batch = supervisor.handle_admitted_event(event, unix_time_ms()?)?;
+                    for command in batch.commands {
+                        supervisor.send_network_command(command)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn send_network_ipc(&mut self, message: IpcMessage) -> Result<(), AslError> {
         self.net.send(&message)
     }
@@ -373,6 +532,21 @@ impl Supervisor {
     /// Extracts text in a fresh, networkless PDF helper process.
     pub fn extract_pdf_text(&self, task_id: [u8; 16], pdf: &[u8]) -> Result<String, AslError> {
         let output = run_extractor_task(&self.launcher, task_id, ExtractorOperation::PdfText, pdf)?;
+        String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
+    }
+
+    /// Detects PDF/OOXML in the extractor and returns bounded plain text.
+    pub fn extract_document_text(
+        &self,
+        task_id: [u8; 16],
+        document: &[u8],
+    ) -> Result<String, AslError> {
+        let output = run_extractor_task(
+            &self.launcher,
+            task_id,
+            ExtractorOperation::DocumentText,
+            document,
+        )?;
         String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
     }
 
@@ -470,59 +644,70 @@ impl Supervisor {
         let outbound =
             std::cell::RefCell::new(DirectOutbound::open(&self.state_database, runtime)?);
         self.run_loop(
-            |supervisor, event| match event {
-                event @ AdmittedNetworkEvent::ControlRequest {
-                    request: WireFrame::FetchRequest(_),
-                    ..
-                } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
+            |supervisor, event| {
                 #[cfg(windows)]
-                event @ AdmittedNetworkEvent::ControlRequest {
-                    request: WireFrame::ContextRequest(_),
-                    ..
-                } => supervisor.handle_context_request(&mut transfer.borrow_mut(), event),
-                event @ AdmittedNetworkEvent::BulkRequest { .. } => {
-                    supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
-                }
-                event @ AdmittedNetworkEvent::ControlRequest { .. } => {
-                    supervisor.handle_direct_inbound(&mut inbound, event)
-                }
-                event => {
-                    let mut transfer = transfer.borrow_mut();
-                    let now_ms = unix_time_ms()?;
-                    let Some(event) =
-                        avatars
-                            .borrow_mut()
-                            .route(supervisor, &mut transfer, event, now_ms)?
-                    else {
-                        return Ok(());
-                    };
-                    let Some(event) =
-                        supervisor.route_transfer_event(&mut transfer, event, now_ms)?
-                    else {
-                        return Ok(());
-                    };
+                supervisor.observe_mailbox_operation(&event);
+                match event {
                     #[cfg(windows)]
-                    if matches!(
-                        &event,
-                        AdmittedNetworkEvent::ControlResponse {
-                            response: WireFrame::ContextOffer(_) | WireFrame::ContextAgreement(_),
-                            ..
+                    AdmittedNetworkEvent::MailboxRecordAvailable(record) => {
+                        supervisor.deliver_mailbox_record(&record, unix_time_ms()?)
+                    }
+                    event @ AdmittedNetworkEvent::ControlRequest {
+                        request: WireFrame::FetchRequest(_),
+                        ..
+                    } => supervisor.handle_fetch_request(&mut transfer.borrow_mut(), event),
+                    #[cfg(windows)]
+                    event @ AdmittedNetworkEvent::ControlRequest {
+                        request: WireFrame::ContextRequest(_),
+                        ..
+                    } => supervisor.handle_context_request(&mut transfer.borrow_mut(), event),
+                    event @ AdmittedNetworkEvent::BulkRequest { .. } => {
+                        supervisor.handle_bulk_request(&mut transfer.borrow_mut(), event)
+                    }
+                    event @ AdmittedNetworkEvent::ControlRequest { .. } => {
+                        supervisor.handle_direct_inbound(&mut inbound, event)
+                    }
+                    event => {
+                        let mut transfer = transfer.borrow_mut();
+                        let now_ms = unix_time_ms()?;
+                        let Some(event) =
+                            avatars
+                                .borrow_mut()
+                                .route(supervisor, &mut transfer, event, now_ms)?
+                        else {
+                            return Ok(());
+                        };
+                        let Some(event) =
+                            supervisor.route_transfer_event(&mut transfer, event, now_ms)?
+                        else {
+                            return Ok(());
+                        };
+                        #[cfg(windows)]
+                        if matches!(
+                            &event,
+                            AdmittedNetworkEvent::ControlResponse {
+                                response: WireFrame::ContextOffer(_)
+                                    | WireFrame::ContextAgreement(_),
+                                ..
+                            }
+                        ) {
+                            supervisor.observe_context_response(&event)?;
                         }
-                    ) {
-                        supervisor.observe_context_response(&event)?;
+                        if supervisor.net.is_running() {
+                            outbound.borrow_mut().handle_event(&event, now_ms)?;
+                        }
+                        driver.borrow_mut()(
+                            supervisor,
+                            &mut transfer,
+                            DownloadDriverEvent::Network(&event),
+                        )
                     }
-                    if supervisor.net.is_running() {
-                        outbound.borrow_mut().handle_event(&event, now_ms)?;
-                    }
-                    driver.borrow_mut()(
-                        supervisor,
-                        &mut transfer,
-                        DownloadDriverEvent::Network(&event),
-                    )
                 }
             },
             |supervisor, observation| {
+                supervisor.observe_dht_provider_observation(&observation)?;
                 supervisor.observe_contact_binding_network(observation.clone())?;
+                supervisor.observe_contact_invite_network(observation.clone())?;
                 match observation {
                     LocalNetworkObservation::DhtProviders { .. } => {
                         outbound
@@ -843,6 +1028,7 @@ impl Supervisor {
             },
             |supervisor, observation| {
                 supervisor.observe_contact_binding_network(observation.clone())?;
+                supervisor.observe_contact_invite_network(observation.clone())?;
                 observer(observation);
                 Ok(())
             },
@@ -1233,8 +1419,16 @@ impl Supervisor {
             if now >= next_agent_tick {
                 #[cfg(windows)]
                 self.poll_local_groups()?;
+                #[cfg(windows)]
+                self.poll_auto_act_replies()?;
+                #[cfg(windows)]
+                self.poll_mailbox_wire()?;
                 self.poll_contact_bindings()?;
+                self.poll_contact_invites()?;
+                self.poll_resource_providers()?;
                 self.poll_profile_signing(now, unix_time_ms()?);
+                self.poll_onboarding_directory_publication(now);
+                self.pump_dht_restore()?;
                 tick(&mut self)?;
                 next_agent_tick = now + NETWORK_EVENT_POLL_INTERVAL;
             }
@@ -1260,6 +1454,23 @@ impl Supervisor {
             else {
                 continue;
             };
+            if let IpcMessage::OperationAccepted { operation_id } = &message {
+                match self.advance_onboarding_publication(*operation_id, Instant::now()) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => {
+                        let _ = self.note_onboarding_publication_failure(*operation_id);
+                        continue;
+                    }
+                }
+            }
+            if let IpcMessage::OperationFailed { operation_id, .. } = &message {
+                match self.note_onboarding_publication_failure(*operation_id) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => continue,
+                }
+            }
             let event = match message {
                 IpcMessage::Pong { nonce } => {
                     self.net.acknowledge_pong(nonce)?;
@@ -1414,18 +1625,78 @@ impl Supervisor {
             self.send_network_command(command)?;
         }
         for event in batch.events {
+            if let Some((key, true)) = self
+                .resource_providers
+                .observe_resource_provider_event(&event)
+                && let Ok(store) = open_store(&self.state_database)
+            {
+                let now = unix_time_ms()?;
+                let _ = store.cache_dht_provider(
+                    key,
+                    self.device_peer_id.clone(),
+                    &[],
+                    now.saturating_add(60 * 60 * 1_000),
+                    now,
+                );
+            }
+            if let AdmittedNetworkEvent::DhtRecordAvailable {
+                agent_id,
+                kind,
+                sequence,
+                registry_sequence,
+                record,
+            } = &event
+                && let Ok(store) = open_store(&self.state_database)
+                && let Ok(signed) = asl_types::record::decode_record(record)
+            {
+                let now = unix_time_ms()?;
+                let _ = store.cache_dht_record(
+                    &asl_store::dht_cache::CachedDhtRecord {
+                        agent_id: *agent_id,
+                        kind: *kind,
+                        sequence: *sequence,
+                        registry_sequence: *registry_sequence,
+                        record: record.clone(),
+                        expires_at_ms: signed.record.expires_at_ms,
+                    },
+                    now,
+                );
+            }
             self.observe_contact_binding_event(&event)?;
+            self.observe_contact_invite_operation(&event);
             self.profile_signing
                 .observe_remote_record(self.agent_identity.agent_id(), &event);
-            match &event {
-                AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. } => {
-                    self.pending_pairing_prompts
-                        .remove_connection(*connection_id);
-                    self.send_network_command(NetworkCommand::CloseConnection {
-                        connection_id: *connection_id,
-                    })?;
-                    continue;
+            match self.handle_contact_invite_event(&event, unix_time_ms()?) {
+                Ok(Some(command)) => self.send_network_command(command)?,
+                Ok(None) => {}
+                Err(error)
+                    if matches!(
+                        event,
+                        AdmittedNetworkEvent::PairingInviteReceived { .. }
+                            | AdmittedNetworkEvent::PairingExchangeReceived { .. }
+                            | AdmittedNetworkEvent::PeerAdmitted { .. }
+                    ) =>
+                {
+                    if let Some(connection_id) = admitted_event_connection(&event) {
+                        self.send_network_command(NetworkCommand::CloseConnection {
+                            connection_id,
+                        })?;
+                    }
+                    if !matches!(
+                        error,
+                        AslError::InvalidIdentity
+                            | AslError::InvalidMessage
+                            | AslError::ExpiredMessage
+                            | AslError::PolicyDenied
+                    ) {
+                        return Err(error);
+                    }
                 }
+                Err(error) => return Err(error),
+            }
+            match &event {
+                AdmittedNetworkEvent::PairingInviteReceived { .. } => continue,
+                AdmittedNetworkEvent::PairingExchangeReceived { .. } => continue,
                 AdmittedNetworkEvent::PairingAccepted { .. }
                 | AdmittedNetworkEvent::PairingDeclined { .. } => continue,
                 AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => {
@@ -1726,6 +1997,7 @@ impl NetRuntime {
         launcher: &SandboxLauncher,
         device_identity: &DeviceIdentity,
         loopback_groups: bool,
+        traversal: asl_net::transport::TraversalConfig,
     ) -> Result<Self, AslError> {
         let (mut pipes, inherited) = InheritedPipes::new()?;
         let child = launcher.spawn_sandbox(
@@ -1733,7 +2005,12 @@ impl NetRuntime {
             inherited,
             SandboxLimits::for_role(SandboxRole::Net),
         )?;
-        write_net_startup_prelude(&mut pipes.input, device_identity, loopback_groups)?;
+        write_net_startup_prelude(
+            &mut pipes.input,
+            device_identity,
+            loopback_groups,
+            traversal,
+        )?;
         Self::from_child(pipes, child, &device_identity.peer_id())
     }
 
@@ -1977,9 +2254,12 @@ fn is_network_event(message: &IpcMessage) -> bool {
             | IpcMessage::Listening { .. }
             | IpcMessage::RelayReserved { .. }
             | IpcMessage::RelayUnavailable { .. }
+            | IpcMessage::ReachabilityChanged { .. }
+            | IpcMessage::RouteChanged { .. }
             | IpcMessage::DiscoveryCandidate { .. }
             | IpcMessage::DhtRecordCandidate { .. }
             | IpcMessage::DhtProviders { .. }
+            | IpcMessage::DhtProviderObserved { .. }
             | IpcMessage::PeerAuthenticated { .. }
             | IpcMessage::PeerDisconnected { .. }
             | IpcMessage::IdentityProofRequested { .. }
@@ -2025,6 +2305,7 @@ pub(crate) fn reject_unadmitted_event(event: NetworkEvent) -> AdmissionBatch {
         }
         NetworkEvent::DiscoveryCandidate { .. } => {}
         NetworkEvent::DhtProviders { .. } => {}
+        NetworkEvent::DhtProviderObserved { .. } => {}
         NetworkEvent::DhtRecordCandidate { candidate_id, .. } => {
             batch.commands.push(NetworkCommand::DecideDhtRecord {
                 candidate_id,
@@ -2073,12 +2354,25 @@ fn event_connection_id(event: &NetworkEvent) -> Option<[u8; 16]> {
         | NetworkEvent::Listening { .. }
         | NetworkEvent::RelayReserved { .. }
         | NetworkEvent::RelayUnavailable { .. }
+        | NetworkEvent::ReachabilityChanged { .. }
+        | NetworkEvent::RouteChanged { .. }
         | NetworkEvent::DiscoveryCandidate { .. }
         | NetworkEvent::DhtRecordCandidate { .. }
         | NetworkEvent::DhtProviders { .. }
+        | NetworkEvent::DhtProviderObserved { .. }
         | NetworkEvent::GossipReceived { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::NetworkError { .. } => None,
+    }
+}
+
+fn admitted_event_connection(event: &AdmittedNetworkEvent) -> Option<[u8; 16]> {
+    match event {
+        AdmittedNetworkEvent::PeerAdmitted { connection_id, .. }
+        | AdmittedNetworkEvent::PairingInviteReceived { connection_id, .. }
+        | AdmittedNetworkEvent::PairingExchangeReceived { connection_id, .. }
+        | AdmittedNetworkEvent::PeerDisconnected { connection_id, .. } => Some(*connection_id),
+        _ => None,
     }
 }
 
@@ -2199,7 +2493,23 @@ pub(crate) fn sanitize_avatar_with(
     run_extractor_task(launcher, rand::random(), ExtractorOperation::Avatar, input)
 }
 
-fn run_extractor_task(
+pub(crate) fn extract_document_text_once(document: &[u8]) -> Result<String, AslError> {
+    let directory = sibling_binary_directory()?;
+    let launcher = SandboxLauncher::new(
+        directory.join("asl-net.exe"),
+        directory.join("asl-worker.exe"),
+        directory.join("asl-extractor.exe"),
+    )?;
+    let output = run_extractor_task(
+        &launcher,
+        rand::random(),
+        ExtractorOperation::DocumentText,
+        document,
+    )?;
+    String::from_utf8(output).map_err(|_| AslError::InvalidMessage)
+}
+
+pub(crate) fn run_extractor_task(
     launcher: &SandboxLauncher,
     task_id: [u8; 16],
     operation: ExtractorOperation,
@@ -2239,7 +2549,7 @@ fn run_extractor_task(
         _ => return Err(AslError::InvalidMessage),
     };
     let maximum_output_bytes = match operation {
-        ExtractorOperation::PdfText => MAX_PDF_TEXT_BYTES,
+        ExtractorOperation::PdfText | ExtractorOperation::DocumentText => MAX_DOCUMENT_TEXT_BYTES,
         ExtractorOperation::Avatar => MAX_AVATAR_BYTES,
     };
     let invalid_output = output.len() > maximum_output_bytes

@@ -60,6 +60,10 @@ pub enum MlsNetworkOutcome {
         sender: PeerId,
         application: Box<GroupApplication>,
     },
+    InviteRequested {
+        request: asl_store::group_state::GroupInviteRequest,
+        connection_id: [u8; 16],
+    },
 }
 
 #[derive(Default)]
@@ -315,6 +319,51 @@ impl CoreAdmission {
                         )?,
                         None,
                     ),
+                    GroupBody::Membership(GroupMembership::InviteRequest {
+                        agent,
+                        device,
+                        expires_at_ms,
+                    }) => {
+                        let (admitted_agent, admitted_device) =
+                            self.admitted_peer_identity(connection_id, now_ms)?;
+                        if admitted_agent != *agent || admitted_device != *device {
+                            return Err(AslError::InvalidIdentity);
+                        }
+                        let (state, current_epoch) = store
+                            .mls_room_progress(request.group_id)?
+                            .ok_or(AslError::NotFound)?;
+                        let room = store
+                            .mls_room_for_reconciliation(request.group_id)?
+                            .ok_or(AslError::NotFound)?;
+                        if state != "active" || room.creator != self.local_hello.peer_id {
+                            return Err(AslError::PolicyDenied);
+                        }
+                        if request.epoch != 0 && request.epoch != current_epoch {
+                            return Err(AslError::PolicyVersionConflict);
+                        }
+                        let recorded = store.record_group_invite_request(
+                            asl_store::group_state::GroupInviteRequestInput {
+                                local_creator: &self.local_hello.peer_id,
+                                wire_id: request.group_id,
+                                mls_epoch: current_epoch,
+                                requester: *agent,
+                                device,
+                                expires_at_ms: *expires_at_ms,
+                                now_ms,
+                            },
+                        )?;
+                        let receipt = GroupPacket {
+                            body: GroupBody::Membership(GroupMembership::Receipt),
+                            ..request
+                        };
+                        (
+                            receipt,
+                            recorded.map(|request| MlsNetworkOutcome::InviteRequested {
+                                request,
+                                connection_id,
+                            }),
+                        )
+                    }
                     // Standalone membership updates are not accepted.
                     _ => return Err(AslError::PolicyDenied),
                 };
